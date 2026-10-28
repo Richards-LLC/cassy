@@ -1007,6 +1007,14 @@ pub enum FactoryCommands {
         #[arg(long)]
         message: String,
 
+        /// Commander operator turn kind (requires --target operator)
+        #[arg(long, value_parser = ["answer", "status", "receipt", "ask", "blocker"])]
+        kind: Option<String>,
+
+        /// Quick-reply label for --kind ask (repeat for each choice)
+        #[arg(long = "option", requires = "kind")]
+        options: Vec<String>,
+
         /// Source label for attribution in wrapped message (default: openclaw)
         #[arg(long, default_value = "openclaw")]
         from: String,
@@ -1394,6 +1402,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 project_dir,
                 target,
                 message,
+                kind,
+                options,
                 from,
                 no_wrap,
                 wait_ack,
@@ -1405,6 +1415,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 project_dir.as_deref(),
                 target,
                 message,
+                kind.as_deref(),
+                options,
                 from,
                 *no_wrap,
                 *wait_ack,
@@ -1722,6 +1734,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         fmt.info(&format!("Factory lane route: {notice}"))?;
     }
 
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
+    }
+
     // cas-7199 / cas-a487: any resolved worker spec that landed on Codex
     // (built-in default since cas-fbac, project config, CLI flag, or a
     // per-worker --worker-spec/[[factory.workers]] override — this single
@@ -1791,6 +1807,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         normalize_supervisor_spec(&mut spec, &sources)?;
         (spec, fallback_model)
     };
+
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(std::slice::from_mut(&mut resolved_supervisor_spec), &home)?;
+    }
 
     // cas-7199 / cas-a487: same Codex-availability fallback as
     // resolved_worker_specs above, applied to the supervisor slot too — a

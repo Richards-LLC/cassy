@@ -27,6 +27,7 @@ pub(super) fn execute_daemon(
     worker_spec_jsons: Vec<String>,
     supervisor_spec_json: Option<String>,
 ) -> Result<()> {
+    crate::ui::factory::validate_daemon_start(session, cwd)?;
     // The daemon command is an internal launch path, but it can still be
     // invoked directly from a repository subdirectory. Carry the same
     // git-toplevel project root as the normal factory command so its config
@@ -74,7 +75,7 @@ pub(super) fn execute_daemon(
     let llm = cas_config.llm();
 
     // Resolve per-worker specs from the cascade (cas-2992).
-    let resolved_worker_specs = {
+    let mut resolved_worker_specs = {
         // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited:
         // harness-agnostic, Grok flows through as Some(Grok) correctly
         // (same pattern as cli/factory/mod.rs).
@@ -100,8 +101,12 @@ pub(super) fn execute_daemon(
         specs
     };
 
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
+    }
+
     // Resolve supervisor spec from the cascade (cas-1948).
-    let resolved_supervisor_spec = {
+    let mut resolved_supervisor_spec = {
         // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited, same as
         // resolved_worker_specs above.
         let sources = ConfigSources {
@@ -125,6 +130,10 @@ pub(super) fn execute_daemon(
         super::normalize_supervisor_spec(&mut spec, &sources)?;
         spec
     };
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(std::slice::from_mut(&mut resolved_supervisor_spec), &home)?;
+    }
+
 
     // Resolve supervisor name up front so teams_configs and FactoryConfig agree.
     // When the caller doesn't provide a name, generate one so the teams config
@@ -248,6 +257,7 @@ pub(super) fn run_factory_with_daemon(
     config: FactoryConfig,
     phone_home: bool,
 ) -> Result<()> {
+    crate::ui::factory::validate_daemon_start(&session_name, &config.cwd)?;
     // macOS can crash when forking a multi-threaded process before exec.
     // Default to subprocess daemon mode there; allow explicit override.
     if should_use_subprocess_daemon_on_macos() {

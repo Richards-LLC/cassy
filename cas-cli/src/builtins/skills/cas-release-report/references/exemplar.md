@@ -32,8 +32,15 @@ publication date/time line, and a verdict paragraph. Then provide these exact
    definitions; name zero and unmeasured values in the counting note instead.
 3. `What you can do now`: `###` themes and `####` change titles; each change has
    `Was: ...`, a blank line, `Now: ...`, and optional `Source: ...` paragraphs.
-   A change with a real before/after capture pair adds `Before: <path>` and
-   `After: <path>` paragraphs between `Now:` and `Source:`. Before is the earlier
+   A change with a captured pair adds `Pair: <task-id>/<shot-id>` between
+   `Now:` and `Source:`. The renderer invokes `cas --json deliverable pairs
+   --task <task-id> --root <project-root>` to resolve the durable
+   `qa/pairs/pairs.json`, using only verified `pairs[]`, never `unpaired[]`.
+   Missing, incomplete or invalid evidence shows no figure and prints a warning;
+   no pair means nothing shown. `cas release report` supplies its own executable;
+   a standalone render uses `cas` on PATH (override with `--cas-bin`).
+   Alternatively add explicit `Before: <path>` and `After: <path>` paragraphs.
+   Choose one form per change. Before is the earlier
    capture of the same surface (a previous visual-QA or QA baseline, a base
    build's run or the prior release's shot); After is the delivery's own
    capture. Paths are absolute or relative to the project root; PNG, JPEG or
@@ -68,41 +75,39 @@ Malformed sections, inconsistent counts and unsafe URL schemes fail before writi
 
 ## Rendering and tokens
 
+`cas release report` renders the Markdown with `scripts/render.py`, then fills
+the template's brand markers from `cas deliverable brand`. By hand:
+
 ```bash
 python3 <skill-dir>/scripts/render.py docs/release-reports/<version>.md \
   --output docs/release-reports/<version>.html --project-root . \
-  --tokens path/to/design-tokens.json --emphasis 'exact verdict phrase'
+  --emphasis 'exact verdict phrase'
 ```
 
 Only source and `--output` are required. `--pdf-href` overrides the sibling PDF
 link; `--footer` overrides the short footer. For a CLI embedding the bundle,
-import `render(source, project_root=..., tokens=..., source_href=..., pdf_href=...,
+import `render(source, project_root=..., source_href=..., pdf_href=...,
 emphasis=..., footer=...)`; it returns HTML without writing files. Keep the
 `references/` directory next to `scripts/` when extracting builtin resources.
 
-Precedence: explicit `--tokens`, the root `DESIGN.md`, root `design-tokens.json`,
-`docs/design/design-tokens.json`, bundled defaults.
-
-A root `DESIGN.md` is used when its frontmatter has `source: [...]` naming at
-least one existing `.css` file and a `maps:` block of `role: "--variable"`
-lines. Each CSS file is inlined whole; a relative `url("./face.woff2")` becomes
-a data URI (400 kB cap). A source holding any other `url(`, `@import` or `</`
-cannot stay offline: the renderer prints a warning and falls back to
-`design-tokens.json` or the bundled defaults. Dark-scheme blocks
-(`@media (prefers-color-scheme: dark)`) are narrowed to `screen`, so print is
-always the light set. Each role becomes `--role: var(--variable)`, except a
-role already named like its variable. An optional `brand-mark:` SVG path is
-inlined beside the product name in the hero. The template reads the Petrastella
-roles below plus optional `hero-band`, `glass-panel`, `glass-panel-strong`,
-`glass-edge`, `glass-blur`, `glass-shadow`, `lift`, `card`, `emphasis`,
-`on-emphasis`, `radius-panel`, `radius-tile` and `radius-chip`; each falls back
-to a Petrastella role or to none, so a flat palette still renders.
-
-JSON tokens use `color.light.<role>.$value`, `color.dark.<role>.$value` and
-`typography.family.{display,body,mono}.$value` arrays. Roles are those in
-`default-tokens.json`; hex and numeric rgb/rgba values are accepted. Partial
-overrides inherit missing defaults. The renderer does not infer visual design
-rules from prose. No network font loads.
+The renderer holds no brand code. Its HTML keeps a `/*cas:brand*/` style marker
+and a `<!--cas:brand-mark-->` lockup marker; `cas release report` fills both.
+`cas deliverable brand --json` names the source it chose: explicit `--tokens`,
+the DESIGN.md named by `docs/deliverables/PROFILE.md`, the DESIGN.md nearest
+`--surface`, the root `DESIGN.md`, a single nested one such as
+`apps/frontend/DESIGN.md`, then `design-tokens.json` and the bundled defaults.
+It follows `inherits:` when that names another DESIGN.md. A DESIGN.md with CSS
+`source` files and `maps:` roles is inlined (relative `.woff2` faces become data
+URIs; any other `url(`, `@import` or `</` refuses it, with a warning); otherwise
+its design-spec `colors`, `typography` and `rounded` values are used, and the
+receipt names the fallback font stack when no local `.woff2` exists.
+Dark-scheme blocks are narrowed to `screen`, so print is always the light set.
+An optional `brand-mark:` is inlined beside the product name. The template reads
+the Petrastella roles plus optional `hero-band`, `glass-panel`,
+`glass-panel-strong`, `glass-edge`, `glass-blur`, `glass-shadow`, `lift`,
+`card`, `emphasis`, `on-emphasis`, `radius-panel`, `radius-tile` and
+`radius-chip`; each falls back to a Petrastella role or to none, so a flat
+palette still renders. No network font loads.
 
 ## Template and change-map data contract v2
 

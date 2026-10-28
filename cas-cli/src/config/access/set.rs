@@ -100,6 +100,26 @@ impl Config {
         };
 
         match key {
+            "accounts.disabled" => {
+                let disabled: Vec<String> = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+                if disabled.iter().any(|v| !std::path::Path::new(v).is_absolute()) {
+                    return Err(MemError::Parse("accounts.disabled requires absolute account folder paths".into()));
+                }
+                self.accounts.get_or_insert_with(Default::default).disabled = disabled;
+            }
+            "accounts.selection" => {
+                let selection = match value {
+                    "soonest-reset" => AccountSelection::SoonestReset,
+                    "most-headroom" => AccountSelection::MostHeadroom,
+                    _ => return Err(MemError::Parse("accounts.selection must be soonest-reset or most-headroom".into())),
+                };
+                self.accounts.get_or_insert_with(Default::default).selection = selection;
+            }
+            "accounts.threshold" => {
+                let threshold = value.parse::<u8>().ok().filter(|n| (1..=100).contains(n))
+                    .ok_or_else(|| MemError::Parse("accounts.threshold must be between 1 and 100".into()))?;
+                self.accounts.get_or_insert_with(Default::default).threshold = threshold;
+            }
             "slack.channels" => {
                 let mut slack = self.slack.clone().unwrap_or_default();
                 slack.channels = serde_json::from_str(value)
@@ -768,6 +788,51 @@ impl Config {
                     .filter(|name| !name.is_empty())
                     .map(ToOwned::to_owned)
                     .collect();
+            }
+            "qa.capture.base_url" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).base_url = value.trim().to_owned();
+            }
+            "qa.capture.serve" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).serve = value.trim().to_owned();
+            }
+            "qa.capture.ready_path" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).ready_path = value.trim().to_owned();
+            }
+            "qa.capture.shots" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).shots = value.trim().to_owned();
+            }
+            "qa.capture.credentials_env" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).credentials_env = value.trim().to_owned();
+            }
+            "qa.capture.login_path" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).login_path = value.trim().to_owned();
+            }
+            "qa.capture.success_url" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).success_url = value.trim().to_owned();
+            }
+            "qa.capture.email_sel" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).email_sel = value.trim().to_owned();
+            }
+            "qa.capture.password_sel" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).password_sel = value.trim().to_owned();
+            }
+            "qa.capture.submit_sel" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).submit_sel = value.trim().to_owned();
+            }
+            "qa.capture.mask" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).mask = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.capture.viewports" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).viewports = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.capture.max_shots" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).max_shots = value.parse().map_err(|_| MemError::Parse("Invalid integer for qa.capture.max_shots".into()))?;
+            }
+            "qa.capture.timeout_secs" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).timeout_secs = value.parse().map_err(|_| MemError::Parse("Invalid integer for qa.capture.timeout_secs".into()))?;
+            }
+            "qa.capture.max_html_mb" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).max_html_mb = value.parse().map_err(|_| MemError::Parse("Invalid integer for qa.capture.max_html_mb".into()))?;
             }
             "qa.post_release.command" => {
                 let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);

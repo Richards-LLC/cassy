@@ -1,5 +1,20 @@
 # Contributing to Cassy
 
+## Commander message and terminal permissions
+
+`MessageQueued.operator_label` additively carries the paired person's name to
+the sender; live/history rows use the same stored operator name. Older peers
+without it keep `device_label` as their display fallback. Input leases stop
+renewing and release when their conversation or raw-output view is left.
+Authenticated departure cleanup is idempotent: releasing an absent or foreign
+lease succeeds without removing another device's control or revoking pairing.
+
+A supervisor message requires `message:send`; it does not acquire or require a
+pane input lease. A message-only pairing can therefore send while another
+paired device controls the terminal. Raw terminal input still requires both
+`pane:input` and that device's active session lease. Message permission never
+grants terminal input authority.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history
@@ -17,6 +32,29 @@ cap while a paired-device receipt is missing. A valid receipt, a new daemon
 WebSocket connection, or a device's first history-page request resets that retry
 schedule. Each scheduled retry logs its next delay; intervening daemon passes
 neither rebroadcast the reply nor stamp it selected again.
+
+## Commander questions with quick replies
+
+A supervisor can send a question with choices using `coordination action=message
+ target=operator kind=ask summary="Choose next step" message="Keep testing?"
+ options=["Keep testing","Stop testing"]`. `options` is an optional array of
+non-empty labels, allowed only with `target=operator kind=ask`. Labels are
+trimmed before storage. The operator's chosen label returns as the message
+text with `in_reply_to` identifying the original question.
+
+The CLI equivalent is:
+
+```sh
+cas factory message --session <session> --target operator --from supervisor \
+  --kind ask --message 'Keep testing?' \
+  --option 'Keep testing' --option 'Stop testing'
+```
+
+The choices are stored with the operator turn and carried by live replies and
+history pages. Empty choices are omitted from the wire; older payloads decode
+as an empty list and older clients ignore the added field. Reloading before
+an answer preserves the choices; after answering it preserves the selected
+label and the durable reply reference.
 
 ## Supervisor succession and committed-work recovery
 
@@ -236,6 +274,38 @@ then merges that immutable commit in an isolated checkout. Its receipt names
 the pushed ref and states that the worker checkout was left untouched.
 Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
 retain the existing protection against deleting uncommitted work.
+
+When a parked delivery hits a content conflict, Cassy returns it Open to its
+assignee through `request_changes`, invalidating the old delivery proof and
+recording `merge_conflicted`, the conflicting paths and the attempted target tip.
+The worker receives one notice and can start, resolve and re-deliver directly.
+Target drift and pre-existing checkout residue keep their existing recovery paths.
+
+Factory daemon startup validates both Unix socket pathnames against the target
+ABI before logs, processes or agent registration: Linux has 108 address bytes,
+macOS 104, including the terminating NUL. An oversized HOME/session path is
+refused with its byte count and a shorter-path remedy. A daemon also refuses an
+inherited CAS_ROOT that does not belong to its declared project; canonical and
+worktree aliases of that project's store remain valid. For an isolated QA rig,
+initialize its own project and clear inherited CAS_ROOT before starting it.
+
+After a published merge, an enforced registry or documentation upkeep gate
+returns the parked task Open to its assignee through the same `request_changes`
+core. Cassy retains the gate text in task notes, sends one corrective notice,
+and retires the old automatic-close intent. The worker can start, commit the
+source repair and re-deliver with a fresh anchor. Verification and QA waits
+keep their existing dispatch ownership.
+
+A supervisor message to a blocked worker records ownership of that wait only
+when sent with `kind=answer` or `in_reply_to` the worker's blocker message.
+An unrelated ping or a reply to ordinary status leaves blocker alerts armed.
+Repeated idle and blocked alerts stay quiet while the assignee, supervisor,
+structured hold reason and blocker question remain unchanged, including a
+verification rejection followed by the same block. A new blocker question or
+hold re-arms alerts; an explicit Open transition clears the answer. Existing
+queued alerts remain readable without waking the supervisor again. The receipt
+and question fingerprint are maintained by authenticated coordination messages,
+not hand-written execution-state patches.
 
 For Claude supervisors in Teams factories, an authenticated action event whose
 complete framed payload fits the hook budget travels in one PTY turn, with its
@@ -1106,6 +1176,22 @@ denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
 
+With no explicit `config_dir` and no captured requester account, Claude/Codex
+workers use the shared recommendation. The receipt names the account and reason;
+an explicit directory or requester account wins. `cas claude` / `cas codex`
+and Commander's New-session sheet highlight the recommendation but still ask.
+
+`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
+weekly reset group, within 24 hours of the earliest eligible reset, then the
+most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
+`accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
+above that usage in either window. Disabled, logged-out/stale and unknown or
+stale usage accounts are excluded. No eligible account preserves the existing
+default/inherited behavior, with each exclusion explained. Project selection/threshold
+override global policy; Commander uses global policy. `accounts.disabled` retains
+the absolute folder list managed by `cas accounts disable` / `enable` in
+`global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
+
 ### Operator credential stores are masked from workers
 
 Workers share the operator's uid and `$HOME`, so removing environment tokens
@@ -1450,6 +1536,56 @@ passing capped test receipts for every changed Rust crate. Missing fast rows
 produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
 REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
 waive these refusals or the merge queue's final-tree proof.
+
+## Project capture configuration
+
+`cas config list --section qa.capture` lists the project capture settings.
+Use `cas config set qa.capture.base_url http://localhost:3000` for an existing
+target, or set `qa.capture.serve` to a checkout server command with `{port}`.
+`ready_path` defaults to `/`; `shots` defaults to `docs/qa/shots.json`.
+`mask` is a comma-separated selector list. `viewports` defaults to `1280x800`;
+`390x844` is available for shots that request mobile. `max_shots` defaults to 6
+and `timeout_secs` to 240. `max_html_mb` is a capture-side ceiling of 8 MB;
+report embedding budgets belong to finalize.
+
+For authenticated surfaces, set `login_path`, an anchored `success_url` such as
+`^https://[^/]+/dashboard`, and `credentials_env` to an environment-variable
+**name**, for example `PROJECT_QA_CREDENTIALS`. Optional `email_sel`,
+`password_sel` and `submit_sel` override the standard form selectors. The named
+variable must resolve to an existing readable credentials file at capture time.
+Set validates the variable name without requiring it in the setting shell;
+neither secrets nor resolved file paths are stored in project configuration.
+
+Consumers use `QaCaptureConfig::is_configured() -> Result<bool, String>`:
+`Ok(false)` means both `base_url` and `serve` are empty. Budget and login
+settings alone do not enable capture. A configured target with broken runtime
+credentials returns a finding in `Err`; evidence gates must refuse that finding.
+`credential_file()` checks the pointer without reading its contents.
+
+Use `cas deliverable capture --task <task> --target <branch> --side both` for
+one bounded merge-base/head run. The default target comes from the task's
+work target; the explicit flag is useful for a disposable project. Capture
+clones immutable revisions (only Git objects are hardlinked), reuses delivered
+`node_modules`, leases ports, masks requested selectors and tears down servers
+on every exit. It writes `<task-artifacts>/qa/pairs/pairs.json` plus PNG/JPGs.
+A failed login or missing mask gives a finding without an unmasked fallback.
+
+The committed shot catalog is an array, for example
+`[{"id":"roster","path":"/drivers/","ready":"main","mask":[".email"]}]`.
+Optional `touches` globs select affected shots. Without a catalog, affected
+journey runs at each revision supply their last-stage screenshot, only when
+both assertion receipts pass. `journey-eval.sh --compare BASE HEAD` and
+`JOURNEY_CAPTURE_MASK` are opt-in; ordinary QA runs keep their existing path.
+The base uses only head's producer instrumentation, recorded by SHA, while its
+application, bundle and tests remain at the base revision.
+
+`cas deliverable pairs --task <task>` verifies complete pairs and their image
+digests. `--range BASE..HEAD` resolves tasks through commit provenance; commits
+without an unambiguous link stay explicitly unlinked. `--side before` or
+`--side after` supports deployed targets, preserving their deployment source.
+A missing side remains unpaired and is excluded from report evidence.
+Global `--json` returns the full receipt. Exit codes are 0 for success,
+1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
 ## Build, assembly and CI policy
 
@@ -2966,14 +3102,30 @@ worktree, `factory.artifacts_root/<project-key>/<task-id>/`, the configured
 scratch root and the harness scratchpad. An operator can add directories
 outside these:
 
+- **Downloads, built in.** The user's Downloads folder is a root for every
+  project's supervisor and workers with no setup: on Linux the
+  `XDG_DOWNLOAD_DIR` from `$XDG_CONFIG_HOME/user-dirs.dirs` (default
+  `~/.config/user-dirs.dirs`), else `~/Downloads`; on macOS `~/Downloads`. It
+  passes the same safety checks as a configured root, and a missing folder
+  admits nothing. On its own it does not turn on the in-place edit judging
+  described below.
+- **User-level write roots.** Running `cas config set factory.write_roots
+  "<dir>,<dir>"` from `$HOME` writes `[factory] write_roots` to the user-level
+  `~/.cas/config.toml` (that is the store `$HOME` resolves to). These roots
+  apply to every project, merged with each project's own list. Folders
+  inside `~/.cas`, such as `~/.cas/qa-rig`, may be roots here; `~/.cas`
+  itself, its config files and `~/.cas/operator/` may not. Each root is
+  checked against both the user store and the project.
 - **Project write roots.** Run `cas config set factory.write_roots
-  "~/Downloads,/mnt/shockwave/ai/pooled_assets/llm"`. This writes
+  "/mnt/shockwave/ai/pooled_assets/llm"` in the project. This writes
   `[factory] write_roots = [...]` to the project's `.cas/config.toml`, so
   `cas config list` and `cas config get factory.write_roots` show it. Each
   root lets the project's supervisor and workers create, edit, rename and
-  delete files beneath it. An empty value clears it. Roots are per project:
-  a worker reads them from its owning project's `.cas/config.toml`, also in
-  an isolated worktree, and another project's agents never get them.
+  delete files beneath it. An empty value clears it. Project roots are per
+  project: a worker reads them from its owning project's `.cas/config.toml`,
+  also in an isolated worktree, and another project's agents never get them.
+  `cas config get factory.write_roots` prints the project's list and notes
+  the user-level and Downloads roots on stderr.
 - **One-off task grants.** Run `cas config grant-write --task <id> --path <dir>
   --mode create+edit --reason "<why>"`. The grant applies to the worker
   holding the task and to the supervisor until the task closes. It is
@@ -2994,8 +3146,8 @@ them too).
 For a support loop, the operator can include `~/.gabber-support` in the
 owning project's `factory.write_roots`, preserving any existing entries when
 setting the list. This admits `state.json` beneath that directory; a sibling
-such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
-`~/.cas/config.toml` does not grant project writes.
+such as `~/.gabber-support-other` stays blocked. Setting it in the user-level
+`~/.cas/config.toml` instead grants it to every project.
 
 Each grant admits only its modes; a project root admits all three:
 
@@ -3021,8 +3173,9 @@ payloads so each write can be attributed to a root.
 
 **Operator-only, guardrail-grade (not security-grade).** The operator and the
 agents share a Unix user. The PreToolUse hook is the actual gate against
-agents; the CLI checks are defence in depth. With no roots and no policy
-file, the default contract is unchanged. The layers are:
+agents; the CLI checks are defence in depth. With no configured roots and no
+policy file, the default contract is unchanged apart from the Downloads
+root. The layers are:
 
 - `cas config set factory.write_roots` refuses only inside a factory worker or
   server cgroup. The operator usually runs it as `! cas …` inside an agent

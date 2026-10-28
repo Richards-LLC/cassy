@@ -3782,6 +3782,66 @@ impl CasCore {
             anchor,
         }))
     }
+    /// Return a genuinely conflicted parked delivery through the same proof
+    /// invalidation and assignee-preserving transition as request_changes.
+    fn return_conflicted_parked_delivery(
+        &self,
+        task: Option<&cas_types::Task>,
+        error: &crate::worktree::WorktreeError,
+        worktree: &cas_types::Worktree,
+        target_tip: Option<&str>,
+    ) -> String {
+        use crate::worktree::{GitError, WorktreeError};
+        let paths = match error {
+            WorktreeError::Git(GitError::MergeConflictPaths(paths)) => paths.iter()
+                .map(|path| crate::worktree::GitOperations::visible_git_label(path))
+                .collect::<Vec<_>>().join(", "),
+            WorktreeError::Git(GitError::MergeConflict) => "not reported by Git".into(),
+            _ => return String::new(),
+        };
+        let Some(task) = task.filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+        else { return String::new(); };
+        let source_tip = task.deliverables.factory_branch_anchor.as_deref().unwrap_or("unrecorded");
+        let Some(target_tip) = target_tip else {
+            return format!("\nCassy could not return task {} to its worker: merge target tip was unresolved.", task.id);
+        };
+        let source = crate::worktree::GitOperations::visible_git_label(&worktree.branch);
+        let target = crate::worktree::GitOperations::visible_git_label(&worktree.parent_branch);
+        let reason = format!(
+            "merge_conflicted: {source} @ {source_tip} could not merge into {target} @ {target_tip}; conflicting paths: {paths}. Merge the target into the delivery branch, resolve, and re-deliver."
+        );
+        let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
+        let recovery = (|| -> Result<String, String> {
+            let store = self.open_task_store().map_err(|error| error.to_string())?;
+            let current = store.get(&task.id).map_err(|error| error.to_string())?;
+            // Do not decline a new delivery that replaced the attempted one.
+            if current.status != cas_types::TaskStatus::AwaitingMerge
+                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+                || current.deliverables.parked_branch != task.deliverables.parked_branch
+                || current.deliverables.work_target != task.deliverables.work_target
+                || current.assignee != task.assignee
+            {
+                return Ok("delivery changed during the merge; no task transition attempted".into());
+            }
+            cas_store::request_changes_for_parked_delivery(&self.cas_root, &task.id, &actor, &reason)
+                .map_err(|error| error.to_string())?;
+            let returned = store.get(&task.id).map_err(|error| error.to_string())?;
+            let notice = crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_merge_conflict_reopen_notice(
+                &self.cas_root, &returned, source_tip, target_tip, &reason,
+            );
+            let notice = match notice {
+                Ok(Some(id)) => format!("worker notified (prompt {id})"),
+                Ok(None) => "no live assigned worker to notify".into(),
+                Err(error) => format!("worker notice failed: {error}"),
+            };
+            Ok(format!("Cassy recorded {reason}\nTask {} is Open again with its assignee kept; {notice}. The worker can start task {} and resolve the conflict.", task.id, task.id))
+        })();
+        match recovery {
+            Ok(detail) => format!("\n{detail}"),
+            Err(error) => format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id),
+        }
+    }
+
     /// Merge worktree back to parent
     ///
     /// Resolves `id` against System A first (the `WorktreeStore`-tracked,
@@ -4870,6 +4930,7 @@ impl CasCore {
             }
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
+            let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
             let merge_result = if let Some(anchor) = pushed_anchor {
                 let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
                 if result.is_ok() {
@@ -4964,11 +5025,16 @@ impl CasCore {
                             Some(("merge_conflict", detail)),
                         );
                     }
-                    return Err(worktree_merge_mcp_error(
+                    let recovery = self.return_conflicted_parked_delivery(
+                        scoped_task.as_deref(), &error, &worktree, attempted_target_tip.as_deref(),
+                    );
+                    let mut error = worktree_merge_mcp_error(
                         error,
                         &worktree.branch,
                         &worktree.parent_branch,
-                    ));
+                    );
+                    error.message = Cow::Owned(format!("{}{recovery}", error.message));
+                    return Err(error);
                 }
             }
         };

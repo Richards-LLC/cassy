@@ -367,7 +367,8 @@ pub fn parse_write_roots(value: &str, cas_root: &Path) -> anyhow::Result<Vec<Ope
 /// absolute, no `..` component, existing and canonical (so a symlink is
 /// judged by where it points), and none of: `/`, `$HOME` or an ancestor of
 /// it, the project root, or anything that contains or lies inside the
-/// project's `.cas/` (so `.cas/config.toml` is never under a root).
+/// project's `.cas/` (so `.cas/config.toml` is never under a root). The
+/// user-level store `~/.cas` is the exception: folders inside it may be roots.
 pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<PathBuf> {
     let raw = raw.trim();
     if Path::new(raw)
@@ -388,6 +389,11 @@ pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<
         );
     }
     let cas_dir = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+    // cas-f0ea0: the user-level store (~/.cas) holds the roots for every
+    // project, and its own folders (such as a QA rig) may be roots. Its
+    // config files and `operator/` stay refused: resolve_operator_path and
+    // the hook's policy-path check never admit them.
+    let user_store = is_user_store(&cas_dir);
     if cas_dir.starts_with(&canonical) {
         anyhow::bail!(
             "write root `{}` contains this project's Cassy directory\n({});\nname a directory outside the project",
@@ -395,7 +401,7 @@ pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<
             cas_dir.display()
         );
     }
-    if canonical.starts_with(&cas_dir) {
+    if !user_store && canonical.starts_with(&cas_dir) {
         anyhow::bail!(
             "write root `{}` is inside this project's Cassy directory\n({})",
             canonical.display(),
@@ -440,6 +446,100 @@ pub fn effective_project_write_roots(configured: &[String], cas_root: &Path) -> 
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(root = %raw, %error, "ignoring factory.write_roots entry");
+            }
+        }
+    }
+    roots
+}
+
+/// Whether `cas_dir` is the user-level store `~/.cas`, whose `config.toml`
+/// holds the write roots for every project (cas-f0ea0).
+pub fn is_user_store(cas_dir: &Path) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical(cas_dir) == canonical(&crate::config::host_config_dir())
+}
+
+/// The host whose Downloads folder [`downloads_dir_for`] resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadsHost {
+    Linux,
+    MacOs,
+}
+
+/// The user's Downloads folder (cas-f0ea0). On Linux `XDG_DOWNLOAD_DIR` from
+/// `user-dirs.dirs` (its text in `user_dirs`), else `~/Downloads`; on macOS
+/// `~/Downloads`. A value that is not absolute or names `$HOME` itself (the
+/// XDG way of disabling the folder) falls back to `~/Downloads`.
+pub fn downloads_dir_for(host: DownloadsHost, home: &Path, user_dirs: Option<&str>) -> PathBuf {
+    let xdg = || {
+        // Shell syntax: the last assignment wins; values are `"$HOME/…"` or absolute.
+        let value = user_dirs?
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("XDG_DOWNLOAD_DIR="))
+            .last()?
+            .trim()
+            .trim_matches('"');
+        let path = match value.strip_prefix("$HOME") {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                home.join(rest.trim_start_matches('/'))
+            }
+            _ => PathBuf::from(value),
+        };
+        (path.is_absolute() && path != home).then_some(path)
+    };
+    match host {
+        DownloadsHost::Linux => xdg().unwrap_or_else(|| home.join("Downloads")),
+        DownloadsHost::MacOs => home.join("Downloads"),
+    }
+}
+
+/// This host's Downloads folder, from `$HOME` (and on Linux
+/// `$XDG_CONFIG_HOME/user-dirs.dirs`, default `~/.config/user-dirs.dirs`).
+pub fn host_downloads_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    if cfg!(target_os = "macos") {
+        return Some(downloads_dir_for(DownloadsHost::MacOs, &home, None));
+    }
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
+    Some(downloads_dir_for(DownloadsHost::Linux, &home, user_dirs.as_deref()))
+}
+
+/// `[factory] write_roots` from the user-level `~/.cas/config.toml`, which
+/// apply to every project (cas-f0ea0). Unreadable config grants nothing.
+pub fn user_write_roots() -> Vec<String> {
+    match crate::config::Config::load(&crate::config::host_config_dir()) {
+        Ok(config) => config.factory().write_roots,
+        Err(error) => {
+            tracing::warn!(%error, "user-level config unreadable; no user write roots apply");
+            Vec::new()
+        }
+    }
+}
+
+/// Every write root in effect for a project (cas-f0ea0): its own
+/// `[factory] write_roots` (`project`), the user-level roots (`user`) and the
+/// built-in Downloads folder, deduplicated in that order. Each passes
+/// [`resolve_project_write_root`] for the project; user-level and built-in
+/// roots must also pass it for the user store. A missing Downloads folder is
+/// skipped quietly; other unsafe or unresolved entries are skipped with a warning.
+pub fn effective_write_roots(project: &[String], user: &[String], cas_root: &Path) -> Vec<PathBuf> {
+    let mut roots = effective_project_write_roots(project, cas_root);
+    let user_store = crate::config::host_config_dir();
+    let downloads = host_downloads_dir()
+        .filter(|path| path.is_dir())
+        .map(|path| path.display().to_string());
+    for raw in user.iter().chain(downloads.as_ref()) {
+        match resolve_project_write_root(raw, &user_store)
+            .and_then(|_| resolve_project_write_root(raw, cas_root))
+        {
+            Ok(root) if !roots.contains(&root) => roots.push(root),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(root = %raw, %error, "ignoring user-level write root");
             }
         }
     }
@@ -1271,6 +1371,26 @@ mod tests {
             home.join("missing").display().to_string(),
         ];
         assert_eq!(effective_project_write_roots(&configured, &cas_root), vec![models]);
+    }
+
+    /// cas-f0ea0: Linux reads XDG_DOWNLOAD_DIR from user-dirs.dirs and falls
+    /// back to ~/Downloads when it is absent, relative or `$HOME` itself;
+    /// macOS always uses ~/Downloads.
+    #[test]
+    fn cas_f0ea0_downloads_dir_resolves_for_linux_and_macos() {
+        use DownloadsHost::{Linux, MacOs};
+        let home = Path::new("/home/ada");
+        let fallback = home.join("Downloads");
+        let user_dirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Téléchargements\"\n";
+        assert_eq!(downloads_dir_for(Linux, home, Some(user_dirs)), home.join("Téléchargements"));
+        assert_eq!(
+            downloads_dir_for(Linux, home, Some("XDG_DOWNLOAD_DIR=\"/mnt/dl\"\n")),
+            Path::new("/mnt/dl")
+        );
+        for fallback_case in [None, Some(""), Some("XDG_DOWNLOAD_DIR=\"$HOME/\"\n"), Some("XDG_DOWNLOAD_DIR=\"dl\"\n")] {
+            assert_eq!(downloads_dir_for(Linux, home, fallback_case), fallback, "{fallback_case:?}");
+        }
+        assert_eq!(downloads_dir_for(MacOs, home, Some(user_dirs)), fallback);
     }
 
     /// cas-ab04: the shared grant path validates the task and path, records

@@ -136,6 +136,7 @@ describe("ten seconds of heartbeats, measured the way the defect was", () => {
     expect(document.activeElement).toBe(composer);
     expect(composer.value).toHaveLength(20);
     // The regions kept moving the whole time — this is not a frozen page.
+    // pin: the last heartbeat's own sentence proves the regions kept updating.
     expect(root.querySelector(".status-stale")!.textContent).toBe("Not live — reconnecting. Showing the last state received 19s ago.");
   });
 });
@@ -162,6 +163,34 @@ describe("live region values", () => {
     // A disabled Send swallows the tap and reads as broken; the block is stated,
     // never enforced by the disabled attribute.
     expect(send.disabled).toBe(false);
+    const reason = root.querySelector<HTMLElement>(`#${send.getAttribute("aria-describedby")}`);
+    expect(reason?.hidden).toBe(false);
+    expect(reason?.textContent).toBe("Take control to send a message");
+  });
+
+  it("keeps a read-only device's composer read-only and says why before anything is typed (cas-b7c0)", () => {
+    const reason = "This browser can read this conversation but not send messages.";
+    root.querySelector<HTMLTextAreaElement>("#message-text")!.dataset.placeholders = JSON.stringify(["Message the supervisor"]);
+    applyLiveRegions(root, { ...live, sendReason: reason, readOnlyReason: reason });
+
+    const field = root.querySelector<HTMLTextAreaElement>("#message-text")!;
+    const status = root.querySelector<HTMLElement>("#message-status")!;
+    expect(field.readOnly).toBe(true);
+    // cas-a56c (QA F01): the field no longer invites a message it cannot send.
+    expect(field.placeholder).toBe("Read only on this browser");
+    expect(field.closest<HTMLElement>(".message")!.dataset.readOnly).toBe("true");
+    expect(status.hidden).toBe(false);
+    expect(status.textContent).toBe(reason);
+    // A standing fact, not a failed send.
+    expect(status.className).toBe("message-status");
+    expect(root.querySelector("#message-send")!.getAttribute("aria-describedby")).toBe(status.id);
+
+    applyLiveRegions(root, live);
+
+    expect(field.readOnly).toBe(false);
+    expect(field.placeholder).toBe("Message the supervisor");
+    expect(field.closest<HTMLElement>(".message")!.dataset.readOnly).toBeUndefined();
+    expect(status.hidden).toBe(true);
   });
 
   it("clears a send block once control is granted", () => {
@@ -171,6 +200,7 @@ describe("live region values", () => {
     const send = root.querySelector<HTMLButtonElement>("#message-send")!;
     expect(send.hasAttribute("aria-disabled")).toBe(false);
     expect(send.hasAttribute("data-disabled-reason")).toBe(false);
+    expect(send.hasAttribute("aria-describedby")).toBe(false);
   });
 
   it("shows a message result and its error tone, then hides it again", () => {

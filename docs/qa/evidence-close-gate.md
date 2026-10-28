@@ -192,8 +192,14 @@ that produces it:
    pass, and an empty AFTER refuses when BEFORE exists. One refusal names
    all missing ids in sorted order. Blank/padded or duplicate per-side ids
    refuse. Baseline captures may predate the delivery; current captures and
-   the pairs manifest retain freshness checks. Existing after-only bundles
-   without `files.pairs` keep their contract. Filenames alone do not declare
+   the pairs manifest retain freshness checks. Both PNG/JPG files and their
+   SHA-256 digests are checked. Paired rows need both sides; unpaired rows need
+   exactly one, and `pairs_status` must agree with the rows and findings.
+   With `[qa.capture]` configured, a visual-change bundle must cite `files.pairs`
+   or set `pairs_status: "unavailable"` with a one-line `pairs_reason` in the
+   bundle. Unavailable with no cited pairs always satisfies this requirement;
+   unconfigured projects receive an advisory. Produce evidence with
+   `cas deliverable capture --task <id> --target <target> --side both`. Filenames alone do not declare
    a BEFORE/AFTER identity.
 
    Batch deferral, batch receipts and passed independent QA do not waive

@@ -21,8 +21,9 @@ from one copyable command, and nothing wraps, clips, or disappears on a light or
    first two lines alone answer "is it fine, and what do I do". The full rules are in
    [references/output-contract.md](references/output-contract.md).
 3. **Colour only the marks, from the semantic set.** Success, warning, error, info, muted —
-   nothing else carries meaning, and every meaning is also carried by a glyph or word; the
-   verdict word is bold in the terminal's default foreground, as is all body text. Done when
+   nothing else carries meaning, and every meaning is also carried by a glyph or word. The target
+   `DESIGN.md` ([DESIGN.md first](../design-spec/references/design-md-first.md)) sets the voice
+   of every word and names the product. The verdict word is bold in the terminal's default foreground, as is all body text. Done when
    `NO_COLOR=1` output reads identically and every coloured run measures ≥ 4.5:1 for text and
    ≥ 3:1 for a mark on the dark, light, and both Solarized palettes.
 4. **Fit 80 columns; use 120 for breathing room, never for content.** Tables right-align

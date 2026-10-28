@@ -30,6 +30,7 @@ export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
 # staging.scratch_root, and let fixtures under /tmp stand in for durable
 # scratch (test-release-env.py covers the temporary-root refusal).
 export CAS_RELEASE_ENV_SCRATCH_ROOT=""
+export CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT=""
 export CAS_RELEASE_ENV_TEMP_ROOTS=""
 export COMPLETION_FIXTURE="$script_dir/tests/release_completion_fixture.py"
 export CAS_RELEASE_TRAIN_GH="$tmp/completion-gh"
@@ -399,8 +400,8 @@ else
     bad 'cas-be3a: a working report renderer was refused'
 fi
 
-# Gap 6: a linked worktree receives the Zig toolchain directory, never a
-# symlink whose target is the compiler binary itself.
+# A linked worktree resolves the shared Zig compiler without copying or linking
+# the ignored toolchain into the worktree.
 zig_main="$(new_worktree zig-main)"
 mkdir -p "$zig_main/.context/zig"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$zig_main/.context/zig/zig"
@@ -415,12 +416,11 @@ if (
     ZIG=
     cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
     cut_preflight_check_zig
-) && [[ -L "$zig_release/.context/zig" ]] \
-    && [[ -d "$zig_release/.context/zig" ]] \
-    && [[ -x "$zig_release/.context/zig/zig" ]]; then
-    ok 'gap 6: preflight links the full Zig toolchain directory'
+    [[ "$ZIG" == "$zig_main/.context/zig/zig" ]]
+) && [[ ! -e "$zig_release/.context/zig" ]]; then
+    ok 'linked-worktree preflight exports main Zig without a toolchain copy'
 else
-    bad 'gap 6: preflight did not create a directory-shaped Zig link'
+    bad 'linked-worktree preflight did not resolve the shared Zig compiler'
 fi
 
 dir_a="$("$train" 9.99.0 "$wt_a" --print-run-dir)"

@@ -18,27 +18,46 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Whether a profile's credential is usable right now.
-///
-/// `Unknown` is a first-class answer, not an error: a probe that cannot reach
-/// the provider CLI must leave the account visible and selectable rather than
-/// silently shortening the operator's list.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LoginState {
-    LoggedIn,
-    LoggedOut,
-    Unknown,
+pub(crate) use crate::account_registry::LoginState;
+
+/// Bound provider status subprocesses and reap a wedged child. Probes capture
+/// both streams so provider diagnostics cannot pollute `accounts list --json`.
+pub(crate) fn probe_output(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    child.wait_with_output().ok()
 }
 
 /// One detected account profile.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Profile {
     pub(crate) name: String,
+    pub(crate) display_name: String,
     pub(crate) directory: PathBuf,
     pub(crate) login_state: LoginState,
     pub(crate) active: bool,
+    pub(crate) disabled: bool,
     /// Live usage for the picker, e.g. `5h limit hit, resets 15:00` (cas-e1f4).
     pub(crate) usage: Option<String>,
+    pub(crate) recommendation: Option<String>,
+    pub(crate) exclusion: Option<String>,
 }
 
 /// Sibling directories that share a profile prefix without being accounts.
@@ -61,9 +80,11 @@ pub(crate) fn is_account_profile_name(name: &str) -> bool {
         return false;
     }
     // Dotted scratch names like `foo.bak.1777306474` are not accounts either,
-    // but `support@petrastella.io` must survive: only reject a marker segment.
+    // but `support@petrastella.io` must survive: only reject a marker segment
+    // after a dot. A whole alias such as `old` or `backup` is a real account.
     !lowered
-        .rsplit('.')
+        .split('.')
+        .skip(1)
         .any(|segment| matches!(segment, "lock" | "tmp" | "bak" | "old" | "backup"))
 }
 
@@ -100,58 +121,56 @@ pub(crate) fn scan_profiles_with(
     active_dir: Option<&Path>,
     mut login_state_for: impl FnMut(&str, &Path) -> LoginState,
 ) -> io::Result<Vec<Profile>> {
-    let mut profiles = vec![profile_for(
-        layout.main_name,
-        home.join(layout.main_dir),
-        active_dir,
-        layout.main_name,
-        &mut login_state_for,
-    )];
-
-    if let Ok(entries) = std::fs::read_dir(home) {
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(profile_name) = file_name.strip_prefix(layout.named_prefix) else {
-                continue;
-            };
-            if !is_account_profile_name(profile_name) {
-                continue;
-            }
-            let profile_name = profile_name.to_string();
-            profiles.push(profile_for(
-                &profile_name,
-                path,
-                active_dir,
-                layout.main_name,
-                &mut login_state_for,
+    let provider = match layout.named_prefix {
+        ".claude-" => crate::accounts::Provider::Claude,
+        ".codex-" => crate::accounts::Provider::Codex,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown account provider",
             ));
         }
-    }
-
-    profiles[1..].sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(profiles)
+    };
+    let accounts =
+        crate::account_registry::discover_with(provider, home, true, &mut login_state_for)?;
+    Ok(accounts
+        .into_iter()
+        .map(|account| Profile {
+            disabled: account.flags.disabled,
+            active: active_dir.map_or(account.name == layout.main_name, |dir| {
+                dir == account.folder
+            }),
+            name: account.name,
+            display_name: account.display_name,
+            directory: account.folder,
+            login_state: account.login_state,
+            usage: None,
+            recommendation: None,
+            exclusion: None,
+        })
+        .collect())
 }
 
-fn profile_for(
-    name: &str,
-    directory: PathBuf,
-    active_dir: Option<&Path>,
-    main_name: &str,
-    login_state_for: &mut impl FnMut(&str, &Path) -> LoginState,
-) -> Profile {
-    Profile {
-        name: name.to_string(),
-        login_state: login_state_for(name, &directory),
-        active: active_dir.map_or(name == main_name, |active| active == directory),
-        directory,
-        usage: None,
+/// Use structured registry usage for both the displayed summary and policy.
+/// Discovery remains selectable even when a provider cannot report capacity.
+pub(crate) fn with_usage(provider: crate::accounts::Provider, home: &Path, mut profiles: Vec<Profile>) -> Vec<Profile> {
+    let Ok(accounts) = crate::account_registry::collect_for(provider, home, true) else { return profiles };
+    let policy = crate::account_selection::load_policy(crate::store::find_cas_root().ok().as_deref());
+    apply_recommendation(&mut profiles, &accounts, provider, chrono::Utc::now(), &policy);
+    profiles
+}
+
+fn apply_recommendation(profiles: &mut [Profile], accounts: &[crate::account_registry::Account], provider: crate::accounts::Provider,
+    now: chrono::DateTime<chrono::Utc>, policy: &crate::config::AccountsConfig) {
+    let selection = crate::account_selection::recommend(accounts, provider, now, policy);
+    for profile in profiles {
+        if let Some(account) = accounts.iter().find(|a| a.folder == profile.directory) {
+            profile.login_state = account.login_state;
+            profile.usage = crate::cli::limits::summarize_windows_at(&account.windows, now);
+        }
+        profile.recommendation = selection.recommended.as_ref()
+            .filter(|r| r.account.folder == profile.directory).map(|r| r.reason.clone());
+        profile.exclusion = selection.excluded.iter().find(|(a, _)| a.folder == profile.directory).map(|(_, why)| why.clone());
     }
 }
 
@@ -193,6 +212,8 @@ pub(crate) fn login_state_label(state: LoginState) -> &'static str {
         LoginState::LoggedIn => "logged in",
         LoginState::LoggedOut => "not logged in",
         LoginState::Unknown => "login state unknown",
+        LoginState::NeverLoggedIn => "not logged in",
+        LoginState::StaleLogin => "not logged in",
     }
 }
 
@@ -204,30 +225,81 @@ pub(crate) fn login_state_label(state: LoginState) -> &'static str {
 pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
     let mut choices: Vec<ProfileChoice> = profiles
         .iter()
-        .map(|profile| ProfileChoice::Existing {
-            name: profile.name.clone(),
-            label: format!(
-                "{} — {}{}{}",
-                profile.name,
-                login_state_label(profile.login_state),
-                if profile.active { ", active" } else { "" },
-                profile
-                    .usage
-                    .as_deref()
-                    .map(|usage| format!(": {usage}"))
-                    .unwrap_or_default()
-            ),
+        .map(|profile| {
+            let state = format!(" — {}{}{}", login_state_label(profile.login_state),
+                if profile.active { ", active" } else { "" }, if profile.disabled { ", disabled" } else { "" });
+            let alias = if profile.display_name == profile.name { String::new() }
+                else { format!(" ({})", shorten_picker_text(&profile.name, 72usize.saturating_sub(text_width(&state)))) };
+            let display = shorten_picker_text(&profile.display_name, 76usize.saturating_sub(text_width(&alias) + text_width(&state)));
+            let mut label = format!("{display}{alias}{state}");
+            if let Some(reason) = &profile.recommendation {
+                append_picker_detail(&mut label, &format!("recommended: {reason}"));
+            } else if let Some(reason) = profile.exclusion.as_deref().filter(|reason| !profile.disabled && *reason != crate::account_selection::LOGIN_UNAVAILABLE_REASON) {
+                append_picker_detail(&mut label, reason);
+            }
+            if let Some(usage) = &profile.usage {
+                for window in usage.split("; ") { append_picker_detail(&mut label, window); }
+            }
+            ProfileChoice::Existing {
+                name: profile.name.clone(),
+                label: disabled_label(profile.disabled, label),
+            }
         })
         .collect();
     choices.push(ProfileChoice::NewLogin);
     choices
 }
 
+fn append_picker_detail(label: &mut String, detail: &str) {
+    let mut line = String::new();
+    for word in detail.split_whitespace() {
+        let word = shorten_picker_text(word, 72);
+        if !line.is_empty() && text_width(&line) + 1 + text_width(&word) > 72 {
+            label.push_str("\n    "); label.push_str(&line); line.clear();
+        }
+        if !line.is_empty() { line.push(' '); }
+        line.push_str(&word);
+    }
+    if !line.is_empty() { label.push_str("\n    "); label.push_str(&line); }
+}
+
+fn disabled_label(disabled: bool, label: String) -> String {
+    use std::io::IsTerminal;
+    if disabled && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        format!("\x1b[2m{label}\x1b[0m")
+    } else {
+        label
+    }
+}
+
+fn text_width(value: &str) -> usize {
+    ratatui::text::Line::from(value).width()
+}
+
+fn shorten_picker_text(value: &str, width: usize) -> String {
+    if text_width(value) <= width {
+        return value.to_string();
+    }
+    if width < 3 {
+        return String::new();
+    }
+    let mut result = String::new();
+    for c in value.chars() {
+        if text_width(&result) + text_width(&c.to_string()) + 3 > width {
+            break;
+        }
+        result.push(c);
+    }
+    result.push_str("...");
+    result
+}
+
 /// Index of the account the environment currently points at, for cursor start.
 pub(crate) fn active_choice_index(profiles: &[Profile]) -> usize {
     profiles
         .iter()
-        .position(|profile| profile.active)
+        .position(|profile| profile.recommendation.is_some())
+        .or_else(|| profiles.iter().position(|profile| profile.active))
         .unwrap_or(0)
 }
 
@@ -236,8 +308,9 @@ pub(crate) fn active_choice_index(profiles: &[Profile]) -> usize {
 /// inquire's default page is 7. This operator has 7 accounts, which pushed
 /// "log in a new account" below the fold — an option you must scroll to find
 /// is an option most people never discover.
-pub(crate) fn picker_page_size(choice_count: usize) -> usize {
-    choice_count.clamp(7, 20)
+pub(crate) fn picker_page_size(choice_count: usize, option_lines: usize, terminal_rows: usize) -> usize {
+    let terminal_rows = if terminal_rows == 0 { 24 } else { terminal_rows };
+    choice_count.clamp(7, 20).min(terminal_rows.saturating_sub(4) / option_lines.max(1)).max(1)
 }
 
 /// What the operator picked: an existing account, or a validated new name.
@@ -291,13 +364,16 @@ pub(crate) fn prompt_for_selection(
 ) -> Result<Selection> {
     let choices = profile_choices(profiles);
     let starting_cursor = active_choice_index(profiles);
-    let page_size = picker_page_size(choices.len());
+    let option_lines = choices.iter().map(|choice| choice.to_string().lines().count()).max().unwrap_or(1);
+    let terminal_rows = crossterm::terminal::size().map(|(_, rows)| usize::from(rows)).unwrap_or(24);
+    let page_size = picker_page_size(choices.len(), option_lines, terminal_rows);
 
     let selection = inquire::Select::new(&format!("Choose {provider_label} account"), choices)
         .with_starting_cursor(starting_cursor)
         .with_page_size(page_size)
         .with_help_message(&format!(
-            "This selection applies only to this {provider_label} session"
+            "Session only. End: new login. Full details: cas {} --list-profiles",
+            provider_label.to_ascii_lowercase()
         ))
         .prompt()
         .with_context(|| format!("{provider_label} account selection cancelled"))?;
@@ -306,21 +382,22 @@ pub(crate) fn prompt_for_selection(
         ProfileChoice::Existing { name, .. } => Ok(Selection::Existing(name)),
         ProfileChoice::NewLogin => {
             let main_name = layout.main_name.to_string();
-            let entered = inquire::Text::new(&format!("Email for the new {provider_label} account"))
-                .with_help_message(&format!(
-                    "creates ~/{}<email> and runs the {provider_label} login flow",
-                    layout.named_prefix
-                ))
-                .with_validator(move |input: &str| {
-                    Ok(match validate_new_profile_name(input, &main_name) {
-                        Ok(()) => inquire::validator::Validation::Valid,
-                        Err(message) => inquire::validator::Validation::Invalid(
-                            inquire::validator::ErrorMessage::Custom(message),
-                        ),
+            let entered =
+                inquire::Text::new(&format!("Email for the new {provider_label} account"))
+                    .with_help_message(&format!(
+                        "creates ~/{}<email> and runs the {provider_label} login flow",
+                        layout.named_prefix
+                    ))
+                    .with_validator(move |input: &str| {
+                        Ok(match validate_new_profile_name(input, &main_name) {
+                            Ok(()) => inquire::validator::Validation::Valid,
+                            Err(message) => inquire::validator::Validation::Invalid(
+                                inquire::validator::ErrorMessage::Custom(message),
+                            ),
+                        })
                     })
-                })
-                .prompt()
-                .with_context(|| format!("new {provider_label} login cancelled"))?;
+                    .prompt()
+                    .with_context(|| format!("new {provider_label} login cancelled"))?;
             Ok(Selection::NewLogin(entered.trim().to_string()))
         }
     }
@@ -453,20 +530,32 @@ mod tests {
 
     #[test]
     fn lock_and_scratch_siblings_are_not_accounts_but_dotted_emails_are() {
-        assert!(is_account_profile_name("support@petrastella.io"));
-        assert!(is_account_profile_name("alt"));
-
-        for rejected in [
-            "",
-            "support@petrastella.io.lock",
-            "work.bak",
-            "work.tmp.1777306474",
-            "old-profile.old",
+        // Only a marker segment after a dot is scratch; a whole alias such as
+        // `old` names a real account (cas-deb5). Login staging stays hidden.
+        for (name, account) in [
+            ("support@petrastella.io", true),
+            ("alt", true),
+            ("old", true),
+            ("backup", true),
+            ("", false),
+            ("support@petrastella.io.lock", false),
+            ("work.bak", false),
+            ("work.tmp.1777306474", false),
+            ("old-profile.old", false),
+            ("login.tmp.AbC123", false),
         ] {
-            assert!(
-                !is_account_profile_name(rejected),
-                "{rejected:?} should not be treated as an account"
-            );
+            assert_eq!(is_account_profile_name(name), account, "{name:?}");
+        }
+        for layout in [CLAUDE, CODEX] {
+            let home = TempDir::new().unwrap();
+            for name in ["old", "backup", "login.tmp.AbC123", "work.old"] {
+                std::fs::create_dir(home.path().join(format!("{}{name}", layout.named_prefix)))
+                    .unwrap();
+            }
+            let profiles =
+                scan_profiles_with(layout, home.path(), None, |_, _| LoginState::Unknown).unwrap();
+            let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["main", "backup", "old"], "{}", layout.named_prefix);
         }
     }
 
@@ -480,7 +569,25 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".claude-alt")).unwrap();
 
         let alt = home.path().join(".codex-alt");
-        let profiles =
+        use base64::Engine as _;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"email":"operator@example.com"}"#);
+        std::fs::write(
+            alt.join("auth.json"),
+            serde_json::json!({
+                "tokens": {"id_token": format!("header.{claims}.signature")}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::copy(
+            alt.join("auth.json"),
+            home.path().join(".codex-work/auth.json"),
+        )
+        .unwrap();
+        std::fs::create_dir(home.path().join(".codex-operator@example.com")).unwrap();
+        std::fs::copy(alt.join("auth.json"), home.path().join(".codex-operator@example.com/auth.json")).unwrap();
+        let mut profiles =
             scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
                 if name == "alt" {
                     LoginState::LoggedIn
@@ -491,9 +598,25 @@ mod tests {
             .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["main", "alt", "work"]);
-        assert!(profiles[1].active);
+        assert_eq!(names, vec!["main", "operator@example.com", "alt", "work"]);
+        assert!(profiles[2].active);
         assert!(!profiles[0].active);
+        profiles[3].usage = Some("weekly 99%, 5h reset, usage unknown until next session".into());
+        let rows = profile_choices(&profiles);
+        assert!(
+            rows[2]
+                .to_string()
+                .starts_with("operator@example.com (alt) — logged in")
+        );
+        assert!(matches!(&rows[2], ProfileChoice::Existing { name, .. } if name == "alt"));
+        assert!(
+            rows[3]
+                .to_string()
+                .starts_with("operator@example.com (work) —")
+        );
+        assert_ne!(rows[2].to_string(), rows[3].to_string());
+        assert!(rows[3].to_string().contains("reset, usage unknown until next session"));
+        assert!(rows.iter().all(|row| row.to_string().lines().all(|line| text_width(line) <= 76)));
     }
 
     #[test]
@@ -501,24 +624,37 @@ mod tests {
         let profiles = vec![
             Profile {
                 name: "main".to_string(),
+                display_name: "main".to_string(),
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedIn,
                 active: true,
+                disabled: false,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
             Profile {
                 name: "alt".to_string(),
+                display_name: "alt".to_string(),
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
+                disabled: false,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
         ];
 
         assert!(should_prompt_for_profile(None, &profiles, true, true));
         assert!(!should_prompt_for_profile(None, &profiles, false, true));
         assert!(!should_prompt_for_profile(None, &profiles, true, false));
-        assert!(!should_prompt_for_profile(Some("alt"), &profiles, true, true));
+        assert!(!should_prompt_for_profile(
+            Some("alt"),
+            &profiles,
+            true,
+            true
+        ));
         assert!(should_prompt_for_profile(None, &profiles[..1], true, true));
         assert!(!should_prompt_for_profile(None, &[], true, true));
         assert!(!should_prompt_for_profile(None, &profiles, false, false));
@@ -529,41 +665,112 @@ mod tests {
         let profiles = vec![
             Profile {
                 name: "main".to_string(),
+                display_name: "main".to_string(),
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedOut,
                 active: true,
+                disabled: false,
                 usage: None,
+            recommendation: None,
+            exclusion: Some("not logged in or login unknown".into()),
             },
             Profile {
                 name: "alt".to_string(),
+                display_name: "alt".to_string(),
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
+                disabled: true,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
         ];
 
         let choices = profile_choices(&profiles);
         assert_eq!(choices.len(), 3);
         assert_eq!(choices[0].to_string(), "main — not logged in, active");
-        assert_eq!(choices[1].to_string(), "alt — login state unknown");
+        assert_eq!(
+            choices[1].to_string(),
+            "alt — login state unknown, disabled"
+        );
         assert_eq!(choices[2], ProfileChoice::NewLogin);
         assert_eq!(active_choice_index(&profiles), 0);
+        for provider in crate::accounts::Provider::ALL {
+            let mut accounts = vec![
+                crate::account_selection::tests::row(provider, "main", 48, 0.0, 0.0),
+                crate::account_selection::tests::row(provider, "alt", 6, 59.0, 20.0),
+            ];
+            if provider == crate::accounts::Provider::Claude {
+                for account in &mut accounts { account.windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
+            }
+            let mut profiles = profiles.clone();
+            for (profile, account) in profiles.iter_mut().zip(&accounts) { profile.directory = account.folder.clone(); }
+            apply_recommendation(&mut profiles, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            let choices = profile_choices(&profiles);
+            assert_eq!(active_choice_index(&profiles), 1);
+            assert!(choices.iter().all(|row| !row.to_string().contains("extra usage")));
+            let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+            let reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(6)), now);
+            assert!(choices[1].to_string().contains(&format!("recommended: {reset}, 41% left")), "{}", choices[1]);
+            for name in ["5h", "weekly"] {
+                assert!(choices[1].to_string().lines().any(|line| line.contains(name) && line.contains("resets ")), "{}", choices[1]);
+            }
+            assert!(choices.iter().all(|choice| choice.to_string().lines().all(|line| text_width(line) <= 76)));
+            assert!(choices[0].to_string().contains("resets later than alt"));
+            let mut idle_accounts = accounts.clone();
+            idle_accounts[1].windows.remove(0);
+            idle_accounts[1].windows[0].used_percent = Some(10.0);
+            idle_accounts[0].flags.duplicate_of = Some(idle_accounts[1].folder.clone());
+            apply_recommendation(&mut profiles, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            let idle_choices = profile_choices(&profiles);
+            assert_eq!(active_choice_index(&profiles), 1);
+            assert!(idle_choices[1].to_string().contains(&format!("recommended: {reset}, 90% left")));
+            assert!(idle_choices[0].to_string().contains("duplicate of alt"));
+            // This block exercises usable rows; the outer fixture also
+            // checks disabled rendering before selection is applied.
+            for profile in &mut profiles { profile.disabled = false; }
+            let mut unknown_reset_accounts = accounts.clone();
+            unknown_reset_accounts[1].windows[1].resets_at = None;
+            apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert!(profile_choices(&profiles)[1].to_string().contains("weekly reset unknown; known resets first"));
+            unknown_reset_accounts[0].flags.disabled = true;
+            apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert!(profile_choices(&profiles)[1].to_string().contains("weekly reset unknown, 41% left"));
+
+            assert!(matches!(&choices[0], ProfileChoice::Existing { name, .. } if name == "main"));
+            assert!(matches!(&choices[1], ProfileChoice::Existing { name, .. } if name == "alt"));
+            assert_eq!(choices[2], ProfileChoice::NewLogin);
+        }
+
     }
 
     #[test]
     fn the_new_login_row_is_never_hidden_below_the_fold() {
         // 7 accounts + the new-login row must all be visible at once.
-        assert_eq!(picker_page_size(8), 8);
-        assert_eq!(picker_page_size(3), 7);
-        assert_eq!(picker_page_size(50), 20);
+        assert_eq!(picker_page_size(8, 1, 24), 8);
+        assert_eq!(picker_page_size(3, 1, 24), 7);
+        assert_eq!(picker_page_size(50, 1, 24), 20);
+        assert_eq!(picker_page_size(8, 4, 24), 5);
+        assert_eq!(picker_page_size(8, 4, 0), 5);
+        assert_eq!(picker_page_size(8, 4, 10), 1);
     }
 
     #[test]
     fn new_profile_names_that_could_escape_or_collide_are_refused() {
         assert!(validate_new_profile_name("work@example.com", "main").is_ok());
 
-        for bad in ["", "   ", "main", "../escape", "a/b", "a b", ".hidden", "-flag", "x.lock"] {
+        for bad in [
+            "",
+            "   ",
+            "main",
+            "../escape",
+            "a/b",
+            "a b",
+            ".hidden",
+            "-flag",
+            "x.lock",
+        ] {
             assert!(
                 validate_new_profile_name(bad, "main").is_err(),
                 "{bad:?} should be refused as a profile directory name"

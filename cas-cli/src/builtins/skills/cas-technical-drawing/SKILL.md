@@ -25,7 +25,7 @@ Never draw geometry by hand. Every view is a projection of one solid model; corr
    | What do I cut, from what, how many? | part cards + parts list |
 
 4. **Run the likeness critique** ([likeness-critique.md](references/likeness-critique.md)) on the isometric: render `--plain`, thumbnail it at 200 px, give a zero-context agent only the image and ask "what is this object?", then point to each identity feature in the pixels and score silhouette, proportion and part identification. Done when the score meets the floor and the scorecard is saved beside the drawings.
-5. **Deliver the print contract.** Sheets are letter or A4 landscape in millimetres at a stated 1:N scale; embed the SVG inline (it carries `width`/`height` in mm) or ship the 300-dpi PNG. Commit `model.json` beside the drawings and treat it as the source of truth; a change to the object is a change to the model followed by a re-render, never an edit to the SVG.
+5. **Deliver the print contract.** Title-block type and mark follow [DESIGN.md first](../design-spec/references/design-md-first.md). Sheets are letter or A4 landscape in millimetres at a stated 1:N scale; embed the SVG inline (it carries `width`/`height` in mm) or ship the 300-dpi PNG. Commit `model.json` beside the drawings and treat it as the source of truth; a change to the object is a change to the model followed by a re-render, never an edit to the SVG.
 
 ## Conventions the renderer enforces
 

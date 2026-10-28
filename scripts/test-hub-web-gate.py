@@ -88,6 +88,37 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
         self.assertEqual((self.repo / 'npm-calls').read_text().splitlines(),
                          ['ci --no-audit --no-fund', 'run typecheck', 'test'])
 
+    def test_ci_browser_install_uses_the_locked_local_cli(self):
+        # Execute the actual workflow bodies, refusing any npm package download.
+        # npm ci has already installed hub-web's locked CLI before these steps.
+        self.write('bin/npm', '''#!/usr/bin/env python3
+import sys
+assert '--package' not in ' '.join(sys.argv), 'browser install must use the locked local CLI'
+assert sys.argv[1:] in (['exec', '--', 'playwright', 'install', 'chromium'],
+                        ['exec', '--', 'playwright', 'install', '--with-deps', 'chromium'],
+                        ['ci'], ['run', 'visual-qa'],
+                        ['run', 'journeys', '--', '--workers=2', '--shard=1/6']), sys.argv
+''')
+        self.write('bin/npx', '''#!/usr/bin/env python3
+import sys
+assert sys.argv[1:] in (['playwright', 'install', 'chromium'],
+                        ['playwright', 'install', '--with-deps', 'chromium']), sys.argv
+''')
+        workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+        bodies = [step['run'] for job in workflow['jobs'].values()
+                  for step in job.get('steps', []) if 'playwright install' in step.get('run', '')]
+        self.assertTrue(bodies, 'no browser install steps found')
+        for sudo in (0, 1):
+            self.write('bin/sudo', f'#!/bin/sh\nexit {sudo}\n')
+            for name in ('npm', 'npx', 'sudo'):
+                (self.repo / 'bin' / name).chmod(0o755)
+            for body in bodies:
+                with self.subTest(sudo=sudo, body=body):
+                    result = subprocess.run(['bash', '-eu', '-c', body], cwd=self.repo / 'hub-web',
+                                            env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'], SHARD='1'),
+                                            text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_visual_qa_drift_fails_named_row(self):
         self.write('scripts/visual-qa.mjs', 'drift\n')
         result = self.gate()

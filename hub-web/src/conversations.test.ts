@@ -10,6 +10,8 @@ import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_S
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
+import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
+
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
 it('another tab settles adjacent held sends without manufacturing unsent chips', () => {
   const history = new ConversationHistory();
@@ -70,13 +72,18 @@ describe('conversation evidence', () => {
   it('shows the other device send live before its reply and labels the sender receipt', () => {
     const history = new ConversationHistory();
     history.submit('own', 'supervisor', 'Mine');
+    history.acknowledge({ client_ref: 'own', notification_id: 40, target: 'supervisor', stamped: true, device_label: 'Desktop', operator_label: 'Daniel' });
+    expect(history.events[0]).toMatchObject({ value: { deviceLabel: 'Daniel' } });
+    // A durable live/history row names the person. Replaying the correlated
+    // receipt from the journal must not replace that with a hardware label.
+    history.hydrateSend({ notification_id: 40, target: 'supervisor', text: 'Mine', state: 'acknowledged', stamped: true, device_id: 'desktop', operator_label: 'Daniel', session: 'factory-a', at: '2026-09-29T15:59:59Z' });
     history.acknowledge({ client_ref: 'own', notification_id: 40, target: 'supervisor', stamped: true, device_label: 'Desktop' });
-    history.hydrateSend({ notification_id: 41, target: 'supervisor', text: 'Question', state: 'sending', stamped: true, device_id: 'phone', operator_label: 'Pixel 10', session: 'factory-a', at: '2026-09-29T16:00:00Z' });
+    history.hydrateSend({ notification_id: 41, target: 'supervisor', text: 'Question', state: 'sending', stamped: true, device_id: 'phone', operator_label: 'Ben', session: 'factory-a', at: '2026-09-29T16:00:00Z' });
     history.receive({ notification_id: 42, reply_to: 41, message: 'Answer', summary: '', device_id: 'phone' });
     const view = new ConversationView(document, history, 'supervisor');
     document.body.replaceChildren(view.element);
     view.update();
-    expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent)).toEqual(['from Desktop', 'from Pixel 10']);
+    expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent)).toEqual(['from Daniel', 'from Ben']);
     expect(history.events.map(event => event.kind === 'send' ? event.value.text : event.value.message)).toEqual(['Mine', 'Question', 'Answer']);
   });
   it('does not acknowledge socket submission, foreign references, or foreign targets', () => {
@@ -87,10 +94,19 @@ describe('conversation evidence', () => {
     expect(history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'another', stamped: true })).toBe(false);
     expect(history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true })).toBe(true);
     expect(history.events[0]).toMatchObject({ value: { state: 'acknowledged', notificationId: 41 } });
+    const stale = { notification_id: 41, target: 'supervisor', text: 'Instruction', state: 'sending' as const, stamped: true, device_id: 'phone', at: '2026-10-26T21:00:00Z' };
+    history.hydrateSend(stale);
+    expect(history.events[0]).toMatchObject({ value: { state: 'acknowledged', notificationId: 41 } });
     history.reply(reply); history.reply(reply);
+    history.hydrateSend({ ...stale, state: 'acknowledged' });
     expect(history.events).toHaveLength(2);
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
     history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true });
+    expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
+    // A journal receipt can replay while the linked reply is absent during history rebuild.
+    history.events.splice(1);
+    history.synchronizePending([], 2_000, [{ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true, sentAt: 1_000 }]);
+    expect(history.events).toHaveLength(1);
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
   });
   it('gives up on a missing receipt after a bounded wait, sooner once a later reply lands (cas-1622)', () => {
@@ -538,6 +554,12 @@ describe('conversation evidence', () => {
   it('names an unreachable session with a pending instruction on its row, over the last turn (cas-7294)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Unreachable · message pending', attention: 0, preview: 'You: Keep this instruction visible.', selected: false };
     expect(conversationRowMarkup({ ...row, unreachable: true })).toContain('<span class="conversation-preview unreachable">Unreachable · message pending</span>');
+    const dormant = visibleCatalog([{ name: 's', supervisor: 'sup', workers: [], liveness: 'live', dormant: true }], () => true)[0];
+    const connection = pendingSessionLabel(dormant, true)!;
+    // pin: a Connected machine must not be called unreachable when its supervisor has not taken the message.
+    expect(connection).toBe('Waiting for supervisor');
+    expect(conversationRowMarkup({ ...row, unreachable: dormant.unreachable, connection })).toContain('<span class="conversation-preview unreachable">Waiting for supervisor</span>');
+    expect(pendingSessionLabel(dormant, false)).toBe(row.connection);
     // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
     expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');
@@ -806,32 +828,26 @@ describe("fitMachineLine (cas-766c)", () => {
   });
 });
 
-describe("supervisor working indicator (cas-5a8f)", () => {
-  const live = { phase: "live" };
-  it("a send held in this browser while the machine is unreachable is not supervisor execution", () => {
+describe("supervisor working indicator (cas-5a8f, cas-3f40, cas-a252)", () => {
+  it("a receipt needs live unanswered work and pane output; idle repaint is not working", () => {
     const history = new ConversationHistory();
+    const live = { phase: "live" };
+    expect(supervisorWorking(history, live, true)).toBe(false);
     history.hold("held", "supervisor", "Are you there?");
-    expect(history.hasPending(), "the held send still keeps its session listed").toBe(true);
+    expect(history.hasPending()).toBe(true);
+    expect(supervisorWorking(history, live, false)).toBe(false);
+    history.release("held");
+    expect(supervisorWorking(history, live, false)).toBe(false);
+    history.acknowledge({ client_ref: "held", notification_id: 7, target: "supervisor", stamped: true });
+    expect(supervisorWorking(history, live, false)).toBe(false);
+    history.hydrateSend({ notification_id: 7, target: "supervisor", text: "Are you there?", state: "delivered", stamped: true, device_id: "phone", at: "2026-10-27T03:38:00Z" });
+    expect(supervisorWorking(history, live, false)).toBe(false);
+    expect(supervisorWorking(history, live, true)).toBe(true);
+    expect(supervisorWorking(history, { phase: "backoff" }, true)).toBe(false);
+    expect(supervisorWorking(history, { phase: "live", authFailure: "revoked" }, true)).toBe(false);
+    history.receive({ notification_id: 8, reply_to: 7, message: "Reconciled.", summary: "", device_id: "*", kind: "status", attachments: [] });
     expect(history.awaitingReply()).toBe(false);
-    expect(supervisorWorking(history, { phase: "backoff" }, false)).toBe(false);
-    expect(supervisorWorking(history, live, false), "held, so the supervisor has not seen it").toBe(false);
-    // Reconnected: the held send goes out, and now it awaits the supervisor.
-    expect(history.release("held")).toBe(true);
-    expect(supervisorWorking(history, live, false)).toBe(true);
-  });
-  it("a send that went out says working only while the machine is live and paired", () => {
-    const history = new ConversationHistory();
-    history.submit("sent", "supervisor", "Run the tests");
-    expect(supervisorWorking(history, live, false)).toBe(true);
-    for (const machine of [{ phase: "backoff" }, { phase: "dialing" }, { phase: "failed" }, undefined]) {
-      expect(supervisorWorking(history, machine, false), JSON.stringify(machine)).toBe(false);
-    }
-    expect(supervisorWorking(history, { phase: "live", authFailure: "revoked" }, false), "revoked pairing").toBe(false);
-  });
-  it("real pane output is independent evidence and keeps working", () => {
-    const history = new ConversationHistory();
-    expect(supervisorWorking(history, { phase: "backoff" }, true)).toBe(true);
-    expect(supervisorWorking(history, live, false), "nothing pending, no output").toBe(false);
+    expect(supervisorWorking(history, live, true)).toBe(false);
   });
 });
 

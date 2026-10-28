@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
@@ -67,7 +68,6 @@ class ZigOrder(Fixture):
         git(self.main, "worktree", "add", "-q", "--detach", str(self.worktree))
         self.main_zig = make_exe(self.main / ".context/zig/zig")
         self.path_zig = make_exe(self.root / "bin/zig")
-        self.env["PATH"] = str(self.root / "bin")
 
     def resolve(self, **kwargs):
         return release_env.resolve_zig(self.worktree, self.env, **kwargs)
@@ -92,13 +92,38 @@ class ZigOrder(Fixture):
         link = self.worktree / ".context/zig"
         self.assertTrue(link.is_symlink() and link.is_dir() and os.access(link / "zig", os.X_OK))
 
-    def test_path_is_the_last_resort_and_a_miss_names_bootstrap(self):
-        self.main_zig.unlink()
+    def test_path_precedes_checkouts_and_a_miss_names_bootstrap(self):
+        local = make_exe(self.worktree / ".context/zig/zig")
+        self.env["PATH"] = str(self.root / "bin")
         self.assertEqual(self.resolve().path, str(self.path_zig))
+        self.path_zig.write_text("#!/bin/sh\necho 0.16.0\n")
+        rejected = self.resolve()
+        self.assertEqual(rejected.path, str(local))
+        self.assertTrue(any(str(self.path_zig) in reason and "0.16.0" in reason for reason in rejected.tried))
         self.path_zig.unlink()
+        self.assertEqual(self.resolve().path, str(local))
+        local.unlink()
+        self.main_zig.unlink()
         zig = self.resolve()
         self.assertEqual(zig.path, "")
         self.assertIn(f"cd {self.main} && ./scripts/bootstrap-zig.sh", zig.fix)
+
+    def test_the_zig_pin_is_read_once_for_every_path_candidate(self):
+        second = make_exe(self.root / "bin2/zig", "#!/bin/sh\necho 0.16.0\n")
+        self.path_zig.write_text("#!/bin/sh\necho 0.16.0\n")
+        self.env["PATH"] = os.pathsep.join([str(self.path_zig.parent), str(second.parent)])
+        reads = []
+        original = Path.read_text
+
+        def counting(path, *args, **kwargs):
+            if path.name == "build.zig.zon":
+                reads.append(path)
+            return original(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "read_text", counting):
+            zig = self.resolve()
+        self.assertEqual(zig.path, str(self.main_zig))
+        self.assertEqual(len(reads), 1, reads)
 
 
 class ScratchPerFilesystem(Fixture):

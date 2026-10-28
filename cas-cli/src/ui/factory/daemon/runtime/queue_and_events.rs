@@ -2125,6 +2125,9 @@ pub enum SupervisorWakeClass {
     /// cas-cd3f: the startup brief CAS queues when it launches a supervisor,
     /// which must begin that session's first turn. Daemon-stamped only.
     Startup,
+    /// cas-bf20: the operator's own message from a hub-verified paired device.
+    /// Only the hub's device-session stamp can raise it.
+    Operator,
 }
 
 impl SupervisorWakeClass {
@@ -2172,6 +2175,9 @@ pub enum WakeSender {
         role: cas_types::AgentRole,
         name: String,
     },
+    /// cas-bf20: the hub verified this row against a paired device session
+    /// (`QueueOrigin::PairedDevice`): the operator, not an agent.
+    Operator,
     /// The row was stamped `registered_agent`, but the id no longer resolves
     /// to a registry row. Treated as unestablished: a sender that has been
     /// deregistered is not an authority, and silently promoting it to
@@ -2642,6 +2648,7 @@ pub(crate) struct StallNudgeRead {
 /// and never opens a store for them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
+    pub(crate) answered_blocker: bool,
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
@@ -2690,6 +2697,7 @@ pub(crate) fn read_row_facts(
     row: &cas_store::QueuedPrompt,
 ) -> RowFacts {
     let mut facts = RowFacts {
+        answered_blocker: crate::mcp::tools::core::task::block_hold::answered_blocker_alert(cas_dir, row),
         wake_gate: queue.wake_gate_state(row.id).ok(),
         deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
         assignment_stale: if match queue.is_abandonment_recovery(row.id) {
@@ -3669,6 +3677,7 @@ pub(super) fn record_undelivered_relay_alerts(
             device_id: "*".to_string(),
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
         }) {
@@ -3788,13 +3797,14 @@ impl FactoryDaemon {
         // Review L3: a scan the runtime refused is retried on the next pass.
         let submitted = self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::UsageLimit, move || {
             let active = crate::store::open_agent_store(&cas_dir)
-                .and_then(|agents| Ok(agents.list(Some(cas_types::AgentStatus::Active))?))
+                .and_then(|agents| Ok(agents.list(None)?))
                 .unwrap_or_default();
             RelayOutput::UsageLimitRead(
                 active
                     .iter()
                     .filter(|agent| {
                         agent.role == cas_types::AgentRole::Worker
+                            && matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
                             && agent.factory_session.as_deref() == Some(session.as_str())
                             && workers.contains(&agent.name)
                     })
@@ -3843,17 +3853,25 @@ impl FactoryDaemon {
                     }
                 }
                 UsageLimitEvidence::Limited { first_evidence } => {
-                    let occurrence = format!("{agent_id}:{first_evidence}");
+                    let occurrence = crate::mcp::tools::service::factory_ops::limit_switch::episode_key(&self.session_name, &worker, &first_evidence);
                     if self.reported_unavailable_workers.get(&agent_id) == Some(&occurrence) {
                         continue;
                     }
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let key = format!("usage-limit:{agent_id}");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
-                        let persisted = matches!(
-                            super::lifecycle::enqueue_worker_unavailable_relay(&cas_dir, &worker, &occurrence),
-                            super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
-                        );
+                        let (detail, switch_queued) = match crate::mcp::tools::service::factory_ops::limit_switch::queue_limit_switch(&cas_dir, &agent_id, &occurrence) {
+                            Ok(decision) => (decision.detail, decision.switch_queued),
+                            Err(error) => {
+                                tracing::warn!(%error, worker, "usage-limit decision failed; notifying supervisor");
+                                (format!("Worker {worker} hit its usage limit; blocked switch: {error:#}. Existing pane kept."), false)
+                            }
+                        };
+                        // The same durable occurrence key dedupes failures too,
+                        // including a daemon restart after the fallback notice.
+                        let persisted = matches!(super::lifecycle::enqueue_usage_limit_switch_relay(
+                            &cas_dir, &worker, &occurrence, &detail, switch_queued),
+                            super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. });
                         super::relay_jobs::RelayOutput::UsageLimitWritten {
                             agent_id,
                             worker,
@@ -6648,6 +6666,9 @@ impl FactoryDaemon {
         prompt: &str,
     ) -> Option<SupervisorWakeClass> {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+        // cas-bf20: checked before the acknowledgement filter because the
+        // operator's "ok" is usually an approval, not a receipt.
+        if *sender == WakeSender::Operator { return Some(SupervisorWakeClass::Operator); }
         if crate::supervisor_message_wakes::quiet(prompt) || crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(prompt).is_some() { return None; }
         match sender {
             // cas-f02b / cas-3dcb: a lifecycle transition, worker death, spawn
@@ -6779,6 +6800,8 @@ impl FactoryDaemon {
                     } else { None }
                 }
             },
+            // cas-bf20: returned before the acknowledgement filter above.
+            WakeSender::Operator => Some(SupervisorWakeClass::Operator),
             // An unstamped, explicitly-unattributed or no-longer-resolvable
             // sender never wakes, whatever the payload says.
             WakeSender::Unstamped | WakeSender::Unattributed | WakeSender::Unresolvable => None,
@@ -6829,10 +6852,9 @@ impl FactoryDaemon {
         match origin {
             None => WakeSender::Unstamped,
             Some(cas_store::QueueOrigin::Unattributed) => WakeSender::Unattributed,
-            // cas-7f81: a verified operator row keeps today's Commander wake
-            // behaviour (inbox-only) until the reply path (cas-7f59) defines
-            // its wake policy; the provenance header already names it.
-            Some(cas_store::QueueOrigin::PairedDevice { .. }) => WakeSender::Unattributed,
+            // cas-bf20: the hub stamps PairedDevice only for a verified
+            // device session (cas-e8df), so it carries the operator's wake.
+            Some(cas_store::QueueOrigin::PairedDevice { .. }) => WakeSender::Operator,
             Some(cas_store::QueueOrigin::Daemon) => WakeSender::Daemon,
             Some(cas_store::QueueOrigin::RegisteredAgent { .. }) => match resolved {
                 Some(agent) => WakeSender::Registered {
@@ -6908,7 +6930,7 @@ impl FactoryDaemon {
                 WakeSender::Unresolvable => {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
-                WakeSender::Daemon | WakeSender::Registered { .. } => {
+                WakeSender::Daemon | WakeSender::Registered { .. } | WakeSender::Operator => {
                     "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, worker action, blocker, verification-dispatch, Slack-activity or fired-reminder envelopes (cas-dab2, cas-d9a8, cas-48e5, cas-8725, cas-e753, cas-835e)"
                 }
             });
@@ -6964,6 +6986,9 @@ impl FactoryDaemon {
                 "supervisor pane is quiet and the row is a reminder the daemon fired"
             }
             SupervisorWakeClass::Startup => "startup brief for a newly launched supervisor",
+            SupervisorWakeClass::Operator => {
+                "supervisor pane is quiet and the row is the operator's verified Commander message"
+            }
         })
     }
 
@@ -7404,7 +7429,7 @@ impl FactoryDaemon {
                 self.open_operator_notices.insert(*id, subject);
             }
         }
-        let (messages, replies) = commander_history_turns(rows, &self.session_name, &notices);
+        let (messages, replies) = commander_history_turns(queue.as_ref(), rows, &self.session_name, &notices);
         // cas-55a4: other sessions' Commander turns travel beside the page,
         // never in it, so Commander can show them only as a labelled, collapsed
         // earlier-session section. They come once, with the newest page.
@@ -7420,7 +7445,7 @@ impl FactoryDaemon {
             // Another session's plumbing notices are its own business: they
             // are never part of this session's history, earlier or not.
             earlier.retain(|row| !is_operator_notice(row));
-            commander_history_turns(earlier, "", &std::collections::HashMap::new())
+            commander_history_turns(queue.as_ref(), earlier, "", &std::collections::HashMap::new())
         } else {
             (Vec::new(), Vec::new())
         };
@@ -7445,15 +7470,8 @@ impl FactoryDaemon {
         notification_id: i64,
     ) -> anyhow::Result<Option<crate::ui::factory::ConversationHistoryMessage>> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        Ok(queue
-            .queued_prompt(notification_id)?
-            .and_then(|row| commander_history_send(row, &self.session_name))
-            .map(|mut message| {
-                // The durable enqueue has completed, so other viewers need
-                // no private receipt to show this send as acknowledged.
-                message.state = "acknowledged".to_string();
-                message
-            }))
+        Ok(queue.queued_prompt(notification_id)?
+            .and_then(|row| commander_history_send(queue.as_ref(), row, &self.session_name)))
     }
 
     /// The selecting job's operator-reply step and its forwarding, in one
@@ -7529,6 +7547,7 @@ impl FactoryDaemon {
                 device_id: device_id.clone(),
                 operator_label: payload.operator_label,
                 kind: payload.kind,
+                options: payload.options,
                 attachments: payload.attachments,
                 notice,
                 reply_to_session: payload.reply_to_session,
@@ -8442,6 +8461,12 @@ impl FactoryDaemon {
         }
     }
 
+    fn forward_operator_message_updates(&mut self) {
+        for message in self.queue_jobs.take_operator_messages() {
+            self.ws_broadcast(&crate::ui::factory::DaemonMessage::OperatorMessage(message));
+        }
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         // cas-786a6: urgent injects whose pane has settled type their payload
@@ -8458,6 +8483,7 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
+        self.forward_operator_message_updates();
         result
     }
 
@@ -8468,6 +8494,7 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
+        self.forward_operator_message_updates();
         // A live mux command still owns its physical receipt. Only orphaned
         // commands use the existing missing-outcome timeout/retry path.
         self.queue_jobs.retain_owned_injects(Instant::now(), |row| self.urgent_injects.holds_row(row));
@@ -8705,6 +8732,18 @@ impl FactoryDaemon {
                     target: "cas::coordination",
                     message_id = queued.id,
                     "row still in flight from an earlier inject; skipped this pass"
+                );
+                continue;
+            }
+            if facts.answered_blocker {
+                // Keep the committed body and its delivery identity intact.
+                // The answer withdraws the wake, not the readable alert.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "answered blocker; readable without another supervisor wake".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                    },
                 );
                 continue;
             }
@@ -10740,14 +10779,38 @@ impl FactoryDaemon {
                     }
                 }
                 SpawnAction::Recycle => {
-                    let spec = request.worker_spec.as_deref().and_then(|json| {
-                        serde_json::from_str::<cas_mux::WorkerSpec>(json).ok()
-                    });
+                    let spec = request
+                        .worker_spec
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok());
+                    let limit_recycle = match request
+                        .worker_spec
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                        .and_then(|v| v.get("limit_recycle").cloned())
+                        .map(serde_json::from_value)
+                        .transpose()
+                    {
+                        Ok(meta) => meta,
+                        Err(error) => {
+                            record_terminal_spawn_state(
+                                self.app.cas_dir(),
+                                request.id,
+                                cas_store::SpawnLifecycleState::Failed,
+                                None,
+                                &format!(
+                                    "Invalid limit recycle metadata; nothing stopped: {error}"
+                                ),
+                            );
+                            continue;
+                        }
+                    };
                     for name in request.worker_names {
                         self.pending_spawns.push_back(PendingSpawn::Recycle {
                             request_id: request.id,
                             name,
                             spec: spec.clone(),
+                            limit_recycle: limit_recycle.clone(),
                         });
                     }
                 }
@@ -11653,6 +11716,7 @@ impl FactoryDaemon {
                 request_id,
                 name,
                 spec,
+                limit_recycle,
             } => {
                 // cas-c1a2 (GH #1178): the replacement reuses this pane name,
                 // and pane buffers are keyed by name and append-only. Without
@@ -11690,6 +11754,10 @@ impl FactoryDaemon {
                             "recipe refused before stopping {name}; the worker keeps running: {error}"
                         )
                     })?;
+                    let (resume_id, resume_note) = if let Some(meta) = limit_recycle.as_ref() {
+                        let (id, note) = crate::mcp::tools::service::factory_ops::limit_switch::prepare_limit_resume(self.app.cas_dir(), &name, meta, &spec)?;
+                        (id, Some(note))
+                    } else { (None, None) };
                     self.app.shutdown_worker_for_recycle(&name).await?;
                     // cas-981e: the relaunch queues the worker's intro and
                     // tracks its process group; give it the same bounded
@@ -11699,12 +11767,12 @@ impl FactoryDaemon {
                     );
                     let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
-                        .respawn_worker_with_spec(&name, teams_config, Some(spec))
-                        .map(|()| launch_floor)
+                        .respawn_worker_with_resume(&name, teams_config, Some(spec), resume_id.as_deref(), limit_recycle.as_ref().map(|meta| meta.cwd.as_path()))
+                        .map(|()| (launch_floor, resume_note))
                 }
                 .await;
                 match result {
-                    Ok(launch_floor) => {
+                    Ok((launch_floor, resume_note)) => {
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a recycled worker must prove its hooks run too.
                         self.verify_respawned_worker(&name, Some(request_id), launch_floor);
@@ -11719,18 +11787,15 @@ impl FactoryDaemon {
                         );
                         // cas-a622: the fresh conversation knows nothing; tell
                         // it what it still holds and how to resume.
-                        if let Err(error) = crate::ui::factory::app::render_and_ops::epic_workers::enqueue_recycle_resume_brief(
-                            self.app.cas_dir(),
-                            self.app.supervisor_name(),
-                            &self.session_name,
-                            &name,
-                        ) {
-                            tracing::warn!(
-                                worker = %name,
-                                %error,
-                                "cas-a622: recycled worker kept its tasks but its resume brief could not be queued"
-                            );
-                        }
+                        let resume_result = if let Some(note) = resume_note {
+                            let tasks = crate::ui::factory::app::render_and_ops::epic_workers::recycle_resume_brief(self.app.cas_dir(), &name, &self.session_name).unwrap_or_default();
+                            crate::store::open_prompt_queue_store(self.app.cas_dir()).and_then(|queue| {
+                                Ok(queue.enqueue_with_summary(self.app.supervisor_name(), &name, &format!("{note}\n{tasks}"), Some(&self.session_name), Some("Account switched: resume your assigned work"))?)
+                            }).map(Some).map_err(anyhow::Error::from)
+                        } else {
+                            crate::ui::factory::app::render_and_ops::epic_workers::enqueue_recycle_resume_brief(self.app.cas_dir(), self.app.supervisor_name(), &self.session_name, &name)
+                        };
+                        if let Err(error) = resume_result { tracing::warn!(worker = %name, %error, "recycle resume brief could not be queued"); }
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -11741,12 +11806,12 @@ impl FactoryDaemon {
                         }
                     }
                     Err(e) => {
-                        let detail = format!("Failed to recycle {name}: {e}");
+                        let detail = if limit_recycle.is_some() { format!("blocked switch for {name}: {e}") } else { format!("Failed to recycle {name}: {e}") };
                         // cas-a622: the recycle kept the bindings for a
                         // replacement that never started. Once the old process
                         // is gone, release them as a shutdown would, rather
                         // than leave tasks bound to a dead name.
-                        if !self.app.worker_names().iter().any(|worker| worker == &name) {
+                        if limit_recycle.is_none() && !self.app.worker_names().iter().any(|worker| worker == &name) {
                             crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
                                 self.app.cas_dir(),
                                 &name,
@@ -12052,6 +12117,7 @@ fn operator_notices(
 /// Project oldest-first Commander-lane rows onto the history wire shapes.
 /// `fallback_session` names a row that carries no session of its own.
 fn commander_history_turns(
+    queue: &dyn cas_store::PromptQueueStore,
     rows: Vec<cas_store::QueuedPrompt>,
     fallback_session: &str,
     notices: &std::collections::HashMap<i64, crate::ui::factory::OperatorNotice>,
@@ -12084,6 +12150,7 @@ fn commander_history_turns(
                 operator_label: payload.operator_label,
                 kind: payload.kind,
                 attachments: payload.attachments,
+                options: payload.options,
                 session: row
                     .factory_session
                     .clone()
@@ -12094,14 +12161,15 @@ fn commander_history_turns(
             });
             continue;
         }
-        if let Some(message) = commander_history_send(row, fallback_session) {
+        if let Some(message) = commander_history_send(queue, row, fallback_session) {
             messages.push(message);
         }
     }
     (messages, replies)
 }
 
-fn commander_history_send(
+pub(super) fn commander_history_send(
+    queue: &dyn cas_store::PromptQueueStore,
     row: cas_store::QueuedPrompt,
     fallback_session: &str,
 ) -> Option<crate::ui::factory::ConversationHistoryMessage> {
@@ -12115,17 +12183,26 @@ fn commander_history_send(
         notification_id: row.id,
         target: row.target,
         text,
-        state: if terminal || row.processed_at.is_some() {
-            "acknowledged".to_string()
+        // A durable row proves queue acceptance. Cleanup's processed_at is
+        // not transport proof, and a gated row has never reached the supervisor.
+        state: if terminal || queue.message_delivery_report(row.id).ok().flatten()
+            .is_some_and(|report| report.delivered_at.is_some()) {
+            "delivered".to_string()
         } else {
-            "sending".to_string()
+            "acknowledged".to_string()
         },
         stamped: !terminal,
         reply_to,
         device_id: operator.map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
         operator_label: Some(operator.map_or_else(
             || "Terminal".to_string(),
-            |stamp| stamp.device_label.clone(),
+            |stamp| {
+                if stamp.operator.trim().is_empty() {
+                    stamp.device_label.clone()
+                } else {
+                    stamp.operator.clone()
+                }
+            },
         )),
         session: row.factory_session.unwrap_or_else(|| fallback_session.to_string()),
         at: row.created_at.to_rfc3339(),
@@ -12818,6 +12895,143 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn limit_switch_error_notifies_once_per_episode_even_after_daemon_restart() {
+        use crate::mcp::tools::service::factory_ops::UsageLimitEvidence;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "provision-test");
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role("supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = Some("provision-test".into());
+        agents.register(&supervisor).unwrap();
+        for cli in ["claude", "codex"] {
+            let mut worker = cas_types::Agent::new_with_role(cli.into(), cli.into(), cas_types::AgentRole::Worker);
+            worker.factory_session = Some("provision-test".into());
+            worker.metadata.insert("worker_cli".into(), cli.into());
+            agents.register(&worker).unwrap();
+            let mut task = cas_types::Task::new(format!("cas-{cli}"), "held task".into());
+            task.assignee = Some(cli.into());
+            crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        }
+        for _restart in 0..2 {
+            let mut daemon = super::super::provisioning_tests::daemon(&root);
+            for stamp in ["first", "first", "next"] {
+                daemon.decide_usage_limited_workers(0, ["claude", "codex"].into_iter().map(|cli| (
+                    cli.into(), cli.into(), UsageLimitEvidence::Limited { first_evidence: stamp.into() }
+                )).collect());
+                daemon.drain_relay_jobs();
+            }
+            drop(daemon);
+            // The fixture listeners leave their socket files after drop.
+            for socket in ["test.sock", "gui.sock"] {
+                std::fs::remove_file(root.join(socket)).unwrap();
+            }
+        }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
+        assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
+        for row in rows {
+            assert_eq!(row.target, "supervisor");
+            // pin: a fallback must preserve the concrete switch error for the supervisor.
+            assert!(row.prompt.contains("worker worktree missing; nothing stopped"), "{}", row.prompt);
+            // pin: a failed switch still needs the existing recovery instruction.
+            assert!(row.prompt.contains("reassign or recover"), "fallback still needs attention: {}", row.prompt);
+        }
+        assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("phone".into()),
+            credential_id: Some("phone-credential".into()),
+            device_label: Some("Ben's phone".into()),
+            operator_label: Some("Ben".into()),
+            controller_origin: None,
+            request_id: None,
+            scopes: vec!["message:send".into()],
+            operator_verified: true,
+        };
+        let receipt = daemon.dispatch_commander_control(
+            super::super::delivery::CommanderControl::SendMessage {
+                target: "supervisor".into(),
+                text: "Yes please, reconcile it.".into(),
+                summary: None,
+                urgent: false,
+                client_ref: Some("ben-send".into()),
+                in_reply_to: None,
+                attribution,
+            },
+        ).await.unwrap().unwrap();
+        let receipt_json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(receipt_json["MessageQueued"]["operator_label"], "Ben",
+            "the origin's receipt must name the person, not just the hardware");
+        let crate::ui::factory::DaemonMessage::MessageQueued { notification_id: id, .. } = receipt
+        else { panic!("expected queued receipt"); };
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none()
+        );
+        let live = daemon.live_operator_message(id).unwrap().unwrap();
+        assert_eq!(live.state, "acknowledged");
+        assert_eq!(live.operator_label.as_deref(), Some("Ben"));
+        // The inert supervisor has not consumed the row. A reload and another
+        // pairing still see the same durable acceptance, not Sending again.
+        for device in ["phone", "desktop"] {
+            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                .conversation_history_page(format!("history-{device}"), device, None, 20)
+                .unwrap()
+            else {
+                panic!("expected conversation history");
+            };
+            assert_eq!(messages.len(), 1, "{device}'s accepted turn");
+            assert_eq!(messages[0].notification_id, live.notification_id);
+            assert_eq!(messages[0].text, live.text);
+            assert_eq!(messages[0].operator_label.as_deref(), Some("Ben"),
+                "both people must see Ben's name on reload");
+            assert_eq!(
+                messages[0].state, live.state,
+                "{device}'s receipt regressed on history"
+            );
+        }
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none(),
+            "reading a receipt must not claim supervisor consumption"
+        );
+        queue.mark_processed(id).unwrap();
+        assert_eq!(daemon.live_operator_message(id).unwrap().unwrap().state, "acknowledged",
+            "processed metadata alone cannot earn Delivered");
+        daemon.queue_jobs.stamp(&root, id, "supervisor",
+            super::super::prompt_queue_jobs::QueueStamp::TransportDelivered);
+        daemon.queue_jobs.apply_completions();
+        let updates = daemon.queue_jobs.take_operator_messages();
+        assert_eq!(updates.len(), 1, "persisted transport publishes one live update");
+        assert_eq!(updates[0].state, "delivered");
+        assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_some());
+        for device in ["phone", "desktop"] {
+            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                .conversation_history_page(format!("delivered-{device}"), device, None, 20).unwrap()
+            else { panic!("expected conversation history"); };
+            assert_eq!(messages[0].state, updates[0].state,
+                "{device}'s history must agree with actual supervisor transport");
+        }
+    }
+
     #[tokio::test]
     async fn cas_7bcb_operator_reply_backoff_caps_and_resets() {
         use crate::ui::factory::daemon::WsConnection;
@@ -13165,20 +13379,42 @@ mod tests {
         sq.ack(broken).unwrap();
     }
     use super::{
-        LIFECYCLE_MAX_RENUDGE_ATTEMPTS, WORKER_DEATH_TAIL_MAX_CHARS, append_spawn_audit, append_spawn_audit_line,
-        boot_hook_review_detail, boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
-        describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
-        enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,
-        is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
-        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
-        registration_timeout_detail, reminder_matches_factory_session,
-        shutdown_targets, spawn_predates_shutdown,
-        spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
-        take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
-        timeout_pane_tail, worker_exit_info,
+        LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
         // cas-2ffe (GH #915): exit cause and death correlation.
-        ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_group,
+        ObservedWorkerExit,
+        WORKER_DEATH_CORRELATION_WINDOW,
+        WORKER_DEATH_TAIL_MAX_CHARS,
+        append_spawn_audit,
+        append_spawn_audit_line,
+        boot_hook_review_detail,
+        boot_model_error_detail,
+        cancel_targeted_in_flight_spawn,
+        closed_death_group,
+        deliver_worker_task_brief,
+        describe_pending_spawn,
+        enqueue_preassign_failure_lifecycle_relay,
+        enqueue_spawn_cancelled_notice,
+        enqueue_spawn_outcome_notice,
+        ensure_worker_preassignment,
+        is_exact_agent_name_match,
+        matches_event_filter,
+        preassign_failure_reason,
+        prompt_poison_sweep_due,
+        prompt_poison_sweep_targets,
+        registered_prompt_sweep_agents,
+        registration_timeout_detail,
+        reminder_matches_factory_session,
+        shutdown_targets,
+        spawn_predates_shutdown,
+        spawn_provisioning_timed_out,
+        spawn_queue_reset_report,
+        stalled_spawn_requests,
+        take_next_pending_spawn,
+        take_spawn_cancellation,
+        take_unverified_spawn_on_exit,
+        timeout_pane_tail,
         worker_exit_cause,
+        worker_exit_info,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -13238,7 +13474,7 @@ mod tests {
         assert!(!notices.contains_key(&reply));
         queue.mark_transport_delivered(relay).unwrap();
         assert!(super::operator_notices(queue, "acct-52", &rows)[&alert].resolved);
-        let (_, replies) = super::commander_history_turns(rows, "acct-52", &notices);
+        let (_, replies) = super::commander_history_turns(queue, rows, "acct-52", &notices);
         assert_eq!(replies.iter().filter(|reply| reply.notice.is_some()).count(), 1);
     }
 
@@ -13276,7 +13512,7 @@ mod tests {
             .unwrap();
         rows.reverse();
         let (messages, replies) =
-            super::commander_history_turns(rows, "", &std::collections::HashMap::new());
+            super::commander_history_turns(queue, rows, "", &std::collections::HashMap::new());
         assert_eq!(
             replies
                 .iter()
@@ -16404,6 +16640,7 @@ mod tests {
             device_id: "device-123".to_string(),
             operator_label: Some("Pippenz".to_string()),
             kind: crate::ui::factory::OperatorTurnKind::Ask,
+            options: vec!["Fix in-train".into(), "Ship with allowlist".into()],
             attachments: Vec::new(),
             reply_to_session: None,
         })
@@ -16422,6 +16659,11 @@ mod tests {
             .unwrap()
             .id();
         queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
+        let (_, history) = super::commander_history_turns(
+            queue.as_ref(), vec![queue.queued_prompt(ask_id).unwrap().unwrap()], "factory-1", &Default::default(),
+        );
+        assert_eq!(history[0].options, ["Fix in-train", "Ship with allowlist"]);
+
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
 
@@ -19654,9 +19896,9 @@ mod supervisor_decision_wake_tests {
 mod declined_wake_retry_tests_cas_913c {
     use super::{
         ClaudeRedelivery, DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, PaneWakeState,
-        ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
-        RecipientWakeEvidence, claude_turn_aware_retry, claude_turn_aware_retry_with_evidence,
-        deferred_inbox_drain_phase, deferred_inbox_outcome,
+        RecipientWakeEvidence, ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome,
+        claude_redelivery_decision_after_turn, claude_turn_aware_retry,
+        claude_turn_aware_retry_with_evidence, deferred_inbox_drain_phase, deferred_inbox_outcome,
         idle_unacked_relay_due, wake_retry_due_to_turn_end, wake_starved_needs_supervisor,
     };
     use chrono::{Duration as Chrono, TimeZone, Utc};

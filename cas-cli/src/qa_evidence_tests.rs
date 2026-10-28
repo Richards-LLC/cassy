@@ -168,7 +168,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes,
-            deployed_origins: &[], rebind_scope: None,
+            deployed_origins: &[], capture_configured: false, rebind_scope: None,
         })
     }
 }
@@ -217,6 +217,143 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
+/// Exercise the bundle gate with the caller's resolved project configuration.
+#[test]
+fn visual_pairs_default_gate_cas_4f82() {
+    let fx = Fixture::new();
+    for (configured, visual, status, reason, expected) in [
+        (true, true, "", "", false),
+        (
+            true,
+            true,
+            "unavailable",
+            "The merge base cannot boot with the available runtime.",
+            true,
+        ),
+        (true, true, "unavailable", "", false),
+        (true, true, "unavailable", "first line\nsecond line", false),
+        (true, true, "complete", "", false),
+        (true, false, "", "", true),
+        (false, true, "", "", true),
+    ] {
+        fx.write_bundle(|manifest| {
+            manifest["visual_change"] = visual.into();
+            manifest["pairs_status"] = status.into();
+            manifest["pairs_reason"] = reason.into();
+        });
+        let ctx = EvidenceContext {
+            task_id: TASK,
+            task_artifacts_dir: &fx.task_dir,
+            repo: &fx.repo,
+            delivered_head: &fx.head,
+            notes: &fx.notes(),
+            deployed_origins: &[],
+            capture_configured: configured,
+            rebind_scope: None,
+        };
+        assert_eq!(
+            validate_cited_pair_coverage(&ctx).is_ok(),
+            expected,
+            "batch citation path"
+        );
+        let result = run_close_gate(&ctx, EvidenceTier::Bundle, &["path:app.ts".into()], &[]);
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "configured={configured} visual={visual} status={status}: {result:?}"
+        );
+        if !expected {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("cas deliverable capture --task cas-test")
+            );
+        } else if !configured && visual {
+            assert!(
+                result
+                    .unwrap()
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("advisory") && note.contains("qa.capture"))
+            );
+        }
+    }
+}
+
+fn pair_capture(dir: &Path, name: &str, contents: &str) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    let png = format!("{name}.png");
+    let jpg = format!("{name}.jpg");
+    std::fs::write(dir.join(&png), contents).unwrap();
+    std::fs::write(dir.join(&jpg), contents).unwrap();
+    let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    serde_json::json!({"png": png, "jpg": jpg, "sha256": digest, "jpg_sha256": digest,
+        "ref": "fixture", "source": "fixture", "captured_at": "2026-10-26T00:00:00Z"})
+}
+
+#[test]
+fn visual_pairs_validate_sides_hashes_and_status_cas_4f82() {
+    let fx = Fixture::new();
+    let dir = fx.bundle_dir().join("pairs");
+    std::fs::create_dir_all(&dir).unwrap();
+    for case in [
+        "valid",
+        "png-tamper",
+        "jpg-tamper",
+        "missing-file",
+        "missing-side",
+        "status",
+        "unpaired-status",
+        "unpaired-row",
+    ] {
+        fx.write_bundle(|manifest| {
+            manifest["files"]["pairs"] = "pairs/pairs.json".into();
+            manifest["pairs_status"] = "complete".into();
+        });
+        let before = pair_capture(&dir, "goal.before", "base");
+        let after = pair_capture(&dir, "goal.after", "head");
+        let mut pairs = serde_json::json!({"schema":1, "task_id":TASK, "base_sha":fx.head, "head_sha":fx.head, "origin":"fixture",
+            "pairs":[{"id":"goal", "surface":"/", "viewport":[1280,800], "scheme":"light", "before":before, "after":after}], "unpaired":[]});
+        match case {
+            "png-tamper" => std::fs::write(dir.join("goal.after.png"), "tampered").unwrap(),
+            "jpg-tamper" => std::fs::write(dir.join("goal.after.jpg"), "tampered").unwrap(),
+            "missing-file" => std::fs::remove_file(dir.join("goal.before.jpg")).unwrap(),
+            "missing-side" => {
+                pairs["pairs"][0].as_object_mut().unwrap().remove("before");
+            }
+            "status" => {
+                fx.write_bundle(|m| {
+                    m["files"]["pairs"] = "pairs/pairs.json".into();
+                    m["pairs_status"] = "unavailable".into();
+                    m["pairs_reason"] = "Base unavailable despite a complete pair.".into();
+                });
+            }
+            "unpaired-status" | "unpaired-row" => {
+                let mut row = pairs["pairs"][0].clone();
+                row["id"] = "extra".into();
+                if case == "unpaired-status" {
+                    row.as_object_mut().unwrap().remove("before");
+                }
+                pairs["unpaired"] = serde_json::json!([row]);
+            }
+            _ => {}
+        }
+        std::fs::write(dir.join("pairs.json"), serde_json::to_vec(&pairs).unwrap()).unwrap();
+        let ctx = EvidenceContext {
+            task_id: TASK,
+            task_artifacts_dir: &fx.task_dir,
+            repo: &fx.repo,
+            delivered_head: &fx.head,
+            notes: &fx.notes(),
+            deployed_origins: &[],
+            capture_configured: true,
+            rebind_scope: None,
+        };
+        let result = validate_bundle(&ctx);
+        assert_eq!(result.is_ok(), case == "valid", "{case}: {result:?}");
+    }
+}
+
 #[test]
 fn after_cells_must_preserve_before_carousels_cas_51f1() {
     let fx = Fixture::new();
@@ -232,7 +369,10 @@ fn after_cells_must_preserve_before_carousels_cas_51f1() {
         } else {
             "pairs/pairs.json"
         };
-        fx.write_bundle(|manifest| manifest["files"]["pairs"] = relative.into());
+        fx.write_bundle(|manifest| {
+            manifest["files"]["pairs"] = relative.into();
+            manifest["pairs_status"] = if after.len() == before.len() { "complete" } else { "partial" }.into();
+        });
         let dir = if missing.is_empty() {
             fx.task_dir.join("pairs")
         } else {
@@ -245,14 +385,12 @@ fn after_cells_must_preserve_before_carousels_cas_51f1() {
             let mut cell = serde_json::json!({"id": id});
             if before.contains(&id) {
                 let name = format!("{id}.before.png");
-                std::fs::write(dir.join(&name), "baseline capture").unwrap();
+                cell["before"] = pair_capture(&dir, &format!("{id}.before"), "baseline capture");
                 set_mtime_secs_ago(&dir.join(&name), 240);
-                cell["before"] = serde_json::json!({"png": name});
+                set_mtime_secs_ago(&dir.join(format!("{id}.before.jpg")), 240);
             }
             if after.contains(&id) {
-                let name = format!("{id}.after.png");
-                std::fs::write(dir.join(&name), "delivered capture").unwrap();
-                cell["after"] = serde_json::json!({"png": name});
+                cell["after"] = pair_capture(&dir, &format!("{id}.after"), "delivered capture");
             }
             if before.contains(&id) && after.contains(&id) {
                 pairs.push(cell);
@@ -275,7 +413,7 @@ fn after_cells_must_preserve_before_carousels_cas_51f1() {
             repo: &fx.repo,
             delivered_head: &fx.head,
             notes: &fx.notes(),
-            deployed_origins: &[], rebind_scope: None,
+            deployed_origins: &[], capture_configured: false, rebind_scope: None,
         };
         let result = run_close_gate(&ctx, EvidenceTier::Bundle, &["path:app.ts".into()], &[]);
         if missing.is_empty() {
@@ -781,7 +919,7 @@ fn ledger_tier_requires_a_fresh_pass_row() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[], rebind_scope: None,
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
     assert!(
         validate_ledger(&ctx)
@@ -949,7 +1087,7 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: &notes,
-        deployed_origins: &[], rebind_scope: None,
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
     let markers = added_skip_markers(HEALER_DIFF);
     let error = run_close_gate(&ctx, EvidenceTier::None, &[], &markers).unwrap_err();
@@ -1005,7 +1143,7 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[], rebind_scope: None,
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
     let error = run_close_gate(
         &ctx,
@@ -1202,7 +1340,7 @@ fn ledger_pass_row_must_be_real_build() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[], rebind_scope: None,
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(
@@ -1223,7 +1361,7 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[], rebind_scope: None,
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
     let refusal = validate_terminal_qa(&ctx).unwrap_err();
     assert!(refusal.problem.starts_with("missing"), "{refusal:?}");
@@ -1782,7 +1920,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes: &notes,
-            deployed_origins: origins, rebind_scope: None,
+            deployed_origins: origins, capture_configured: false, rebind_scope: None,
         })
     }
 }
@@ -2462,7 +2600,7 @@ fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes,
-        deployed_origins: &[], rebind_scope: None,
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
     }
 }
 

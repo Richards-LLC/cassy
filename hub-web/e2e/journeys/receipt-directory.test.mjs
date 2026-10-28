@@ -98,3 +98,18 @@ test('project names and the untruncated title path distinguish receipt parts (ca
   assert.notEqual(receiptPartName(title, { ...identity, titlePath: ['fleet-ops.journey.ts', 'light', title + 'second'] }), part);
   assert.ok(part.length <= 96);
 });
+
+test('opt-in masking refuses missing selectors before a screenshot and preserves default options', async () => {
+  const { captureStageScreenshot, captureMask } = await import('./receipt-directory.mjs');
+  assert.equal(captureMask(undefined), undefined);
+  assert.deepEqual(captureMask('[".private"]'), ['.private']);
+  for (const raw of ['secret', '{}', '[""]', '[3]']) assert.throws(() => captureMask(raw), /JOURNEY_CAPTURE_MASK/);
+  const screenshots = [];
+  const page = { screenshot: async (options) => screenshots.push(options), locator: (selector) => ({ count: async () => selector === '.private' ? 1 : 0 }) };
+  await captureStageScreenshot(page, 'normal.png', undefined);
+  assert.deepEqual(screenshots, [{ path: 'normal.png' }]);
+  await assert.rejects(captureStageScreenshot(page, 'unsafe.png', ['.missing']), /cannot apply requested capture mask/);
+  assert.equal(screenshots.length, 1);
+  await captureStageScreenshot(page, 'safe.png', ['.private']);
+  assert.equal(screenshots[1].mask.length, 1);
+});

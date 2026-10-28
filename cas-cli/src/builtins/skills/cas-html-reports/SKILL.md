@@ -1,6 +1,6 @@
 ---
 name: cas-html-reports
-description: "Use when producing durable HTML analysis: investigations, audits, decision briefs, benchmarks, post-mortems or executive updates; use cas-release-report for published releases; not feature reports or client deliverables."
+description: "Use when producing durable HTML analysis: investigations, audits, decision briefs, benchmarks, post-mortems or executive updates; published releases are cas-release-report and feature reports cas-feature-report; not client deliverables."
 metadata:
   managed_by: cas
 ---
@@ -56,7 +56,8 @@ A deliverable is a report when **all three** hold:
 Canonical cases: investigation and diagnostic write-ups, metrics and mining analyses, audits, decision
 briefs, comparisons and benchmarks, incident post-mortems, status summaries (a published version release uses `cas-release-report`), financial
 reports, executive and board updates, system explainers, research and market analyses. A client's
-SOW delivery uses `cas-sow-delivery-report`.
+SOW delivery uses `cas-sow-delivery-report`; a feature report, showcase or walkthrough of shipped
+work uses `cas-feature-report`.
 
 ## When HTML is NOT required
 
@@ -88,7 +89,7 @@ system flow, never a manufactured decision. The matrix is `references/report-typ
 Every type, audience, and domain obeys `references/technical-contract.md`: one file (No CDN, no
 framework, no build step), vanilla JS only as progressive enhancement, semantic accessible HTML,
 Print-ready, Provenance per figure, copyable numbers, and the design language by default — the
-project's `DESIGN.md` or, without one, `design-spec/references/tokens.css`. Encodings, scales, and
+target project's `DESIGN.md`, resolved by [DESIGN.md first](../design-spec/references/design-md-first.md). Encodings, scales, and
 number formatting are in `references/presentation-rules.md`; chart construction follows
 `cas-dataviz`.
 

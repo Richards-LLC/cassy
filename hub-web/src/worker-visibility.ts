@@ -28,6 +28,14 @@ export function sessionReachable(session: HubSession, catalogFresh = true): bool
     && session.liveness === "live" && Boolean(session.supervisor.trim());
 }
 
+/** The retained message's wait, shared by its list row and conversation header. */
+export function pendingSessionLabel(session: HubSession | undefined, machineConnected: boolean): string | undefined {
+  if (!session?.unreachable) return undefined;
+  // Retention also covers a dormant/missing supervisor on a connected machine.
+  // Its queue is waiting for a recipient, not for the machine's transport.
+  return machineConnected ? "Waiting for supervisor" : "Unreachable · message pending";
+}
+
 export function visibleCatalog(sessions: readonly HubSession[], pending: (name: string) => boolean, catalogFresh = true, recovery = false): HubSession[] {
   return sessions.flatMap(session => {
     if (sessionReachable(session, catalogFresh)) return [session];

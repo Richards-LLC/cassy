@@ -183,7 +183,7 @@ test("HUB-J2 the installation inventory on keyboard and phone, and exact-device 
         - paragraph: Your projects. Your supervisors.
         - navigation "Choose a supervisor"
         - status
-        - text: Pair a machine to start your first conversation.
+        - text: Pair a machine to start your first conversation. Got a pairing link from whoever runs it? Open it on this device.
         - button "0 paired machines Not paired"
     `);
   });

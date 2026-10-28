@@ -1,3 +1,5 @@
+import { fitComposerPlaceholder } from "./conversation-shell";
+
 /**
  * Everything a hub heartbeat changes, written into nodes that already exist.
  *
@@ -11,6 +13,12 @@ export interface LiveRegionView {
   /** Full sentence, or undefined when the hub is live. */
   readonly staleNotice?: string;
   readonly sendReason?: string;
+  /**
+   * Why this device can never send here (a read-only pairing, cas-b7c0). The
+   * composer is read-only and the sentence stands under it before anything is
+   * typed, instead of appearing only after a tap on Send.
+   */
+  readonly readOnlyReason?: string;
   readonly messageStatus?: { readonly text: string; readonly error: boolean };
   readonly delivery?: string;
   /**
@@ -27,6 +35,8 @@ export interface LiveRegionView {
     readonly cleanupRetryInFlight?: boolean;
   };
 }
+
+export const READ_ONLY_PLACEHOLDER = "Read only on this browser";
 
 /** A reason that is absent must clear the attributes, not leave a stale one. */
 function setDisabledReason(element: HTMLElement | null, reason: string | undefined): void {
@@ -48,13 +58,36 @@ function setNotice(element: HTMLElement | null, text: string | undefined): void 
 
 export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
   setNotice(root.querySelector<HTMLElement>(".status-stale"), view.staleNotice);
-  setDisabledReason(root.querySelector<HTMLElement>("#message-send"), view.sendReason);
+  const send = root.querySelector<HTMLElement>("#message-send");
+  setDisabledReason(send, view.sendReason);
+  if (view.sendReason !== undefined) send?.setAttribute("aria-describedby", "message-status");
+  else send?.removeAttribute("aria-describedby");
+
+  const field = root.querySelector<HTMLTextAreaElement>("#message-text");
+  if (field) {
+    const readOnly = view.readOnlyReason !== undefined;
+    // cas-a56c (QA F01): a read-only field does not invite a message; writable
+    // again, it takes back its fitted wording.
+    const wasReadOnly = field.readOnly;
+    field.readOnly = readOnly;
+    if (readOnly && field.placeholder !== READ_ONLY_PLACEHOLDER) field.placeholder = READ_ONLY_PLACEHOLDER;
+    if (!readOnly && wasReadOnly) fitComposerPlaceholder(field);
+    const composer = field.closest<HTMLElement>(".message");
+    if (composer) {
+      if (view.readOnlyReason === undefined) delete composer.dataset.readOnly;
+      else composer.dataset.readOnly = "true";
+    }
+  }
 
   const status = root.querySelector<HTMLElement>("#message-status");
   if (status) {
-    status.textContent = view.messageStatus?.text ?? "";
-    status.className = `message-status${view.messageStatus?.error ? " error" : ""}`;
-    status.hidden = view.messageStatus === undefined;
+    // The current refusal must stay visible and describe Send, even when a
+    // previous send left a status. A pairing fact has no error tone.
+    const reason = view.sendReason ?? view.readOnlyReason;
+    const shown = reason === undefined ? view.messageStatus : { text: reason, error: false };
+    status.textContent = shown?.text ?? "";
+    status.className = `message-status${shown?.error ? " error" : ""}`;
+    status.hidden = shown === undefined;
   }
 
   setNotice(root.querySelector<HTMLElement>("#message-delivery"), view.delivery);

@@ -45,12 +45,12 @@ describe("invitation scope ceiling in the actual pairing form", () => {
     expect(command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");
   });
 
-  it("names what a read-only link withholds, and the command, beside what it grants rather than inside Technical details (cas-b52d, journey F26)", () => {
+  it("says in plain words what a read-only link withholds and whom to ask, keeping the command in Technical details (cas-b52d, cas-b7c0)", () => {
     const origin = "https://commander.example";
     const render = (scopes?: ("machine-read" | "session-read" | "pane-read" | "pane-input" | "message-send" | "pane-interrupt")[]) => new DOMParser().parseFromString(pairDialogMarkup({
       cleanupFailed: false, cleanupContext: { cause: "cancel", storeOpen: false, rollbackPending: false },
       pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "studio", scopes },
-      draft: createPairingDraft(origin), status: "", createInFlight: false, exchangeInFlight: false,
+      draft: { ...createPairingDraft(origin), machineLabel: "Studio Mac" }, status: "", createInFlight: false, exchangeInFlight: false,
       relayOrigin: origin, pageOrigin: origin,
     }), "text/html");
     const doc = render(["machine-read", "session-read", "pane-read"]);
@@ -60,8 +60,13 @@ describe("invitation scope ceiling in the actual pairing form", () => {
     expect(withheld.previousElementSibling?.textContent).toBe("This browser will be able to: See its sessions and raw output");
     expect(withheld.closest("details")).toBeNull();
     expect(withheld.compareDocumentPosition(doc.querySelector('input[name="url"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(withheld.querySelector("code")?.textContent).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");
-    expect(withheld.querySelector("#pair-copy")?.textContent).toBe("Copy command");
+    // The person holding a phone is told whom to ask, never a command or a scope name (cas-b7c0).
+    expect(withheld.querySelector(".pair-withheld-ask")?.textContent).toContain("ask whoever runs Studio Mac for a link that can");
+    expect(withheld.textContent).not.toMatch(/cas hub|--scopes|:send/);
+    // The machine's owner still finds the exact command, with its Copy, under Technical details.
+    const command = doc.querySelector(".pair-technical .pair-withheld-command")!;
+    expect(command.querySelector("code")?.textContent).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");
+    expect(command.querySelector("#pair-copy")?.textContent).toBe("Copy command");
     expect(doc.querySelectorAll("#pair-copy")).toHaveLength(1);
     // A link that grants everything, or one that declares no ceiling, withholds nothing.
     expect(render(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"]).querySelector(".pair-withheld")).toBeNull();
@@ -125,6 +130,22 @@ describe("pairing dialog in plain words (F3)", () => {
     expect(outside.textContent).not.toMatch(/machine:read|pane:interrupt/);
     expect(outside.textContent).not.toMatch(/Cassy Cloud origin|device credential|target hub|Operator label|Device label|Email code/i);
     expect(technical?.textContent).toContain("machine:read");
+  });
+
+  it("offers a second person a way to send the code to whoever runs the machine (cas-a56c)", () => {
+    const code = new DOMParser().parseFromString(steps.code, "text/html");
+    const share = code.querySelector(".pair-share")!;
+    expect(share.textContent).toContain("Not your machine?");
+    expect(share.textContent).toContain("whoever runs it");
+    expect(share.textContent).toContain("10 minutes");
+    const button = share.querySelector<HTMLButtonElement>("button#pair-share")!;
+    expect(button.textContent).toBe("Send the code");
+    // What is sent names the code and the command that approves it, never a scope.
+    expect(button.dataset.shareText).toContain("cas hub authorize KQ7M-4XTR");
+    expect(button.dataset.shareText).not.toMatch(/machine:read|pane:/);
+    // The step that creates the code says so before it exists.
+    const create = new DOMParser().parseFromString(steps.create, "text/html");
+    expect(create.querySelector(".pair-flow")?.textContent).toContain("Not your machine?");
   });
 
   it("names the fields in the operator's words", () => {

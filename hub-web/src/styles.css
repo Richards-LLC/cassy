@@ -1054,7 +1054,14 @@ main {
 /* Why a message did not go out, beside the composer that did not send it. */
 .message-status {
   text-wrap: pretty;
+  /* No reason may run off a phone's edge, even one naming a long token (cas-b7c0). */
+  overflow-wrap: anywhere;
 }
+
+/* cas-b7c0: a pairing that can only read keeps its composer read-only; the
+   sentence under it says why. Voice input would only fill a field that cannot send. */
+.message[data-read-only] #message-text { cursor: default; border-style: dashed; }
+.message[data-read-only] #message-mic { display: none; }
 
 .message-status.error { color: var(--state-warn); }
 
@@ -1367,7 +1374,11 @@ fieldset {
    grants, compact enough that the fields still open unscrolled: the hint and
    its Copy share a row, and the command fills whole lines below them. */
 .pair-withheld { display: grid; gap: var(--space-1); }
-.pair-withheld > .pair-lead { margin: 0; }
+.pair-withheld > .pair-lead, .pair-withheld-ask { margin: 0; }
+/* cas-a56c: the second person's way to send the code on. */
+.pair-share { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+.pair-share .scope-hint { flex: 1 1 14rem; margin: 0; }
+.pair-share button { min-height: var(--rail-item-min); padding: 0 var(--space-3); font-size: var(--fs-meta); }
 .pair-withheld-command { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
 .pair-withheld-command .scope-hint { flex: 1 1 14rem; margin: 0; }
 .pair-withheld-command button { min-height: var(--space-8); padding: 0 var(--space-3); font-size: var(--fs-meta); }
@@ -2552,6 +2563,10 @@ button.chip:disabled { cursor: default; }
 /* cas-d382 QA F01: Copy command is one line, beside or under the command, never wrapped. */
 .fleet-permission-command .fleet-permission-copy { flex: none; white-space: nowrap; }
 
+/* A code's share controls can outgrow a landscape phone. The field list
+   scrolls already; let the bounded dialog scroll any remaining overflow too,
+   rather than clipping it at dialog[open]'s hidden outer edge. */
+#pair-dialog { overflow: auto; }
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }
 .conversation-sidebar > footer { flex-shrink: 0; padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
 @media (max-height: 30rem) {

@@ -95,6 +95,18 @@ test(
     };
     page.on("requestfinished", (request) => completed(request, false));
     page.on("requestfailed", (request) => completed(request, true));
+    // Observe real daemon state, rather than trusting a possibly stale Live header.
+    const welcomes: number[] = [];
+    const attachments: unknown[] = [];
+    page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+      if (typeof payload !== "string") return;
+      try {
+        const frame = JSON.parse(payload);
+        // The real daemon publishes UTC pass timestamps. Match them against
+        // the monotonic epoch of this actual frame, not the fixture clock.
+        if (frame.message?.Welcome) welcomes.push(performance.timeOrigin + performance.now());
+      } catch { /* Non-JSON frames are pane output. */ }
+    }));
     const header = page.locator("#conversation-connection");
     const stage = async (title: string, body: () => Promise<void>) =>
       test.step(title, async () => {
@@ -235,16 +247,42 @@ test(
         expect(navigations, "recovery must not reload the browser").toBe(0);
         await expect(page.locator("#pair-dialog")).toBeHidden();
       };
+      const countAttached = async (afterWelcome: number) => {
+        let snapshot: Awaited<ReturnType<typeof command>>;
+        await expect.poll(async () => {
+          snapshot = await command("attachment");
+          return snapshot.loopPid === fixture!.daemonPid && Date.parse(snapshot.last_pass_at ?? "") > afterWelcome;
+        }, { message: "first published completed pass after the real Welcome" }).toBe(true);
+        // The loop records ws_clients immediately before complete_pass. Do not
+        // wait for a later positive count: this first fresh snapshot must count it.
+        expect(snapshot.commander_clients).toBeGreaterThanOrEqual(1);
+        attachments.push({ welcomeAt: afterWelcome, ...snapshot });
+      };
       await stage(
         "Restart the real hub and replay the queued message",
         async () => {
+          const before = welcomes.length;
           await command("stop");
           await expect(header).toContainText("Reconnecting");
           await command("queue", { message: "Queued during the hub restart." });
           await command("start");
           await replay("Queued during the hub restart.");
+          await expect.poll(() => welcomes.length).toBeGreaterThan(before);
+          await countAttached(welcomes.at(-1)!);
         },
       );
+      await stage("Replace the daemon without losing the open phone", async () => {
+        const before = welcomes.length;
+        const stopped = await command("daemon-stop");
+        await expect(header).toContainText("Reconnecting");
+        const replacement = await command("daemon-start");
+        expect(replacement.daemonPid).not.toBe(stopped.daemonPid);
+        fixture!.daemonPid = replacement.daemonPid;
+        await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
+        await expect(header).toContainText("Live");
+        await countAttached(welcomes.at(-1)!);
+        expect(navigations, "replacement must not reload the phone").toBe(0);
+      });
       await stage(
         "Wait through a real sixty-second outage with bounded retries",
         async () => {
@@ -353,7 +391,9 @@ test(
             message: "Queued while Local Network Access was denied.",
           });
           await expect(
-            page.getByText(/Allow Local network access for this page/),
+            page
+              .getByRole("status")
+              .filter({ hasText: /allow local network access for this page/i }),
           ).toBeVisible();
           // Browser.grantPermissions does not overwrite a per-origin
           // Browser.setPermission denial. Change those same real permissions.
@@ -434,7 +474,7 @@ test(
         await writeFile(
           join(directory, "hub-evidence.json"),
           JSON.stringify(
-            redactQaValue({ evidence, network }, secrets),
+            redactQaValue({ evidence, network, attachments }, secrets),
             null,
             2,
           ),
@@ -488,3 +528,78 @@ test(
     }
   },
 );
+
+
+// cas-7ebc: the catalog's double supplied options the real payload discarded.
+// Keep this check on the actual CLI, daemon queue, hub and production browser.
+test("HUB-J7 real ask choices survive reload and the phone answer names its question", {
+  annotation: { type: "journey-part", description: "real hub, CLI ask, durable linked answer" },
+}, async ({ page, context }, info) => {
+  const directory = resolve(process.env.JOURNEY_RECEIPTS ??
+    join(process.env.JOURNEY_OUTPUT ?? "e2e/.results/real-hub", "journeys"),
+    "HUB-J7", "parts", `real-hub-run-${info.repeatEachIndex}`);
+  claimReceiptDirectory(directory, info.title);
+  const secrets: string[] = [];
+  let fixture: { pairUrl: string; version: string } | undefined;
+  let tracing = false;
+  let passed = false;
+  let readback: unknown;
+  try {
+    fixture = await command("reset", { messageControl: true });
+    const pairing = new URL(fixture!.pairUrl);
+    secrets.push(fixture!.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? "");
+    pairing.pathname = "/commander/";
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    // Pair outside the trace so invitation and installation keys are not captured.
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable choices QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    // Pairing opens the only conversation on a phone. Its list is then
+    // hidden; clicking the disappearing row races that automatic navigation.
+    await expect(page.getByRole("textbox", { name: "Your message", exact: true })).toBeVisible();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await context.tracing.start({ screenshots: false,
+      snapshots: { dom: true, aria: true, screen: true }, sources: true });
+    tracing = true;
+    const ask = await command("ask");
+    const question = page.getByRole("group", { name: "Question from journey-supervisor", exact: true });
+    await expect(question.getByRole("button", { name: "Keep testing", exact: true })).toBeVisible();
+    await expect(question.getByRole("button")).toHaveCount(2);
+    await page.screenshot({ path: join(directory, "J01-live-choices.png") });
+    await page.reload();
+    await expect(question.getByRole("button", { name: "Keep testing", exact: true })).toBeVisible();
+    await page.screenshot({ path: join(directory, "J02-history-choices.png") });
+    await question.getByRole("button", { name: "Keep testing", exact: true }).click();
+    await expect.poll(async () => (await command("answers", { notificationId: ask.message_id })).length).toBe(1);
+    readback = await command("answers", { notificationId: ask.message_id });
+    expect(readback).toEqual([expect.objectContaining({
+      target: "journey-supervisor", operator_verified: 1,
+      prompt: `[CAS reply: explicitly acknowledges notification_id=${ask.message_id}]\nKeep testing`,
+    })]);
+    await expect(question.getByLabel("You replied: Keep testing")).toBeVisible();
+    await expect(question.getByRole("button")).toHaveCount(0);
+    await page.reload();
+    await expect(question.getByLabel("You replied: Keep testing")).toBeVisible();
+    await expect(question.getByRole("button")).toHaveCount(0);
+    expect((await command("answers", { notificationId: ask.message_id })).length).toBe(1);
+    await page.screenshot({ path: join(directory, "J03-linked-answer.png") });
+    passed = true;
+  } finally {
+    try {
+      await page.screenshot({ path: join(directory, "final.png") }).catch(() => undefined);
+      await writeFile(join(directory, "final.aria.yml"), await page.locator("body").ariaSnapshot().catch(() => "# unavailable"));
+      await writeFile(join(directory, "final.aria.json"), JSON.stringify(await page.locator("body").ariaSnapshotJSON().catch(() => null), null, 2));
+      await writeFile(join(directory, "result.json"), JSON.stringify({
+        id: "HUB-J7", status: passed ? "PASS" : "FAIL", binary: fixture?.version,
+        label: "real-bundle, real-hub, real-factory-daemon, inert-supervisor-provider",
+        viewport: page.viewportSize(), readback,
+      }, null, 2));
+      if (tracing) await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
+    } finally {
+      await context.close().catch(() => undefined);
+      await command("cleanup");
+    }
+  }
+});

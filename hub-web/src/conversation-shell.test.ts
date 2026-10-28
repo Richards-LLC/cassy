@@ -59,13 +59,20 @@ describe("cold-load list states (journey F14)", () => {
     expect(conversationListState(true, [{ catalogReceived: false, phase: "dialing" }, { catalogReceived: false, phase: undefined }])).toEqual({ kind: "loading" });
     // One machine answered empty, the other is still on its first attempt: not "No live supervisors" yet.
     expect(conversationListState(true, [{ catalogReceived: true, phase: "live" }, { catalogReceived: false, phase: "auth" }])).toEqual({ kind: "loading" });
-    expect(conversationListState(true, [])).toEqual({ kind: "text", text: "Pair a machine to start your first conversation." });
+    const unpaired = conversationListState(true, []);
+    expect(unpaired.kind === "text" && unpaired.text).toMatch(/^Pair a machine to start your first conversation\./);
+    // cas-a56c: someone sent a link by whoever runs the machine is told where it goes.
+    expect(unpaired.kind === "text" && unpaired.text).toContain("pairing link");
     const empty = conversationListState(true, [{ catalogReceived: true, phase: "live" }, { catalogReceived: false, phase: "failed" }]);
     expect(empty.kind === "text" && empty.text).toMatch(/^No live supervisors listed/);
+    // cas-a56c: the way on is named in the controls' own words, without "recovery" jargon.
+    expect(empty.kind === "text" && empty.text).toContain("New session");
+    expect(empty.kind === "text" && empty.text).not.toContain("recovery");
     const unreachable = conversationListState(true, [{ catalogReceived: false, phase: "backoff" }]);
     expect(unreachable.kind === "text" && unreachable.text).toMatch(/^Can't reach your paired machines yet/);
     // cas-97d58 F16: a browser that blocks every machine is named as the cause.
     const blocked = conversationListState(true, [{ catalogReceived: false, phase: "backoff", browserBlocked: true }]);
+    // pin: cas-97d58 F16's exact sentence naming the browser as the cause.
     expect(blocked.kind === "text" && blocked.text).toBe("This browser is blocking its connection to your paired machines.");
     const mixed = conversationListState(true, [{ catalogReceived: false, phase: "backoff", browserBlocked: true }, { catalogReceived: false, phase: "backoff" }]);
     expect(mixed.kind === "text" && mixed.text).toMatch(/^Can't reach your paired machines yet/);

@@ -18,6 +18,7 @@ describe("Commander MessageQueued callback", () => {
         target: "patient-pelican-9",
         stamped: true,
         device_label: "Desktop",
+        operator_label: "Daniel",
       },
     });
 
@@ -27,6 +28,7 @@ describe("Commander MessageQueued callback", () => {
       target: "patient-pelican-9",
       stamped: true,
       device_label: "Desktop",
+      operator_label: "Daniel",
     }, { credentialId: "send-credential", generation: 7 });
   });
 });

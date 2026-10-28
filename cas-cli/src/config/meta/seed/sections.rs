@@ -1,6 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 
 pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
+    registry.section_descriptions.insert("accounts", "Claude and Codex account recommendations");
     registry
         .section_descriptions
         .insert("sync", "Rule synchronization to .claude/rules/");
@@ -22,6 +23,7 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
     registry
         .section_descriptions
         .insert("qa", "User-facing QA gates for task planning");
+    registry.section_descriptions.insert("qa.capture", "Project before/after capture and size budgets");
     registry.section_descriptions.insert("upkeep", "Delivery-scoped documentation upkeep gates");
     registry.section_descriptions.insert(
         "issues",

@@ -314,18 +314,29 @@ impl Plan {
 }
 
 /// Whether `name` (after the prefix) looks like a login email.
-fn email_shaped(name: &str) -> bool {
+pub(crate) fn email_shaped(name: &str) -> bool {
     name.split_once('@')
         .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.'))
 }
 
 /// Find the provider's account directories under `home`: the retiring
-/// defaults first, then the named ones in name order. Symlinked directories
-/// and non-account siblings (`.lock`, `.bak`, ...) are skipped.
+/// defaults first, then the named ones in name order. Directory symlinks are
+/// followed; unreadable entries and non-account siblings (`.lock`, `.bak`, ...)
+/// are skipped. Each canonical directory target is returned once, even when
+/// several aliases reach it. Write callers treat the target, inside or outside
+/// `home`, as the account; the registry retains every alias separately.
 pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
-    let real_dir = |path: &Path| {
-        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
-    };
+    let mut targets = BTreeSet::new();
+    Ok(discover_aliases(provider, home)?
+        .into_iter()
+        .filter(|account| account.path.canonicalize().is_ok_and(|target| targets.insert(target)))
+        .collect())
+}
+
+/// Alias-preserving lookup for selection, launch and individual lifecycle commands.
+/// Bulk link/sync callers use `discover` to process each physical target once.
+pub(crate) fn discover_aliases(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
+    let real_dir = |path: &Path| path.is_dir();
     let account = |label: String, path: PathBuf, retiring: bool| AccountDir {
         email: provider.login_email(home, &path),
         has_login: path.join(provider.credentials()).exists(),
@@ -341,21 +352,22 @@ pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> 
         }
     }
     let mut named = Vec::new();
-    for entry in std::fs::read_dir(home)? {
-        let entry = entry?;
-        let Some(label) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let Some(name) = label.strip_prefix(provider.prefix()) else {
-            continue;
-        };
-        if provider.retiring().contains(&label.as_str())
-            || !crate::cli::account_picker::is_account_profile_name(name)
-            || !real_dir(&entry.path())
-        {
-            continue;
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            let Some(label) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(name) = label.strip_prefix(provider.prefix()) else {
+                continue;
+            };
+            if provider.retiring().contains(&label.as_str())
+                || !crate::cli::account_picker::is_account_profile_name(name)
+                || !real_dir(&entry.path())
+            {
+                continue;
+            }
+            named.push(label);
         }
-        named.push(label);
     }
     named.sort();
     for label in named {
@@ -606,7 +618,7 @@ fn side_by_side(rel: &str, account: &str) -> String {
 /// Every regular file under `root` (or `root` itself), as paths relative to
 /// the account directory: `<item>/<...>`. Symlinks inside an item are
 /// followed only when they point at a regular file.
-fn files_under(root: &Path, item: &str) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn files_under(root: &Path, item: &str) -> Result<Vec<(String, PathBuf)>> {
     if root.is_file() {
         return Ok(vec![(item.to_string(), root.to_path_buf())]);
     }
@@ -632,7 +644,7 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
     digest_file(path)
 }
 
-fn digest_file(path: &Path) -> Result<[u8; 32]> {
+pub(crate) fn digest_file(path: &Path) -> Result<[u8; 32]> {
     use sha2::{Digest as _, Sha256};
     use std::io::Read as _;
     let mut file =

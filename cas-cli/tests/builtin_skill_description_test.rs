@@ -274,6 +274,29 @@ fn cas_dataviz_description_names_its_boundary_with_the_bundled_skill() {
     }
 }
 
+/// cas-150b: a plain-words "feature report" request has one owner. Its
+/// description claims the phrase, and cas-html-reports hands it over instead
+/// of turning it away.
+#[test]
+fn feature_report_requests_route_to_cas_feature_report() {
+    for (label, flavor) in FLAVORS {
+        let owner = builtin_catalog::find(flavor, "skills/cas-feature-report/SKILL.md");
+        let owner = field(owner, "description").expect("cas-feature-report description");
+        assert!(
+            owner
+                .trim_start_matches('"')
+                .starts_with("Use when asked for a feature report"),
+            "{label}: {owner:?}"
+        );
+        let reports = builtin_catalog::find(flavor, "skills/cas-html-reports/SKILL.md");
+        let reports = field(reports, "description").expect("cas-html-reports description");
+        assert!(
+            reports.contains("feature reports cas-feature-report"),
+            "{label} cas-html-reports must route feature reports: {reports:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Portability of shipped text
 // ---------------------------------------------------------------------------
@@ -649,4 +672,30 @@ fn live_builtin_skills_use_violet_tool_names() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// cas-d1dc: plain-words customer release notes route to their own skill,
+/// and the team release-notes skill no longer claims them.
+#[test]
+fn customer_release_notes_route_to_their_own_skill() {
+    for (label, flavor) in FLAVORS {
+        let description = |skill: &str| {
+            field(
+                builtin_catalog::find(flavor, &format!("skills/{skill}/SKILL.md")),
+                "description",
+            )
+            .unwrap_or_else(|| panic!("{label} {skill} has no description"))
+        };
+        let customer = description("cas-customer-release-notes");
+        assert!(
+            customer.contains("customer release notes") && customer.contains("client"),
+            "{label}: {customer}"
+        );
+        let team = description("cas-release-notes");
+        assert!(
+            !team.contains("for the team or for customers")
+                && team.contains("go to cas-customer-release-notes"),
+            "{label}: {team}"
+        );
+    }
 }

@@ -46,8 +46,8 @@ the request shape and the unwired alternatives.
 
 ## Workflow
 
-1. Harvest the project's design context using
-   [style-harvest.md](references/style-harvest.md). Produce a concrete style
+1. Resolve the target project's `DESIGN.md` ([DESIGN.md first](../design-spec/references/design-md-first.md)), then
+   harvest its design context using [style-harvest.md](references/style-harvest.md). Produce a concrete style
    token block before writing the final prompt; reuse that style token block in
    every request.
 2. Choose the asset row and preset in

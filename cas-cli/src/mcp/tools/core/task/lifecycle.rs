@@ -3392,9 +3392,9 @@ impl CasCore {
                 start_guidance(&task),
             );
             let note = format!(
-                "[{}] START CONTEXT{}",
+                "[{}] START CONTEXT{}{}{}",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                advisory
+                advisory, related_context, cited_issues
             );
             task_store.append_note(&task.id, &note).map_err(|error| Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -3425,11 +3425,11 @@ impl CasCore {
                     .map(|line| format!("Cited issue: {line}"))
                     .unwrap_or_default();
             let optional = format!(
-                "\n{}\nNotes:\n{}\n{}\n{}\n{}",
+                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                excerpt(&related_context, 120),
                 task_scope(&task),
                 task_show_notes(&task.notes, &task.id),
                 excerpt(&execution_state.unwrap_or_default(), 120),
-                excerpt(&related_context, 120),
                 excerpt(&cited_pointer, 220),
             );
             let prefix = format!(
@@ -5221,12 +5221,14 @@ mod related_recall_response_tests {
             .expect("created task")
             .id;
         let started = text(
-            core.cas_task_start(Parameters(IdRequest { id: task_id }))
+            core.cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
                 .await
                 .expect("start qa task"),
         );
         assert!(started.contains("m-golden-set"), "{started}");
         assert!(started.contains("QA golden test data"), "{started}");
+        let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
+        assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
     }
 
     #[test]

@@ -1743,6 +1743,7 @@ impl SqlitePromptQueueStore {
         tx: &ImmediateTx<'_>,
         prompts: Vec<QueuedPrompt>,
     ) -> Result<Vec<QueuedPrompt>> {
+        const LIFECYCLE_DELIVERY_WINDOW_SECS: i64 = 9 * 60;
         if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("lifecycle:") || prompt.source.starts_with("verification-dispatch:")) {
             return Ok(prompts);
         }
@@ -1752,7 +1753,7 @@ impl SqlitePromptQueueStore {
         )?;
         let now = Utc::now();
         let mut current = Vec::with_capacity(prompts.len());
-        for prompt in prompts {
+        for mut prompt in prompts {
             if let Some(detail) = Self::supervisor_relay_expiry_reason(tx, has_tasks, &prompt, now)? {
                 // Preserve forensic transport history on a previously polled
                 // row. Early stages can advance to Suppressed; acknowledgement
@@ -1775,6 +1776,19 @@ impl SqlitePromptQueueStore {
                     params![acked_via, now.to_rfc3339(), prompt.id],
                 )?;
             } else {
+                // Carry the delay on the returned queue row, so both a hook
+                // digest and an explicit inbox poll show that this is old
+                // news. Keep the persisted body and delivery receipts intact.
+                if (prompt.source.starts_with("lifecycle:")
+                    || prompt.source.starts_with("lifecycle-wake:"))
+                    && cas_types::parse_lifecycle_envelope(&prompt.prompt).is_some()
+                {
+                    let age_secs = (now - prompt.created_at).num_seconds().max(0);
+                    if age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
+                        let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
+                        summary.push_str(&format!(" [delayed {}m]", age_secs / 60));
+                    }
+                }
                 current.push(prompt);
             }
         }
@@ -10644,6 +10658,7 @@ mod tests {
         assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
         assert_eq!(surfaced[0].id, id);
         assert_eq!(surfaced[0].created_at, queued_at);
+        assert!(surfaced[0].summary.as_deref().is_some_and(|summary| summary.contains("[delayed 29m]")), "{:?}", surfaced[0].summary);
         assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
     }
 

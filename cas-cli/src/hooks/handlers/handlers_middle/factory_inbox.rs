@@ -1120,6 +1120,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lifecycle_digest_names_a_relay_delayed_past_delivery_window() {
+        let mut delayed = row(13952, "lifecycle:13952", "started");
+        delayed.created_at = Utc::now() - chrono::Duration::minutes(29);
+        delayed.summary = Some("task_started: cas-example".into());
+        let mut timely = row(13956, "lifecycle:13956", "closed");
+        timely.summary = Some("task_closed: cas-other".into());
+        let rendered = digest_row(&[delayed, timely]).unwrap();
+        assert!(rendered.contains("#13952 task_started: cas-example [delayed"), "{rendered}");
+        assert!(rendered.contains("#13956 task_closed: cas-other"), "{rendered}");
+        assert!(!rendered.contains("#13956 task_closed: cas-other [delayed"), "{rendered}");
+    }
+
     /// The injected block must name the sender and the message id: a recipient
     /// that cannot identify the message cannot ack or reply to it.
     #[test]

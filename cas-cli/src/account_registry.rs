@@ -459,6 +459,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_plan_does_not_come_from_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(".claude-fixture");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"fixture-only","subscriptionType":"max"}}"#).unwrap();
+        let row = account(Provider::Claude, home.path(), folder);
+        assert!(row.plan.is_none(), "credential contents must not supply plan metadata");
+    }
+
+    #[test]
     fn deadline_keeps_completed_usage_and_leaves_pending_accounts_unknown() {
         let home = tempfile::tempdir().unwrap();
         let mut accounts = vec![

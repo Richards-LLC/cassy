@@ -1125,70 +1125,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn keychain_lifecycle_uses_named_services_and_preserves_old_item_on_write_failure() {
-        use std::os::unix::process::ExitStatusExt;
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.set("USER", "fixture");
-        let from = Path::new("/Users/fixture/.claude-old@example.com");
-        let to = Path::new("/Users/fixture/.claude-new@example.com");
-        let old = "Claude Code-credentials-0be5f251";
-        for fail_write in [false, true] {
-            let mut calls = Vec::new();
-            let result = keychain_rekey(from, to, &mut |args, input| {
-                calls.push((args.to_vec(), input.map(str::to_owned)));
-                Ok(Output {
-                    status: std::process::ExitStatus::from_raw(if fail_write && args[0] == "-i" {
-                        256
-                    } else {
-                        0
-                    }),
-                    stdout: b"fixture-secret\n".to_vec(),
-                    stderr: Vec::new(),
-                })
+    fn keychain_migration_refuses_before_reading_any_secret() {
+        let result = keychain_rekey(Path::new("/fixture/.claude-old"),
+            Path::new("/fixture/.claude-new"), &mut |_, _| {
+                panic!("Cassy must never read or rewrite Claude Keychain secrets")
             });
-            assert_eq!(result.is_err(), fail_write);
-            assert_eq!(
-                calls[0],
-                (
-                    ["find-generic-password", "-s", old, "-w"]
-                        .map(str::to_owned)
-                        .to_vec(),
-                    None
-                )
-            );
-            assert_eq!(calls[1].0, ["-i"]);
-            assert_eq!(
-                calls[1].1.as_deref(),
-                Some(
-                    "add-generic-password -U -a \"fixture\" -s \"Claude Code-credentials-ef91b6f7\" -X \"666978747572652d736563726574\"\n"
-                )
-            );
-            if fail_write {
-                assert_eq!(calls.len(), 2, "old item must survive failed writes");
-            } else {
-                assert_eq!(
-                    calls[2],
-                    (
-                        ["delete-generic-password", "-s", old]
-                            .map(str::to_owned)
-                            .to_vec(),
-                        None
-                    )
-                );
-            }
-        }
-        let mut calls = Vec::new();
-        keychain_delete(from, &mut |args, input| {
-            assert!(input.is_none());
-            calls.push(args.to_vec());
-            Ok(Output {
-                status: std::process::ExitStatus::from_raw(44 << 8),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        })
-        .unwrap();
-        assert_eq!(calls, vec![vec!["delete-generic-password", "-s", old]]);
+        assert!(result.is_err());
     }
 
     #[test]

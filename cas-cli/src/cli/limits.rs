@@ -847,6 +847,17 @@ mod tests {
     }
 
     #[test]
+    fn claude_usage_without_native_snapshot_is_unknown_not_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".credentials.json"), "{}").unwrap();
+        let report = collect_claude("fixture", dir.path());
+        assert_eq!(report.state, "unavailable");
+        assert!(report.detail.as_deref().unwrap().contains("Claude Code statusline"));
+        let usage = account_usage(crate::accounts::Provider::Claude, dir.path());
+        assert!(!usage.rejected && !usage.authenticated);
+    }
+
+    #[test]
     fn local_reset_format_table() {
         use chrono::FixedOffset;
         let zone = FixedOffset::west_opt(4 * 3600).unwrap();

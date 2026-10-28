@@ -772,7 +772,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .mount(&server)
         .await;
     let denied = outsider_service
-        .artifact(Parameters(foreign_fetch))
+        .artifact(Parameters(foreign_fetch.clone()))
         .await
         .unwrap_err();
     assert_eq!(

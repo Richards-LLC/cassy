@@ -1,6 +1,6 @@
 import { test, expect, type Request } from "@playwright/test";
-import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { claimReceiptDirectory } from "./receipt-directory.mjs";
 import {
   saveQaTrace,
@@ -637,6 +637,24 @@ test("HUB-J24 real hub composer upload stores the picked file", {
   }
 });
 
+test("HUB-J13 real fixture keeps cleanup state when removal is refused", {
+  annotation: { type: "journey-part", description: "real hub, failed removal and explicit recovery" },
+}, async () => {
+  const fixture = await command("reset", { newSession: true });
+  const home = dirname(fixture.project);
+  try {
+    // A real filesystem refusal, without racing a writer or mocking rm.
+    await chmod(home, 0o500);
+    await expect(command("cleanup")).rejects.toThrow(/EACCES/);
+    await chmod(home, 0o700);
+    await command("cleanup");
+    await expect(access(home)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await chmod(home, 0o700).catch(error => { if (error.code !== "ENOENT") throw error; });
+    await command("cleanup");
+  }
+});
+
 // Unlike the protocol double, this crosses POST /v1/sessions and the real
 // reaper/daemon/PTY bootstrap. Only provider and OS service placement are inert.
 test("HUB-J13 real hub starts a supervisor and carries a conversation", {
@@ -700,6 +718,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     } finally {
       await context.close().catch(() => undefined);
       await command("cleanup");
+      await expect(access(dirname(fixture.project))).rejects.toMatchObject({ code: "ENOENT" });
     }
   }
 });

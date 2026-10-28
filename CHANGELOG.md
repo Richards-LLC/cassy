@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.87.0] - 2026-10-28
+
 ### Fixed — steadier Commander connections
 
 - **A connection that recovers** — Was: slow status reads and repeated retries

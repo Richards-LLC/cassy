@@ -1383,7 +1383,8 @@ fn cas_afe0_reference_wire_never_becomes_a_body_receipt() {
             assert!(!projected.is_full());
             let projected = projected.into_prompt();
             let wire = super::teams_body_fallback_text(&projected);
-            assert_eq!(wire, projected.prompt, "a reference carries no body provenance or reply hint");
+            // References carry no body provenance or reply hint.
+            assert_eq!(wire, projected.prompt);
             let wire = if cli == "codex" {
                 super::super::delivery::frame_pty_payload(cas_mux::SupervisorCli::Codex, "worker", &wire)
             } else {

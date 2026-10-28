@@ -85,7 +85,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
 test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");
   hub.supervisorSays(PELICAN, [
     "# Release is ready", "## Evidence", "### Checks", "The reviewed build passed.",
@@ -182,6 +182,19 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     const atTail = () => page.evaluate(() => {
       const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
       return thread.scrollHeight - thread.clientHeight - thread.scrollTop <= 4;
+    });
+    // cas-c3ac: wait for initial font/layout delivery before introducing a
+    // separate resize. The view's ResizeObserver and deferred pin must see
+    // the initial geometry first; a fixed frame delay can precede that delivery.
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await new Promise<void>(resolve => {
+        const observer = new ResizeObserver(() => {
+          observer.disconnect();
+          requestAnimationFrame(() => resolve());
+        });
+        observer.observe(document.querySelector(".conversation-reading.thread .msgs")!);
+      });
     });
     await expect.poll(atTail, { message: "the thread opens at its latest turn" }).toBe(true);
     await expect(newest).toBeInViewport();
@@ -624,7 +637,11 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     await tab.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(tab.locator(".conversation-row")).click();
     const log = tab.getByRole("log");
     await expect(log.getByText("Here it is, and the page the scanner flagged.")).toBeVisible();
-    const storage = () => tab.evaluate(async () => ({ local: Object.keys(localStorage).sort(), databases: (await indexedDB.databases()).map((db) => db.name).sort() }));
+    // cas-b255: HOSTILE attempts to write exactly this key. Host arrivals,
+    // navigation and panel-size persistence may legitimately change meanwhile.
+    // Compare the probe's value (including absence), retaining the database
+    // isolation check, rather than treating every host write as a frame escape.
+    const storage = () => tab.evaluate(async () => ({ local: localStorage.getItem("pwned"), databases: (await indexedDB.databases()).map((db) => db.name).sort() }));
     const before = await storage();
     const tabs = tab.context().pages().length;
 

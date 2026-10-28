@@ -12174,7 +12174,8 @@ mod tests {
                 INSERT INTO prompt_queue(source,target,prompt,factory_session)
                 SELECT 'worker','supervisor','still working','long-decisions' FROM n;").unwrap();
             let mut stmt = conn.prepare(&conversation_open_attention_sql()).unwrap();
-            let count = stmt.query_map(["long-decisions"], SqlitePromptQueueStore::prompt_from_row).unwrap().count();
+            let count = stmt.query_map(["long-decisions"], SqlitePromptQueueStore::prompt_from_row).unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>().unwrap().len();
             assert_eq!(count, 512);
             let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
             assert!(steps < 1536 * 150, "session scan must be linear: {steps} VM steps for 1536 rows");
@@ -12316,6 +12317,7 @@ mod tests {
             let plan = plan(&sql);
             assert!(plan.contains("idx_prompt_queue_session_history"), "{plan}");
             assert!(!plan.to_lowercase().contains("temp b-tree"), "{plan}");
+            assert!(!plan.to_lowercase().contains("correlated"), "{plan}");
         }
     }
 

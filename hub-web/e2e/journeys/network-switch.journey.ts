@@ -248,7 +248,7 @@ test("HUB-J12 network switch: waking probes a half-open socket before sending", 
     const heartbeat = page.waitForResponse(response => response.url() === "https://atlas.test/v1/sessions");
     await clock.advance(6_000);
     await heartbeat;
-    const probe = page.waitForResponse(response => response.url() === "https://atlas.test/v1/machine");
+    const probe = page.waitForResponse(response => response.url() === "https://atlas.test/v1/health");
     await visibility("visible");
     await probe;
     await sendNow(page, "Right after waking");

@@ -29,7 +29,9 @@ function fakeSocket() {
 
 function supervisor(callbacks: Partial<HubCallbacks> = {}): { sup: HubConnectionSupervisor; internals: Internals } {
   const sup = new HubConnectionSupervisor({ baseUrl: "https://atlas.test" } as StoredMachine, { onState: vi.fn(), ...callbacks } as unknown as HubCallbacks);
-  return { sup, internals: sup as unknown as Internals };
+  const internals = sup as unknown as Internals;
+  internals.lifecycle = { phase: "live", stage: "live" };
+  return { sup, internals };
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -380,6 +382,7 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
     const sup = new HubConnectionSupervisor({ baseUrl: "https://atlas.test" } as StoredMachine, callbacks as unknown as HubCallbacks);
     const machine = sup as unknown as Refusing & { handleDaemonObject(session: string, message: Record<string, unknown>): void };
     machine.desired = true;
+    (sup as unknown as Internals).lifecycle = { phase: "live", stage: "live" };
     machine.machineSocketReady = true;
     const live = () => machine.handleDaemonObject("factory-a", { Welcome: { state: { panes: [], cols: 80, rows: 24 }, scrollback: {}, protocol_version: 1 } });
     const refusedThenClosed = async (ref: string): Promise<number | undefined> => {

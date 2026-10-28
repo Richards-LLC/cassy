@@ -84,7 +84,7 @@ export interface AttachSnapshot extends ConnectionSnapshot {
 export const STAGE_TIMEOUT_MS: Readonly<Record<Exclude<ConnectionStage, "idle" | "live">, number>> = {
   resolving: 3_000,
   dialing: 5_000,
-  auth: 3_000,
+  auth: 5_000,
   attaching: 3_000,
 };
 

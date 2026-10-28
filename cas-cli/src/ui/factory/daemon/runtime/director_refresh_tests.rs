@@ -180,9 +180,21 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     for id in [before_answer.id, idle_id] {
         let report = queue.message_delivery_report(id).unwrap().unwrap();
         assert!(report.delivered_at.is_none());
-        // pin: the report distinguishes an intentionally withdrawn wake from failed delivery.
-        assert_eq!(report.pending_detail.as_deref(), Some("answered blocker; readable without another supervisor wake"));
+        if id == before_answer.id {
+            // pin: an outstanding blocker wake is parked after its explicit answer.
+            assert_eq!(report.pending_detail.as_deref(), Some("answered blocker; readable without another supervisor wake"));
+        }
     }
+    // 29da493b3 / 5092b8d5f: routine worker_idle rows bypass daemon delivery
+    // entirely. Prove the digest and its full-read escape instead of expecting
+    // a parking stamp on a row QueueSelect intentionally never selects.
+    let digest = queue.surface_for_recipient_within_budget(
+        fixture.app.supervisor_name(), None, cas_store::HookDrain::NoticeDigest, 30, 0,
+    ).unwrap().rows;
+    assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![idle_id]);
+    let explicit = queue.poll_named_for_recipient(fixture.app.supervisor_name(), None, &[idle_id]).unwrap();
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].prompt, idle_row.prompt);
     assert_eq!(queue.peek_all(30).unwrap().into_iter().find(|row| row.id == before_answer.id).unwrap().prompt,
         before_answer.prompt);
     // Release the held lifecycle alert after the worker resumes: it must be
@@ -272,369 +284,98 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(tasks.get_execution_state(&task.id).unwrap().unwrap().get("answered_blocker").is_none());
 }
 
+// a6be40dba / 1ecb22e52 deliberately replace direct green Teams/PTY
+// fallbacks with one durable readiness episode. Reproduce the original race
+// after the real batch check, then drive that queue through its final live read.
 #[tokio::test]
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
-    let mut shutdown_delivered = false;
-    let mut stale_fallback_suppressed = false;
-    let mut stale_sync_fallbacks = Vec::new();
-    for scenario in [
-        "codex_merged",
-        "codex_positive",
-        "merged",
-        "positive",
-        "superseded",
-        "missing",
-        "shutdown",
-        "merged_fallback",
-        "superseded_refused",
-        "superseded_unreported",
-    ] {
-        let synchronous_fallback =
-            matches!(scenario, "superseded_refused" | "superseded_unreported");
-        let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
-        let cas_dir = fixture.app.cas_dir().to_path_buf();
-        // A dropped incident must count as zero rows, not an uninitialized schema.
-        let _queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        fixture
-            .app
-            .set_supervisor_cli_for_test(if synchronous_fallback || scenario.starts_with("codex_") {
-                cas_mux::SupervisorCli::Codex
-            } else {
-                cas_mux::SupervisorCli::Claude
-            });
-        let (_, mut prompts, _) = fixture
-            .app
-            .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
-        assert_eq!(prompts.len(), 1);
-        // pin: the incident's CI-success teammate emitter is the route under test.
-        assert!(
-            prompts[0]
-                .text
-                .contains("CI completed successfully for delivery")
-        );
-        assert!(prompts[0].retract_task.is_some());
-        let verdicts = fixture
-            .app
-            .deliverability_request()
-            .read(None, &mut prompts);
-        assert_eq!(
-            verdicts,
-            vec![true],
-            "the merge is genuinely outstanding at the batch check"
-        );
+    use super::super::supervisor_single_turn_tests::{attach_supervisor_pty, fixture_child, teams_messages};
+    if !fixture_child("ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox") {
+        return;
+    }
+    for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+        for outcome in ["live", "merged", "declined"] {
+            let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+            let cas_dir = fixture.app.cas_dir().to_path_buf();
+            let root = cas_dir.parent().unwrap();
+            fixture.app.set_supervisor_cli_for_test(cli);
+            let (_, mut prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(
+                std::slice::from_ref(&fixture.event),
+            );
+            assert_eq!(prompts.len(), 1);
+            let mut daemon = daemon_on_lanes(&cas_dir);
+            std::mem::swap(&mut daemon.app, &mut fixture.app);
+            fixture._env.set("CAS_FACTORY_SESSION", &daemon.session_name);
+            attach_supervisor_pty(&mut daemon, root, cli, true).await;
 
-        let mut daemon = daemon_on_lanes(&cas_dir);
-        std::mem::swap(&mut daemon.app, &mut fixture.app);
-        let teams = super::super::teams::TeamsManager::new(&daemon.session_name);
-        teams
-            .init_team_config(&[], cas_dir.parent().unwrap(), &Default::default(), "lead")
-            .unwrap();
-        let inbox = teams.teams_dir().join("inboxes/supervisor.json");
-        daemon.teams = Some(teams);
+            assert!(prompts[0].is_merge_ready());
+            let expected_text = prompts[0].text.lines().next().unwrap().to_string();
+            assert_eq!(daemon.app.deliverability_request().read(None, &mut prompts), vec![true],
+                "the merge must be genuinely outstanding at the batch check");
+            let mut refresh = DirectorRefresh::new();
+            refresh.start_deliverability_check(
+                &daemon.app, &mut daemon.queue_jobs, prompts,
+                vec![fixture.event.clone()], Instant::now(),
+            ).unwrap();
+            let batch = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(batch) = refresh.take_deliverability(&mut daemon.queue_jobs).pop() {
+                        break batch;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("batch recheck must finish");
+            assert!(batch.prompts[0].1);
 
-        if scenario == "superseded" || synchronous_fallback {
-            let store = crate::store::open_task_store_local(&cas_dir).unwrap();
-            let mut task = store.get("cas-9efb-test").unwrap();
-            task.deliverables.decline_factory_branch_anchor();
-            task.status = cas_types::TaskStatus::Open;
-            store.update(&task).unwrap();
-        }
-        // Exercise the real batch job: relabelled prompts must survive its handoff.
-        let mut refresh = DirectorRefresh::new();
-        let batch = if synchronous_fallback {
-            None
-        } else {
-            refresh
-                .start_deliverability_check(
-                    &daemon.app,
-                    &mut daemon.queue_jobs,
-                    prompts.clone(),
-                    vec![fixture.event.clone()],
-                    Instant::now(),
-                )
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let batch = loop {
-                let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
-                if let Some(batch) = batches.pop() {
-                    break batch;
+            // The target/task changes only after the successful async verdict.
+            match outcome {
+                "merged" => fixture.advance_target(true),
+                "declined" => {
+                    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+                    let mut task = tasks.get("cas-9efb-test").unwrap();
+                    task.deliverables.decline_factory_branch_anchor();
+                    task.status = cas_types::TaskStatus::Open;
+                    tasks.update(&task).unwrap();
                 }
-                assert!(Instant::now() < deadline, "batch recheck did not complete");
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            };
-            if scenario == "superseded" {
-                // pin: this failure identifies the missing superseded-body batch handoff.
-                assert!(
-                    batch.prompts[0].1,
-                    "superseded prompt must survive the batch handoff"
-                );
+                _ => {}
             }
-            Some(batch)
-        };
-        let expected_task = prompts[0].retract_task.clone();
-        let expected_text = prompts[0].text.lines().next().unwrap().to_string();
-        let capture = cas_dir.join("fallback.txt");
-        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") || synchronous_fallback || scenario.starts_with("codex_") {
-            let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
-            std::fs::remove_dir_all(&tree).unwrap();
-            // A missing live tree with no saved roster exercises the real ENOENT path.
-            daemon.teams = Some(super::super::teams::TeamsManager::rooted_at(
-                tree,
-                &daemon.session_name,
-            ));
-            let name = daemon.app.supervisor_name().to_string();
-            let pty = cas_mux::Pty::spawn(
-                &name,
-                cas_mux::PtyConfig {
-                    command: "sh".into(),
-                    args: vec![
-                        "-c".into(),
-                        "stty -echo; cat > \"$1\"".into(),
-                        "fallback".into(),
-                        capture.display().to_string(),
-                    ],
-                    cwd: Some(cas_dir.clone()),
-                    env: vec![],
-                    env_remove: vec![],
-                    rows: 24,
-                    cols: 80,
-                },
-            )
-            .unwrap();
-            daemon.app.mux.add_pane(
-                cas_mux::Pane::with_pty(
-                    &name,
-                    cas_mux::PaneKind::Supervisor,
-                    pty,
-                    24,
-                    80,
-                    if synchronous_fallback || scenario.starts_with("codex_") {
-                        cas_mux::SupervisorCli::Codex
-                    } else {
-                        cas_mux::SupervisorCli::Claude
-                    },
-                )
-                .unwrap(),
-            );
-        }
-        if matches!(scenario, "merged" | "codex_merged") {
-            // Preserve the successful verdict while the integration target moves.
-            fixture.advance_target(true);
-        }
-        if synchronous_fallback {
-            let store_worker = super::super::store_worker::global();
-            if scenario == "superseded_refused" {
-                daemon.queue_jobs.close_lanes_for_test();
-                daemon
-                    .deliver_director_events(
-                        &mut refresh,
-                        vec![fixture.event.clone()],
-                        (vec![fixture.event.clone()], prompts, None),
-                        Instant::now(),
-                        0.0,
-                        store_worker,
-                        &super::super::loop_watchdog::LoopProgress::new(),
-                    )
-                    .await;
-            } else {
-                // The real read job cannot report until shutdown has used its
-                // unchecked fallback; no scheduling race or timed sleep.
-                let gate = Arc::new(ReadGate::default());
-                refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
-                refresh
-                    .start_deliverability_check(
-                        &daemon.app,
-                        &mut daemon.queue_jobs,
-                        prompts,
-                        vec![fixture.event.clone()],
-                        Instant::now(),
-                    )
-                    .unwrap();
-                daemon
-                    .drain_director_deliveries_for_shutdown(
-                        &mut refresh,
-                        store_worker,
-                        Duration::ZERO,
-                    )
-                    .await;
-                gate.open();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while daemon.queue_jobs.external_completions_ready() == 0 {
-                    assert!(Instant::now() < deadline, "late recheck did not finish");
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+            let writer = super::super::store_worker::global();
+            daemon.inject_rechecked_batch(batch, writer).await;
+            assert!(writer.wait_idle(Duration::from_secs(10)));
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let rows = queue.peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1, "one durable readiness episode: {cli:?}/{outcome}");
+            let id = rows[0].id;
+            assert!(rows[0].prompt.contains(&expected_text));
+            assert!(teams_messages(&daemon).is_empty(), "green readiness uses the queue");
+
+            let completed = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    let report = queue.message_delivery_report(id).unwrap().unwrap();
+                    let written = std::fs::read_to_string(root.join("input")).unwrap();
+                    if outcome == "live" {
+                        if report.delivered_at.is_some() && written.contains(&expected_text)
+                            && written.ends_with('\r') && !daemon.app.mux.has_pending_injects()
+                        {
+                            break (report, written);
+                        }
+                    } else if report.pending_reason == Some(cas_store::PendingReason::SupersededStale) {
+                        break (report, written);
+                    }
+                    tokio::task::yield_now().await;
                 }
-                // The original pending batch was already consumed by shutdown.
-                assert!(
-                    refresh
-                        .take_deliverability(&mut daemon.queue_jobs)
-                        .is_empty()
-                );
-            }
-            let name = daemon.app.supervisor_name().to_string();
-            // A Codex inject retains the submit boundary after writing its body.
-            // Wait for ownership to clear before issuing the marker; otherwise
-            // inject correctly defers it and there is nothing for cat to drain.
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(!daemon.app.mux.pane_submit_pending(&name));
-            let marker = "sync-fallback-check-finished";
-            assert_eq!(
-                daemon.app.mux.inject(&name, marker).await.unwrap(),
-                cas_mux::InjectOutcome::Delivered
-            );
-            while !std::fs::read_to_string(&capture)
-                .unwrap_or_default()
-                .contains(marker)
-                && Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let written = std::fs::read_to_string(&capture).unwrap_or_default();
-            assert!(
-                written.contains(marker),
-                "PTY did not drain its complete body"
-            );
-            // pin: both direct transport fallbacks must preserve the Superseded label and remove merge instructions.
-            if !written.contains("Superseded delivery") || written.contains("MERGE REQUIRED") {
-                stale_sync_fallbacks.push((scenario, written));
-            }
-            assert!(daemon.finish_shutdown_writes(store_worker, Duration::from_secs(10)));
-            continue;
-        }
-        daemon
-            .inject_rechecked_batch(batch.unwrap(), super::super::store_worker::global())
-            .await;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !scenario.starts_with("codex_") && daemon.queue_jobs.external_completions_ready() == 0 {
-            assert!(
-                Instant::now() < deadline,
-                "merge alert job did not complete"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        if scenario == "merged_fallback" {
-            // The failed native write already finished, but the PTY fallback has not run.
-            fixture.advance_target(true);
-        }
-        if scenario != "shutdown" {
-            daemon
-                .director_refresh_pass(
-                    &mut refresh,
-                    false,
-                    super::super::store_worker::global(),
-                    &super::super::loop_watchdog::LoopProgress::new(),
-                )
-                .await;
-        }
-        daemon
-            .drain_director_deliveries_for_shutdown(
-                &mut refresh,
-                super::super::store_worker::global(),
-                Duration::from_secs(10),
-            )
-            .await;
-        assert!(daemon.finish_shutdown_writes(
-            super::super::store_worker::global(),
-            Duration::from_secs(10)
-        ));
-        let rows: Vec<super::super::teams::InboxMessage> =
-            serde_json::from_str(&std::fs::read_to_string(inbox).unwrap_or_else(|_| "[]".into()))
-                .unwrap();
-        if scenario == "merged" {
-            assert!(
-                rows.is_empty(),
-                "a completed merge must suppress the stale director teammate message: {rows:?}"
-            );
-        } else if scenario == "superseded" {
-            assert_eq!(
-                rows.len(),
-                1,
-                "a superseded delivery must reach the teammate inbox"
-            );
-            assert_eq!(rows[0].retract_task, expected_task);
-            // pin: request_changes must reach the supervisor as superseded, without a merge instruction.
-            assert!(rows[0].text.contains("Superseded delivery"));
-            // pin: this heading asks the supervisor to merge a superseded tip.
-            assert!(!rows[0].text.contains("MERGE REQUIRED"));
-        } else if scenario == "positive" {
-            assert_eq!(
-                rows.len(),
-                1,
-                "a genuine merge alert must reach the native inbox exactly once"
-            );
-            assert_eq!(rows[0].retract_task, expected_task);
-        } else if scenario == "merged_fallback" || scenario.starts_with("codex_") {
-            // A later marker on the same PTY proves all earlier queued payloads
-            // have reached cat before absence of the stale body is judged.
-            let name = daemon.app.supervisor_name().to_string();
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let marker = "fallback-check-finished";
-            daemon.app.mux.inject(&name, marker).await.unwrap();
-            while !std::fs::read_to_string(&capture)
-                .unwrap_or_default()
-                .contains(marker)
-                && Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let written = std::fs::read_to_string(&capture).unwrap_or_default();
-            stale_fallback_suppressed =
-                written.contains(marker) && !written.contains(&expected_text);
-            if scenario.starts_with("codex_") {
-                assert!(written.contains(marker), "PTY must drain before judging delivery");
-                assert_eq!(written.contains(&expected_text), scenario == "codex_positive",
-                    "only a live merge demand may reach Codex: {written}");
-            }
-        } else {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !std::fs::read_to_string(&capture)
-                .unwrap_or_default()
-                .contains(&expected_text)
-                && Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let delivered = std::fs::read_to_string(capture)
-                .unwrap_or_default()
-                .contains(&expected_text);
-            if scenario == "shutdown" {
-                shutdown_delivered = delivered;
-            } else {
-                assert!(
-                    delivered,
-                    "the genuine alert must fall back to the actual supervisor PTY"
-                );
-            }
-            let db = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-            let incidents: i64 = db.query_row("SELECT COUNT(*) FROM prompt_queue WHERE source = 'teams-recovery' AND target = 'operator'", [], |row| row.get(0)).unwrap();
-            if scenario == "shutdown" {
-                shutdown_delivered &= incidents == 1;
-            } else {
-                assert_eq!(
-                    incidents, 1,
-                    "missing team files must publish one durable incident"
-                );
-            }
+            }).await.unwrap_or_else(|_| panic!("queue did not settle: {cli:?}/{outcome}: {:?}",
+                queue.message_delivery_report(id).unwrap()));
+            let (report, written) = completed;
+            assert_eq!(report.delivered_at.is_some(), outcome == "live", "{cli:?}/{outcome}: {report:?}");
+            assert_eq!(written.matches(&expected_text).count(), usize::from(outcome == "live"),
+                "only the live merge demand may reach the actual supervisor consumer: {cli:?}/{outcome}: {written:?}");
+            assert!(report.confirmed_at.is_none(), "transport is not an observed model turn");
+            assert!(teams_messages(&daemon).is_empty(), "no duplicate teammate body");
+            assert!(daemon.finish_shutdown_writes(writer, Duration::from_secs(10)));
         }
     }
-    // pin: failure reports each real fallback route that delivered stale merge instructions.
-    assert!(
-        stale_sync_fallbacks.is_empty(),
-        "stale fallback bodies: {stale_sync_fallbacks:?}"
-    );
-    assert!(
-        shutdown_delivered,
-        "shutdown must consume the completed native failure and deliver its PTY fallback plus incident (stale fallback suppressed: {stale_fallback_suppressed})"
-    );
-    assert!(
-        stale_fallback_suppressed,
-        "a merge after the native error must suppress the PTY fallback"
-    );
 }
 
 #[tokio::test]

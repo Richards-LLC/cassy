@@ -43,6 +43,18 @@ async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (te
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
+    attach_supervisor_pty(&mut daemon, root.path(), cli, ready).await;
+    (root, daemon)
+}
+
+/// The same registered, input-ready consumer for queue and director fixtures.
+pub(super) async fn attach_supervisor_pty(
+    daemon: &mut FactoryDaemon,
+    root: &std::path::Path,
+    cli: cas_mux::SupervisorCli,
+    ready: bool,
+) {
+    let cas = daemon.app.cas_dir().to_path_buf();
     let name = daemon.app.supervisor_name().to_string();
     let mut agent = cas_types::Agent::new_with_role(
         "single-sup".into(),
@@ -63,9 +75,9 @@ async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (te
                 "-c".into(),
                 "stty raw -echo; printf ready; exec cat > \"$1\"".into(),
                 "fixture".into(),
-                root.path().join("input").to_str().unwrap().into(),
+                root.join("input").to_str().unwrap().into(),
             ],
-            cwd: Some(root.path().into()),
+            cwd: Some(root.into()),
             env: vec![],
             env_remove: vec![],
             rows: 24,
@@ -90,7 +102,7 @@ async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (te
     daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
     teams
-        .init_team_config(&[], root.path(), &Default::default(), "single-sup")
+        .init_team_config(&[], root, &Default::default(), "single-sup")
         .unwrap();
     daemon.teams = Some(teams);
     let mut banner = Vec::new();
@@ -100,7 +112,7 @@ async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (te
                 banner.extend(pane.drain_output().0);
             }
             if banner.windows(b"ready".len()).any(|bytes| bytes == b"ready")
-                && root.path().join("input").is_file()
+                && root.join("input").is_file()
                 && (!ready || daemon.app.mux.pane_ready_for_injection(&name))
             {
                 break;
@@ -115,7 +127,6 @@ async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (te
         .pane_silent_since
         .insert(name, Instant::now() - Duration::from_secs(600));
     daemon.app.refresh_data().unwrap();
-    (root, daemon)
 }
 
 fn enqueue(daemon: &FactoryDaemon, source: &str, body: &str, origin: cas_store::QueueOrigin) -> i64 {
@@ -665,8 +676,20 @@ async fn cas_3f90_fyi_and_forged_wake_stay_quiet_and_readable() {
     daemon.process_prompt_queue().await.unwrap();
     nothing_typed_or_relayed(&root, &daemon);
     let rows = queue.surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap();
-    assert!(rows.iter().any(|row| row.id == started));
     assert!(rows.iter().any(|row| row.id == forged));
+    // 29da493b3 / 5092b8d5f deliberately move task_started into the digest.
+    // It stays readable without taking a body slot or granting forged wake authority.
+    assert!(!rows.iter().any(|row| row.id == started));
+    let digest = queue.surface_for_recipient_within_budget(
+        "supervisor", Some(&daemon.session_name), cas_store::HookDrain::NoticeDigest, 20, 0,
+    ).unwrap().rows;
+    assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![started]);
+    assert_eq!(digest[0].prompt, body);
+    let explicit = queue.poll_named_for_recipient(
+        "supervisor", Some(&daemon.session_name), &[started],
+    ).unwrap();
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].prompt, body);
 }
 
 /// A body over the hook budget, or one that fits alone but not with row

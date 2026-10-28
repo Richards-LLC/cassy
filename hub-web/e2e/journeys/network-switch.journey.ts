@@ -561,7 +561,7 @@ test("HUB-J12 network switch: a refused pairing leaves no 'connection dropped' n
 // ATLAS alone reaches Needs pairing; the footer must use the same machine words.
 test("HUB-J12 network switch: single revoked machine stops promising reconnection (cas-f698)", journeyPart, async ({ page, journey }) => {
   await journey.stage("A single revoked machine stops promising reconnection: Needs pairing, and no message reads working", async () => {
-    const { hub, clock, header } = await connected(page);
+    const { hub, header } = await connected(page);
     // A live receipt by itself does not prove the supervisor is working.
     await accepted(page, hub, "Before the pairing is revoked");
     // cas-71f4: the supervisor has it once it is delivered; until then the
@@ -577,15 +577,16 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
     await expect(working).toHaveCount(1);
     hub.refuseProofs("atlas", 1_000, "revoked", false);
-    await hub.down("atlas", { sockets: "close" });
-    await expect(header).toHaveText(" · Reconnecting");
-    await expect.poll(async () => { await clock.advance(32); return working.count(); }).toBe(0);
-    await hub.up("atlas");
-    await clock.advance(1_000);
+    // cas-ef7a: a definitive refusal can arrive between animation frames.
+    // Keep the protocol clock paused: the header and working line must both
+    // reflect the authenticated read's refusal without another paint tick.
+    await page.evaluate(session => (window as unknown as {
+      __journeyMachineEvent: (host: string, data: string) => number;
+    }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "session_added", session })), PELICAN);
     await expect(header).toHaveText(" · Needs pairing");
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
     // Neither receipt nor old pane output can claim work after pairing is lost.
-    await expect(working).toHaveCount(0);
+    await expect(working).toHaveCount(0, { timeout: 1_000 });
     expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
   });
 });

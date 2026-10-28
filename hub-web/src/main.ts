@@ -757,6 +757,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // machine is a recovery.
       if (state.phase === "live" && !wasLive && lastLiveAt.has(machine.id) && machine.id === selectedMachineId) countUsage("connection.recovered");
       connectionStates.set(machine.id, state);
+      // A refused pairing is terminal truth, even between animation frames.
+      // Clear stale working ink with the same state change as Needs pairing.
+      if (state.authFailure) {
+        for (const view of conversationViews.values()) view.refreshWorking();
+      }
       // A machine coming online takes its unsent counts. Only after the state
       // is recorded: flushUsage sends to the machines recorded as live.
       if (state.phase === "live" && !wasLive) void flushUsage();

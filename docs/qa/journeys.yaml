@@ -319,6 +319,11 @@ bug_families:
     tasks: [cas-abb7]
     invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
     journeys: [HUB-J22]
+  missing-terminal-operator-input:
+    title: Genuine supervisor terminal input appears live before the answer, persists across devices, and excludes injected traffic
+    tasks: [cas-69b3f]
+    invariants: [HUB-J4-GOAL, HUB-J12-GOAL]
+    journeys: [HUB-J4, HUB-J12]
   stale-worker-and-delivery-projection:
     title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
     tasks: [cas-0a75]
@@ -407,11 +412,11 @@ bug_families:
     tasks: [cas-fa56]
     invariants: [HUB-J1-RELAY-DEADLINE-STABLE]
     journeys: [HUB-J1]
-  missing-terminal-operator-input:
-    title: Genuine supervisor terminal input appears live before the answer, persists across devices, and excludes injected traffic
-    tasks: [cas-69b3f]
-    invariants: [HUB-J4-GOAL, HUB-J12-GOAL]
-    journeys: [HUB-J4, HUB-J12]
+  revoked-working-indicator:
+    title: An authenticated pairing refusal clears working before the next animation frame
+    tasks: [cas-ef7a]
+    invariants: [HUB-J12-TRUTHFUL-WORKING]
+    journeys: [HUB-J12]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

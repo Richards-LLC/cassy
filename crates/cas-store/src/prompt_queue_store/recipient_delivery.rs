@@ -21,6 +21,22 @@ impl RecipientDelivery {
     }
 }
 
+// These control envelopes can require action even when an older producer
+// stamped Normal priority. Keep their unresolved recovery bodies intact.
+fn needs_full_recovery(row: &QueuedPrompt) -> bool {
+    row.urgent
+        || row.priority == NotificationPriority::Critical
+        || row.source.starts_with("verification-dispatch:")
+        || row.source.starts_with("lifecycle-wake:ci-red-run:")
+        || row.source.starts_with("lifecycle-wake:worker-attention:")
+        || cas_types::parse_lifecycle_envelope(&row.prompt).is_some_and(|event| {
+            matches!(
+                event.transition.as_deref(),
+                Some("task_blocked" | "task_awaiting_merge" | "task_close_rejected")
+            )
+        })
+}
+
 impl SqlitePromptQueueStore {
     pub(super) fn recipient_delivery_on_conn(
         conn: &Connection,
@@ -59,11 +75,7 @@ impl SqlitePromptQueueStore {
         )?;
         let status = if let Some(terminal) = terminal {
             terminal
-        } else if row.urgent
-            || row.priority == NotificationPriority::Critical
-            || !body_seen
-            || named_read
-        {
+        } else if needs_full_recovery(&row) || !body_seen || named_read {
             return Ok(RecipientDelivery::Full(row));
         } else {
             "already surfaced; not acknowledged".to_string()

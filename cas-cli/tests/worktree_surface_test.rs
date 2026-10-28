@@ -3981,6 +3981,106 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{}", get_text(&accepted));
 }
 
+/// A task's unnamed registry commit precedes a target-sync merge, as in the
+/// delivered cas-0a75 lane. Post-merge generation must not hide that case.
+#[tokio::test]
+async fn post_merge_generated_tip_preserves_changed_bug_case_cas_3712() {
+    let mut env = test_env();
+    for case in ["changed", "missing", "unchanged"] {
+        let repo = GitRepo::new();
+        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+        run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+        let registry_path = "docs/qa/journeys.yaml";
+        let registry = "version: 1\nupdated: '2026-10-26'\nsurfaces: ['src/pages/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Open}\n    owners: ['src/pages/signup.ts']\n";
+        let linked = registry.replace("check: Read state", "check: Read state, bug: {task: cas-3712}");
+        for dir in ["docs/qa", "src/pages", "hub-web/dist", "scripts"] {
+            std::fs::create_dir_all(repo.root.join(dir)).unwrap();
+        }
+        std::fs::write(repo.root.join(registry_path), if case == "unchanged" { &linked } else { registry }).unwrap();
+        std::fs::write(repo.root.join("src/pages/signup.ts"), "signup\n").unwrap();
+        std::fs::write(repo.root.join("hub-web/dist/app.js"), "old bundle\n").unwrap();
+        std::fs::write(repo.root.join("scripts/regenerate-generated-artifacts.sh"),
+            "#!/usr/bin/env bash\nset -euo pipefail\ncat src/pages/signup.ts > hub-web/dist/app.js\ngit add hub-web/dist\ngit commit -q -m 'build: regenerate dist from merged sources'\n").unwrap();
+        run_git(&["add", "."], &repo.root);
+        run_git(&["commit", "-m", "base journey registry"], &repo.root);
+        run_git(&["branch", "epic/upkeep"], &repo.root);
+        run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
+        let root = init_cas_dir(&repo.root, &mut env).unwrap();
+        let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
+            "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-generated-upkeep\"\n[qa.registry]\nenforce = \"{stage}\"\n"
+        )).unwrap();
+        configure("off");
+        cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+        for (id, name, role) in [
+            ("upkeep-worker", "alice", AgentRole::Worker),
+            ("upkeep-supervisor", "supervisor", AgentRole::Supervisor),
+        ] {
+            register_delivery_agent(&root, id, name, role, "upkeep-session");
+        }
+        let branch = "factory/alice-cas-3712";
+        let worker = root.join("worktrees/alice");
+        repo.add_worktree(&worker, branch);
+        let agents = open_agent_store(&root).unwrap();
+        let mut agent = agents.get("upkeep-worker").unwrap();
+        agent.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
+        agents.update(&agent).unwrap();
+        let mut task = Task::new("cas-3712".into(), "Repair signup state".into());
+        task.task_type = TaskType::Bug;
+        task.depth = TaskDepth::Light;
+        task.assignee = Some("alice".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:merge-generated-upkeep".into(), target_branch: "epic/upkeep".into(),
+        });
+        let tasks = open_task_store(&root).unwrap();
+        tasks.add(&task).unwrap();
+        env.set_current_dir(&worker);
+        let service = delivery_service(&root, "upkeep-worker");
+        let started = service.task(Parameters(task_req(serde_json::json!({"action": "start", "id": task.id})))).await.unwrap();
+        assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
+        std::fs::write(worker.join("src/pages/signup.ts"), "fixed signup\n").unwrap();
+        run_git(&["commit", "-am", "fix(cas-3712): repair signup state"], &worker);
+        if case == "changed" {
+            std::fs::write(worker.join(registry_path), &linked).unwrap();
+            run_git(&["commit", "-am", "docs: register signup regression"], &worker);
+        }
+        run_git(&["switch", "epic/upkeep"], &repo.root);
+        std::fs::write(repo.root.join("README.md"), "other task\n").unwrap();
+        run_git(&["commit", "-am", "advance target"], &repo.root);
+        run_git(&["push", "origin", "epic/upkeep"], &repo.root);
+        run_git(&["merge", "--no-ff", "epic/upkeep", "-m", "sync target"], &worker);
+        std::fs::write(worker.join("hub-web/dist/app.js"), "worker bundle\n").unwrap();
+        run_git(&["commit", "-am", "build: refresh worker bundle"], &worker);
+        let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        run_git(&["push", "origin", branch], &worker);
+        let parked = service.task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "signup repaired",
+        })))).await.unwrap();
+        assert!(get_text(&parked).contains("MERGE REQUIRED"), "{}", get_text(&parked));
+        cas_store::waive_qa_pass(&root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &anchor,
+            "fixture: isolate post-merge registry attribution", chrono::Utc::now()).unwrap();
+        configure("enforce");
+        env.set_current_dir(&repo.root);
+        let supervisor = delivery_service(&root, "upkeep-supervisor");
+        let mut request = coord_req("worktree_merge");
+        request.id = Some(branch.into());
+        request.task_id = Some(task.id.clone());
+        request.cleanup = Some(false);
+        let merged = supervisor.coordination(Parameters(request)).await.unwrap();
+        let text = get_text(&merged);
+        assert_eq!(git_stdout(&repo.root, &["log", "-1", "--format=%s", "epic/upkeep"]),
+            "build: regenerate dist from merged sources", "automatic regeneration must still run");
+        let final_task = tasks.get(&task.id).unwrap();
+        if case == "changed" {
+            assert_eq!(final_task.status, TaskStatus::Closed, "{case}: {text}");
+        } else {
+            assert!(text.contains("BUG FIX WITHOUT A CASE"), "{case}: {text}");
+            assert_eq!(final_task.status, TaskStatus::Open, "{case}: {text}");
+        }
+        env.set_current_dir(cas::test_paths::runtime_fixture_parent());
+    }
+}
+
 #[tokio::test]
 async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge() {
     let mut env = test_env();

@@ -34,6 +34,7 @@ mod chunk_assets;
 mod server;
 pub(crate) mod state;
 mod tailscale;
+mod visual_pages;
 pub mod usage;
 mod worker_gate;
 

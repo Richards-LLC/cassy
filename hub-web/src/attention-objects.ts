@@ -30,6 +30,7 @@ export function askOptions(reply: OperatorReply): string[] {
 export const RETIRED_LINES: Readonly<Record<AskRetirement, string>> = {
   dismissed: "Dismissed. You can still answer here.",
   "session-ended": "No longer waiting: the session that asked has ended.",
+  handled: "No longer waiting: handled in earlier history.",
 };
 
 /** True while `reply` still waits on the operator (an unanswered ask, an unacknowledged blocker). */

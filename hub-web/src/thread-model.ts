@@ -66,6 +66,8 @@ export interface ThreadWork { type: "work"; key: string; events: WorkEvent[] }
 export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking | ThreadWork;
 
 export interface ThreadModelOptions {
+  /** Bounds a rendered group so a single speaker cannot defeat windowing. */
+  groupSize?: number;
   /** Whether the supervisor is executing: appends the working line. */
   working?: boolean;
   /** Clock used for day labels; injectable for tests. */
@@ -155,13 +157,18 @@ function dayKey(at: number): string {
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
+// Date#toLocaleDateString constructs a formatter on every call. History
+// presentation reuses these labels across frames and should reuse its formatters.
+const sameYearDay = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
+const otherYearDay = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
+
 export function dayLabel(at: number, now: number): string {
   const key = dayKey(at);
   if (key === dayKey(now)) return "Today";
   if (key === dayKey(now - 86_400_000)) return "Yesterday";
   const date = new Date(at);
   const sameYear = date.getFullYear() === new Date(now).getFullYear();
-  return date.toLocaleDateString(undefined, sameYear ? { weekday: "short", day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" });
+  return (sameYear ? sameYearDay : otherYearDay).format(date);
 }
 
 function turnOf(event: ConversationEvent): ThreadTurn {
@@ -237,12 +244,14 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
 
   const times = shownTimes(events, now);
   events.forEach((event, index) => {
-    if (event.at !== undefined) {
-      // Work older than the loaded history waits for its page.
-      if (index === 0 && !options.historyEnd) while (nextWork < work.length && work[nextWork]!.at < event.at) nextWork += 1;
-      else flushWork(event.at);
-    }
+    // Queue order survives live catch-up; its arrival sort key can be newer
+    // than the durable turns after it. Place work by the displayed clock too.
     const { at, clockAhead } = times[index]!;
+    if (at !== undefined) {
+      // Work older than the loaded history waits for its page.
+      if (index === 0 && !options.historyEnd) while (nextWork < work.length && work[nextWork]!.at < at) nextWork += 1;
+      else flushWork(at);
+    }
     if (at !== undefined) {
       const day = dayKey(at);
       if (day !== lastDay) {
@@ -297,7 +306,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     // start a new group. (Splitting on the mark alone would regroup a thread
     // on reload, where a first live turn's mark is settled differently.)
     const apart = group !== undefined && at !== undefined && groupLastAt !== undefined && at - groupLastAt >= GROUP_SPLIT_MS;
-    if (!group || group.side !== turn.side || apart) {
+    if (!group || group.side !== turn.side || apart || group.turns.length >= (options.groupSize ?? Infinity)) {
       closeGroup();
       group = { type: "group", key: `group:${turn.key}`, side: turn.side, turns: [], time: undefined };
       items.push(group);

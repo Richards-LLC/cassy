@@ -792,6 +792,22 @@ const COMMANDER_HISTORY_COLUMNS: &str = "id, source, target, prompt, created_at,
                     operator_device_id, operator_device_label, operator_scopes,
                     operator_verified, recipient_device_id, kind, attachments";
 
+/// One descending indexed session scan; later accepted sends retire decisions
+/// in Rust without restarting the same suffix search for each unanswered ask.
+fn conversation_open_attention_sql() -> String {
+    format!(
+        "SELECT {COMMANDER_HISTORY_COLUMNS},
+                COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) AS open_attention_kind
+         FROM prompt_queue
+         WHERE factory_session = ?1
+           AND ((lower(target) = 'operator'
+                 AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker'))
+             OR (source LIKE 'commander:%' AND operator_verified = 1 AND lower(target) <> 'operator')
+             OR (source = 'terminal' AND target = 'terminal-history' AND processed_at IS NOT NULL))
+         ORDER BY id DESC"
+    )
+}
+
 /// The rows a Commander thread is made of: verified Commander sends,
 /// terminal input recorded for history, and operator-lane replies.
 const COMMANDER_HISTORY_LANE: &str = "((source LIKE 'commander:%' AND operator_verified = 1)
@@ -806,6 +822,10 @@ const PROMPT_QUEUE_SESSION_HISTORY_INDEX: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_session_history
     ON prompt_queue(factory_session, id)
     WHERE factory_session IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_attention
+    ON prompt_queue(factory_session,
+        COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END), id)
+    WHERE lower(target) = 'operator';
 "#;
 
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
@@ -3144,6 +3164,10 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Open Commander decisions independently of cursor paging. Delivery
+    /// consumption does not answer an ask; a linked operator turn does.
+    fn conversation_open_attention(&self, factory_session: &str, device_id: &str) -> Result<Vec<QueuedPrompt>>;
+
     /// The newest Commander-lane rows of this project that belong to any
     /// session other than `factory_session` (including rows with no session
     /// recorded), newest-first (cas-55a4). Commander shows them only in a
@@ -3237,11 +3261,14 @@ pub trait PromptQueueStore: Send + Sync {
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()>;
 
     /// One authenticated device committed the reply locally. Never marks read.
-    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
+    /// Returns whether this receipt closed the row's delivery lane (its
+    /// addressee, or one viewer of an unaddressed row, while still pending).
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool>;
 
     /// Attention-only application receipt. Authoritative daemon provenance
     /// fences it from conversation replies; persistence never marks read.
-    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
+    /// Returns whether this receipt closed the row, as for replies.
+    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool>;
 
     /// Broadcast outcome for `all_workers` (attempted/succeeded/failed counts).
     ///
@@ -8360,6 +8387,47 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .map_err(Into::into)
     }
 
+    fn conversation_open_attention(&self, factory_session: &str, device_id: &str) -> Result<Vec<QueuedPrompt>> {
+        if factory_session.trim().is_empty() || device_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = conversation_open_attention_sql();
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([factory_session], |row| {
+            let queued = Self::prompt_from_row(row)?;
+            // A send is arbitrary operator text, including JSON with a
+            // non-string kind. Only operator-lane decisions have this kind.
+            let kind = if queued.target.eq_ignore_ascii_case("operator") {
+                row.get::<_, Option<String>>("open_attention_kind")?
+            } else {
+                None
+            };
+            Ok((queued, kind))
+        })?;
+        let mut later_operator = false;
+        let mut acknowledged = std::collections::HashSet::new();
+        let mut open = Vec::new();
+        for row in rows {
+            let (row, kind) = row?;
+            if row.target.eq_ignore_ascii_case("operator") {
+                let closed = if kind.as_deref() == Some("blocker") { later_operator } else { acknowledged.contains(&row.id) };
+                if !closed { open.push(row); }
+            } else {
+                later_operator = true;
+                // Match the old SQL's exact canonical header, including the
+                // newline. Embedded, padded or leading-zero ids do not ACK.
+                if let Some(id) = row.prompt.strip_prefix("[CAS reply: explicitly acknowledges notification_id=")
+                    .and_then(|rest| rest.split_once("]\n").map(|(id, _)| id))
+                    .and_then(|text| text.parse::<i64>().ok().filter(|id| id.to_string() == text)) {
+                    acknowledged.insert(id);
+                }
+            }
+        }
+        open.reverse();
+        Ok(open)
+    }
+
     fn earlier_session_history(
         &self,
         factory_session: &str,
@@ -8679,11 +8747,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
-    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool> {
         self.persist_operator_receipt(prompt_id, factory_session, device_id, false)
     }
 
-    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool> {
         self.persist_operator_receipt(prompt_id, factory_session, device_id, true)
     }
 
@@ -12066,6 +12134,66 @@ mod tests {
         let activity = store.latest_session_activity("factory-7").unwrap().unwrap();
         assert_eq!(activity.id, worker_id);
         assert!(store.latest_session_activity("factory-8").unwrap().is_none());
+        let decision = store.enqueue_with_session("supervisor", "operator",
+            r#"{"schema_version":2,"reply_to":null,"message":"Proceed?","summary":"","device_id":"*","kind":"ask","attachments":[]}"#,
+            "factory-7").unwrap();
+        // Legacy peers may carry kind only in the JSON payload. A new
+        // pairing still sees that decision without loading its history.
+        for device in ["phone-7", "computer-9"] {
+            assert_eq!(store.conversation_open_attention("factory-7", device).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![decision]);
+        }
+        assert!(store.conversation_open_attention("factory-8", "phone-7").unwrap().is_empty());
+        assert!(store.conversation_open_attention("factory-7", "").unwrap().is_empty());
+        for (suffix, source, verified, processed, header, closes_ask, closes_blocker) in [
+            ("unverified", "commander:test", false, false, "exact", false, false),
+            ("pending-terminal", "terminal", false, false, "exact", false, false),
+            ("embedded", "commander:test", true, false, "embedded", false, true),
+            ("zero-padded", "commander:test", true, false, "zero", false, true),
+            ("plain", "commander:test", true, false, "plain", false, true),
+            ("json", "commander:test", true, false, "json", false, true),
+            ("commander", "commander:test", true, false, "exact", true, true),
+            ("terminal", "terminal", false, true, "exact", true, true),
+        ] {
+            let session = format!("attention-{suffix}");
+            let ask = store.enqueue_with_session("supervisor", "operator", r#"{"kind":"ask"}"#, &session).unwrap();
+            let blocker = store.enqueue_with_session("supervisor", "operator", r#"{"kind":"blocker"}"#, &session).unwrap();
+            let prefix = format!("[CAS reply: explicitly acknowledges notification_id={ask}]\n");
+            let message = match header {
+                "embedded" => format!("quote: {prefix}answer"),
+                "zero" => format!("[CAS reply: explicitly acknowledges notification_id=0{ask}]\nanswer"),
+                "plain" => "ordinary reply".into(),
+                "json" => r#"{"kind":1,"text":"ordinary operator JSON"}"#.into(),
+                _ => format!("{prefix}answer"),
+            };
+            {
+                let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+                // pin: terminal-history is the accepted terminal lane; Commander targets the supervisor.
+                conn.execute("INSERT INTO prompt_queue(source,target,prompt,factory_session,operator_verified,processed_at)
+                    VALUES (?1,?2,?3,?4,?5,?6)", params![source, if source == "terminal" { "terminal-history" } else { "supervisor" },
+                    message, session, verified, processed.then(|| Utc::now().to_rfc3339())]).unwrap();
+            }
+            let expected: Vec<_> = [(ask, closes_ask), (blocker, closes_blocker)].into_iter()
+                .filter_map(|(id, closed)| (!closed).then_some(id)).collect();
+            assert_eq!(store.conversation_open_attention(&session, "phone").unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), expected, "{suffix}");
+        }
+        // Hundreds of unanswered decisions followed by unrelated worker traffic:
+        // the real query must visit the session once, not its suffix per ask.
+        {
+            let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+            conn.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<512)
+                INSERT INTO prompt_queue(source,target,prompt,factory_session,kind)
+                SELECT 'supervisor','operator','Proceed?','long-decisions','ask' FROM n;
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1024)
+                INSERT INTO prompt_queue(source,target,prompt,factory_session)
+                SELECT 'worker','supervisor','still working','long-decisions' FROM n;").unwrap();
+            let mut stmt = conn.prepare(&conversation_open_attention_sql()).unwrap();
+            let count = stmt.query_map(["long-decisions"], SqlitePromptQueueStore::prompt_from_row).unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>().unwrap().len();
+            assert_eq!(count, 512);
+            let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+            assert!(steps < 1536 * 150, "session scan must be linear: {steps} VM steps for 1536 rows");
+        }
+
     }
 
     /// cas-e829: a relay-watchdog alert knows the relay it is about, and
@@ -12188,6 +12316,7 @@ mod tests {
                 .join("\n")
         };
         for sql in [
+            conversation_open_attention_sql().replace("?1", "'factory-7'"),
             format!(
                 "SELECT {COMMANDER_HISTORY_COLUMNS} FROM prompt_queue
                  WHERE factory_session = 'factory-7' AND {COMMANDER_HISTORY_LANE}
@@ -12201,6 +12330,7 @@ mod tests {
             let plan = plan(&sql);
             assert!(plan.contains("idx_prompt_queue_session_history"), "{plan}");
             assert!(!plan.to_lowercase().contains("temp b-tree"), "{plan}");
+            assert!(!plan.to_lowercase().contains("correlated"), "{plan}");
         }
     }
 

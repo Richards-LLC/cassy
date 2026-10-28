@@ -193,9 +193,9 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
     // still ellipsises on one line as the last guard (journey F9).
     input.dataset.placeholders = JSON.stringify(composerPlaceholders(project));
     fitComposerPlaceholder(input);
-    // dressComposer runs before a rebuild re-attaches the composer: fit again
-    // once it is back in the document.
-    queueMicrotask(() => fitComposerPlaceholder(input));
+    // Fit the reattached field after the shell's task yields. A microtask
+    // forced another whole-page layout inside the conversation-opening click.
+    requestAnimationFrame(() => { if (input.isConnected) fitComposerPlaceholder(input); });
     watchComposerPlaceholder(input);
     input.rows = 1;
     // Hidden until attaching works (cas-17e3): a control that can never be

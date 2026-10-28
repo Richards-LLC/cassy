@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Release report card</title>
+<style>
+  body { margin: 0; padding: 22px 24px; font: 15px/1.5 system-ui, sans-serif; color: #1b1d24; background: #fff; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  p { margin: 0 0 14px; color: #4a4f5c; }
+  table { border-collapse: collapse; width: 100%; max-width: 520px; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #e3e5ea; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  figure { margin: 18px 0 0; }
+</style>
+</head>
+<body>
+<h1>3.26.0 release report</h1>
+<p>Gate green on all 14 targets. Per-target timings below.</p>
+<svg role="img" aria-label="Gate lanes: build, test and publish all green" width="300" height="64" viewBox="0 0 300 64">
+  <rect x="2" y="12" width="88" height="40" rx="8" fill="#2f9e5b"/><text x="46" y="37" fill="#fff" font-size="13" text-anchor="middle">build</text>
+  <rect x="106" y="12" width="88" height="40" rx="8" fill="#2f9e5b"/><text x="150" y="37" fill="#fff" font-size="13" text-anchor="middle">test</text>
+  <rect x="210" y="12" width="88" height="40" rx="8" fill="#2f9e5b"/><text x="254" y="37" fill="#fff" font-size="13" text-anchor="middle">publish</text>
+</svg>
+<table>
+  <thead><tr><th>Target</th><th>Result</th><th class="num">Time</th></tr></thead>
+  <tbody>
+    <tr><td>core</td><td>pass</td><td class="num">2m 14s</td></tr>
+    <tr><td>ui</td><td>pass</td><td class="num">1m 52s</td></tr>
+    <tr><td>hub</td><td>pass</td><td class="num">3m 08s</td></tr>
+    <tr><td>cli</td><td>pass, 1 flake</td><td class="num">2m 41s</td></tr>
+  </tbody>
+</table>
+</body>
+</html>

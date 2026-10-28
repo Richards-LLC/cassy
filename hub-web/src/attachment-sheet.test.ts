@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes, restateAttachmentNotes } from "./attachment-sheet";
+import { artifactHref, attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes, restateAttachmentNotes } from "./attachment-sheet";
 import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
@@ -98,6 +98,39 @@ describe("sheets in the thread", () => {
       history.markReplyPersisted(60); view.update();
       expect(view.element.querySelector('.obj .sheet')).toBe(sheet);
     } finally { unregister(); }
+  });
+});
+
+describe("a page attachment shows inline in a sandboxed frame (cas-3aff)", () => {
+  it("frames only the machine's page URL, with every sandbox permission withheld, and keeps the frame across updates", async () => {
+    const asked: string[] = [];
+    const uninstall = installAttachmentSheet(undefined, async (id) => { asked.push(id); return id === card.artifact_id ? "https://atlas.test/v1/pages/T/card" : undefined; });
+    try {
+      const history = new ConversationHistory();
+      const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+      const broken: ArtifactRef = { ...card, artifact_id: "art-broken", name: "Broken.html" };
+      history.reply(reply(80, "Report attached.", [brief, card, broken]), at(10, 1)); view.update();
+      await Promise.resolve(); await Promise.resolve();
+      const turn = view.element.querySelector<HTMLElement>(".msgs > .turn.sup")!;
+      expect([...turn.children].map((child) => child.tagName === "TIME" ? "time" : child.className.split(" ")[0])).toEqual(["bub", "sheet", "visual-page", "visual-page", "time"]);
+      expect(asked).toEqual([card.artifact_id, "art-broken"]);
+      const [page, failed] = [...turn.querySelectorAll<HTMLElement>(".visual-page")];
+      // The card stays the file's link (its tap opens the page in a tab).
+      expect(page!.querySelector("a.sheet")?.getAttribute("href")).toBe(artifactHref(card));
+      const frame = page!.querySelector("iframe")!;
+      expect(frame.getAttribute("sandbox")).toBe("");
+      expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
+      expect(frame.getAttribute("allow")).toBe("");
+      expect(frame.getAttribute("src")).toBe("https://atlas.test/v1/pages/T/card");
+      expect(frame.title).toBe("Release report card.html, a page from the supervisor");
+      expect(page!.querySelector("iframe[srcdoc]")).toBeNull();
+      expect(failed!.querySelector("iframe")).toBeNull();
+      // pin: the failed frame must say where the page can still be opened.
+      expect(failed!.querySelector(".visual-status")?.textContent).toBe("This page can't be shown here. Open the file above to try it in a tab.");
+      history.reply(reply(81, "Also tagged.", undefined, "answer"), at(10, 2)); view.update();
+      expect(view.element.querySelector("iframe")).toBe(frame);
+      expect(asked).toHaveLength(2);
+    } finally { uninstall(); }
   });
 });
 

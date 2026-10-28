@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { conversationShellMarkup } from "./conversation-shell";
 import { ConversationView } from "./conversation-view";
@@ -117,10 +117,26 @@ describe("desktop context rail (P10)", () => {
     expect(jumps.map((jump) => jump.querySelector(".context-hint")?.textContent ?? null)).toEqual([PINNED_MARK, BLOCKER_HINT, null]);
     expect(jumps.map((jump) => jump.dataset.pinned ?? null)).toEqual(["true", null, null]);
     expect(BLOCKER_HINT).toBe("Reply to unblock");
+    // Separate machines can use the same queue ids. Only this history owns the rail jump.
+    const otherHistory = new ConversationHistory();
+    for (const event of history.events) if (event.kind === "reply") otherHistory.reply(event.value, event.at);
+    const otherView = new ConversationView(document, otherHistory, "other");
+    document.body.prepend(otherView.element); otherView.update();
+    const otherUpdate = vi.spyOn(otherView, "update");
     jumps[1]!.click();
-    const turn = document.querySelector<HTMLElement>('.thread [data-key="reply:10"]')!;
+    expect(otherUpdate).not.toHaveBeenCalled();
+    expect(otherView.jump.hidden).toBe(true);
+    const turn = view.element.querySelector<HTMLElement>('[data-key="reply:10"]')!;
     expect(document.activeElement).toBe(turn);
     expect(turn.tabIndex).toBe(-1);
+    // The same ids/text on another machine must rebind the cached rail's handlers.
+    const targetUpdate = vi.spyOn(view, "update");
+    syncContextRail(document, { history: otherHistory, progress: false, attention: 0 });
+    rail.querySelector<HTMLButtonElement>('[data-reply-to="10"]')!.click();
+    expect(targetUpdate).not.toHaveBeenCalled();
+    expect(otherUpdate).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(otherView.element.querySelector('[data-key="reply:10"]'));
+    view.dispose(); otherView.dispose();
   });
 
   it("cuts a long entry at a word with an ellipsis, never mid-word, and keeps short ones whole", () => {

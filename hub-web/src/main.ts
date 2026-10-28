@@ -21,12 +21,12 @@ import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSend
 import { HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText } from "./conversation-view";
+import { ConversationView, emptyActivityText, type TurnRenderContext } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { NoticePersistence, isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
-import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
+import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
@@ -85,7 +85,7 @@ import { enrollPairedInstallation } from "./inbox/hub-enrollment";
 import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
-import { countUsage, usage, type UsageAction } from "./usage";
+import { countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
@@ -170,13 +170,24 @@ const mountedThreads = new Set<string>();
 installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
 // Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
-installAttachmentSheet((sheet, file, context) => {
+/** The machine and session whose thread a rendered turn belongs to. */
+function threadOf(context: TurnRenderContext): { machineId: string; session: string } | undefined {
   const entry = [...conversationHistories].find(([, history]) => history === context.history);
-  if (!entry) return sheet;
+  if (!entry) return undefined;
   const separator = entry[0].indexOf(":");
-  const machineId = entry[0].slice(0, separator), session = entry[0].slice(separator + 1);
-  const available = () => connectionStates.get(machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(machineId)?.artifactPreview(session, file.artifact_id) : undefined, { machineId, available });
+  return { machineId: entry[0].slice(0, separator), session: entry[0].slice(separator + 1) };
+}
+// cas-9c66: media attachments preview inline. cas-3aff: an HTML attachment
+// shows its page inline, in a sandboxed frame on the publishing machine's
+// own origin.
+installAttachmentSheet((sheet, file, context) => {
+  const thread = threadOf(context);
+  if (!thread) return sheet;
+  const available = () => connectionStates.get(thread.machineId)?.phase === "live";
+  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
+}, async (artifactId, context) => {
+  const thread = threadOf(context);
+  return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
 });
 const conversationHistories = new Map<string, ConversationHistory>();
 /**
@@ -237,6 +248,19 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
   return page;
 }
 function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); persistArrivals(); syncEarlyThread(); }
+let replyPresentationFrame: number | undefined;
+/** Socket catch-up and journal receipts share one presentation after a frame.
+ * Yield past the shell's measurement/resize callbacks rather than combining
+ * their layout and an entire catch-up presentation into one long frame task.
+ */
+function scheduleReplyPresentation(): void {
+  if (replyPresentationFrame !== undefined) return;
+  replyPresentationFrame = requestAnimationFrame(() => window.setTimeout(() => {
+    replyPresentationFrame = undefined;
+    updateConversationViews();
+    renderConversationList();
+  }, 0));
+}
 // What the desktop context rail can show beyond the header (P10): the last
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
@@ -254,17 +278,32 @@ function syncConversationContext(): void {
   }
   const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress || progressSheetOpen(), attention: contextAttention });
-  markRailEdges();
+  scheduleConversationLayout();
+}
+
+let conversationLayoutFrame: number | undefined;
+/** Measure the finished shell once, after its region writes and focus landing. */
+function scheduleConversationLayout(): void {
+  if (conversationLayoutFrame !== undefined) return;
+  conversationLayoutFrame = requestAnimationFrame(() => {
+    conversationLayoutFrame = undefined;
+    const list = document.querySelector<HTMLElement>("#conversation-list");
+    // A phone's list is display:none while reading. Even a scrollTop write
+    // on it forces layout of the visible thread, with no position to restore.
+    if (list && !(phoneLayout() && selectedSession)) keepConversationListPlace(list, selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined);
+    fitConversationHost(document);
+    markRailEdges();
+  });
 }
 
 /** cas-d043 H10: which edges of the rail have rows beyond them, for glass.css's edge fades. */
 function markRailEdges(rail: Element | null = document.querySelector(".conversation-context")): void {
-  if (!(rail instanceof HTMLElement)) return;
+  if (!(rail instanceof HTMLElement) || (phoneLayout() && !contextSheetOpen())) return;
   rail.toggleAttribute("data-more-above", rail.scrollTop > 1);
   rail.toggleAttribute("data-more-below", rail.scrollHeight - rail.scrollTop - rail.clientHeight > 1);
 }
 document.addEventListener("scroll", (event) => { if (event.target instanceof HTMLElement && event.target.matches(".conversation-context")) markRailEdges(event.target); }, true);
-window.addEventListener("resize", () => markRailEdges());
+window.addEventListener("resize", scheduleConversationLayout);
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
 /** Pane output lights the working line now and schedules the check that puts it out. */
 function refreshWorkingLines(): void {
@@ -486,7 +525,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // cas-ff22: Show work's rows between the turns; undefined while it is off.
       work: () => workPicture.threadWork(threadMachineId, threadSession),
       workRows: workPicture.rows(threadMachineId, threadSession),
-      loadEarlier: () => {
+      loadEarlier: (source) => {
+        if (source === "scroll") countUsage("history.scroll_older");
         const page = conversationHistoryPage(threadKey);
         if (page.loading || page.nextBefore === undefined) return;
         page.loading = true;
@@ -510,7 +550,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // "Jump to latest" gets its own row above the pinned card and composer, so
   // it never floats over a turn in the thread (cas-97ea).
   if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
-  conversation.update();
+  conversation.requestUpdate();
 }
 
 /** The view key of a thread shown before its session's panes (cas-fc2c). */
@@ -531,6 +571,13 @@ function syncEarlyThread(): void {
     && threadBeforePanes({ placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) });
   for (const [key, view] of [...conversationViews]) {
     if (!key.endsWith(`:${EARLY_THREAD}`) || (wanted && key === earlyThreadKey(threadKey!))) continue;
+    // A catalog/attach render may retire the early view before the queued
+    // session-state callback gets to capture its focus. Hand it off here,
+    // while the actual focused node still exists, respecting newer choices.
+    const active = document.activeElement;
+    if (active && view.element.contains(active)) {
+      landFocus([focusTargets.thread, focusTargets.conversationBack], { keep: true, nextTask: true, waitMs: 2_000, since: active });
+    }
     view.dispose();
     conversationViews.delete(key);
   }
@@ -942,8 +989,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       conversationHistory(sessionKey(machine.id, session), session).receive({ ...reply, device_persisted: false }, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
-      updateConversationViews(); renderConversationList();
-      if (selectedMachineId === machine.id && selectedSession === session) render();
+      scheduleReplyPresentation();
     },
     onConversationHistoryRequested: (session) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));
@@ -969,11 +1015,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (cursor.loading) countUsage("history.older");
       applyHistoryCursor(cursor, page);
       const history = conversationHistory(key, session);
+      if (page.open_attention !== undefined) {
+        const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));
+        history.setOpenAttention(page.open_attention.map(reply => ({ ...reply, device_persisted: false })), through);
+      }
       // cas-55a4: the thread is this session's own turns. Other sessions'
       // turns (the page's earlier_* section, or a project-wide page from an
       // older daemon) are filed beside it by session, never into it.
       for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
-      for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
+      for (const reply of [...page.replies, ...(page.open_attention ?? []), ...(page.earlier_replies ?? [])]) {
         // cas-e829: this session's notices raise or retire attention; another
         // session's are its own business.
         if (isOperatorNotice(reply)) {
@@ -987,8 +1037,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // the reader's position after Load earlier (HUB-J4).
         history.hydrateReply(reply.session === undefined || reply.session === session ? { ...reply, device_persisted: false } : reply);
       }
-      updateConversationViews();
-      renderConversationList();
+      scheduleReplyPresentation();
       // cas-ff22: older turns on screen may want the work done between them.
       workPicture.coverHistory(machine.id, session, history.visibleEvents()[0]?.at);
       if (selectedMachineId === machine.id && selectedSession === session) render();
@@ -1169,6 +1218,7 @@ function applyOperatorNotice(machine: StoredMachine, session: string, reply: Ope
     if (plan.action === "raise") await addAttention(machine, session, NOTICE_KIND, plan.content, noticeTime(reply.at));
     else if (plan.action === "resolve") {
       let matching = attention.filter(item => item.fingerprint === plan.fingerprint);
+      countAttentionDelivery(matching);
       // Retain a tombstone even when resolution arrived before its alert.
       if (!matching.length) {
         const raised = planNotice(machine.id, session, { ...reply, notice: { ...reply.notice!, resolved: false } }, () => false);
@@ -1272,7 +1322,7 @@ function settleLaunchDropped(machineId: string): void {
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
   const acknowledgedAt = new Date().toISOString();
   const pending = items.filter((item) => !item.acknowledgedAt);
-  if (pending.some((item) => item.kind === NOTICE_KIND)) countUsage("attention.delivery");
+  countAttentionDelivery(pending);
   for (const item of pending) item.acknowledgedAt = acknowledgedAt;
   await Promise.all(pending.map((item) => attentionStore.put(item)));
   render();
@@ -2182,7 +2232,12 @@ function bindPairBarFrost(dialog: HTMLDialogElement): void {
   const bar = scroller?.querySelector<HTMLElement>(":scope > .dialog-actions");
   if (!scroller || !bar || pairBarBound.has(scroller)) return;
   pairBarBound.add(scroller);
-  const sync = () => bar.classList.toggle("fields-beneath", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1);
+  const sync = () => {
+    // A closed dialog has no scrolling fields. Reading its geometry here
+    // would nevertheless force layout of the newly opened conversation.
+    if (!dialog.open) return;
+    bar.classList.toggle("fields-beneath", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1);
+  };
   scroller.addEventListener("scroll", sync, { passive: true });
   if (typeof ResizeObserver !== "undefined") {
     const observer = new ResizeObserver(sync);
@@ -2244,7 +2299,7 @@ function syncControlHolder(): void {
   const holder = lease && !lease.held_by_me ? lease.controller_label || undefined : undefined;
   let note = host.querySelector<HTMLElement>(":scope > #conversation-control");
   if (!holder) {
-    if (note) { note.remove(); fitConversationHost(document); }
+    if (note) { note.remove(); scheduleConversationLayout(); }
     return;
   }
   if (!note) { note = document.createElement("span"); note.id = "conversation-control"; host.append(note); }
@@ -2252,7 +2307,7 @@ function syncControlHolder(): void {
   note.dataset.holder = holder;
   const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
   note.replaceChildren(separator, `${holder} in control`);
-  fitConversationHost(document);
+  scheduleConversationLayout();
 }
 
 const interruptsInFlight = new Set<string>();
@@ -3570,7 +3625,7 @@ async function flushDeviceReplyWrites(): Promise<void> {
         finally { done(); }
       });
       // Receipt display does not delay the next item in the same commit.
-      try { updateConversationViews(); } catch { /* presentation cannot invalidate a durable receipt */ }
+      try { scheduleReplyPresentation(); } catch { /* presentation cannot invalidate a durable receipt */ }
     }
   } finally { writingDeviceReplies = false; }
 }
@@ -4410,7 +4465,6 @@ function renderConversationList(): void {
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
   }, endConversationSession);
-  keepConversationListPlace(container, shown.find((row) => row.selected)?.key);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -4439,7 +4493,7 @@ function renderConversationList(): void {
     }
   }
   // The state's width changes the room the machine · codename line has.
-  fitConversationHost(document);
+  scheduleConversationLayout();
   refreshConnectionLog?.();
 }
 
@@ -4534,7 +4588,7 @@ function renderAttention(): void {
       return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
     },
   });
-  markRailEdges();
+  scheduleConversationLayout();
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
@@ -5119,7 +5173,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.append(row);
   }
   contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
-  markRailEdges();
+  scheduleConversationLayout();
   if (!contextProgress) {
     const empty = document.createElement("p");
     empty.className = "status-empty";
@@ -5577,8 +5631,16 @@ app.addEventListener("click", (event) => {
   const localKey = `${machineId}:${artifactId}`;
   const onCard = link.matches("a.sheet");
   const machineLabel = machines.get(machineId)?.label ?? "that machine";
+  // cas-3aff: an HTML page opens in a tab under the machine's sandbox policy,
+  // never as the raw stored file.
+  const visual = link.matches("a.sheet") && link.dataset.mime !== undefined && isVisualPage({ mime: link.dataset.mime });
   void openArtifact({
-    fetchView: () => connection.artifactView(session, artifactId),
+    fetchView: visual
+      ? async () => {
+        const ticket = await visualPageView(machineId, session, artifactId);
+        return ticket ? { ok: true, view: { artifact_id: artifactId, url: ticket.url } } : connection.visualPage(session, artifactId);
+      }
+      : () => connection.artifactView(session, artifactId),
     openWindow: () => window.open("about:blank", "_blank"),
     notify: (message, result) => {
       if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);
@@ -5598,10 +5660,35 @@ app.addEventListener("click", (event) => {
 /** Files a machine said were never uploaded to Cloud, by machine and artifact (journey F6). */
 const localOnlyArtifacts = new Set<string>();
 
+/**
+ * Minted visual page URLs by machine, session and artifact (cas-3aff), reused
+ * while the machine's ticket has more than a minute left, so a repainted
+ * thread and the card's open-in-tab share one ticket.
+ */
+const visualPageTickets = new Map<string, Promise<{ url: string; until: number } | undefined>>();
+
+function visualPageView(machineId: string, session: string, artifactId: string): Promise<{ url: string; until: number } | undefined> {
+  const key = `${machineId}\u0000${session}\u0000${artifactId}`;
+  const held = visualPageTickets.get(key);
+  const fresh = held?.then((ticket) => (ticket && ticket.until > Date.now() + 60_000 ? ticket : undefined));
+  const minted = (fresh ?? Promise.resolve(undefined)).then(async (ticket) => {
+    if (ticket) return ticket;
+    const connection = connections.get(machineId);
+    const result = connection ? await connection.visualPage(session, artifactId).catch(() => undefined) : undefined;
+    if (!result?.ok) return undefined;
+    const until = Date.parse(result.view.expires_at ?? "");
+    return { url: result.view.url, until: Number.isFinite(until) ? until : Date.now() + 5 * 60_000 };
+  });
+  visualPageTickets.set(key, minted);
+  void minted.then((ticket) => { if (!ticket && visualPageTickets.get(key) === minted) visualPageTickets.delete(key); });
+  return minted;
+}
+
+
 window.addEventListener("keydown", globalShortcut, true);
 // The conversation header's machine · codename line is fitted to its room
 // (cas-71af): a width change can make the machine name step aside or return.
-window.addEventListener("resize", () => fitConversationHost(document), { passive: true });
+window.addEventListener("resize", () => scheduleConversationLayout(), { passive: true });
 // Rotation changes the layout in CSS instantly, but the phone's sheets (Tasks
 // & progress, Attention) are decided in JS at render time. Without this, a
 // phone turned on its side kept the composition it was mounted with until
@@ -5710,10 +5797,16 @@ function renderMachineRegister(): void {
       });
     },
   });
-  if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).
-  const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  const open = (opener: string) => {
+    pairedMachinesOpener = opener; commandPaletteOpen = false;
+    document.querySelector<HTMLDialogElement>('#command-palette')?.close();
+    dialog.showModal();
+    // Reset when opened, rather than forcing the conversation's fresh
+    // layout by writing scroll offsets on an invisible register each render.
+    list.scrollTop = 0; dialog.scrollTop = 0;
+  };
   for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
     const button = document.getElementById(id); if (button) button.onclick = () => open(id);
   }

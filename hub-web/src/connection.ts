@@ -749,6 +749,30 @@ export class HubConnectionSupervisor {
     });
   }
 
+  /**
+   * A short-lived URL for an HTML page the session published, served by this
+   * machine under its sandbox policy (cas-3aff). Commander frames it inline
+   * and opens it in a tab; the page itself never enters this document.
+   */
+  async visualPage(session: string, artifactId: string): Promise<ArtifactViewResult> {
+    return withRequestDeadline(async signal => {
+    const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/page`;
+    const { response } = await this.authorizedFetch("POST", path, { signal });
+    const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+    // A frame is only ever pointed at this paired machine's own origin.
+    const url = response.ok && typeof body?.url === "string" ? new URL(body.url, this.machine.baseUrl) : undefined;
+    if (url && url.origin === new URL(this.machine.baseUrl).origin) {
+      return { ok: true, view: { ...(body as unknown as ArtifactView), url: url.href } };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      code: typeof body?.error === "string" ? body.error : undefined,
+      detail: typeof body?.status === "string" ? body.status : null,
+    };
+    });
+  }
+
   /** The machine's main project folders and launch roots (cas-41b9). */
   async projects(signal?: AbortSignal): Promise<ProjectCatalog> {
     return this.request("GET", "/v1/projects", undefined, signal);

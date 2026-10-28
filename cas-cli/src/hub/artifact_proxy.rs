@@ -282,10 +282,10 @@ pub(crate) async fn fetch_session_media<R: SessionReadModel>(
     )
     .await;
     if response.status().is_success()
-        && response
-            .headers()
-            .get("content-type")
-            .is_some_and(|mime| mime == "image/svg+xml")
+        && response.headers().get("content-type").is_some_and(|mime| {
+            mime.to_str()
+                .is_ok_and(|mime| mime.eq_ignore_ascii_case("image/svg+xml"))
+        })
     {
         response
             .extensions_mut()

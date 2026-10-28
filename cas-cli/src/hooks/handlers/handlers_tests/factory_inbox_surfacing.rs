@@ -1771,11 +1771,16 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     println!("AFE0_FIXTURE input_body_bytes={} repeat_hook_bytes={}", kept.len(), next_turn.len());
     // Durable diagnostics for replaying this synthetic fixture on the base
     // and treatment with the same capped test command.
-    let report_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
-    std::fs::create_dir_all(&report_dir).unwrap();
-    std::fs::write(report_dir.join("afe0-fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "input_body_bytes": kept.len(), "repeat_hook_bytes": next_turn.len(), "rendered": next_turn
-    })).unwrap()).unwrap();
+    let report_root = crate::test_paths::workspace_root();
+    if report_root.join("Cargo.toml").is_file() {
+        let report_dir = report_root.join("target");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(report_dir.join("afe0-fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "input_body_bytes": kept.len(), "repeat_hook_bytes": next_turn.len(), "rendered": next_turn
+        })).unwrap()).unwrap();
+    } else {
+        eprintln!("SKIP byte replay artifact export: runtime checkout is absent");
+    }
     assert_eq!(next_turn.matches(kept.trim()).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
     assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");

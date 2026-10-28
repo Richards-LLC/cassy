@@ -243,6 +243,9 @@ invariants:
   HUB-J22-GOAL:
     statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
+  HUB-J24-GOAL:
+    statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
+    check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
 bug_families:
   expired-toast-announcement:
     title: Expired connection notices must leave an empty live region while subsequent notices still announce

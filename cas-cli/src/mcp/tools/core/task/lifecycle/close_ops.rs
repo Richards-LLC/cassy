@@ -27763,6 +27763,118 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[cfg(unix)]
+    async fn queue_proof_close_cas_4386(case: &str) -> (Task, String) {
+        use crate::mcp::CasService;
+        use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store};
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, bare) = handoff_repo();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("cas-cli/tests")).unwrap();
+        std::fs::write(p.join("cas-cli/tests/queue_proof_test.rs"), "// integration target\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore", "cas-cli"]);
+        git(p, &["commit", "-q", "-m", "test(cas-4386): delivery with scoped proof obligation"]);
+        let delivery = head_sha(p);
+        let tree = rev_parse_local(p, "HEAD^{tree}");
+        // A queue's synthetic commit and the landed commit may differ while
+        // carrying the same tree. Keep that real Git boundary in the fixture.
+        git(p, &["checkout", "-q", "-b", "queue"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "synthetic queue head"]);
+        let queue = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "land delivery"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        assert_ne!(head_sha(p), queue);
+        let tree = if case == "wrong-tree" { rev_parse_local(p, "main~1^{tree}") } else { tree };
+        let proof_head = if case == "before-delivery" { rev_parse_local(p, "main~1") } else { queue };
+        let tree = if case == "before-delivery" { rev_parse_local(p, "main~1^{tree}") } else { tree };
+        let mut run = serde_json::json!({
+            "id": 4386, "event": "merge_group", "status": "completed", "conclusion": "success",
+            "path": ".github/workflows/ci.yml", "head_sha": proof_head,
+            "head_branch": "gh-readonly-queue/main/pr-1415-seed",
+            "repository": {"full_name": "acme/epic"},
+            "head_repository": {"full_name": "acme/epic"},
+        });
+        match case {
+            "failed" => run["conclusion"] = serde_json::json!("failure"),
+            "pending" => run["status"] = serde_json::json!("in_progress"),
+            "wrong-event" => run["event"] = serde_json::json!("pull_request"),
+            "wrong-repo" => run["repository"]["full_name"] = serde_json::json!("other/repo"),
+            _ => {}
+        }
+        let artifacts = if case == "no-gate-receipt" { serde_json::json!([]) } else {
+            serde_json::json!([{"name": format!("merge-queue-validated-tree-{tree}"), "expired": false}])
+        };
+        let gh = env.home().join("gh");
+        crate::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api repos/acme/epic/actions/runs/4386') printf '%s\n' '{run}' ;;
+'api repos/acme/epic/actions/runs/4386/artifacts?per_page=100') printf '%s\n' '{{"total_count":{},"artifacts":{artifacts}}}' ;;
+'api repos/acme/epic/git/commits/'*) printf '%s\n' '{{"sha":"{proof_head}","tree":{{"sha":"{tree}"}}}}' ;;
+*) exit 97 ;;
+esac
+"#, artifacts.as_array().unwrap().len()));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        git(p, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/acme/epic"]);
+        git(p, &["config", "remote.origin.url", "https://github.com/acme/epic"]);
+
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-4386-fixture\"\n[verification]\nenabled = false\n").unwrap();
+        open_store(&root).unwrap().init().unwrap();
+        open_rule_store(&root).unwrap().init().unwrap();
+        open_skill_store(&root).unwrap().init().unwrap();
+        let store = open_task_store(&root).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        agents.register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task("worker");
+        task.id = "cas-4386".into();
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-4386-fixture".into(), target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        let reason = if case == "no-citation" { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
+        let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "commit_receipt": delivery,
+            "supervisor_override": true, "reason": reason,
+        })).unwrap())).await.unwrap();
+        (store.get(&task.id).unwrap(), format!("{response:?}"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_close_reuses_landed_queue_proof_cas_4386() {
+        let (task, text) = queue_proof_close_cas_4386("green").await;
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
+        assert!(task.notes.contains("run=4386"), "{}", task.notes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386() {
+        for case in ["no-citation", "failed", "pending", "wrong-event", "wrong-repo", "wrong-tree", "before-delivery", "no-gate-receipt"] {
+            let (task, text) = queue_proof_close_cas_4386(case).await;
+            assert_ne!(task.status, TaskStatus::Closed, "{case}: {text}");
+            assert!(text.contains("scoped proof receipt has base"), "{case}: {text}");
+            assert!(!task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);
+        }
+    }
+
     #[test]
     fn matching_epic_assembly_proves_supervisor_close_without_worker_receipt_cas_d1ee() {
         let dir = init_factory_repo("worker");

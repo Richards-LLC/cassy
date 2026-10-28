@@ -2919,6 +2919,16 @@ revalidation, so cached source refs cannot suppress it as already landed.
 Unsafe source refnames still refuse. Local-merge tasks and repositories without
 origin retain their local source authority.
 
+Renaming an epic's lane keeps the immutable epic ID in the factory branch name.
+Task display, close, worktree merge, spawn and sync resolve inherited previous
+names to that epic's current lane, without redirecting an unrelated explicit
+repository or branch pin. First publication requires creation provenance for
+that exact current name; close never recreates a lane deleted from origin.
+To repair a proof-locked target, a live registered supervisor can use
+`task action=update id=<task> target_branch=<current-epic-lane> proof_scope_fix=true reason="repair target after epic rename"`.
+This audits and invalidates the old proof cycle and reopens the task; workers
+cannot use this recovery, and ordinary close proofs still apply.
+
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`
 to clear it, or supply a valid replacement methodology. Switching to `no-code`

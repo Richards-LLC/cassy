@@ -398,6 +398,11 @@ bug_families:
     tasks: [cas-fa56]
     invariants: [HUB-J1-RELAY-DEADLINE-STABLE]
     journeys: [HUB-J1]
+  revoked-working-indicator:
+    title: An authenticated pairing refusal clears working before the next animation frame
+    tasks: [cas-ef7a]
+    invariants: [HUB-J12-TRUTHFUL-WORKING]
+    journeys: [HUB-J12]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

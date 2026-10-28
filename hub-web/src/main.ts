@@ -23,7 +23,7 @@ import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, sc
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
-import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
+import { NoticePersistence, isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
@@ -923,7 +923,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onOperatorReply: (session, reply, frameFence) => {
       // A notice belongs only to attention, including its durable resolution.
-      if (isOperatorNotice(reply)) { applyOperatorNotice(machine, session, reply); return; }
+      if (isOperatorNotice(reply)) { void applyOperatorNotice(machine, session, reply, frameFence); return; }
       void persistDeviceReply(machine, session, reply, frameFence);
       conversationHistory(sessionKey(machine.id, session), session).receive({ ...reply, device_persisted: false }, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
@@ -963,7 +963,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // cas-e829: this session's notices raise or retire attention; another
         // session's are its own business.
         if (isOperatorNotice(reply)) {
-          if (reply.session === undefined || reply.session === session) applyOperatorNotice(machine, session, reply);
+          if (reply.session === undefined || reply.session === session) void applyOperatorNotice(machine, session, reply, frameFence);
           continue;
         }
         if (reply.session === undefined || reply.session === session) void persistDeviceReply(machine, session, reply, frameFence);
@@ -1142,11 +1142,37 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
 }
 
 /** Raise, keep or retire the attention item for one system notice (cas-e829). */
-function applyOperatorNotice(machine: StoredMachine, session: string, reply: OperatorReply & { at?: string }): void {
-  const plan = planNotice(machine.id, session, reply, (fingerprint) => attention.some((item) => item.fingerprint === fingerprint));
-  if (plan.action === "resolve") resolveAttention(plan.fingerprint);
-  else if (plan.action === "raise") void addAttention(machine, session, NOTICE_KIND, plan.content, noticeTime(reply.at));
-  else void retimeNotice(plan.fingerprint, noticeTime(reply.at));
+const noticePersistence = new NoticePersistence();
+function applyOperatorNotice(machine: StoredMachine, session: string, reply: OperatorReply & { at?: string }, frameFence?: CredentialFence): Promise<void> {
+  const fence = frameFence ?? credentialFence(machine);
+  const current = async () => {
+    const installed = (await catalog.snapshot()).machines.find(item => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
+    return Boolean(installed && installed.credentialId === fence.credentialId && credentialFence(installed).generation === fence.generation && !conversationPersistenceBlocked.has(machine.id));
+  };
+  return noticePersistence.keep(scopeKey(deliveryScope(machine, session)), reply, async () => {
+    const plan = planNotice(machine.id, session, reply, (fingerprint) => attention.some((item) => item.fingerprint === fingerprint));
+    if (plan.action === "raise") await addAttention(machine, session, NOTICE_KIND, plan.content, noticeTime(reply.at));
+    else if (plan.action === "resolve") {
+      let matching = attention.filter(item => item.fingerprint === plan.fingerprint);
+      // Retain a tombstone even when resolution arrived before its alert.
+      if (!matching.length) {
+        const raised = planNotice(machine.id, session, { ...reply, notice: { ...reply.notice!, resolved: false } }, () => false);
+        if (raised.action !== "raise") return;
+        const item = createAttentionItem({ id: `${plan.fingerprint}:${reply.notification_id}`, machineId: machine.id, machineLabel: machine.label, session, kind: NOTICE_KIND, createdAt: noticeTime(reply.at) ?? new Date().toISOString() }, raised.content);
+        attention = [item, ...attention];
+        matching = [item];
+      }
+      const acknowledgedAt = new Date().toISOString();
+      for (const item of matching) {
+        item.acknowledgedAt ??= acknowledgedAt;
+        await attentionStore.put(item);
+      }
+      render();
+    } else await retimeNotice(plan.fingerprint, noticeTime(reply.at));
+  }, current, () => {
+    // The hub supplies authenticated device identity, as for reply receipts.
+    connections.get(machine.id)?.send(session, { OperatorNoticePersisted: { notification_id: reply.notification_id, device_id: "" } });
+  });
 }
 
 /**
@@ -1154,12 +1180,12 @@ function applyOperatorNotice(machine: StoredMachine, session: string, reply: Ope
  * its row's own time takes that earlier time (cas-5c22).
  */
 async function retimeNotice(fingerprint: string, at: string | undefined): Promise<void> {
-  if (at === undefined) return;
-  const changed = attention.filter((item) => item.fingerprint === fingerprint && !item.acknowledgedAt && at < item.createdAt);
-  if (!changed.length) return;
-  attention = attention.map((item) => changed.includes(item) ? { ...item, createdAt: at, ...(item.firstSeenAt === undefined || at < item.firstSeenAt ? { firstSeenAt: at } : {}) } : item);
-  for (const item of attention.filter((candidate) => changed.some((old) => old.id === candidate.id))) await attentionStore.put(item);
-  render();
+  const changed = attention.filter((item) => item.fingerprint === fingerprint && !item.acknowledgedAt && at !== undefined && at < item.createdAt);
+  if (at !== undefined) attention = attention.map((item) => changed.includes(item) ? { ...item, createdAt: at, ...(item.firstSeenAt === undefined || at < item.firstSeenAt ? { firstSeenAt: at } : {}) } : item);
+  // A prior failed put may already be in memory. A repeat must retry storage
+  // even when there is no earlier timestamp or the notice was dismissed.
+  for (const item of attention.filter(candidate => candidate.fingerprint === fingerprint)) await attentionStore.put(item);
+  if (changed.length) render();
 }
 
 /** A session that left the catalog takes its open notices with it (cas-e829). */

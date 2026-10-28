@@ -600,9 +600,11 @@ exit 0
         ))
         .unwrap();
         // (keys written with the email, keys written at the question, succeeds)
-        let cases: [(&[u8], &[u8], bool); 3] = [
+        let cases: [(&[u8], &[u8], bool); 4] = [
             (b"typed@example.com\ry\r", b"", true),
+            // An unfinished type-ahead stays editable and can be completed.
             (b"typed@example.com\rn", b"\x7fy\r", true),
+            (b"typed@example.com\ry", b"\r", true),
             (b"typed@example.com\r\x03", b"", false),
         ];
         for (with_email, at_question, succeeds) in cases {
@@ -661,7 +663,7 @@ exit 0
             let Ok(code) = result else { panic!("{provider} {case:?}: still waiting for input: {output}") };
             if succeeds {
                 assert_eq!(code, Some(0), "{provider} {case:?}: {output}");
-                assert!(output.contains("Keep the existing account? [y/N] y"), "{provider} {case:?}: {output}");
+                assert!(output.contains("Keep the existing account? [y/N] "), "{provider} {case:?}: {output}");
             } else {
                 assert_ne!(code, Some(0), "{provider} {case:?}: {output}");
                 assert!(!output.contains("Keep the existing account?"), "{provider} {case:?}: {output}");

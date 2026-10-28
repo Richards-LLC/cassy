@@ -231,6 +231,9 @@ invariants:
       `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml` with
       the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub tests
       (cas-ab04)'
+  HUB-J23-GOAL:
+    statement: I reach the latest exchange immediately and scroll back through older turns without losing my place
+    check: Walk HUB-J23 on the production bundle and read cursor requests back from the protocol double; measure the frozen real thread separately.
   HUB-J21-GOAL:
     statement: reach Cassy Cloud's Explorer from Commander, on its home or on the open conversation's project, in
       its own tab, carrying nothing but the path and the project id
@@ -1978,3 +1981,32 @@ journeys:
   spec: hub-web/e2e/journeys/whole-picture.journey.ts
   catalog_gaps: the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe
     and the hub's follower-only relay are proven by the Rust tests
+
+- id: HUB-J23
+  name: Read older turns by scrolling
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: long conversation at desktop 1280 and phone 390
+  steps:
+  - Open directly at the latest exchange
+  - Scroll up to request one older page
+  - Return to the latest exchange without fetching history
+  - Answer a decision from before the loaded tail
+  owner_groups:
+  - commander_runtime
+  owners:
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/thread-window.ts
+  - hub-web/src/main.ts
+  - hub-web/e2e/journeys/history-window.journey.ts
+  invariants:
+  - HUB-J23-GOAL
+  traffic:
+    share_pct: null
+    basis: No per-journey usage instrumentation.
+  spec: hub-web/e2e/journeys/history-window.journey.ts
+  catalog_gaps: The hub double supplies cursor pages; frozen real-thread performance is measured separately.

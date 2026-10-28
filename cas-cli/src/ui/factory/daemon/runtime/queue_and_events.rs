@@ -7430,6 +7430,13 @@ impl FactoryDaemon {
             }
         }
         let (messages, replies) = commander_history_turns(queue.as_ref(), rows, &self.session_name, &notices);
+        let open_attention = if before.is_none() && !device_id.trim().is_empty() {
+            let mut decisions = queue.conversation_open_attention(&self.session_name, device_id)?;
+            decisions.retain(|row| !is_operator_notice(row));
+            Some(commander_history_turns(queue.as_ref(), decisions, &self.session_name, &std::collections::HashMap::new()).1)
+        } else {
+            None
+        };
         // cas-55a4: other sessions' Commander turns travel beside the page,
         // never in it, so Commander can show them only as a labelled, collapsed
         // earlier-session section. They come once, with the newest page.
@@ -7458,6 +7465,7 @@ impl FactoryDaemon {
             request_id,
             messages,
             replies,
+            open_attention,
             has_earlier,
             next_before,
             earlier_messages,
@@ -13595,6 +13603,38 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session, "acct-wise-lion-31");
         assert_eq!(messages[0].operator_label.as_deref(), Some("Terminal"));
+    }
+
+    #[test]
+    fn commander_tail_includes_open_attention_without_loading_older_pages() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let session = daemon.session_name.clone();
+        let turn = |kind: &str| {
+            let payload = serde_json::json!({"schema_version":2,"reply_to":null,"message":"decision","summary":"","device_id":"*","kind":kind,"attachments":[]});
+            let id = queue.enqueue_with_session("supervisor", "operator", &payload.to_string(), &session).unwrap();
+            queue.stamp_operator_reply(id, kind, &[]).unwrap();
+            id
+        };
+        let open = turn("ask");
+        let answered = turn("ask");
+        let retired_blocker = turn("blocker");
+        queue.record_terminal_operator_turn(&session, &format!("[CAS reply: explicitly acknowledges notification_id={answered}]\nProceed")).unwrap();
+        let blocker = turn("blocker");
+        let newest = turn("answer");
+        let page = daemon.conversation_history_page("tail".into(), "phone", None, 1).unwrap();
+        let json = serde_json::to_value(page).unwrap();
+        let page = &json["ConversationHistory"];
+        assert_eq!(page["replies"].as_array().unwrap().len(), 1);
+        assert_eq!(page["replies"][0]["notification_id"], newest);
+        let attention = page["open_attention"].as_array().expect("first page independently includes old open decisions");
+        assert_eq!(attention.iter().map(|reply| reply["notification_id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![open, blocker]);
+        assert!(!attention.iter().any(|reply| reply["notification_id"] == retired_blocker));
+        let older = serde_json::to_value(daemon.conversation_history_page("older".into(), "phone", Some(newest), 1).unwrap()).unwrap();
+        assert!(older["ConversationHistory"].get("open_attention").is_none(), "summary is first-page only");
     }
 
     #[test]

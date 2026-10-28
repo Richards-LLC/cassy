@@ -4,6 +4,7 @@ import { machineMonogram } from "./machine-accent";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
+import { reconcileChildren, ThreadWindow } from "./thread-window";
 import { bindSwipeDismiss } from "./swipe-dismiss";
 import { machineName } from "./conversation-list";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
@@ -168,7 +169,7 @@ export interface ConversationViewOptions {
    */
   connection?: () => string | undefined;
   /** Requests the next older durable page when history has more turns. */
-  loadEarlier?: () => void;
+  loadEarlier?: (source?: "scroll") => void;
   /** Whether the daemon reported an older page still available. */
   hasEarlier?: () => boolean;
   /** Keeps the paging control honest while a request is in flight. */
@@ -437,6 +438,13 @@ export class ConversationView {
   /** Composer focus/keyboard state, used to keep the thread tail visible. */
   private composing = false;
   private nodes = new Map<string, HTMLElement>();
+  private readonly cachedNodes = new Map<string, HTMLElement>();
+  private readonly window = new ThreadWindow();
+  private readonly above: HTMLElement;
+  private readonly below: HTMLElement;
+  private readonly loadLater: HTMLButtonElement;
+  private windowFrame?: number;
+  private earlierIntent = false;
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
   /**
@@ -446,6 +454,7 @@ export class ConversationView {
    * expanded, and dismissing one message keeps the rest of its run open.
    */
   private readonly reviewedRuns = new Set<string>();
+  private unconfirmedByKey = new Map<string, UnconfirmedRun>();
   private following = true;
   /**
    * Where the reader was, by turn, while not following the tail (cas-2093).
@@ -487,6 +496,7 @@ export class ConversationView {
   /** The thread's content height at the last scroll it saw (cas-acb4b). */
   private lastContentHeight?: number;
   private disposed = false;
+  private updateRequest?: object;
   private resize?: ResizeObserver;
 
   constructor(document: Document, private history: ConversationHistory, options: ConversationViewOptions | string, editMessage?: (text: string) => void) {
@@ -494,9 +504,18 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
+    // The keyed reading anchor owns compensation, including spacer changes.
+    this.element.style.overflowAnchor = "none";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
+    this.element.addEventListener("conversation-reveal-turn", event => {
+      const id = (event as CustomEvent<{ notificationId: number }>).detail?.notificationId;
+      if (!Number.isSafeInteger(id)) return;
+      this.following = false;
+      this.window.show(`reply:${id}`);
+      this.update();
+    });
     this.head = document.createElement("header"); this.head.className = "thead";
     const identity = document.createElement("div"); identity.className = "id";
     const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
@@ -516,10 +535,16 @@ export class ConversationView {
       // Paging holds the reader's turn from here (journey F7), not the button.
       this.focusMoved = undefined;
       this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
+      if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
+    this.above = document.createElement("div"); this.below = document.createElement("div");
+    for (const spacer of [this.above, this.below]) { spacer.setAttribute("aria-hidden", "true"); spacer.style.overflowAnchor = "none"; }
+    this.loadLater = document.createElement("button"); this.loadLater.type = "button";
+    this.loadLater.className = "conversation-load-earlier"; this.loadLater.textContent = "Load later"; this.loadLater.hidden = true;
+    this.loadLater.onclick = () => this.moveWindow(false);
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
@@ -529,11 +554,25 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.empty, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
+    // Browser pinning/focus recovery also emits scroll. Only a reading gesture
+    // may start an older network request; explicit Load earlier works as well.
+    this.element.addEventListener("wheel", event => {
+      this.earlierIntent = event.deltaY < 0;
+      if (this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)) this.scrollWindow(true);
+    }, { passive: true });
+    this.element.addEventListener("keydown", event => { this.earlierIntent = ["ArrowUp", "PageUp", "Home"].includes(event.key); });
+    let touchY: number | undefined;
+    this.element.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY; }, { passive: true });
+    this.element.addEventListener("touchmove", event => {
+      const next = event.touches[0]?.clientY;
+      if (next !== undefined && touchY !== undefined) this.earlierIntent = next > touchY;
+      touchY = next;
+    }, { passive: true });
     this.element.addEventListener("scroll", () => {
       // cas-6a9b: a scroll that moved the thread up and off its tail is the
       // reader, whatever else is in flight. Layout never does that: a pin
@@ -544,6 +583,7 @@ export class ConversationView {
       // and one whose thread had grown unseen was read as layout and pinned.
       this.pinDeferred = false;
       const scrollTop = this.element.scrollTop;
+      const scrollingUp = scrollTop < this.scrolledTo;
       const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
       if (readerLeftTail) {
         this.following = false;
@@ -553,6 +593,7 @@ export class ConversationView {
         this.scrolledTo = scrollTop;
         if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
         this.notePlace();
+        this.scrollWindow(true);
         return;
       }
       if (this.pinPending) return;
@@ -578,6 +619,7 @@ export class ConversationView {
       // The reader scrolled their focused control away: their scroll is the place now.
       if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
       this.notePlace();
+      this.scrollWindow(scrollingUp);
     }, { passive: true });
     this.element.addEventListener("focusin", (event) => {
       const target = event.target;
@@ -625,39 +667,71 @@ export class ConversationView {
     }
   }
 
+  /** Mount and session-state callbacks share one presentation before paint.
+   * Keeping layout out of the row's click lets its shell finish before the
+   * thread measures it; an intervening immediate update satisfies the request.
+   */
+  requestUpdate(): void {
+    if (this.disposed || this.updateRequest) return;
+    const request = this.updateRequest = {};
+    requestAnimationFrame(() => {
+      if (!this.disposed && this.updateRequest === request) this.update();
+    });
+  }
+
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    this.updateRequest = undefined;
     this.noticeReset();
     this.restorePlace();
     // Turns added above the reader (Load earlier) must not move what they are
     // reading (journey F7): remember the first turn on screen and where it sat.
     const anchor = this.following ? undefined : this.readingAnchor();
+    this.window.measure(this.nodes);
     const offeredEarlier = !this.loadEarlier.hidden;
-    const hasEarlier = this.options.hasEarlier?.() === true;
+    let hasEarlier = this.options.hasEarlier?.() === true || this.window.hasEarlier;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
-    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) });
+    const events = this.history.visibleEvents();
+    const modelOptions = { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) };
+    // A visual chunk boundary must not split a logical unconfirmed run.
+    this.unconfirmedByKey = new Map();
+    if (events.some(event => event.kind === "send" && event.value.state === "unconfirmed")) {
+      for (const item of threadModel(events, modelOptions)) {
+        if (item.type !== "group" || item.side !== "you") continue;
+        for (const [index, run] of this.deriveUnconfirmedRuns(item)) this.unconfirmedByKey.set(item.turns[index]!.key, run);
+      }
+    }
+    const model = threadModel(events, { ...modelOptions, groupSize: 4 });
+    const focused = documentActiveKey(this.msgs);
+    const window = this.window.select(model, this.element.scrollTop, this.element.clientHeight, this.following, focused ?? anchor?.key);
+    hasEarlier = this.options.hasEarlier?.() === true || this.window.hasEarlier;
+    this.loadEarlier.hidden = !hasEarlier;
+    this.loadLater.hidden = !this.window.hasLater;
+    this.above.style.height = `${window.above}px`; this.below.style.height = `${window.below}px`;
     const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];
-    for (const item of model) {
-      let node = this.nodes.get(item.key);
+    for (const item of window.items) {
+      let node = this.nodes.get(item.key) ?? this.cachedNodes.get(item.key);
       if (!node) node = document.createElement(item.type === "day" ? "p" : "div");
       this.renderItem(node, item);
       next.set(item.key, node);
       children.push(node);
+      this.cachedNodes.delete(item.key);
+      this.cachedNodes.set(item.key, node);
     }
     this.nodes = next;
-    for (const key of this.expanded) if (!next.has(key)) this.expanded.delete(key);
+    while (this.cachedNodes.size > 60) this.cachedNodes.delete(this.cachedNodes.keys().next().value!);
     // Only re-append when the sequence changed: an unchanged list keeps its
     // scroll position and selection.
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
-    if (!same) this.msgs.replaceChildren(...children);
+    if (!same || window.above > 0 || window.below > 0) reconcileChildren(this.msgs, [...(window.above > 0 ? [this.above] : []), ...children, ...(window.below > 0 ? [this.below] : [])]);
     this.renderPinned(document);
     this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
@@ -678,6 +752,37 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+  }
+
+  /** Explicit paging through rows already held in memory. */
+  private moveWindow(earlier: boolean): void {
+    // A paging button moves to the newly exposed cached rows. Holding the old
+    // turn here would send the next scroll frame straight back to that window.
+    this.following = false;
+    this.earlierIntent = false;
+    this.place = undefined;
+    this.placePending = false;
+    this.scrolledTo = this.element.scrollTop;
+    if (earlier) this.window.earlier(); else this.window.later();
+    this.update();
+    const first = [...this.msgs.children].find(node => node !== this.above && node !== this.below) as HTMLElement | undefined;
+    if (first) this.element.scrollTop += first.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
+    this.scrolledTo = this.element.scrollTop;
+    this.notePlace();
+  }
+
+  /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
+  private scrollWindow(up: boolean): void {
+    if (this.windowFrame !== undefined) return;
+    this.windowFrame = requestAnimationFrame(() => {
+      this.windowFrame = undefined;
+      if (this.disposed) return;
+      if (up && this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)
+        && !this.window.hasEarlier && this.options.hasEarlier?.() && !this.options.loadingEarlier?.()) {
+        this.earlierIntent = false;
+        this.options.loadEarlier?.("scroll");
+      } else this.update();
+    });
   }
 
   /**
@@ -744,8 +849,8 @@ export class ConversationView {
    */
   private readingAnchor(): { key?: string; node: HTMLElement; top: number } | undefined {
     if (this.msgs.hidden) return undefined;
-    const top = this.element.getBoundingClientRect().top;
-    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > top ? box.top : undefined; };
+    const bounds = this.element.getBoundingClientRect();
+    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > bounds.top && box.top < bounds.bottom ? box.top : undefined; };
     for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) {
       const at = visible(node);
       if (at !== undefined) return { key: node.dataset.key, node, top: at };
@@ -789,6 +894,16 @@ export class ConversationView {
   private noticeReset(): void {
     if (!this.element.isConnected || this.element.clientHeight === 0) return;
     if (Math.abs(this.element.scrollTop - this.scrolledTo) > 1) this.placePending = true;
+    // An outage banner can add padding above the turns without changing
+    // scrollTop. The remembered turn, rather than the offset alone, reveals
+    // that layout drift before this update captures a new reading anchor.
+    if (!this.following && this.place) {
+      const node = [...this.msgs.querySelectorAll<HTMLElement>("[data-key]")].find(item => item.dataset.key === this.place!.key);
+      if (node) {
+        const offset = node.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
+        if (Math.abs(offset - this.place.offset) > 1) this.placePending = true;
+      }
+    }
   }
 
   private restorePlace(): void {
@@ -866,6 +981,9 @@ export class ConversationView {
     jump.append(label, " ", text, glyph.content.firstElementChild!);
     jump.title = "Go to the question";
     jump.onclick = () => {
+      this.following = false;
+      this.window.show(`reply:${ask.notification_id}`);
+      this.update();
       const turn = this.element.querySelector<HTMLElement>(`[data-key="reply:${ask.notification_id}"]`);
       if (turn) {
         turn.tabIndex = -1;
@@ -918,6 +1036,8 @@ export class ConversationView {
   private restoreUnsent(): void {
     const restored = this.history.restoreDismissed();
     if (!restored.length) return;
+    this.following = false;
+    this.window.show(`send:${restored[0]!.id}`);
     this.update();
     this.options.dismissalsChanged?.();
     const key = `send:${restored[0]!.id}`;
@@ -1228,7 +1348,10 @@ export class ConversationView {
     // replacement instead of dropping it to the page body.
     const active = document.activeElement;
     let refocus: { bubble: HTMLElement; className: string } | undefined;
-    const runs = this.unconfirmedRuns(group);
+    const runs = new Map(group.turns.flatMap((turn, index) => {
+      const run = this.unconfirmedByKey.get(turn.key);
+      return run ? [[index, run] as const] : [];
+    }));
     for (const [index, turn] of group.turns.entries()) {
       const run = runs.get(index);
       const signature = this.turnSignature(turn) + (run ? JSON.stringify(run) : "");
@@ -1269,7 +1392,7 @@ export class ConversationView {
       children.push(bubble, ...sheets);
     }
     if (group.time) children.push(timeElement(document, group.time, group.clockAhead));
-    node.replaceChildren(...children);
+    reconcileChildren(node, children);
     if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
@@ -1278,7 +1401,7 @@ export class ConversationView {
    * one notice, not a stack of warning cards each with its own Retry. Maps a
    * turn's index in the group to its place in such a run.
    */
-  private unconfirmedRuns(group: ThreadGroup): Map<number, UnconfirmedRun> {
+  private deriveUnconfirmedRuns(group: ThreadGroup): Map<number, UnconfirmedRun> {
     const runs = new Map<number, UnconfirmedRun>();
     const actionable = group.turns.map((turn) => turn.event.kind === "send" && turn.event.value.state === "unconfirmed" && !this.history.repliedSince(turn.event.value));
     for (let start = 0; start < actionable.length; ) {
@@ -1635,6 +1758,11 @@ function syncClampPill(node: HTMLElement): void {
   const more = node.querySelector<HTMLButtonElement>(":scope > .coalesce-expand");
   if (!line || !more || !line.isConnected || line.dataset.expanded === "true" || Number(line.dataset.count) > 1) return;
   more.hidden = !(line.scrollHeight > line.clientHeight + 1);
+}
+
+function documentActiveKey(root: HTMLElement): string | undefined {
+  const active = root.ownerDocument.activeElement;
+  return active instanceof HTMLElement && root.contains(active) ? active.closest<HTMLElement>("[data-key]")?.dataset.key : undefined;
 }
 
 function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => string): string {

@@ -164,6 +164,32 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The socket closes while loading.
 - A hub without history support: the thread starts empty.
 
+### HUB-J23 · Read older turns by scrolling
+
+- **Entry:** a long conversation on desktop or phone
+- **Goal:** I reach the latest exchange immediately and scroll back through older turns without losing my place
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/history-window.journey.ts`
+- **Gaps:** the hub double supplies cursor pages; frozen real-thread performance is measured separately
+
+#### Steps
+
+1. Open directly at the latest exchange — one bounded tail request; newest turn in view
+2. Scroll up to request one older page — upward reading gesture requests its cursor and the mounted window remains bounded
+3. Return to the latest exchange without fetching history — Jump to latest restores the tail; mounted turns remain unique and ordered
+4. Answer a decision from before the loaded tail — first-page attention summary keeps the old ask actionable; its quick reply preserves the notification id without loading older pages
+
+#### Expected experience
+
+- Opening does not stream older pages or scroll visibly through history.
+- Scroll-up paging retains the reading anchor; keyboard Load earlier remains available.
+- New replies append without detaching unchanged focused content.
+
+#### Edge paths
+
+- A mount, reconnect or focus-restoring scroll does not request older history.
+- A long same-speaker run remains bounded; Jump to latest returns from an older window.
+
 ### HUB-J5 · Reply by typing
 
 - **Entry:** an open conversation with a live supervisor

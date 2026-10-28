@@ -630,6 +630,10 @@ pub enum DaemonMessage {
         request_id: String,
         messages: Vec<ConversationHistoryMessage>,
         replies: Vec<ConversationHistoryReply>,
+        /// Complete open decisions, independent of cursor history. `Some([])`
+        /// proves no decisions remain; absent on old peers and older pages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_attention: Option<Vec<ConversationHistoryReply>>,
         has_earlier: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_before: Option<i64>,
@@ -1488,6 +1492,7 @@ mod tests {
             next_before: None,
             earlier_messages: Vec::new(),
             earlier_replies: Vec::new(),
+            open_attention: None,
         };
         let json = serde_json::to_value(&page).unwrap();
         assert_eq!(json["ConversationHistory"]["request_id"], "history-1");

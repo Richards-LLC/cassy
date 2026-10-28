@@ -11,6 +11,28 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
+  it("coalesces mount requests before paint and ignores one superseded by an immediate update", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+    onTestFinished(() => { vi.unstubAllGlobals(); });
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element);
+    const update = vi.spyOn(view, "update");
+    history.reply(reply(1, "answer", "Ready before paint"), at(9, 0));
+    view.requestUpdate(); view.requestUpdate();
+    expect(update).not.toHaveBeenCalled();
+    for (const callback of frames.splice(0)) callback(0);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(view.element.textContent).toContain("Ready before paint");
+    view.requestUpdate();
+    view.update();
+    for (const callback of frames.splice(0)) callback(0);
+    expect(update).toHaveBeenCalledTimes(2);
+    view.requestUpdate(); view.dispose();
+    for (const callback of frames.splice(0)) callback(0);
+    expect(update).toHaveBeenCalledTimes(2);
+  });
   it("says Retry goes through once the session a held send waited for is live again (cas-d15c, cas-a355 N2)", () => {
     const history = new ConversationHistory();
     let live = false;
@@ -60,6 +82,46 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".bub")).toBe(first);
     expect(first.classList.contains("group-first")).toBe(true); expect(first.classList.contains("group-last")).toBe(false);
     expect(view.element.querySelectorAll(".msgs > .turn")).toHaveLength(1);
+  });
+  it("keeps a focused link connected when another reply joins its group", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "answer", "[Evidence](https://example.org/proof)"), at(9, 44)); view.update();
+    const link = view.element.querySelector<HTMLAnchorElement>(".bub a")!;
+    link.focus();
+    history.reply(reply(2, "answer"), at(9, 45)); view.update();
+    expect(document.activeElement).toBe(link);
+    expect(view.element.querySelector(".bub a")).toBe(link);
+  });
+  it("opens a bounded tail and exposes cached older turns before fetching another page", () => {
+    const history = new ConversationHistory();
+    const fetchEarlier = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "sup", hasEarlier: () => true, loadEarlier: fetchEarlier });
+    document.body.replaceChildren(view.element);
+    for (let id = 1; id <= 240; id++) history.reply(reply(id, "answer"), at(9, 0) + id * 1000);
+    view.update();
+    const coldShortCount = view.element.querySelectorAll(".conversation-turn").length;
+    expect(coldShortCount).toBeLessThanOrEqual(80);
+    expect(view.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
+    expect(view.element.querySelector('[data-key="reply:1"]')).toBeNull();
+    const first = view.element.querySelector<HTMLElement>(".conversation-turn")!.dataset.key;
+    view.element.querySelector<HTMLButtonElement>(".conversation-load-earlier")!.click();
+    expect(fetchEarlier).not.toHaveBeenCalled();
+    expect(view.element.querySelector('[data-key="reply:1"]')).toBeNull();
+    expect(view.element.querySelector<HTMLElement>(".conversation-turn")!.dataset.key).not.toBe(first);
+    expect(view.element.querySelectorAll(".conversation-turn").length).toBeLessThanOrEqual(80);
+    view.jump.click();
+    expect(view.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
+    view.dispose();
+    // Before any browser measurements, long Markdown must not mount the
+    // same number of bubbles as one-line updates and force a giant layout.
+    const longHistory = new ConversationHistory();
+    for (let id = 1; id <= 240; id++) longHistory.reply(reply(id, "answer", "Long release evidence. ".repeat(60)), at(9, 0) + id * 1000);
+    const longView = new ConversationView(document, longHistory, "sup");
+    document.body.replaceChildren(longView.element); longView.update();
+    expect(longView.element.querySelectorAll(".conversation-turn").length).toBeLessThan(coldShortCount);
+    expect(longView.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
+    longView.dispose();
   });
   it("shows session dividers and the no-earlier-history marker", () => {
     const history = new ConversationHistory();
@@ -206,12 +268,14 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
     // A stand-in layout: every element in the thread, in document order, is 50px tall, stacked from the thread's top edge and moved by scrollTop.
     const msgs = view.element.querySelector<HTMLElement>(".msgs")!;
+    Object.defineProperty(view.element, "clientHeight", { configurable: true, value: 200 });
     const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    let bannerOffset = 0;
     const original = Element.prototype.getBoundingClientRect;
     Element.prototype.getBoundingClientRect = function (this: Element) {
       if (this === view.element) return rect(0, 200);
       const index = [...msgs.querySelectorAll("*")].indexOf(this);
-      return index >= 0 ? rect(40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
+      return index >= 0 ? rect(bannerOffset + 40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
     };
     const bubble = (key: string) => [...msgs.querySelectorAll<HTMLElement>("[data-key]")].find((node) => node.dataset.key === key);
     try {
@@ -223,6 +287,11 @@ describe("ConversationView (Pebble thread)", () => {
       history.reply(reply(11, "answer", "Three workers."), at(9, 1));
       view.update();
       expect(view.element.scrollTop).toBeGreaterThan(0);
+      expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
+      // An outage banner adds padding without changing scrollTop. The same
+      // recorded reading turn must stay put when the outside layout changes.
+      bannerOffset = 76;
+      view.update();
       expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
     } finally {
       Element.prototype.getBoundingClientRect = original;

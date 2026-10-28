@@ -806,6 +806,10 @@ const PROMPT_QUEUE_SESSION_HISTORY_INDEX: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_session_history
     ON prompt_queue(factory_session, id)
     WHERE factory_session IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_attention
+    ON prompt_queue(factory_session,
+        COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END), id)
+    WHERE lower(target) = 'operator';
 "#;
 
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
@@ -3143,6 +3147,10 @@ pub trait PromptQueueStore: Send + Sync {
         before: Option<i64>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Open Commander decisions independently of cursor paging. Delivery
+    /// consumption does not answer an ask; a linked operator turn does.
+    fn conversation_open_attention(&self, factory_session: &str, device_id: &str) -> Result<Vec<QueuedPrompt>>;
 
     /// The newest Commander-lane rows of this project that belong to any
     /// session other than `factory_session` (including rows with no session
@@ -8360,6 +8368,28 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .map_err(Into::into)
     }
 
+    fn conversation_open_attention(&self, factory_session: &str, device_id: &str) -> Result<Vec<QueuedPrompt>> {
+        if factory_session.trim().is_empty() || device_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!(
+            "SELECT {COMMANDER_HISTORY_COLUMNS} FROM prompt_queue
+             WHERE factory_session = ?1 AND lower(target) = 'operator'
+               AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker')
+               AND NOT EXISTS (
+                 SELECT 1 FROM prompt_queue sent
+                 WHERE sent.factory_session = ?1 AND sent.id > prompt_queue.id
+                   AND ((sent.source LIKE 'commander:%' AND sent.operator_verified = 1 AND lower(sent.target) <> 'operator')
+                     OR (sent.source = 'terminal' AND sent.target = 'terminal-history' AND sent.processed_at IS NOT NULL))
+                   AND (COALESCE(prompt_queue.kind, CASE WHEN json_valid(prompt_queue.prompt) THEN json_extract(prompt_queue.prompt, '$.kind') END) = 'blocker'
+                     OR instr(sent.prompt, '[CAS reply: explicitly acknowledges notification_id=' || prompt_queue.id || ']' || char(10)) = 1)
+               ) ORDER BY id ASC"
+        );
+        conn.prepare_cached(&sql)?.query_map([factory_session], Self::prompt_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     fn earlier_session_history(
         &self,
         factory_session: &str,
@@ -12066,6 +12096,16 @@ mod tests {
         let activity = store.latest_session_activity("factory-7").unwrap().unwrap();
         assert_eq!(activity.id, worker_id);
         assert!(store.latest_session_activity("factory-8").unwrap().is_none());
+        let decision = store.enqueue_with_session("supervisor", "operator",
+            r#"{"schema_version":2,"reply_to":null,"message":"Proceed?","summary":"","device_id":"*","kind":"ask","attachments":[]}"#,
+            "factory-7").unwrap();
+        // Legacy peers may carry kind only in the JSON payload. A new
+        // pairing still sees that decision without loading its history.
+        for device in ["phone-7", "computer-9"] {
+            assert_eq!(store.conversation_open_attention("factory-7", device).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![decision]);
+        }
+        assert!(store.conversation_open_attention("factory-8", "phone-7").unwrap().is_empty());
+        assert!(store.conversation_open_attention("factory-7", "").unwrap().is_empty());
     }
 
     /// cas-e829: a relay-watchdog alert knows the relay it is about, and
@@ -12187,6 +12227,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        let attention = plan("SELECT id FROM prompt_queue WHERE factory_session = 'factory-7' AND lower(target) = 'operator' AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker')");
+        assert!(attention.contains("idx_prompt_queue_attention"), "{attention}");
         for sql in [
             format!(
                 "SELECT {COMMANDER_HISTORY_COLUMNS} FROM prompt_queue

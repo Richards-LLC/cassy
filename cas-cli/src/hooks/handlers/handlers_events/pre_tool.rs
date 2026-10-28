@@ -5221,14 +5221,14 @@ fn operator_policy_command_textual(command: &str) -> bool {
     let shell_command = shell_command_without_heredoc_bodies(command);
     let mut bodies = shell_heredoc_bodies(command).into_iter();
     // An unquoted heredoc expands command substitutions before its reader
-    // receives the data. Only quoted bodies are unconditionally literal.
+    // receives the data. Only complete quoted bodies are provably literal.
     // Use the existing delimiter/body ordering, failing closed if incomplete.
     let expanding_policy = shell_command
         .lines()
         .flat_map(heredoc_delimiters)
         .any(|delimiter| {
             let body = bodies.next();
-            !delimiter.literal_body && body.is_none_or(|body| runs_substitution(&[body]))
+            body.is_none_or(|body| !delimiter.literal_body && runs_substitution(&[body]))
         });
     let statements = shell_statement_words(command);
     let clipboard = statements.iter().any(|words| {

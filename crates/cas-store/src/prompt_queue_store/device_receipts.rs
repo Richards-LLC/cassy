@@ -160,7 +160,7 @@ mod tests {
             ("relay-watchdog", Some(QueueOrigin::Daemon), true),
         ] {
             for target in ["operator", "supervisor"] {
-                let id = store.enqueue_urgent_with_outcome(source, target, "receipt classification",
+                let id = store.enqueue_urgent_with_outcome(source, target, &format!("receipt classification {origin:?}"),
                     Some("session"), None, None, false, origin.as_ref()).unwrap().id();
                 let wrong = if notice { store.record_operator_reply_persisted(id, "session", "phone") }
                     else { store.record_operator_notice_persisted(id, "session", "phone") };

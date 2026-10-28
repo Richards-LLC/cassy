@@ -316,6 +316,7 @@ export class HubConnectionSupervisor {
    */
   private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
+  private readonly endedSessions = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private healthPing?: { id: number; startedAt: number };
   private readonly eventRecovery = new EventRecovery();
@@ -1247,7 +1248,22 @@ export class HubConnectionSupervisor {
     else await installationLock(this.machine.id, rotate);
   }
 
+  /** A durable end receipt stops retries; transport closure alone does not. */
+  setSessionEnded(session: string, ended: boolean): void {
+    if (!ended) { this.endedSessions.delete(session); return; }
+    this.endedSessions.add(session);
+    this.desiredSessions.delete(session);
+    const timer = this.attachRetryTimers.get(session);
+    if (timer !== undefined) window.clearTimeout(timer);
+    this.attachRetryTimers.delete(session);
+    this.clearAttachTimeouts(session);
+    const socket = this.sockets.get(session);
+    if (socket) this.retireLegacySocket(socket);
+    this.sockets.delete(session);
+  }
+
   async attach(session: string): Promise<void> {
+    if (this.endedSessions.has(session)) return;
     this.attachesInFlight.set(session, (this.attachesInFlight.get(session) ?? 0) + 1);
     try {
       await this.openAttach(session);
@@ -1280,7 +1296,7 @@ export class HubConnectionSupervisor {
   }
 
   private async openAttach(session: string): Promise<void> {
-    if (!this.desired) return;
+    if (!this.desired || this.endedSessions.has(session)) return;
     const unsupported = unsupportedBrowserReason();
     if (unsupported) throw new UnsupportedBrowserError(unsupported);
     this.desiredSessions.add(session);
@@ -1598,6 +1614,7 @@ export class HubConnectionSupervisor {
   }
 
   private scheduleAttach(session: string): void {
+    if (this.endedSessions.has(session)) return;
     if (!this.desired || this.attachRetryTimers.has(session)) return;
     const attempt = this.socketAttempts.get(session) ?? 0;
     // Capped like the machine connection's retry (cas-4ce5): a session held
@@ -1707,6 +1724,7 @@ export class HubConnectionSupervisor {
   }
 
   send(session: string, message: unknown, clientRef?: string): boolean {
+    if (this.endedSessions.has(session)) return false;
     // While a probe waits on the machine socket it may be half-open, and
     // while heartbeats go unanswered (unsteady) it may be dead: a message
     // sent into it could vanish, so it is refused here and the caller holds

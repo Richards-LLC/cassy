@@ -2867,10 +2867,11 @@ button.chip:disabled { cursor: default; }
 /* cas-5d2c: the heading names the project and machine once, at the weight of
    a row's title, so the rows under it lead with what tells them apart: the
    codename, then what the session last did. */
-.conversation-group-head { margin: var(--space-2) 14px 0; color: var(--ink); font: var(--weight-semibold) var(--fs-meta)/1.35 var(--font-ui); }
+.conversation-group { flex: none; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); margin-block: var(--space-1) var(--space-2); padding: var(--space-1); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); }
+.conversation-group-head { margin: var(--space-2) var(--space-3) var(--space-1); overflow-wrap: anywhere; color: var(--ink); font: var(--weight-semibold) var(--fs-meta)/1.35 var(--font-ui); }
 .conversation-row.grouped .conversation-title:has(+ .conversation-supervisor) { display: none; }
 .conversation-row.grouped .conversation-supervisor { font-size: var(--fs-meta); color: var(--ink); }
-.conversation-row.grouped { padding-left: 22px; }
+.conversation-row.grouped { padding-left: var(--space-3); }
 .conversation-row[aria-current="true"] .conversation-session-mark { background: var(--bg-panel); }
 .conversation-session-mark { margin-left: 8px; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--ink); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
 .conversation-end { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: -6px 14px var(--space-1) 73px; font-size: var(--fs-xs); color: var(--ink-mid); }
@@ -2903,6 +2904,7 @@ button.chip:disabled { cursor: default; }
   .conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { min-height: 36px; padding-inline: 14px; }
 }
 @media (forced-colors: active) {
+  .conversation-group { border-color: CanvasText; background: Canvas; color: CanvasText; }
   /* The mark keeps its text on any system palette: an outline, no fill. */
   .conversation-session-mark, .conversation-row[aria-current="true"] .conversation-session-mark { background: transparent; border: 1px solid currentColor; }
 }
@@ -3214,3 +3216,77 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 }
 .worker-timeline-rows .work-row-toggle, .worker-timeline-rows .work-row-line { width: 100%; }
 .worker-timeline-rows .work-row-time { margin-left: auto; padding-left: var(--space-2); }
+
+/* Project-first register: the project owns the boundary; its supervisors
+   carry identity and work. The boundary is a meaningful mark (>= 3:1). */
+.project-card { border-color: var(--ink-mid); }
+.project-card-toggle { display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 0; min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink); text-align: left; }
+.project-card-toggle:hover { background: var(--bg-hover); color: var(--ink); }
+.project-card-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); }
+.project-card-count { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
+.project-card-chevron { color: var(--ink-mid); }
+.project-card-toggle[aria-expanded="false"] .project-card-chevron { rotate: -90deg; }
+.project-machine-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-3); }
+.project-machine-chip { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: 28px; padding: var(--space-1) var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.project-machine-chip:hover { background: var(--bg-hover); color: var(--ink); }
+.machine-online-dot { width: var(--space-2); height: var(--space-2); border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); flex: none; }
+.machine-online-dot.online { background: var(--state-ok); border-color: var(--state-ok); }
+.machine-online-dot.offline { background: var(--color-transparent); border-color: var(--ink-mid); }
+.project-card-summary { margin: 0; padding: 0 var(--space-3) var(--space-1); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+.project-card-rows { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.project-card-rows[hidden] { display: none; }
+.project-card .conversation-row.grouped { padding-inline-start: var(--space-3); }
+.project-card .conversation-who { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
+.project-card .conversation-supervisor { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.project-card .conversation-session-mark { margin-inline-start: 0; }
+.conversation-account { display: block; max-width: 100%; overflow-wrap: anywhere; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+.conversation-avatar { position: relative; }
+.conversation-avatar.harness-mark { background: var(--bg-panel); color: var(--ink); font-family: var(--font-mono); }
+.supervisor-state { position: absolute; right: 0; bottom: 0; width: var(--space-3); height: var(--space-3); border: var(--state-rule-width) solid var(--bg-raised); border-radius: var(--radius-pill); background: var(--state-idle); }
+.supervisor-state.working { background: var(--state-ok); }
+.supervisor-state.needs-you { background: var(--state-warn); }
+.supervisor-state.offline { background: var(--bg-raised); outline: var(--line-width) solid var(--ink-mid); outline-offset: calc(-1 * var(--line-width)); }
+.conversation-filters { display: flex; flex: none; gap: var(--space-1); padding: 0 var(--space-4) var(--space-2); overflow-x: auto; min-width: 0; }
+.conversation-filter { flex: none; min-height: 32px; padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); white-space: nowrap; }
+.conversation-filter[aria-pressed="true"] { border-color: var(--color-action); background: var(--bg-active); color: var(--color-action); }
+.conversation-filter:hover { background: var(--bg-hover); color: var(--ink); }
+.needs-you-section { flex: none; display: flex; flex-direction: column; gap: var(--space-1); margin-block-end: var(--space-2); padding: var(--space-2); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); }
+.needs-you-section h2 { margin: 0; padding: var(--space-1) var(--space-2); font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.needs-you-shortcut { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-2); row-gap: var(--space-1); min-height: var(--rail-item-min); padding: var(--space-2); text-align: left; border: 0; border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink); }
+.needs-you-shortcut:hover { background: var(--bg-hover); color: var(--ink); }
+.needs-you-shortcut strong { font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.needs-you-shortcut .codename { font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.needs-you-shortcut small { flex-basis: 100%; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.project-nav-empty { color: var(--ink-mid); margin: var(--space-3); font-size: var(--fs-meta); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .conversation-list-heading { padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--space-3) + env(safe-area-inset-right)) var(--space-2) calc(var(--space-3) + env(safe-area-inset-left)); }
+  .conversation-list-title { margin-top: var(--space-2); }
+  .conversation-list-heading p { margin-top: var(--space-1); }
+  .conversation-search { margin-top: var(--space-2); }
+  .conversation-filters { padding-inline: var(--space-3); }
+  .conversation-sidebar > .conversation-filters { padding-inline-start: calc(var(--space-3) + env(safe-area-inset-left)); padding-inline-end: calc(var(--space-3) + env(safe-area-inset-right)); }
+  .conversation-filter { min-height: var(--rail-item-min); }
+  .project-machine-chip { min-height: var(--rail-item-min); }
+  /* Keep six sessions visible below the project header and filter bar.
+     The 42px avatar and separate 44px End target keep their full size. */
+  .project-card .conversation-row { padding-block: var(--space-1); }
+  .project-card .conversation-end[data-state="idle"] .conversation-end-ask { bottom: var(--space-1); }
+}
+@media (forced-colors: active) {
+  .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }
+  .conversation-filter[aria-pressed="true"] { border-color: Highlight; background: Canvas; color: Highlight; }
+  .supervisor-state { border-color: Canvas; background: CanvasText; }
+  .supervisor-state.offline { background: Canvas; outline: var(--line-width) solid CanvasText; }
+  .machine-online-dot.online { background: CanvasText; border-color: CanvasText; }
+}
+
+.session-end-receipt {
+  margin: var(--space-4);
+  padding: var(--space-4);
+  border-top: var(--line-width) solid var(--line-strong);
+  background: var(--bg-panel);
+  color: var(--ink-mid);
+  overflow-wrap: anywhere;
+}
+.session-end-receipt p { margin: var(--space-2) 0 0; }
+.session-end-receipt .session-end-orphans, .session-ended-status .session-end-orphans { color: var(--state-warn); }

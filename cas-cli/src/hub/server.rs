@@ -2131,8 +2131,10 @@ fn systemd_unit_command(
     let mut command = std::process::Command::new("systemd-run");
     command.arg("--user")
         .arg(format!("--unit=cas-factory-{name}"))
+        .arg("--slice=agent.slice")
         .arg("--collect")
         .arg("--property=Type=exec")
+        .arg("--property=Nice=5")
         .arg(format!("--property=StandardError=append:{}", log_path.display()))
         .arg("--property=StandardOutput=null")
         .arg(format!("--working-directory={}", root.display()));
@@ -2341,6 +2343,8 @@ mod launch_tests {
         );
         let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
         assert!(args.contains(&"--unit=cas-factory-demo-1".to_string()));
+        assert!(args.contains(&"--slice=agent.slice".to_string()), "{args:?}");
+        assert!(args.contains(&"--property=Nice=5".to_string()), "{args:?}");
         assert!(args.contains(&"reap-daemon".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--property=KillMode=")));
         assert!(args.contains(&"--setenv=PATH".to_string()));
@@ -2739,7 +2743,7 @@ pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: boo
     sessions
         .into_iter()
         .filter(|session| {
-            reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
+            session.ended.is_some() || reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
         })
         .filter(|session| !session.supervisor.trim().is_empty())
         .collect()

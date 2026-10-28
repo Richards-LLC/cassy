@@ -1,7 +1,8 @@
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { fleetControlGate } from '../src/fleet-permissions';
 import type { Scope } from '../src/types';
-import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
+import { groupConversationRows, type ConversationRow } from '../src/conversation-list';
+import { ProjectNavigation } from '../src/project-navigation';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
 import { DEFAULT_EXPLORER_ORIGIN, explorerUrl } from '../src/app-switcher';
@@ -68,7 +69,7 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
  * one heading with the most recent marked; this device may end them.
  */
 export function fixtureSessionRows(): ConversationRow[] {
-  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true };
+  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true, harness: 'codex' as const, account_email: 'operator@example.test', machine_online: true };
   const now = Date.now();
   return groupConversationRows([
     { ...base, key: 'atlas-linux:noble', session: 'gabber-studio-noble-cheetah-84', supervisor: 'noble-cheetah-84', when: '14h', freshness: 'Last activity 14h ago · relay-watchdog → Commander', activityAt: now - 14 * 3_600_000, preview: 'Mixdown preview rendered: 3 stems.' },
@@ -83,7 +84,7 @@ export function fixtureSessionRows(): ConversationRow[] {
  * phone opens on. Each can be ended; one has unread turns and one is waiting.
  */
 export function fixtureManySessionRows(): ConversationRow[] {
-  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true };
+  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true, harness: 'codex' as const, account_email: 'operator@example.test', machine_online: true };
   const now = Date.now();
   const names = ['calm-puma-34', 'wild-shark-68', 'noble-cheetah-84', 'quiet-otter-12', 'brave-lynx-7', 'swift-heron-51', 'amber-fox-29'];
   const previews = ['Stem export is at 60%.', 'Mixdown preview rendered: 3 stems.', 'Waiting on your approval for the mastering chain.', 'Nothing waiting on you.', 'Re-rendered the vocal bus.', 'Live', 'Live'];
@@ -130,7 +131,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()
     : needsPairing ? fixtureConversationRows(selected).map((row) => row.machineId === 'atlas-linux' ? { ...row, connection: 'Needs pairing', interrupted: true } : row)
     : fixtureConversationRows(selected);
-  const conversationList = new ConversationList();
+  const conversationList = new ProjectNavigation();
   const listNode = app.querySelector<HTMLElement>('#conversation-list')!;
   // Ending a session drops its row, as main.ts does once the hub confirms.
   let shownRows = listRows;
@@ -308,7 +309,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // Polish fixture; upload, ticket, reload and second-device behavior is HUB-J24.
     installAttachmentSheet((sheet, file) => {
       if (state === 'conversation-attachment-failure') return inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: new URL('/attachment-preview-missing.png', location.href).href } }));
-      const root = inlineAttachment(sheet, file, () => new Promise(() => {}), { openPreview: true });
+      const root = inlineAttachment(sheet, file, () => new Promise(() => {}));
       const viewport = root.querySelector<HTMLElement>('.rich-media');
       if (viewport) {
         const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;

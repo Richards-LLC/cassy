@@ -93,17 +93,6 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
   await journey.stage("Pair", async () => {
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
-    expect(hub.exchanges).toHaveLength(1);
-    expect(hub.exchanges[0]).toMatchObject({ token: TOKEN, hub_id: "atlas", operator_label: "Daniel" });
-    // The new token goes to the new link's machine, never the earlier one (QA F01).
-    expect(hub.exchangeOrigins).toEqual(["https://atlas.test"]);
-  });
-
-  await journey.stage("Reach the supervisor", async () => {
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
-    await expect(row).toBeVisible({ timeout: 15_000 });
-    await row.click();
-    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator("#toast")).toHaveText(/connected/);
     // It covers no heading either: at the top right it used to land on the
     // context rail's "Tasks & progress" (3.30.0 journey F8).
@@ -115,6 +104,17 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
       }).map((h) => h.textContent?.trim());
     });
     expect(covered, "headings under the toast").toEqual([]);
+    expect(hub.exchanges).toHaveLength(1);
+    expect(hub.exchanges[0]).toMatchObject({ token: TOKEN, hub_id: "atlas", operator_label: "Daniel" });
+    // The new token goes to the new link's machine, never the earlier one (QA F01).
+    expect(hub.exchangeOrigins).toEqual(["https://atlas.test"]);
+  });
+
+  await journey.stage("Reach the supervisor", async () => {
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // cas-0b3d: the machine takes this browser's usage counts as it comes
     // online, not only when another machine does or five minutes pass.
     await expect.poll(() => hub.usagePosts.filter((post) => post.machine === "atlas").flatMap((post) => post.entries.map((entry) => entry.action)), { timeout: 15_000 }).toContain("pair.link");

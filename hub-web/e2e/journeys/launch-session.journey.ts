@@ -53,7 +53,7 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
 
   await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
-    await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toBeVisible();
     // cas-865c: New session is named by its goal before the permission too; it
     // opens the sheet's grant view, which explains what is asked.
     const toggle = page.locator("#new-session-toggle");
@@ -152,7 +152,7 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await page.reload();
     await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await back.tap();
-    await expect(list.getByRole("button", { name: /ledger-api/ })).toBeVisible();
+    await expect(list.getByRole("button", { name: /ledger-api/ }).and(list.locator(".conversation-row"))).toBeVisible();
   });
 });
 
@@ -295,7 +295,7 @@ test("HUB-J13 New session says a reconnecting machine is reconnecting, then load
     await journey.open();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await hub.down("atlas", { sockets: "close" });
-    await expect(list.getByRole("button", { name: /cas-src/ })).toContainText("Reconnecting", { timeout: 20_000 });
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Reconnecting", { timeout: 20_000 });
   });
 
   await journey.stage("New session says it is reconnecting and offers nothing that can only fail", async () => {

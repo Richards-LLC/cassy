@@ -97,7 +97,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await holdPageClock(page);
     try {
       await showConversationList(page);
-      const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+      const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
       await expect(row).toBeVisible();
       // cas-d8a5 (journey F32): the row's spoken name reads as words: no run-on
       // badge, no empty part, no stray " , " before its time.

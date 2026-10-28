@@ -8,7 +8,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 async function choose(page: Page) {
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
 }
 async function send(page: Page, text: string) {
   await page.getByRole("textbox", { name: "Your message" }).fill(text);
@@ -447,14 +447,14 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
 test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  const casSrc = list.getByRole("button", { name: /cas-src/ });
+  const casSrc = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
   await journey.stage("Read a reply, then move to another conversation", async () => {
     await journey.open();
     await casSrc.click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "Read before the reload.");
     await expect(page.getByRole("log").getByText("Read before the reload.")).toBeVisible();
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(casSrc.getByLabel(/unread/)).toHaveCount(0);
   });

@@ -358,6 +358,7 @@ mod viktor_provenance_tests {
     #[test]
     fn viktor_queue_rows_keep_the_standard_provenance_envelope() {
         let row = QueuedPrompt {
+            reference_only: false,
             id: 73,
             source: "viktor".to_string(),
             target: "worker-1".to_string(),
@@ -390,6 +391,7 @@ mod viktor_provenance_tests {
     #[test]
     fn provenance_marks_only_rows_past_the_operational_freshness_window() {
         let row = QueuedPrompt {
+            reference_only: false,
             id: 74,
             source: "director".to_string(),
             target: "worker-1".to_string(),
@@ -418,6 +420,7 @@ mod viktor_provenance_tests {
 
     fn commander_row(origin: Option<cas_store::QueueOrigin>) -> QueuedPrompt {
         QueuedPrompt {
+            reference_only: false,
             id: 75,
             source: "commander:Daniel@iphone-15".to_string(),
             target: "supervisor".to_string(),
@@ -1892,8 +1895,9 @@ impl CasService {
         // This is strong evidence for exactly one row; the conservative
         // generic reply-inference rule below remains unchanged.
         let explicit_reply_to = req.in_reply_to;
-        // Only a direct reply acknowledges the row it names (cas-009c).
-        let mut explicit_reply_acks = false;
+        // Direct replies settle their addressed copy; a broadcast answer
+        // settles only this recipient, never the shared row (cas-009c).
+        let mut explicit_reply_settles = false;
         let mut replied_blocker = None;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
@@ -1928,7 +1932,11 @@ impl CasService {
             ];
             let reference =
                 classify_reply_reference(&prior.source, &prior.target, &counterparty, &me);
-            explicit_reply_acks = reference == Some(ReplyReference::DirectReply);
+            explicit_reply_settles = reference == Some(ReplyReference::DirectReply)
+                || (reference == Some(ReplyReference::Thread)
+                    && prior.target.eq_ignore_ascii_case("all_workers")
+                    && counterparty.iter().any(|name| !name.is_empty() && name.eq_ignore_ascii_case(&prior.source))
+                    && !me.iter().any(|name| !name.is_empty() && name.eq_ignore_ascii_case(&prior.source)));
             match reference {
                 Some(ReplyReference::DirectReply) => {
                     replied_blocker = crate::prompt_revalidation::parse_blocker_envelope(&prior.prompt)
@@ -2988,8 +2996,11 @@ impl CasService {
                     )
                 })?;
         }
-        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_acks) {
-            queue.ack(notification_id).map_err(|error| {
+        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_settles) {
+            let sender_name = agent_from_store.as_ref().map(|a| a.name.as_str())
+                .unwrap_or(display_name.as_str());
+            let sender_aliases = crate::harness_policy::inbox_aliases(sender_name, role == "supervisor");
+            queue.acknowledge_for_recipients(notification_id, &sender_aliases, Some(message_id)).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!(
@@ -3073,10 +3084,11 @@ impl CasService {
                 .claim_recipient_transport_token(message_id, &worker.name)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
             {
-                let body =
-                    crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
-                        &row,
-                    );
+                let delivery = queue.recipient_delivery(row.id, &worker.name)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "recovery row unavailable"))?;
+                let row = delivery.into_prompt();
+                let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
                 if let Err(error) = inbox.write_to_inbox(
                     &worker.name,
                     &row.source,
@@ -3566,6 +3578,12 @@ impl CasService {
         let now = chrono::Utc::now();
         let mut body = String::new();
         for message in &messages {
+            if message.reference_only {
+                body.push_str(&format!("**[{}] From: {}**\n{}\n\n", message.id, message.source, message.prompt));
+                rendered += 1;
+                continue;
+            }
+
             // A supervisor can claim a queue row directly through inbox_poll,
             // bypassing the daemon's transport-time check. Re-run the exact
             // merge-request predicate here so an invalidated delivery anchor
@@ -3956,7 +3974,13 @@ impl CasService {
             )));
         }
 
-        queue.ack(notification_id).map_err(|error| {
+        let agent_id = self.inner.get_agent_id().map_err(|_| Self::error(
+            ErrorCode::INVALID_REQUEST, "message_ack requires a registered agent identity"))?;
+        let agent = self.inner.open_agent_store()?.get(&agent_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
+        let aliases = crate::harness_policy::inbox_aliases(&agent.name,
+            agent.role == cas_types::AgentRole::Supervisor);
+        queue.acknowledge_for_recipients(notification_id, &aliases, None).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to acknowledge message: {error}"),
@@ -5055,6 +5079,7 @@ mod inbox_poll_identity_tests {
     #[test]
     fn a_named_progress_relay_is_shown_after_its_task_moves_on() {
         let relay = |source: &str, transition: &str, new: &str| cas_store::QueuedPrompt {
+            reference_only: false,
             id: 7,
             source: source.to_string(),
             target: "supervisor".to_string(),
@@ -6775,7 +6800,8 @@ mod cas_89e1_post_merge_message_type_tests {
                 )
                 .and_then(|out| out.text)
                 .unwrap();
-            assert!(repeated.contains("Another request")); // pin: unacknowledged batch-body recovery stays available.
+            assert!(!repeated.contains("Another request")); // pin: an ordinary polled body is recovered by reference.
+            assert!(repeated.contains(&format!("Message {untouched}:")), "{repeated}");
             assert!(!repeated.contains(&long));
         }
     }
@@ -7339,6 +7365,7 @@ mod cas_89e1_post_merge_message_type_tests {
     #[test]
     fn verified_commander_rows_print_the_exact_operator_reply_command() {
         let mut row = cas_store::QueuedPrompt {
+            reference_only: false,
             id: 3139,
             source: "commander:Daniel@Soundwave".into(),
             target: "supervisor".into(),

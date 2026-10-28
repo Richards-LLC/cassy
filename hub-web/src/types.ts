@@ -31,7 +31,16 @@ export interface PairingInstallIdentity {
   generation: number;
 }
 
+export interface SessionEndOutcome {
+  at: string;
+  reason: string;
+  workers_stopped: string[];
+  orphans: string[];
+  unverified?: string[];
+}
+
 export interface HubSession {
+  ended?: SessionEndOutcome;
   name: string;
   project_dir?: string;
   supervisor: string;
@@ -54,6 +63,11 @@ export interface HubSession {
   started_at?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), so the app switcher opens Explorer on it. */
   cloud_project_id?: string;
+  /** Additive session-read metadata; omitted by older hubs. */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  machine_online?: boolean;
 }
 
 export interface PaneInfo {

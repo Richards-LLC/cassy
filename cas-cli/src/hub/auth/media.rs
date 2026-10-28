@@ -30,7 +30,7 @@ impl AuthStore {
         artifact: &str,
         now: DateTime<Utc>,
     ) -> Result<MediaTicket> {
-        let state = self.lock().map_err(store_failure)?;
+        let state = self.read_lock().map_err(store_failure)?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         anyhow::ensure!(
             context.has(Scope::SessionRead),
@@ -101,7 +101,7 @@ impl AuthStore {
                 && claims.expires - claims.issued <= MEDIA_TTL_SECONDS,
             "media ticket refused"
         );
-        let state = self.lock().map_err(store_failure)?;
+        let state = self.read_lock().map_err(store_failure)?;
         let device = state
             .devices
             .iter()

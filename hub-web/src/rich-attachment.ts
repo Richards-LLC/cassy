@@ -24,7 +24,7 @@ function previewElement(document: Document): Preview {
 }
 
 /** Reserve media's final viewport before any lazy code, URL or bytes arrive. */
-export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>, options: { machineId?: string; available?: () => boolean; openPreview?: boolean } = {}): HTMLElement {
+export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>, options: { machineId?: string; available?: () => boolean } = {}): HTMLElement {
   const mime = file.mime.split(";")[0]!.trim().toLowerCase();
   if (!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/pdf)$/.test(mime)) return sheet;
   const document = sheet.ownerDocument;

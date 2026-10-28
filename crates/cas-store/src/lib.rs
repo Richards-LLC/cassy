@@ -174,7 +174,8 @@ pub use qa_pass_store::{
     claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
     open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer, release_qa_claim_for_task,
     resolve_qa_pass, satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task, waive_qa_pass,
-    withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
+    withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task, waive_qa_pass_reporting_superseded,
+    obsolete_qa_task_passes, qa_task_has_current_round,
 };
 pub use rule_candidate_store::{
     RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
@@ -288,7 +289,7 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    AdmissionOutcome, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryRetryState, DeliveryStage,
+    AdmissionOutcome, RecipientDelivery, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryRetryState, DeliveryStage,
     EnqueueIdempotentResult, EnqueueOutcome, HOOK_SURFACE_BUDGET_CHARS,
     HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain, InboxHandoffState, MessageDeliveryReport,
     MessageStatus, NOTICE_DIGEST_KIND, OPERATOR_CLOUD_SCHEMA_STATEMENTS,

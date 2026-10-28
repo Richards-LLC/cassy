@@ -37,7 +37,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(send).toBeVisible();
   });
 
@@ -63,14 +63,14 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   });
 
   await journey.stage("Restore the draft and focus after switching conversations rebuilds the shell", async () => {
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(composer).toHaveValue("");
     await expect(composer).toBeFocused();
     // Prove a shell replacement, distinct from the steady heartbeat above.
     expect(await page.evaluate(() =>
       (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField.isConnected,
     )).toBe(false);
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
     await expect(composer).toBeFocused();
     expect(await composer.evaluate((field: HTMLTextAreaElement) => field.selectionStart)).toBe(7);
@@ -94,7 +94,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     queued = hub.queueLatest(PELICAN);
     await expect(page.locator('.conversation-turn[data-state="acknowledged"]').getByRole("status")).toHaveText("Queued for supervisor");
     await page.reload();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.locator('.conversation-turn[data-state="acknowledged"]').getByRole("status")).toHaveText("Queued for supervisor");
     hub.deliverQueued(PELICAN, queued);
     const delivered = page.locator('.conversation-turn[data-state="delivered"]');
@@ -416,7 +416,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   });
 
   await journey.stage("A long supervisor name leaves the message box usable", async () => {
-    await list.getByRole("button", { name: /forge-tools/ }).click();
+    await list.getByRole("button", { name: /forge-tools/ }).and(list.locator(".conversation-row")).click();
     const longSend = page.getByRole("button", { name: "Send to the forge-tools supervisor", exact: true });
     await expect(longSend).toBeVisible();
     const [field, button, row] = await Promise.all([composer.boundingBox(), longSend.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
@@ -498,7 +498,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     for (const [project, wordings] of Object.entries(expected)) {
       const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
       if (await back.isVisible()) await back.click();
-      await list.getByRole("button", { name: new RegExp(project) }).click();
+      await list.getByRole("button", { name: new RegExp(project) }).and(list.locator(".conversation-row")).click();
       await expect(composer).toBeVisible();
       await expect.poll(async () => (await fit()).fits, { message: `${project}: the placeholder fits the 390px field` }).toBe(true);
       const { text } = await fit();
@@ -516,11 +516,11 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // the composer now; focus elsewhere is left where it is.
     const details = page.locator(".conversation-pane-slot .connection-details summary");
     await page.reload();
-    await expect(list.getByRole("button", { name: /gabber-studio/ })).toBeVisible();
+    await expect(list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row"))).toBeVisible();
     // cas-54ed: the attach is held until the card has focus, not for 3 s a
     // loaded host can spend before the focus lands.
     const releaseOtter = hub.holdAttach(OTTER);
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(details).toBeVisible();
     await details.focus();
     await expect(details).toBeFocused();
@@ -529,9 +529,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(composer).toBeFocused();
     // Focus outside the card (the list search) stays there when it is replaced.
     await page.reload();
-    await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toBeVisible();
     const releasePelican = hub.holdAttach(PELICAN);
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(details).toBeVisible();
     const search = page.getByRole("searchbox", { name: "Search conversations" });
     await search.focus();
@@ -555,7 +555,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await composer.fill("Short enough to keep.");
     await expect(note).toBeHidden();
     await page.reload();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(composer).toHaveValue("Short enough to keep.");
     await expect(note).toBeHidden();
   });
@@ -602,7 +602,7 @@ test("HUB-J5 message-only pairing sends without taking pane control (cas-d402)",
   });
   await journey.stage("Send while this device does not hold the session", async () => {
     await journey.open();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(send).toBeVisible();
     await composer.fill("Send this without terminal access.");
     const sent = hub.nextSend();
@@ -632,7 +632,7 @@ test("HUB-J5 Send again delivers without taking pane control (cas-d402)", journe
   });
   await journey.stage("A message whose receipt never came settles as Not confirmed", async () => {
     await journey.open();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(send).toBeVisible();
     await composer.fill("Did the Mac tests start?");
     const unreceipted = hub.nextSend();

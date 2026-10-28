@@ -528,6 +528,22 @@ pub fn waive_qa_pass(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<QaPass> {
+    waive_qa_pass_reporting_superseded(cas_dir, task_id, supervisor_agent_id,
+        implementer_agent_id, branch, bound_head, reason, now).map(|(pass, _)| pass)
+}
+
+/// Record the waiver and report the retired round so lifecycle callers can
+/// cancel its work item, just as they do after a head-advance supersession.
+pub fn waive_qa_pass_reporting_superseded(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    implementer_agent_id: &str,
+    branch: &str,
+    bound_head: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(QaPass, Option<QaPass>)> {
     if reason.trim().is_empty() {
         return Err(StoreError::Parse("a QA waiver needs a reason".to_string()));
     }
@@ -539,8 +555,10 @@ pub fn waive_qa_pass(
     let conn = open_conn(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
+    let mut retired = None;
     if let Some(active) = active_with_conn(&tx, task_id)? {
         set_state(&tx, &active.id, QaPassState::Superseded, Some(now))?;
+        retired = Some(by_id_with_conn(&tx, &active.id)?);
     }
     let round = failed_rounds_with_conn(&tx, task_id)? + 1;
     let id = new_pass_id();
@@ -562,7 +580,43 @@ pub fn waive_qa_pass(
     )?;
     let pass = by_id_with_conn(&tx, &id)?;
     tx.commit()?;
-    Ok(pass)
+    Ok((pass, retired))
+}
+
+/// Keep a shared work item if any round still needs it or records a verdict.
+/// Deadline expiry is deliberately not applied by this read-only predicate.
+pub fn qa_task_has_current_round(cas_dir: &Path, qa_task_id: &str) -> Result<bool> {
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM qa_passes WHERE qa_task_id = ?1
+         AND state NOT IN ('superseded', 'waived'))",
+        params![qa_task_id], |row| row.get(0),
+    )?)
+}
+
+/// Read a bounded page of obsolete work items for exactly one delivery. Each
+/// child appears once; references from any non-obsolete round protect it.
+pub fn obsolete_qa_task_passes(cas_dir: &Path, task_id: &str, limit: usize) -> Result<Vec<QaPass>> {
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let columns = COLUMNS.split(',').map(|column| format!("p.{}", column.trim()))
+        .collect::<Vec<_>>().join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {columns} FROM qa_passes p JOIN tasks t ON t.id = p.qa_task_id
+         WHERE p.task_id = ?1 AND p.state IN ('superseded', 'waived')
+           AND t.status NOT IN ('closed', 'cancelled')
+           AND EXISTS(SELECT 1 FROM json_each(t.labels) WHERE value = 'qa-pass')
+           AND NOT EXISTS(SELECT 1 FROM qa_passes current
+             WHERE current.qa_task_id = p.qa_task_id
+               AND current.state NOT IN ('superseded', 'waived'))
+           AND p.rowid = (SELECT newest.rowid FROM qa_passes newest
+             WHERE newest.qa_task_id = p.qa_task_id
+             ORDER BY newest.requested_at DESC, newest.rowid DESC LIMIT 1)
+         ORDER BY p.requested_at, p.rowid LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![task_id, limit.clamp(1, 100) as i64], parse_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(StoreError::Database)
 }
 
 /// cas-0c988: carry a recorded verdict to a rebased tip of the same delivery.

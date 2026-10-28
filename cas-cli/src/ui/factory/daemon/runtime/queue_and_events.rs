@@ -13473,8 +13473,8 @@ mod tests {
         let mut daemon = super::super::provisioning_tests::daemon(&root);
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         let payload = crate::supervisor_notices::operator_prompt("notice", "notice").unwrap();
-        let notice = queue.enqueue_idempotent("relay-watchdog", "operator", &payload,
-            Some("provision-test"), None, None, "notice-receipt", Some(&QueueOrigin::Daemon)).unwrap().id();
+        let cas_store::EnqueueIdempotentResult::Created(notice) = queue.enqueue_idempotent("relay-watchdog", "operator", &payload,
+            Some("provision-test"), None, None, "notice-receipt", Some(&QueueOrigin::Daemon)).unwrap() else { panic!("expected a new notice"); };
         let reply = queue.enqueue_with_session("supervisor", "operator", &payload, "provision-test").unwrap();
         for id in [reply, notice, notice] {
             let frame = serde_json::from_value(serde_json::json!({ "OperatorNoticePersisted": {

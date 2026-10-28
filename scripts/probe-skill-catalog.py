@@ -182,7 +182,9 @@ context_window = 200000
             if harness == "grok":
                 env["XAI_API_KEY"] = "fixture-only"
             argv = [str(executable)]
-            if executable.read_bytes()[:50].startswith(b"#!/usr/bin/env node"):
+            with executable.open("rb") as binary:
+                node_script = binary.read(50).startswith(b"#!/usr/bin/env node")
+            if node_script:
                 argv.insert(0, shutil.which("node"))
             prompt = ("Use $fixture-skill-49." if harness == "codex" else "/fixture-skill-49") if named else "Reply with fixture done."
             if harness == "codex":

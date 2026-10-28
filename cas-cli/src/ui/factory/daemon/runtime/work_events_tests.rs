@@ -105,6 +105,7 @@ fn claude_transcript_pages_by_cursor_without_touching_the_transcript() {
     assert!(!has_earlier);
     assert_eq!(older.len(), 1);
     assert_eq!((older[0].kind, older[0].label.as_str()), (WorkEventKind::Thinking, "Checking the lane"));
+    assert_eq!(serde_json::to_value(&older[0]).unwrap()["reasoning"]["source"], "claude_thinking");
 
     let DaemonMessage::WorkEventDetail { detail: Some(text), truncated: false, .. } =
         detail(&mut index, &scope, &stores, &path, &newest[0].id)
@@ -527,4 +528,19 @@ fn v2_changed_files_are_per_turn_successful_edit_provenance() {
         wire[1].get("changed_files").is_none(),
         "failed edit is not a changed file"
     );
+    write_lines(&path, &[
+        json!({"type":"assistant","timestamp":at(4),"message":{"content":[
+            {"type":"tool_use","id":"c","name":"Edit","input":{"file_path":"c.rs"}},
+            {"type":"tool_use","id":"d","name":"Edit","input":{"file_path":"d.rs"}}
+        ]}}),
+        json!({"type":"user","timestamp":at(5),"message":{"content":[{"type":"tool_result","tool_use_id":"d","content":"done"}]}}),
+        json!({"type":"user","timestamp":at(6),"message":{"content":[{"type":"tool_result","tool_use_id":"c","content":"done"}]}}),
+        json!({"type":"user","promptId":"p2","timestamp":at(7),"message":{"content":"next"}}),
+        json!({"type":"assistant","timestamp":at(8),"message":{"content":[{"type":"tool_use","id":"e","name":"Edit","input":{"file_path":"e.rs"}}]}}),
+        json!({"type":"user","timestamp":at(9),"message":{"content":[{"type":"tool_result","tool_use_id":"e","content":"done"}]}}),
+    ]);
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(events).unwrap();
+    assert_eq!(wire[3]["changed_files"]["files"].as_array().unwrap().len(), 3, "the newest snapshot includes earlier calls settling later");
+    assert_eq!(wire[4]["changed_files"]["files"].as_array().unwrap().len(), 1, "a new turn starts its own provenance");
 }

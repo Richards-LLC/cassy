@@ -150,19 +150,13 @@ impl WorkEventScope {
                 .map(|agent| SupervisorSource {
                     agent_id: agent.id.clone(),
                     agent_name: agent.name.clone(),
-                    harness_session: agent
-                        .cc_session_id
-                        .clone()
-                        .unwrap_or_else(|| agent.id.clone()),
+                    harness_session: agent.cc_session_id.clone().unwrap_or_else(|| agent.id.clone()),
                     cli: agent
                         .metadata
                         .get(&format!("{prefix}_cli"))
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(cas_mux::SupervisorCli::Claude),
-                    account_dir: agent
-                        .metadata
-                        .get(&format!("{prefix}_account_dir"))
-                        .cloned(),
+                    account_dir: agent.metadata.get(&format!("{prefix}_account_dir")).cloned(),
                 })
                 .collect()
         };
@@ -191,10 +185,7 @@ impl WorkEventScope {
     fn transcripts(&self, agent: Option<&str>) -> Vec<&SupervisorSource> {
         match agent {
             None => self.supervisors.iter().collect(),
-            Some(name) => self
-                .members()
-                .filter(|source| source.agent_name == name)
-                .collect(),
+            Some(name) => self.members().filter(|source| source.agent_name == name).collect(),
         }
     }
 
@@ -378,13 +369,24 @@ impl TranscriptIndex {
         let (exit_code, session) = result_facts(result, 0);
         let parent = self.poll_parents.remove(call);
         let running = session.is_some() && exit_code.is_none() && !error;
-        let failed = error || exit_code.is_some_and(|code| code != 0);
+        let failed = error
+            || result
+                .get("isError")
+                .or_else(|| result.get("is_error"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            || exit_code.is_some_and(|code| code != 0);
         for target in std::iter::once(index).chain(parent) {
             let indexed = &mut self.events[target];
             indexed.result_line = Some(line);
             indexed.event.error = failed;
             if let Some(tool) = &mut indexed.event.tool {
                 tool.exit_code = exit_code;
+                let files = result.get("numFiles").and_then(Value::as_u64);
+                let matches = result.get("numMatches").and_then(Value::as_u64);
+                if files.is_some() || matches.is_some() {
+                    tool.counts = Some(WorkToolCounts { files, matches });
+                }
             }
             if let Some(lifecycle) = &mut indexed.event.lifecycle {
                 lifecycle.stage = if running { "phase" } else { "end" }.into();
@@ -408,6 +410,7 @@ impl TranscriptIndex {
             if !running
                 && !failed
                 && (known_success || exit_code == Some(0))
+                && indexed.event.turn.is_some()
                 && let Some(tool) = &indexed.event.tool
                 && tool.operation == "edit"
             {
@@ -433,6 +436,16 @@ impl TranscriptIndex {
                         provenance: "successful_tool_calls".into(),
                         complete: false,
                     });
+                }
+            }
+        }
+        let turn = self.events[index].event.turn.clone();
+        if let Some(files) = self.changed_files.get(&turn) {
+            for indexed in &mut self.events {
+                if indexed.event.turn == turn
+                    && let Some(summary) = &mut indexed.event.changed_files
+                {
+                    summary.files = files.clone();
                 }
             }
         }
@@ -570,7 +583,7 @@ impl TranscriptIndex {
                     self.lifecycle_notice(at, offset, "end", None, Some("success"))
                 }
                 Some("compact_boundary") => {
-                    self.lifecycle_notice(at, offset, "phase", Some("compacting"), None)
+                    self.lifecycle_notice(at, offset, "phase", Some("compacted"), Some("success"))
                 }
                 _ => {}
             },
@@ -613,7 +626,7 @@ impl TranscriptIndex {
                 );
             }
             Some("compacted") => {
-                self.lifecycle_notice(at, offset, "phase", Some("compacting"), None)
+                self.lifecycle_notice(at, offset, "phase", Some("compacted"), Some("success"))
             }
             Some("response_item") => match kind {
                 Some("reasoning") => {
@@ -635,7 +648,8 @@ impl TranscriptIndex {
                 ) => {
                     if let Some(call) = payload.get("call_id").and_then(Value::as_str) {
                         let result = payload.get("output").unwrap_or(&Value::Null);
-                        self.settle(call, offset, at, false, result, true);
+                        let known_success = published_success(result, 0);
+                        self.settle(call, offset, at, false, result, known_success);
                     }
                 }
                 _ => {}
@@ -751,7 +765,10 @@ fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
             return result_facts(&value, depth + 1);
         }
         // Older Codex shell tools publish a fixed runner header before Final output.
-        let header = text.split("Final output:").next().unwrap_or("");
+        let header = text
+            .split_once("Final output:")
+            .map(|(header, _)| header)
+            .unwrap_or("");
         let code = header.lines().find_map(|line| {
             line.strip_prefix("Process exited with code ")?
                 .trim()
@@ -782,6 +799,28 @@ fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
         }
     }
     (None, None)
+}
+
+/// apply_patch has a published success header; arbitrary output is not proof of an edit.
+fn published_success(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if let Some(text) = value.as_str() {
+        return if let Ok(value) = serde_json::from_str::<Value>(text) {
+            published_success(&value, depth + 1)
+        } else {
+            text.starts_with("Success. Updated the following files:")
+        };
+    }
+    if value.get("success").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    value.as_array().is_some_and(|parts| {
+        parts
+            .iter()
+            .any(|part| published_success(part.get("text").unwrap_or(part), depth + 1))
+    })
 }
 
 fn session_key(value: &Value) -> Option<String> {
@@ -936,16 +975,8 @@ fn tool_summary(name: &str, input: &Value) -> (WorkEventKind, String) {
         })
     } else {
         [
-            "description",
-            "command",
-            "cmd",
-            "file_path",
-            "path",
-            "pattern",
-            "query",
-            "url",
-            "skill",
-            "prompt",
+            "description", "command", "cmd", "file_path", "path", "pattern", "query", "url",
+            "skill", "prompt",
         ]
         .iter()
         .find_map(|key| field(key))
@@ -966,11 +997,7 @@ fn tool_detail(name: &str, input: &Value, output: Option<&str>, error: bool) -> 
     };
     let mut detail = format!("{}\n\nInput:\n{input}", display_name(name));
     if let Some(output) = output {
-        detail.push_str(if error {
-            "\n\nResult (error):\n"
-        } else {
-            "\n\nResult:\n"
-        });
+        detail.push_str(if error { "\n\nResult (error):\n" } else { "\n\nResult:\n" });
         detail.push_str(output);
     }
     detail
@@ -1263,7 +1290,7 @@ impl WorkEventIndex {
             _ => None,
         };
         self.probe_paths
-            .retain(|id, _| scope.workers.iter().any(|source| &source.agent_id == id));
+            .retain(|id, _| scope.members().any(|source| &source.agent_id == id));
         let mut fingerprint = newest.unwrap_or_default();
         for source in scope.members() {
             let cached = self
@@ -1326,11 +1353,7 @@ impl WorkEventIndex {
                     .detail(line.parse().ok()?, block.parse().ok()?)
             }
             "q" => {
-                let row = stores
-                    .queue
-                    .as_ref()?
-                    .get(parts.next()?.parse().ok()?)
-                    .ok()??;
+                let row = stores.queue.as_ref()?.get(parts.next()?.parse().ok()?).ok()??;
                 let payload: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
                 let addressed = scope
                     .supervisors
@@ -1455,10 +1478,7 @@ impl WorkEventService {
             self.fingerprint = None;
             return false;
         }
-        !self.probe_in_flight
-            && self
-                .last_probe
-                .is_none_or(|last| now.duration_since(last) >= PROBE_INTERVAL)
+        !self.probe_in_flight && self.last_probe.is_none_or(|last| now.duration_since(last) >= PROBE_INTERVAL)
     }
 
     pub(crate) fn start_probe(
@@ -1481,16 +1501,12 @@ impl WorkEventService {
             budget: JOB_BUDGET,
         };
         let submitted = jobs.submit_external(spec, move || {
-            Box::new(probe(&index, &cas_dir, &project_path, &session))
-                as Box<dyn std::any::Any + Send>
+            Box::new(probe(&index, &cas_dir, &project_path, &session)) as Box<dyn std::any::Any + Send>
         });
         use super::jobs::Submitted;
         self.probe_in_flight = matches!(
             submitted,
-            Submitted::Queued
-                | Submitted::QueuedBehindKey
-                | Submitted::QueuedDroppedOldest { .. }
-                | Submitted::Coalesced { .. }
+            Submitted::Queued | Submitted::QueuedBehindKey | Submitted::QueuedDroppedOldest { .. } | Submitted::Coalesced { .. }
         );
     }
 

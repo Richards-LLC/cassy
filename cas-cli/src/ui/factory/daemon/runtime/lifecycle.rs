@@ -4867,7 +4867,7 @@ impl FactoryDaemon {
         // A green delivery has one durable reservation shared with later park
         // and manual merge requests. Never bypass that queue via direct PTY or
         // native inbox transport. Red/unknown decision prompts keep their lane.
-        if prompt.merge_alert.is_some() && prompt.text.starts_with("READY TO MERGE") {
+        if prompt.is_merge_ready() {
             let cas_dir = self.app.cas_dir().to_path_buf();
             let session = self.session_name.clone();
             store_worker.submit("director merge readiness", move || {
@@ -5052,7 +5052,7 @@ mod stall_nudge_routing_rework_tests {
         let root = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
         let mut prompt = crate::ui::factory::director::Prompt {
-            merge_alert: None,
+            merge_ready: false, merge_alert: None,
             target: "worker".into(), text: "quiet".into(), stall_nudge_task: Some("cas-unknown".into()),
             retract_worker: None, retract_task: None, retract_epic: None,
             drop_if_worker_assigned: None, durable_retry: true,

@@ -145,6 +145,36 @@ async fn test_search_with_content() {
     // Search result depends on whether index was built
     let text = extract_text(result);
     assert!(!text.is_empty());
+
+    // Exercise the consolidated MCP boundary with a large real search/context.
+    test_env.set("CAS_AGENT_ROLE", "worker");
+    for index in 0..6 {
+        service.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
+            "title": format!("boundedreceipt {index} {}", "large task title ".repeat(50)),
+            "description": "Evidence remains available through explicit expansion",
+            "risk": "none", "door": "two-way"
+        })).unwrap())).await.unwrap();
+    }
+    let memories = SqliteStore::open(&_temp.path().join(".cas")).unwrap();
+    for index in 0..10 {
+        memories.add(&Entry::new(format!("bounded-memory-{index}"),
+            format!("boundedreceipt evidence {index}: {}", "context details ".repeat(30)))).unwrap();
+    }
+    let service = cas::mcp::tools::service::CasService::new(service, None);
+    for action in ["search", "context"] {
+        let request: SearchContextRequest = serde_json::from_value(serde_json::json!({
+            "action":action, "query":"boundedreceipt", "limit":10
+        })).unwrap();
+        let full_request = SearchContextRequest { max_tokens: Some(100_000), ..request.clone() };
+        let full = extract_text(service.search(Parameters(full_request)).await.unwrap());
+        let bounded = extract_text(service.search(Parameters(request)).await.unwrap());
+        eprintln!("READ_REPLAY action={action} full_bytes={} default_bytes={}", full.len(), bounded.len());
+        assert!(full.len() > 2000, "fixture must exceed the default byte budget");
+        assert!(bounded.len() <= 2000, "default {action} leaks full body: {bounded}");
+        assert!(bounded.contains("max_tokens="), "expansion command missing");
+        assert!(full.contains("boundedreceipt"));
+    }
+
 }
 
 #[tokio::test]

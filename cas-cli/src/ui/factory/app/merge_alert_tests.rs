@@ -358,6 +358,9 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         // pin: the supervisor merges directly without a worker relay.
         assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
         assert!(f.app.refresh_prompt_for_delivery(prompt));
+        // Routing is production intent; localized wording cannot turn a green delivery red.
+        prompt.text = prompt.text.replacen("READY TO MERGE", "Merge delivery now", 1);
+        assert!(prompt.is_merge_ready());
         // The actual director producer, park relay and manual worker request
         // must reserve one shared wake, including before a task can park.
         let session = "readiness-fixture";
@@ -374,6 +377,8 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
             &f.app.cas_dir, session, prompt,
         ).unwrap();
         let row = queue.queued_prompt(director).unwrap().unwrap();
+        assert!(crate::ui::factory::daemon::runtime::delivery::parse_merge_ready_prompt(
+            &row.target, &row.prompt).unwrap().is_merge_ready());
         use crate::ui::factory::daemon::runtime::queue_and_events::{read_row_facts, WakeSender, SupervisorWakeClass};
         assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
             Some(Ok(Some(_)))), "unparked green delivery remains actionable through the queue");
@@ -792,6 +797,7 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     let prompts = f.relay();
     assert_eq!(prompts.len(), 1, "missing CI");
+    assert!(!prompts[0].is_merge_ready());
     assert!(
         prompts[0].text.contains("CI unknown"),
         "{}",
@@ -889,6 +895,7 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     f.ci(Some("failure"));
     let (_, failed, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(failed.len(), 1, "the later real failure needs a decision");
+    assert!(!failed[0].is_merge_ready());
     assert!(failed[0].text.contains("CI failed"));
     assert!(f.relay().is_empty());
 }

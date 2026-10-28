@@ -183,7 +183,8 @@ pub fn handle_session_start(
         // Capture/surface succession before generic orphan cleanup changes task state.
         if agent_role.as_deref() == Some("supervisor") {
             register_directly(&mut stores);
-            match crate::supervisor_continuity::startup_context(cas_root, &current_agent_id(input)) {
+            match crate::supervisor_continuity::startup_context(cas_root, &current_agent_id(input))
+            {
                 Ok(context) => lane_handoff = context,
                 Err(error) => eprintln!("cas: Supervisor handoff unavailable: {error}"),
             }
@@ -215,6 +216,7 @@ pub fn handle_session_start(
     // omits the duplicate bundle.
     let suppress_custom_profile_context =
         crate::hooks::session_start_fallback::is_custom_claude_supervisor()
+            && matches!(input.source.as_deref(), None | Some("startup"))
             && !crate::hooks::session_start_fallback::claim(cas_root, &input.session_id);
     let context_limit = config.context_limit();
 
@@ -264,8 +266,11 @@ pub fn handle_session_start(
     // over-budget payload degrades to counts + remediation command instead of
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + Cassy header + memories/tasks) is protected.
+    let context = resume_context_delta(cas_root, input, context);
     let mut assembler = SessionContextAssembler::new(context);
-    if !lane_handoff.is_empty() { assembler.prepend_protected(lane_handoff); }
+    if !lane_handoff.is_empty() {
+        assembler.prepend_protected(lane_handoff);
+    }
 
     if let Some(warning) = registration_role_warning {
         assembler.append_protected(warning);
@@ -301,7 +306,10 @@ pub fn handle_session_start(
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
         ) {
             assembler.prepend_degradable_with_priority(
-                "Factory MCP binary skew", banner.clone(), banner, DegradationPriority::Context,
+                "Factory MCP binary skew",
+                banner.clone(),
+                banner,
+                DegradationPriority::Context,
             );
         }
         if let Some(banner) =
@@ -318,7 +326,9 @@ pub fn handle_session_start(
 
     if let Some(channels) = crate::cli::session_start_channels(cas_root, chrono::Utc::now()) {
         assembler.append_degradable_with_priority(
-            "Configured Slack channels", channels.clone(), channels,
+            "Configured Slack channels",
+            channels.clone(),
+            channels,
             DegradationPriority::Context,
         );
     }
@@ -377,7 +387,8 @@ pub fn handle_session_start(
     }
 
     let docs_measurement = crate::hooks::handlers::handlers_events::docs_freshness::Measurement::at(
-        Path::new(&input.cwd), cas_root,
+        Path::new(&input.cwd),
+        cas_root,
     );
     if let Some(staleness) =
         crate::hooks::handlers::handlers_events::codemap::evaluate_codemap_at(&docs_measurement)
@@ -403,12 +414,14 @@ pub fn handle_session_start(
     }
 
     {
-        match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(&docs_measurement) {
+        match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(
+            &docs_measurement,
+        ) {
             // Always append so codemap retains the preview top slot when both
             // modules report high severity.
-            Ok(Some(staleness)) => {
-                assembler.append_protected(docs_measurement.annotate(staleness.format_injection(is_supervisor)))
-            }
+            Ok(Some(staleness)) => assembler.append_protected(
+                docs_measurement.annotate(staleness.format_injection(is_supervisor)),
+            ),
             Ok(None) => {}
             Err(e) => eprintln!("cas: project-overview freshness check failed: {e}"),
         }
@@ -635,6 +648,82 @@ pub fn handle_session_start(
     }
 
     Ok(output)
+}
+
+/// Hash only base context; current safety and operational banners are always rebuilt.
+/// Only explicit resume promises retained history. Clear/compact/unknown starts
+/// reload everything. Cache errors fail open, and no recalled text is persisted.
+fn resume_context_delta(cas_root: &Path, input: &HookInput, context: String) -> String {
+    use sha2::{Digest, Sha256};
+    if context.is_empty() || input.session_id.trim().is_empty() {
+        return context;
+    }
+    let role = std::env::var("CAS_AGENT_ROLE").unwrap_or_default();
+    let mut key = Sha256::new();
+    for part in [
+        input.session_id.as_str(),
+        input.cwd.as_str(),
+        crate::harness_policy::own_tool_prefix(),
+        &role,
+        input.permission_mode.as_deref().unwrap_or_default(),
+    ] {
+        key.update(part.len().to_le_bytes());
+        key.update(part.as_bytes());
+    }
+    for root in [Path::new(&input.cwd), cas_root.parent().unwrap_or(cas_root)] {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            match std::fs::read(root.join(name)) {
+                Ok(bytes) => {
+                    key.update(bytes.len().to_le_bytes());
+                    key.update(bytes);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => key.update([0]),
+                Err(_) => return context,
+            }
+        }
+    }
+    let directory = cas_root.join("session-context-fingerprints");
+    let path = directory.join(format!("{:x}.json", key.finalize()));
+    let previous: Vec<String> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut sections = Vec::new();
+    let mut start = 0;
+    for (offset, _) in context.match_indices('\n') {
+        if context[offset + 1..].starts_with("# ") || context[offset + 1..].starts_with("## ") {
+            sections.push(&context[start..offset + 1]);
+            start = offset + 1;
+        }
+    }
+    sections.push(&context[start..]);
+    let fingerprints: Vec<String> = sections
+        .iter()
+        .map(|section| format!("{:x}", Sha256::digest(section.as_bytes())))
+        .collect();
+    let save = || -> std::io::Result<()> {
+        use std::io::Write;
+        std::fs::create_dir_all(&directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+        file.write_all(&serde_json::to_vec(&fingerprints)?)?;
+        file.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    if save().is_err() || input.source.as_deref() != Some("resume") || previous.is_empty() {
+        return context;
+    }
+    let changed: String = sections
+        .iter()
+        .zip(&fingerprints)
+        .filter(|(_, fingerprint)| !previous.contains(fingerprint))
+        .map(|(section, _)| *section)
+        .collect();
+    if changed.is_empty() {
+        "Cassy resume: base context unchanged; previously delivered guidance still applies.\n"
+            .into()
+    } else {
+        changed
+    }
 }
 
 fn active_peer_supervisor_banner(cas_root: &Path, current_name: Option<&str>) -> Option<String> {
@@ -1103,6 +1192,64 @@ mod large_artifact_staging_tests {
                 "worker SessionStart lost mandatory protected guidance: {required:?}"
             );
         }
+    }
+
+    #[test]
+    fn session_start_resume_replays_only_changed_context_cas_ea0c() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = staging_env("worker");
+        env.set("CAS_AGENT_NAME", "resume-worker");
+        let mut input = session_input(tmp.path().to_str().unwrap());
+        input.source = Some("startup".into());
+        let first = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        input.source = Some("resume".into());
+        let resumed = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        eprintln!(
+            "SESSION_REPLAY first_bytes={} resume_bytes={}",
+            first.len(),
+            resumed.len()
+        );
+        assert!(
+            resumed.len() < first.len() / 2,
+            "unchanged resume repeats context: {resumed}"
+        );
+        assert!(!resumed.contains("# Factory Worker"));
+
+        // Dynamic safety context must be evaluated even when base guidance is cached.
+        env.set(
+            "CAS_CLONE_PATH",
+            tmp.path().join("other-worktree").to_str().unwrap(),
+        );
+        let warning = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(
+            warning.contains(tmp.path().join("other-worktree").to_str().unwrap()),
+            "resume lost current safety warning: {warning}"
+        );
+        env.remove("CAS_CLONE_PATH");
+
+        // Changed instructions invalidate the retained base, even in the same session.
+        std::fs::write(tmp.path().join("AGENTS.md"), "New project guidance").unwrap();
+        let changed = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(changed.contains("# Factory Worker"));
+        for source in ["compact", "clear", "startup"] {
+            input.source = Some(source.into());
+            let reset = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            assert!(
+                reset.contains("# Factory Worker"),
+                "{source} needs a full reload"
+            );
+        }
+        input.source = Some("resume".into());
+        input.session_id = "new-session".into();
+        assert!(
+            additional_context(handle_session_start(&input, Some(tmp.path())).unwrap())
+                .contains("# Factory Worker")
+        );
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        assert!(
+            !additional_context(handle_session_start(&input, Some(tmp.path())).unwrap())
+                .contains("unchanged")
+        );
     }
 
     /// WP2 (audit cas-1660 M30): the assembled SessionStart payload must fit
@@ -2843,7 +2990,10 @@ mod worker_worktree_assertion_tests {
 
         let result = build_worker_worktree_assertion(&p, String::new());
         // pin: session-start switch advice preserves the worker branch as one argument.
-        assert!(result.contains("git switch 'factory/worker{a,b}!e'"), "{result}");
+        assert!(
+            result.contains("git switch 'factory/worker{a,b}!e'"),
+            "{result}"
+        );
         assert!(
             result.contains("WRONG BRANCH"),
             "expected WRONG BRANCH warning for 'main': {result}"

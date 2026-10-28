@@ -312,7 +312,7 @@ async fn c4491f_assignment_wake_reads_its_task_off_the_loop() {
     let store_worker = super::store_worker::global();
     let mut refresh = DirectorRefresh::new();
     let wake = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: relay_worker().into(),
         text: "You have been assigned a new task:\nTask ID: cas-a551\nTitle: assigned work".into(),
         stall_nudge_task: None,
@@ -371,7 +371,7 @@ fn c4491f_assignment_read_names_a_stale_task() {
     task.status = cas_types::TaskStatus::Closed;
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let wake = |id: &str| crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "w".into(),
         text: format!("You have been assigned a new task:\nTask ID: {id}"),
         stall_nudge_task: None,
@@ -546,7 +546,7 @@ async fn c4491f_expired_recheck_leaves_the_assignment_unread() {
         .with_read_gate(Arc::clone(&gate))
         .with_timeout(Duration::ZERO);
     let wake = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "w".into(),
         text: "You have been assigned a new task:\nTask ID: cas-a551".into(),
         stall_nudge_task: None,
@@ -580,7 +580,7 @@ fn c4491f_unread_assignment_is_checked_before_it_is_delivered() {
     task.status = cas_types::TaskStatus::Closed;
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let wake = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "w".into(),
         text: "You have been assigned a new task:\nTask ID: cas-c105".into(),
         stall_nudge_task: None,
@@ -716,7 +716,7 @@ fn unread_batch(text: &str) -> super::factory_jobs::DeliverabilityBatch {
     super::factory_jobs::DeliverabilityBatch {
         prompts: vec![(
             crate::ui::factory::director::Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: relay_worker().into(),
                 text: text.into(),
                 stall_nudge_task: None,

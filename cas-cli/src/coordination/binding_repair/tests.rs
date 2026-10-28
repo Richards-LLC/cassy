@@ -479,10 +479,10 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     );
 }
 
-/// A transport-uncertain attempt pauses the project's legacy claims; the next
-/// update's identical attempt, refused definitely, is the exit.
+/// A transport-uncertain attempt pauses legacy claims; a reader refusal
+/// retains pending work through a failed retry.
 #[test]
-fn cas_9021_uncertain_attempt_is_settled_by_a_later_definite_refusal() {
+fn cas_7088_reader_refusal_retains_pending_pause_after_uncertainty() {
     let env = crate::test_support::TestEnvGuard::temp_home();
     let scope = scope();
     let root = env.home().join("project/.cas");
@@ -498,10 +498,14 @@ fn cas_9021_uncertain_attempt_is_settled_by_a_later_definite_refusal() {
     ))
     .unwrap();
     refusal["scope"]["team_id"] = scope.team_id.clone().into();
-    for (key, value) in [("code", "channel_unavailable"), ("reason", "not_member"), ("next_action", "invite_violet")] {
+    refusal["binding"]["team_id"] = scope.team_id.clone().into();
+    for (key, value) in [("code", "no_eligible_readers"), ("reason", "no_eligible_readers"), ("next_action", "retry_later")] {
         refusal[key] = value.into();
     }
-    for key in ["binding", "activation_id", "latest_attempt", "blockers", "retry_after_secs"] {
+    refusal["guidance"] = "Pending activity would reach no supervisor of this project. Start one, then retry; nothing was settled.".into();
+    refusal["latest_attempt"]["quiescence"]["blocking_v1_leases"] = 0.into();
+    refusal["latest_attempt"]["quiescence"]["blocking_v1_consumers"] = serde_json::json!([]);
+    for key in ["blockers", "retry_after_secs"] {
         refusal[key] = serde_json::Value::Null;
     }
     let team = scope.team_id.clone();
@@ -530,6 +534,14 @@ fn cas_9021_uncertain_attempt_is_settled_by_a_later_definite_refusal() {
     let refused = client.repair(&root, &scope).unwrap();
     remote.join().unwrap();
     assert!(matches!(refused.outcome, RepairOutcome::Blocked), "{refused:?}");
-    assert_eq!(journal.read().unwrap().policies[0].disposition, ChannelDisposition::LegacyAllowed);
-    assert!(journal.read().unwrap().legacy_claims_allowed(), "the definite refusal is the exit from Unknown");
+    assert_eq!(refused.response.as_ref().unwrap().code, ReconciliationCode::NoEligibleReaders);
+    assert_eq!(refused.response.as_ref().unwrap().next_action, super::super::binding_reconciliation::NextAction::RetryLater);
+    // pin: Cloud's retryable refusal guidance is the operator-visible contract.
+    assert_eq!(refused.error.as_deref(), Some("Pending activity would reach no supervisor of this project. Start one, then retry; nothing was settled."));
+    assert!(matches!(journal.read().unwrap().policies[0].disposition, ChannelDisposition::Paused { .. }));
+    assert!(!journal.read().unwrap().legacy_claims_allowed(), "pending rows cannot be reopened to legacy claims");
+    let failed_retry = client.repair(&root, &scope).unwrap();
+    assert!(matches!(failed_retry.outcome, RepairOutcome::Blocked));
+    assert!(matches!(journal.read().unwrap().policies[0].disposition, ChannelDisposition::Paused { .. }));
+    assert!(!journal.read().unwrap().legacy_claims_allowed(), "failed retry must retain the pending-row pause");
 }

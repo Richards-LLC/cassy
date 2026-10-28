@@ -523,13 +523,7 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
     > = std::sync::LazyLock::new(Default::default);
     let busy = ticks.and_then(|ticks| {
         let mut samples = SAMPLES.lock().ok()?;
-        if samples.len() > 1024 {
-            samples.clear();
-        }
-        let prior = samples.insert(pid, (fingerprint.clone(), ticks));
-        prior
-            .filter(|(old, _)| old == &fingerprint)
-            .map(|(_, old)| ticks > old)
+        record_cpu_sample(&mut samples, pid, &fingerprint, ticks)
     });
     let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"))
         .unwrap_or_else(|_| "unavailable".into());
@@ -550,6 +544,23 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
             if stdin { "yes" } else { "unobserved" }
         ),
     }
+}
+
+/// A cold probe has no delta. Keep sampling separate from classification so
+/// two status views can be checked against identical process evidence.
+fn record_cpu_sample(
+    samples: &mut std::collections::HashMap<u32, (String, u64)>,
+    pid: u32,
+    fingerprint: &str,
+    ticks: u64,
+) -> Option<bool> {
+    if samples.len() > 1024 {
+        samples.clear();
+    }
+    let prior = samples.insert(pid, (fingerprint.to_string(), ticks));
+    prior
+        .filter(|(old, _)| old == fingerprint)
+        .map(|(_, old)| ticks > old)
 }
 
 fn is_harness_command(raw: &[u8]) -> bool {

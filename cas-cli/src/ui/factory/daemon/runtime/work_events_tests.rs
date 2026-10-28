@@ -105,6 +105,7 @@ fn claude_transcript_pages_by_cursor_without_touching_the_transcript() {
     assert!(!has_earlier);
     assert_eq!(older.len(), 1);
     assert_eq!((older[0].kind, older[0].label.as_str()), (WorkEventKind::Thinking, "Checking the lane"));
+    assert_eq!(serde_json::to_value(&older[0]).unwrap()["reasoning"]["source"], "claude_thinking");
 
     let DaemonMessage::WorkEventDetail { detail: Some(text), truncated: false, .. } =
         detail(&mut index, &scope, &stores, &path, &newest[0].id)
@@ -153,6 +154,7 @@ fn codex_rollout_reasoning_and_calls_become_events() {
     assert!(!has_earlier);
     let shapes: Vec<_> = events.iter().map(|event| (event.kind, event.label.as_str(), event.error)).collect();
     assert_eq!(shapes, vec![
+        (WorkEventKind::Notice, "Turn started", false),
         (WorkEventKind::Thinking, "Reading the queue", false),
         (WorkEventKind::Tool, "shell: git status", true),
         (WorkEventKind::Todo, "Todos 1/2 · Merge", false),
@@ -340,9 +342,15 @@ fn measure_real_transcript() {
     let started = std::time::Instant::now();
     let (newest, mut has_earlier, mut cursor) = page(&mut index, &scope, &stores, &path, None, 100);
     let first_page = started.elapsed();
+    let mut typed_tools = newest.iter().filter(|event| event.tool.is_some()).count();
+    let mut lifecycles = newest.iter().filter(|event| event.lifecycle.is_some()).count();
+    let mut sample = newest.iter().find(|event| event.tool.is_some() && event.lifecycle.is_some()).cloned();
     let (mut pages, mut events) = (1, newest.len());
     while has_earlier {
         let (older, more, next) = page(&mut index, &scope, &stores, &path, cursor.as_deref(), 100);
+        typed_tools += older.iter().filter(|event| event.tool.is_some()).count();
+        lifecycles += older.iter().filter(|event| event.lifecycle.is_some()).count();
+        if sample.is_none() { sample = older.iter().find(|event| event.tool.is_some() && event.lifecycle.is_some()).cloned(); }
         (pages, events, has_earlier, cursor) = (pages + 1, events + older.len(), more, next);
     }
     let all_pages = started.elapsed();
@@ -362,5 +370,204 @@ fn measure_real_transcript() {
         all_pages.as_millis(),
         details.as_millis()
     );
+    println!("schema_version={} typed_tools={typed_tools} lifecycles={lifecycles} sample={}", WORK_EVENT_SCHEMA_VERSION, serde_json::to_string(&sample).unwrap());
+    assert!(typed_tools > 0 && lifecycles > 0, "real transcript must exercise typed tools and lifecycle fields");
     assert_eq!(before, after);
+}
+
+#[test]
+fn v2_tool_payloads_use_explicit_inputs_and_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("claude.jsonl");
+    write_lines(
+        &path,
+        &[
+            json!({"type":"assistant","timestamp":at(1),"message":{"content":[
+                {"type":"tool_use","id":"r","name":"Read","input":{"file_path":"src/lib.rs"}},
+                {"type":"tool_use","id":"s","name":"Grep","input":{"pattern":"needle","path":"src"}},
+                {"type":"tool_use","id":"c","name":"Bash","input":{"command":"git status","cwd":"/repo"}},
+                {"type":"tool_use","id":"u","name":"future_tool","input":{}}
+            ]}}),
+            json!({"type":"user","timestamp":at(2),"toolUseResult":{"exitCode":7},"message":{"content":[
+                {"type":"tool_result","tool_use_id":"c","is_error":true,"content":"failed"}
+            ]}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Claude),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(events).unwrap();
+    assert_eq!(wire[0]["tool"]["operation"], "read");
+    assert_eq!(wire[0]["tool"]["targets"], json!(["src/lib.rs"]));
+    assert_eq!(wire[0]["tool"]["counts"]["files"], 1);
+    assert_eq!(wire[1]["tool"]["operation"], "search");
+    assert_eq!(wire[2]["tool"]["command"], "git status");
+    assert_eq!(wire[2]["tool"]["exit_code"], 7);
+    assert_eq!(wire[3]["tool"]["operation"], "other");
+}
+
+#[test]
+fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(1),"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status\"}","call_id":"c"}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Codex),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
+    let resolve = |_: &SupervisorSource| Some(path.clone());
+    let (started, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let before = index.fingerprint(&scope, &stores, &resolve).unwrap();
+    assert_eq!(
+        serde_json::to_value(&started[0]).unwrap()["lifecycle"]["stage"],
+        "start"
+    );
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(2),"type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"{\"exit_code\":0,\"output\":\"clean\"}"}}),
+        ],
+    );
+    let (ended, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    assert_eq!(started[0].id, ended[0].id);
+    let wire = serde_json::to_value(&ended[0]).unwrap();
+    assert_eq!(wire["lifecycle"]["stage"], "end");
+    assert_eq!(wire["lifecycle"]["outcome"], "success");
+    assert_ne!(
+        index.fingerprint(&scope, &stores, &resolve).unwrap(),
+        before,
+        "settling the newest row must wake live clients"
+    );
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(3),"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"long command\"}","call_id":"run"}}),
+            json!({"timestamp":at(4),"type":"response_item","payload":{"type":"function_call_output","call_id":"run","output":[{"type":"input_text","text":"{\"session_id\":42,\"output\":\"working\"}"}]}}),
+        ],
+    );
+    let (running, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    assert_eq!(
+        serde_json::to_value(&running[1]).unwrap()["lifecycle"]["phase"],
+        "running"
+    );
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(5),"type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":42,\"chars\":\"\"}","call_id":"poll"}}),
+            json!({"timestamp":at(6),"type":"response_item","payload":{"type":"function_call_output","call_id":"poll","output":"Chunk ID: test\nProcess exited with code 3\nFinal output:\nfailed"}}),
+        ],
+    );
+    let (ended, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let continuation = serde_json::to_value(&ended[2]).unwrap();
+    let wire = serde_json::to_value(&ended[1]).unwrap();
+    assert_eq!(continuation["lifecycle"]["id"], wire["lifecycle"]["id"]);
+    assert_eq!(continuation["tool"]["operation"], "command");
+    assert_eq!(wire["lifecycle"]["stage"], "end");
+    assert_eq!(wire["lifecycle"]["outcome"], "error");
+    assert_eq!(wire["tool"]["exit_code"], 3);
+    let claude = temp.path().join("claude.jsonl");
+    write_lines(&claude, &[
+        json!({"type":"assistant","timestamp":at(1),"message":{"content":[{"type":"tool_use","id":"bg","name":"Bash","input":{"command":"long command"}}]}}),
+        json!({"type":"user","timestamp":at(2),"toolUseResult":{"isAsync":true,"backgroundTaskId":"job"},"message":{"content":[{"type":"tool_result","tool_use_id":"bg","content":"launched"}]}}),
+        json!({"type":"assistant","timestamp":at(3),"message":{"content":[{"type":"tool_use","id":"poll","name":"TaskOutput","input":{"task_id":"job"}}]}}),
+        json!({"type":"user","timestamp":at(4),"toolUseResult":{"task":{"task_id":"job","status":"completed","exitCode":0}},"message":{"content":[{"type":"tool_result","tool_use_id":"poll","content":"done"}]}}),
+        json!({"type":"system","subtype":"turn_duration","timestamp":at(5)}),
+    ]);
+    let (scope, stores, mut index) = (super::tests::scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
+    let (events, _, _) = page(&mut index, &scope, &stores, &claude, None, 10);
+    let original_detail = serde_json::to_string(&detail(&mut index, &scope, &stores, &claude, &events[0].id)).unwrap();
+    assert!(original_detail.contains("done"), "a background command retains its final poll output");
+    let wire = serde_json::to_value(events).unwrap();
+    assert_eq!(wire[0]["lifecycle"]["outcome"], "success");
+    assert_eq!(wire[0]["tool"]["exit_code"], 0);
+    assert_eq!(wire[2]["lifecycle"]["outcome"], "unknown", "turn_duration reports completion without a success verdict");
+}
+
+#[test]
+fn v2_reasoning_publishes_only_recorded_summary_and_detail() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(1),"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Published heading\nPublished detail"}],"encrypted_content":"PRIVATE_SENTINEL","content":[{"text":"PRIVATE_SENTINEL"}]}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Codex),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&events[0]).unwrap();
+    assert_eq!(wire["reasoning"]["summary"], "Published heading");
+    assert_eq!(wire["reasoning"]["source"], "codex_summary");
+    let detail =
+        serde_json::to_string(&detail(&mut index, &scope, &stores, &path, &events[0].id)).unwrap();
+    assert!(detail.contains("Published detail"));
+    assert!(!detail.contains("PRIVATE_SENTINEL"));
+}
+
+#[test]
+fn v2_changed_files_are_per_turn_successful_edit_provenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("claude.jsonl");
+    write_lines(
+        &path,
+        &[
+            json!({"type":"user","promptId":"p1","timestamp":at(1),"message":{"content":"edit"}}),
+            json!({"type":"assistant","timestamp":at(2),"message":{"content":[
+                {"type":"tool_use","id":"a","name":"Edit","input":{"file_path":"a.rs"}},
+                {"type":"tool_use","id":"b","name":"Write","input":{"file_path":"b.rs"}}
+            ]}}),
+            json!({"type":"user","timestamp":at(3),"message":{"content":[
+                {"type":"tool_result","tool_use_id":"a","content":"done"},
+                {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"refused"}
+            ]}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Claude),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&events).unwrap();
+    assert_eq!(
+        wire[0]["changed_files"]["files"],
+        json!([{"path":"a.rs","operation":"edit","source_event_id":events[0].id}])
+    );
+    assert_eq!(
+        wire[0]["changed_files"]["provenance"],
+        "successful_tool_calls"
+    );
+    assert_eq!(wire[0]["changed_files"]["complete"], false);
+    assert!(
+        wire[1].get("changed_files").is_none(),
+        "failed edit is not a changed file"
+    );
+    write_lines(&path, &[
+        json!({"type":"assistant","timestamp":at(4),"message":{"content":[
+            {"type":"tool_use","id":"c","name":"Edit","input":{"file_path":"c.rs"}},
+            {"type":"tool_use","id":"d","name":"Edit","input":{"file_path":"d.rs"}}
+        ]}}),
+        json!({"type":"user","timestamp":at(5),"message":{"content":[{"type":"tool_result","tool_use_id":"d","content":"done"}]}}),
+        json!({"type":"user","timestamp":at(6),"message":{"content":[{"type":"tool_result","tool_use_id":"c","content":"done"}]}}),
+        json!({"type":"user","promptId":"p2","timestamp":at(7),"message":{"content":"next"}}),
+        json!({"type":"assistant","timestamp":at(8),"message":{"content":[{"type":"tool_use","id":"e","name":"Edit","input":{"file_path":"e.rs"}}]}}),
+        json!({"type":"user","timestamp":at(9),"message":{"content":[{"type":"tool_result","tool_use_id":"e","content":"done"}]}}),
+    ]);
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(events).unwrap();
+    assert_eq!(wire[3]["changed_files"]["files"].as_array().unwrap().len(), 3, "the newest snapshot includes earlier calls settling later");
+    assert_eq!(wire[4]["changed_files"]["files"].as_array().unwrap().len(), 1, "a new turn starts its own provenance");
 }

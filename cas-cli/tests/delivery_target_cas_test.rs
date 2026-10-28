@@ -824,8 +824,11 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 assert_eq!(handoff.priority, cas_store::NotificationPriority::High);
                 assert!(handoff.created_at < dispatch.deadline_at);
                 assert!(chrono::Utc::now() < dispatch.deadline_at);
+                // pin: the daemon's wake parser requires this typed XML envelope and its dispatch identity.
                 assert!(handoff.prompt.contains(&format!("<cas-verification-dispatch dispatch_id=\"{}\"", dispatch.id)), "{}", handoff.prompt);
+                // pin: the wake parser must route the dispatch to its bound supervisor owner.
                 assert!(handoff.prompt.contains(&format!("owner=\"{supervisor_id}\"")), "{}", handoff.prompt);
+                // pin: the wake parser revalidates the typed dispatch's exact deadline.
                 assert!(handoff.prompt.contains(&format!("deadline=\"{}\"", dispatch.deadline_at.to_rfc3339())), "{}", handoff.prompt);
             }
             if row == "worker-blocked" {

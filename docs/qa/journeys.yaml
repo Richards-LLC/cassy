@@ -303,6 +303,10 @@ invariants:
   HUB-J24-PHONE-UPLOAD:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
+  HUB-J3-LIST-SCROLL-BOUNDS:
+    statement: Project-list accessibility labels remain inside the scrolling navigation and never extend the viewport-sized conversation shell.
+    check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
+    bug: {task: cas-2a07}
 bug_families:
   lost-ack-history-correlation:
     title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
@@ -422,6 +426,11 @@ bug_families:
     tasks: [cas-e155, cas-b255, cas-c3ac]
     invariants: [HUB-J4-GOAL, HUB-J4-VISUAL-SANDBOX, HUB-J4-MESSAGE-HIERARCHY]
     journeys: [HUB-J4]
+  scrolling-list-absolute-label-overflow:
+    title: Absolute accessibility labels in long project lists must use the scrolling navigation as their containing block
+    tasks: [cas-2a07]
+    invariants: [HUB-J3-LIST-SCROLL-BOUNDS]
+    journeys: [HUB-J1, HUB-J3]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code
@@ -668,6 +677,7 @@ journeys:
   - hub-web/src/viewport.ts
   invariants:
   - HUB-J3-GOAL
+  - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
   traffic:
     share_pct: null

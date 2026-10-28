@@ -1781,7 +1781,8 @@ dialog form > *,
 .conversation-search svg { position: absolute; left: 14px; width: 16px; height: 16px; color: var(--ink-mid); pointer-events: none; }
 .conversation-search input { width: 100%; min-height: var(--rail-item-min); padding: 0 var(--space-3) 0 38px; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--canvas); color: var(--ink); font: var(--weight-regular) var(--fs-md)/1.3 var(--font-ui); }
 .conversation-search input::placeholder { color: var(--ink-mid); opacity: 1; }
-#conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
+/* Keep absolute screen-reader labels inside the scrolling list, not the sidebar. */
+#conversation-list { position: relative; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
 .conversation-sidebar footer button { width: 100%; font-size: var(--fs-meta); }
 .conversation-row { position: relative; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; column-gap: 13px; row-gap: 3px; align-items: center; text-align: left; width: 100%; flex: none; padding: var(--space-3) 14px; border: 0; border-radius: 20px; background: var(--color-transparent); color: var(--ink); }

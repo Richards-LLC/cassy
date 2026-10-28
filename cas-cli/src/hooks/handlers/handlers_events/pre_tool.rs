@@ -7608,6 +7608,20 @@ mod workspace_contract_tests {
     /// however the command is wrapped.
     #[test]
     fn cas_3147_agent_shell_cannot_run_operator_policy_commands() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let decision = |command: &str| {
+            let out = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
+            let value = serde_json::to_value(out).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
         for command in [
             "cas config set factory.write_roots ~/soundwave-config",
             "/home/u/.local/bin/cas config set factory.write_roots ''",
@@ -7617,8 +7631,8 @@ mod workspace_contract_tests {
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",
         ] {
-            let denial = operator_policy_command_denial(command)
-                .unwrap_or_else(|| panic!("{command} must be refused"));
+            let (status, denial) = decision(command);
+            assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
         for allowed in [
@@ -7627,7 +7641,39 @@ mod workspace_contract_tests {
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
         ] {
-            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+            let (status, reason) = decision(allowed);
+            assert_ne!(status, "deny", "{allowed}: {reason}");
+        }
+        for operation in [
+            "set factory.write_roots /x",
+            "grant-write --task cas-1234 --path /x --reason example",
+            "revoke-write --task cas-1234 --path /x",
+        ] {
+            let mutation = format!("cas config {operation}");
+            for sink in ["wl-copy", "pbcopy", "xclip -selection clipboard"] {
+                for copy in [
+                    format!("printf '%s' '{mutation}' | {sink}"),
+                    format!("cat <<'COMMAND' | {sink}\n{mutation}\nCOMMAND"),
+                ] {
+                    let (status, reason) = decision(&copy);
+                    assert_eq!(status, "allow", "copy is data: {copy}: {reason}");
+                }
+            }
+            for invocation in [
+                mutation.clone(),
+                format!("sh -c '{mutation}'"),
+                format!("eval \"{mutation}\""),
+                format!("env X=1 {mutation}"),
+                format!("printf '%s' x | xargs {mutation}"),
+                format!("printf '%s' '{mutation}' | sh"),
+                format!("printf '%s' '{mutation}' | pbcopy; {mutation}"),
+                format!("printf '%s' '{mutation}' | env X=1 pbcopy"),
+                format!("printf '%s' '{mutation}' | /tmp/pbcopy"),
+            ] {
+                let (status, reason) = decision(&invocation);
+                assert_eq!(status, "deny", "execution stays closed: {invocation}: {reason}");
+                assert!(reason.contains("OPERATOR-ONLY"), "{invocation}: {reason}");
+            }
         }
     }
 

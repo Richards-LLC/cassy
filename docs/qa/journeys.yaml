@@ -265,6 +265,10 @@ invariants:
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
+  HUB-J24-SENT-ATTACHMENT:
+    statement: Sent uploads show an image thumbnail or named file sheet without host paths, including after reload and on another paired device; the supervisor retains the exact resolvable artifact reference.
+    check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history.
+    bug: {task: cas-195a}
   HUB-J24-PHONE-UPLOAD:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
@@ -2002,10 +2006,12 @@ journeys:
   - Paste plain text inline.
   - Preview long pasted text, a screenshot and a picked file in the composer.
   - Retry a failed upload with the same identity and send the stored paths once.
-  goal: Text plus readable host paths reach the supervisor without duplicate delivery.
+  - Inspect named sheets and an image preview after reload and on a fresh paired phone.
+  goal: Text and resolvable paths reach the supervisor once while sender bubbles show thumbnails and filenames.
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/composer-uploads.ts
+  - hub-web/src/sent-attachments.ts
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
   - hub-web/e2e/journeys/real-hub.journey.ts
@@ -2016,7 +2022,7 @@ journeys:
   - A refused file is named among multiple attachments; unsupported types do not prescribe reconnecting.
   - A missing session shows the hub refusal text and keeps the files for recovery.
   - HEIC, AVIF and MOV bytes retain their media types in host artifact storage.
-  invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD]
+  invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD, HUB-J24-SENT-ATTACHMENT]
   traffic:
     share_pct: null
     basis: New journey; no production traffic attribution yet.

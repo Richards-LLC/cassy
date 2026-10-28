@@ -5947,10 +5947,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // same-session supervisors; newer status or ready supersedes
             // either kind, but never a transported action or another worker's.
             let mut stmt = tx.prepare_cached(
-                "SELECT id, prompt, summary FROM prompt_queue
+                "SELECT id, prompt, summary, kind FROM prompt_queue
                  WHERE factory_session = ? AND origin_agent_id = ?
                    AND processed_at IS NULL AND transport_delivered_at IS NULL
-                   AND kind IS NULL
+                   AND (kind IS NULL OR kind = 'supervisor_digest')
                    AND COALESCE(highest_stage, 'enqueued')
                        NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
                  ORDER BY id",
@@ -5961,6 +5961,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -5969,8 +5970,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 .chars()
                 .filter(|ch| !matches!(ch, '"' | '<' | '>' | '\n' | '\r'))
                 .collect();
-            let candidates = pending.into_iter().filter(|(_, old_prompt, _)| {
-                old_prompt.ends_with("</cas-worker-action>")
+            let candidates = pending.into_iter().filter(|(_, old_prompt, _, old_kind)| {
+                // Quiet actions still fold; a digest of an independent merge
+                // episode must retain its own evidence and reservation.
+                (old_kind.is_none() || split_quiet_marker(old_prompt).0)
+                    && old_prompt.ends_with("</cas-worker-action>")
                     && ["status", "ready"].iter().any(|kind| {
                         old_prompt.contains(&format!(
                             "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
@@ -5980,12 +5984,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // Reserve the new row inside this transaction before assembling
             // the superseded notifications and their provenance labels.
             let origin_kind = origin.kind_str();
-            let kind = supervisor_delivery_kind(&tx, source, target, prompt, Some(factory_session), urgent, Some(origin))?;
             tx.execute(
                 "INSERT INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary,
-                     priority, urgent, origin_agent_id, origin_kind, kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     priority, urgent, origin_agent_id, origin_kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     source,
                     target,
@@ -5996,8 +5999,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     prio,
                     urgent_flag,
                     origin_agent_id,
-                    origin_kind,
-                    kind
+                    origin_kind
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -6030,7 +6032,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let mut folded_len = new_prompt.len() + fold_end.len()
                 + if new_quiet { QUIET_MESSAGE_MARKER.len() + 1 } else { 0 };
             let mut superseded = Vec::new();
-            for (old_id, old_prompt, old_summary) in candidates {
+            for (old_id, old_prompt, old_summary, _) in candidates {
                 let (old_quiet, old_prompt) = split_quiet_marker(&old_prompt);
                 let old_body = body_of(&old_prompt);
                 // Split before the closing line's own trailing blank line:
@@ -6084,7 +6086,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 }
             };
 
-            tx.execute("UPDATE prompt_queue SET prompt = ?1 WHERE id = ?2", params![stored_prompt, id])?;
+            // Classify the complete fold, not just the latest body: an older
+            // actionable message keeps its wake when the latest is quiet.
+            let kind = supervisor_delivery_kind(&tx, source, target, &stored_prompt, Some(factory_session), urgent, Some(origin))?;
+            tx.execute("UPDATE prompt_queue SET prompt = ?1, kind = ?2 WHERE id = ?3", params![stored_prompt, kind, id])?;
             let detail = format!(
                 "newer worker action message {id} superseded this pending wake and carries its body"
             );

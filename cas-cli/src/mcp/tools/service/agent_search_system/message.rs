@@ -6507,30 +6507,85 @@ mod cas_89e1_post_merge_message_type_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn folded_worker_acknowledgements_remain_inbox_only_cas_6920() {
         let _env = TestEnvGuard::temp_home();
-        let root = tempfile::tempdir().unwrap();
-        let cas_root = root.path().join(".cas");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        let worker = register_gh_1171_fleet(&core, false);
-        let agents = core.open_agent_store().unwrap();
-        let mut supervisor = agents.get("supervisor-a-id").unwrap();
-        supervisor.factory_session = worker.factory_session.clone();
-        agents.update(&supervisor).unwrap();
-        core.set_agent_id_for_testing(worker.id.clone());
-        let service = gh_1171_service(&core);
-        for body in ["ok", "thanks"] {
-            let mut request = message_request_to("supervisor");
-            request.kind = Some("status".into());
-            request.message = Some(body.into());
-            service.message_send(request).await.unwrap();
+        let mut failures = Vec::new();
+        for (case, messages, quiet) in [
+            ("acknowledgements", [("ok", None), ("thanks", None)], true),
+            (
+                "quiet then action",
+                [("ok", None), ("Choose the release scope", None)],
+                false,
+            ),
+            (
+                "action then quiet",
+                [("Choose the release scope", None), ("thanks", None)],
+                false,
+            ),
+            (
+                "identical quiet resend",
+                [
+                    ("Choose the release scope", None),
+                    ("Choose the release scope", Some(false)),
+                ],
+                false,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let cas_root = root.path().join(".cas");
+            std::fs::create_dir_all(&cas_root).unwrap();
+            let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            let worker = register_gh_1171_fleet(&core, false);
+            let agents = core.open_agent_store().unwrap();
+            let mut supervisor = agents.get("supervisor-a-id").unwrap();
+            supervisor.factory_session = worker.factory_session.clone();
+            agents.update(&supervisor).unwrap();
+            core.set_agent_id_for_testing(worker.id.clone());
+            let service = gh_1171_service(&core);
+            for (body, wake) in messages {
+                let mut request = message_request_to("supervisor");
+                request.kind = Some("status".into());
+                request.message = Some(body.into());
+                request.wake = wake;
+                service.message_send(request).await.unwrap();
+            }
+            let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+            let rows = queue.peek_all(10).unwrap();
+            let row = rows.last().expect("the latest message remains readable");
+            let transports = queue
+                .peek_for_targets(&[&supervisor.name], worker.factory_session.as_deref(), 10)
+                .unwrap();
+            let recipient_core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+            recipient_core.set_agent_id_for_testing(supervisor.id.clone());
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "inbox_poll", "notification_id": row.id,
+            }))
+            .unwrap();
+            let full = response_text(
+                gh_1171_service(&recipient_core)
+                    .inbox_poll(request)
+                    .await
+                    .unwrap(),
+            );
+            if rows.len() != 1
+                || crate::supervisor_message_wakes::quiet(&row.prompt) != quiet
+                || transports.len() != usize::from(!quiet)
+                || messages
+                    .iter()
+                    .any(|(body, _)| !row.prompt.contains(body) || !full.contains(body))
+            {
+                failures.push(format!(
+                    "{case}: pending={}, transports={}, quiet={}, prompt={}, full={full}",
+                    rows.len(),
+                    transports.len(),
+                    crate::supervisor_message_wakes::quiet(&row.prompt),
+                    row.prompt
+                ));
+            }
         }
-        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "acknowledgements still coalesce");
-        let prompt = &rows[0].prompt;
-        assert!(prompt.contains("ok") && prompt.contains("thanks"), "{prompt}");
-        assert!(crate::supervisor_message_wakes::quiet(prompt),
-            "folded acknowledgements must wait for the next turn: {prompt}");
+        assert!(
+            failures.is_empty(),
+            "folded message delivery lost bodies or wake intent:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve

@@ -539,6 +539,94 @@ pub(crate) fn standalone_work_target(
     Ok((target, warning))
 }
 
+/// Factory lane names retain the immutable epic id across title changes.
+fn names_epic_lane(epic: &cas_types::Task, branch: &str) -> bool {
+    branch.starts_with("epic/") && branch.ends_with(&format!("-{}", epic.id))
+}
+
+/// Resolve legacy rows whose recorded lane predates a rename of that epic's
+/// own target. A different epic or an integration base is never a rename.
+pub(crate) fn effective_epic_branch(epic: &cas_types::Task) -> Option<&str> {
+    let branch = epic
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    let target = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|b| !b.is_empty());
+    match (branch, target) {
+        (Some(branch), Some(target))
+            if names_epic_lane(epic, branch) && names_epic_lane(epic, target) =>
+        {
+            Some(target)
+        }
+        _ => branch.or(target.filter(|target| target.starts_with("epic/"))),
+    }
+}
+
+/// Normalize a persisted factory lane even for consumers that have only its
+/// portable WorkTarget (sync, receipts and repository binding). Never infer a
+/// repository or redirect an unrelated explicit pin.
+fn current_epic_work_target(cas_root: &Path, target: &WorkTarget) -> WorkTarget {
+    let Some((_, suffix)) = target.target_branch.rsplit_once("-cas-") else {
+        return target.clone();
+    };
+    if !target.target_branch.starts_with("epic/") || suffix.is_empty() {
+        return target.clone();
+    }
+    let id = format!("cas-{suffix}");
+    let epic = crate::store::open_task_store(cas_root)
+        .ok()
+        .and_then(|store| store.get(&id).ok());
+    let Some(epic) = epic.filter(|epic| epic.task_type == cas_types::TaskType::Epic) else {
+        return target.clone();
+    };
+    let Some(binding) = epic.deliverables.work_target.as_ref() else {
+        return target.clone();
+    };
+    if canonical_selector(&binding.repo_selector) != canonical_selector(&target.repo_selector) {
+        return target.clone();
+    }
+    let Some(branch) = effective_epic_branch(&epic) else {
+        return target.clone();
+    };
+    WorkTarget {
+        repo_selector: target.repo_selector.clone(),
+        target_branch: branch.to_string(),
+    }
+}
+
+/// Resolve an explicit sync ref only within this repository's task scope.
+pub(crate) fn effective_epic_ref(cas_root: &Path, branch: &str) -> String {
+    let Ok((repo, _)) = git_checkout_layout(cas_root) else {
+        return branch.into();
+    };
+    let Ok(repo_selector) = selector_for_repo(&repo) else {
+        return branch.into();
+    };
+    current_epic_work_target(
+        cas_root,
+        &WorkTarget {
+            repo_selector,
+            target_branch: branch.into(),
+        },
+    )
+    .target_branch
+}
+
+pub(crate) fn effective_task_work_target(
+    task: &cas_types::Task,
+    epic: Option<&cas_types::Task>,
+) -> Option<WorkTarget> {
+    epic.filter(|_| task.task_type != cas_types::TaskType::Epic)
+        .and_then(|epic| default_child_work_target_from_epic(task, epic))
+        .or_else(|| task.deliverables.work_target.clone())
+}
+
 /// Select the durable WorkTarget a child should inherit from an epic.
 ///
 /// The live epic branch is the delivery lane whenever it is recorded.  Its
@@ -548,11 +636,7 @@ pub(crate) fn standalone_work_target(
 /// worktree merge, expressed as a portable child WorkTarget for close gates.
 pub(crate) fn inherited_work_target_from_epic(epic: &cas_types::Task) -> Option<WorkTarget> {
     let epic_target = epic.deliverables.work_target.as_ref()?;
-    let target_branch = epic
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
+    let target_branch = effective_epic_branch(epic)
         .unwrap_or(&epic_target.target_branch)
         .to_string();
     Some(WorkTarget {
@@ -561,9 +645,9 @@ pub(crate) fn inherited_work_target_from_epic(epic: &cas_types::Task) -> Option<
     })
 }
 
-/// Return the inherited target only when the child has no target, or is still
-/// on the epic's own base target.  A distinct child target is an operator
-/// choice and must remain authoritative.
+/// Follow the epic for an untargeted child, its inherited base, or a recorded
+/// previous name of the same lane. An unrelated explicit child pin remains
+/// authoritative, including pins to another repository.
 pub(crate) fn default_child_work_target_from_epic(
     child: &cas_types::Task,
     epic: &cas_types::Task,
@@ -575,14 +659,20 @@ pub(crate) fn default_child_work_target_from_epic(
         None => Some(inherited),
         Some(target)
             if target.repo_selector == epic_target.repo_selector
-                && target.target_branch == epic_target.target_branch =>
+                && (target.target_branch == epic_target.target_branch
+                    || epic.branch.as_deref() == Some(target.target_branch.as_str())
+                    || epic
+                        .deliverables
+                        .epic_branch_origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.branch == target.target_branch)
+                    || names_epic_lane(epic, &target.target_branch)) =>
         {
             Some(inherited)
         }
         Some(_) => None,
     }
 }
-
 /// cas-c85e (GH #997): the WorkTarget a task should carry after being moved
 /// into `epic` (`task update epic=`), or `None` to keep its current target.
 ///
@@ -921,6 +1011,8 @@ pub(crate) fn resolve_repo_context(
     cas_root: &Path,
     target: &WorkTarget,
 ) -> Result<RepoContext, String> {
+    let current_target = current_epic_work_target(cas_root, target);
+    let target = &current_target;
     if let Some(binding) = host_binding(&target.repo_selector)? {
         let (repo_root, git_common_dir) = validate_binding(&binding, &target.repo_selector)
             .map_err(|()| {
@@ -1041,6 +1133,8 @@ pub(crate) fn resolve_repo_context_from_local_root(
     cas_root: &Path,
     target: &WorkTarget,
 ) -> Result<RepoContext, String> {
+    let current_target = current_epic_work_target(cas_root, target);
+    let target = &current_target;
     let (repo_root, git_common_dir) = match git_checkout_layout(cas_root) {
         Ok(layout) => layout,
         Err(error) => {
@@ -1089,6 +1183,8 @@ pub(crate) fn resolve_repo_context_bounded(
     target: &WorkTarget,
     probe: &BoundedRepoProbe,
 ) -> Result<RepoContext, BoundedRepoError> {
+    let current_target = current_epic_work_target(cas_root, target);
+    let target = &current_target;
     if let Some(binding) = bounded_host_binding(&target.repo_selector)? {
         let (repo_root, git_common_dir) =
             validate_binding_bounded(&binding, &target.repo_selector, probe)?;

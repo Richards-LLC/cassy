@@ -1497,7 +1497,10 @@ pub(crate) fn epic_branch_for_state(data: &DirectorData, state: &EpicState) -> O
     data.epic_tasks
         .iter()
         .find(|epic| epic.id == *epic_id)
-        .and_then(|epic| epic.branch.clone())
+        .and_then(|epic| {
+            crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic)
+                .map(str::to_string)
+        })
         .or_else(|| Some(epic_branch_name(epic_title, epic_id)))
 }
 

@@ -2184,7 +2184,13 @@ fn resolve_sync_all_workers_target(
         .map(str::trim)
         .filter(|b| !b.is_empty())
     {
-        return Ok(branch.to_string());
+        let bare = normalize_branch_ref(branch);
+        let current = crate::mcp::tools::core::task::repo_context::effective_epic_ref(cas_root, &bare);
+        return Ok(if current == bare {
+            branch.to_string()
+        } else {
+            current
+        });
     }
 
     if let Some(factory_session) = current_factory_session() {

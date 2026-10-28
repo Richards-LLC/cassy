@@ -9014,7 +9014,7 @@ impl CasCore {
             && let Some(epic) = parent_epic.as_ref()
             && !epic.is_terminal()
             && let (Some(epic_branch), Some(target)) = (
-                epic.branch.as_deref(),
+                crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic),
                 epic.deliverables.work_target.as_ref(),
             )
         {
@@ -9037,6 +9037,7 @@ impl CasCore {
                     &epic.id,
                     epic_branch,
                     integration_branch,
+                    epic.deliverables.epic_branch_origin.as_ref(),
                 ) {
                     close_notes.record(&mut task, &note);
                 }
@@ -17384,17 +17385,7 @@ pub(crate) fn effective_close_work_target(
     task: &Task,
     parent_epic: Option<&Task>,
 ) -> Option<cas_types::WorkTarget> {
-    parent_epic
-        .and_then(|epic| {
-            (task.task_type != TaskType::Epic)
-                .then(|| {
-                    crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
-                        task, epic,
-                    )
-                })
-                .flatten()
-        })
-        .or_else(|| task.deliverables.work_target.clone())
+    crate::mcp::tools::core::task::repo_context::effective_task_work_target(task, parent_epic)
 }
 
 /// cas-7efe: the single, authoritative parent-branch resolution policy for
@@ -18960,6 +18951,7 @@ fn advance_clean_epic_after_child_integration(
     epic_id: &str,
     epic_branch: &str,
     integration_branch: &str,
+    created_as: Option<&cas_types::EpicBranchOrigin>,
 ) -> Option<String> {
     use std::process::Command;
 
@@ -18968,6 +18960,12 @@ fn advance_clean_epic_after_child_integration(
         || !is_safe_git_refname(integration_branch)
     {
         return None;
+    }
+
+    if !created_as.is_some_and(|origin| origin.branch == epic_branch) {
+        return Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id}; no factory creation provenance for the current lane. No refs advanced or pushed; child close remains valid."
+        ));
     }
 
     fetch_parent_branch_best_effort(repo_path, epic_branch);
@@ -19022,6 +19020,24 @@ fn advance_clean_epic_after_child_integration(
                 ),
             },
         );
+    }
+
+    // Closing advances an existing shared lane, never recreates a deleted one.
+    match crate::worktree::GitOperations::new(repo_path.to_path_buf())
+        .observe_epic_publication(epic_branch, None)
+        .remote
+    {
+        Ok(Some(true)) => {}
+        Ok(_) => {
+            return Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id}; current lane is absent on origin; automatic resurrection refused. No refs advanced or pushed; child close remains valid."
+            ));
+        }
+        Err(error) => {
+            return Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id}; {error}. Child close remains valid; no refs advanced or pushed."
+            ));
+        }
     }
 
     let push = Command::new("git")
@@ -19084,7 +19100,6 @@ fn advance_clean_epic_after_child_integration(
         )),
     }
 }
-
 /// Return the fetched remote epic tip only when it contains the integration
 /// commit a losing concurrent closer intended to publish.  This narrow check
 /// makes a rejected non-force push idempotent without treating an unrelated
@@ -26623,6 +26638,12 @@ mod merge_state_gate_tests {
             repaired.deliverables.work_target.unwrap().target_branch,
             "epic/current-cas-new-parent"
         );
+        let updated = supervisor_service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"update", "id":"cas-new-parent", "target_branch":"epic/current-cas-new-parent"})).unwrap())).await.unwrap();
+        assert_ne!(updated.is_error, Some(true), "{updated:?}");
+        assert_eq!(
+            store.get("cas-new-parent").unwrap().branch.as_deref(),
+            Some("epic/current-cas-new-parent")
+        );
     }
 
     /// cas-44e93: a per-task factory branch pushed once (`pushed`), with a
@@ -27170,6 +27191,26 @@ mod merge_state_gate_tests {
         }
     }
 
+
+    fn advance_recorded_epic(
+        repo: &std::path::Path,
+        id: &str,
+        branch: &str,
+        integration: &str,
+    ) -> Option<String> {
+        advance_clean_epic_after_child_integration(
+            repo,
+            id,
+            branch,
+            integration,
+            Some(&cas_types::EpicBranchOrigin {
+                branch: branch.into(),
+                host: "fixture".into(),
+                device_id: None,
+            }),
+        )
+    }
+
     #[test]
     fn child_integration_advances_clean_epic_locally_and_on_origin() {
         let bare = tempfile::tempdir().unwrap();
@@ -27192,7 +27233,7 @@ mod merge_state_gate_tests {
         let integration_tip = head_sha(p);
         git(p, &["push", "-q", "origin", "main"]);
 
-        let note = advance_clean_epic_after_child_integration(p, "cas-epic", "epic/clean", "main")
+        let note = advance_recorded_epic(p, "cas-epic", "epic/clean", "main")
             .expect("a behind epic must produce an advancement audit note");
         assert!(note.contains("ADVANCED"), "{note}");
         assert_eq!(
@@ -27232,7 +27273,7 @@ mod merge_state_gate_tests {
         );
 
         let note =
-            advance_clean_epic_after_child_integration(p, "cas-epic", "epic/diverged", "main")
+            advance_recorded_epic(p, "cas-epic", "epic/diverged", "main")
                 .expect("divergence must be reported rather than silently skipped");
         assert!(
             note.contains("REFUSED") && note.contains("not auto-merge"),
@@ -27265,7 +27306,7 @@ mod merge_state_gate_tests {
         commit_file_at(p, "landed.rs", "// landed\n", "2026-08-15T02:00:00Z");
 
         let note =
-            advance_clean_epic_after_child_integration(p, "cas-epic", "epic/offline", "main")
+            advance_recorded_epic(p, "cas-epic", "epic/offline", "main")
                 .expect("remote failure must return an audit note, not an error");
         assert!(
             note.contains("FAILED_REMOTE") && note.contains("Child close remains valid"),

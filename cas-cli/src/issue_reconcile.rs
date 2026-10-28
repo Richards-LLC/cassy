@@ -180,11 +180,17 @@ pub fn external_ref_hint_note(hint: &ExternalRefHint) -> String {
 fn open_states(
     issues: &[IssueRef],
     states: &dyn IssueStates,
+    default_repo: Option<&str>,
 ) -> BTreeMap<String, Result<HashSet<u64>, String>> {
     let repos: BTreeSet<String> = issues
         .iter()
         .map(|issue| repo_key(&issue.owner, &issue.repo))
         .collect();
+    let mut repos: Vec<_> = repos.into_iter().collect();
+    let default_repo = default_repo.map(|repo| repo.trim().to_ascii_lowercase());
+    // Spend the bounded budget on this project's issues before foreign refs.
+    // Stable sorting preserves alphabetical order for the remaining repos.
+    repos.sort_by_key(|repo| Some(repo.as_str()) != default_repo.as_deref());
     repos
         .into_iter()
         .take(MAX_REPOS)
@@ -215,7 +221,7 @@ pub fn epic_open_issue_warning(
         return None;
     }
     let issues: Vec<IssueRef> = referenced.iter().map(|(issue, _)| issue.clone()).collect();
-    let states = open_states(&issues, states);
+    let states = open_states(&issues, states, default_repo);
     let mut open = Vec::new();
     let mut unchecked = Vec::new();
     for (issue, tasks) in &referenced {
@@ -336,15 +342,54 @@ pub fn shipped_open_issues(
         }
     }
     let issues: Vec<IssueRef> = referenced.iter().map(|(issue, _)| issue.clone()).collect();
-    let states = open_states(&issues, states);
-    let unchecked: Vec<String> = issues
-        .iter()
-        .filter_map(|issue| match states.get(&repo_key(&issue.owner, &issue.repo)) {
-            Some(Ok(_)) => None,
-            Some(Err(error)) => Some(format!("{} ({error})", issue.display())),
-            None => Some(format!("{} (repository limit reached)", issue.display())),
-        })
-        .collect();
+    let states = open_states(&issues, states, default_repo);
+    let mut by_repo: BTreeMap<String, Vec<&IssueRef>> = BTreeMap::new();
+    for issue in &issues {
+        by_repo
+            .entry(repo_key(&issue.owner, &issue.repo))
+            .or_default()
+            .push(issue);
+    }
+    let mut unchecked = Vec::new();
+    let (mut omitted_repos, mut omitted_refs) = (0, 0);
+    let mut by_repo: Vec<_> = by_repo.into_iter().collect();
+    let default_key = default_repo.map(|repo| repo.trim().to_ascii_lowercase());
+    by_repo.sort_by_key(|(repo, _)| Some(repo.as_str()) != default_key.as_deref());
+    for (repo, refs) in by_repo {
+        let error = match states.get(&repo) {
+            Some(Ok(_)) => continue,
+            Some(Err(error)) => error.as_str(),
+            None => "repository limit reached",
+        };
+        // One representative ref per repository, under the same row bound as
+        // lookups. Keep omitted counts rather than dumping every task citation.
+        if unchecked.len() == MAX_REPOS {
+            omitted_repos += 1;
+            omitted_refs += refs.len();
+            continue;
+        }
+        let more = if refs.len() > 1 {
+            format!(" (+{} more)", refs.len() - 1)
+        } else {
+            String::new()
+        };
+        unchecked.push(format!("{}{more} ({error})", refs[0].display()));
+    }
+    if omitted_repos > 0 {
+        let repo_label = if omitted_repos == 1 {
+            "repository"
+        } else {
+            "repositories"
+        };
+        let ref_label = if omitted_refs == 1 {
+            "reference"
+        } else {
+            "references"
+        };
+        unchecked.push(format!(
+            "{omitted_repos} more unchecked {repo_label} ({omitted_refs} {ref_label})"
+        ));
+    }
     if !unchecked.is_empty() && !states.values().any(Result::is_ok) {
         return Err(unchecked.join("; "));
     }

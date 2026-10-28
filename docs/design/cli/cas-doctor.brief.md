@@ -186,7 +186,7 @@ captures live with task cas-edb0's evidence.
 | Scannable | Successful shipped-issue findings stay first, followed by unchecked references and their causes. |
 | Readable | Task/GH shorthand resolves against the project repository; a failed foreign repository never erases valid findings. |
 | Machine output | The existing JSON check carries the same warning and unchecked-reference message, with no schema change. |
-| Omitted | Repository and reference limits stay bounded; omitted references are named as unchecked, and a wholly unavailable lookup remains an explicit skip. |
+| Omitted | The project repository is checked first within the existing three-repository budget; unchecked notes show one reference per repo, up to three, with omitted reference/repository counts. A wholly unavailable lookup remains an explicit skip. |
 
 Design: `DESIGN.md@b43940e43`. Renderer, palette and grouping are unchanged.
 Exact-revision candidate terminal captures are recorded in the task artifacts.

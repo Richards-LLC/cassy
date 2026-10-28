@@ -24,7 +24,7 @@ describe("supervisor markdown subset", () => {
       "```",
     ].join("\n")));
 
-    expect(root.querySelector(".markdown-heading strong")?.textContent).toBe("Ship result");
+    expect(root.querySelector("h1.markdown-heading strong")?.textContent).toBe("Ship result");
     expect(root.querySelector("p:not(.markdown-heading) strong")?.textContent).toBe("Ready");
     expect(root.querySelector("p:not(.markdown-heading) em")?.textContent).toBe("care");
     expect(root.querySelector(".markdown-inline-code")?.textContent).toBe("cargo check");

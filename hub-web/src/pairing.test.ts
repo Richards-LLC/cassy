@@ -167,6 +167,16 @@ describe("wire-v1 reverse pairing", () => {
     await expect(createPairingRequest(fetcher, relayOrigin, request.controllerOrigin)).rejects.toThrow("invalid pairing code");
   });
 
+  it.each([
+    ["the relay's rate_limited body", { error: "rate_limited", error_description: "The pairing request rate limit was exceeded." }],
+    ["a body that is not JSON", undefined],
+  ])("tells the operator to wait a minute when the relay rate-limits creation (%s)", async (_shape, body) => {
+    const fetcher = vi.fn(async () => body === undefined ? new Response("Too Many Requests", { status: 429 }) : response(429, body, { "Retry-After": "60" }));
+    const error = await createPairingRequest(fetcher, relayOrigin, request.controllerOrigin).catch((caught) => caught);
+    expect(error).toBeInstanceOf(PairingRelayError);
+    expect(error).toMatchObject({ code: "rate_limited", message: "Too many codes just now — try again in a minute." });
+  });
+
   it("executes pending and ready fixtures through the production poll parser", async () => {
     const pendingFixture = await fixture("pending-poll-response");
     const pending = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(202, pendingFixture));

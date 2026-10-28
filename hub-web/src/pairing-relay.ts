@@ -112,6 +112,8 @@ async function createBoundedPairingRequest(fetcher: Fetcher, relayOrigin: string
   const response = await fetcher(relayEndpoint(relayOrigin, CREATE_PATH), {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", body: JSON.stringify(body), signal,
   });
+  // The relay caps codes per minute; any 429 here is that cap, whatever its body.
+  if (response.status === 429) throw new PairingRelayError("rate_limited", "Too many codes just now — try again in a minute.");
   const value = await jsonRecord(response);
   if (response.status !== 201) throw relayError(response.status, value.error);
   if (value.wire_version !== 1) throw new PairingRelayError("invalid_response", "The pairing service returned an unsupported wire version.");

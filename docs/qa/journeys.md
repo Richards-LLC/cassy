@@ -121,6 +121,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Expected experience
 
+- Reply receipt regression (cas-c641): a live daemon reply with `operator_label: null` commits to IndexedDB before exactly one application ACK. Pending replies outside the bounded history page drain across batches of ten; after a fresh attach the drained backlog is not replayed. Lost ACKs remain safe to re-ACK without duplicate turns. A reply queued behind a busy browser writer for more than five seconds still commits before authorizing its ACK.
+
 - Rows read project first, then machine, so two machines never look alike; the generated codename is tertiary.
 - New replies and questions waiting for me are visible on the row without opening it.
 - A visible search field finds a conversation by project, machine or supervisor; the palette does too, from anywhere.

@@ -19,7 +19,7 @@ import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./co
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { HeldSendFlushes } from "./held-send-flush";
-import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
+import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -3492,26 +3492,51 @@ function restoreStoredSends(machine: StoredMachine): void {
   });
 }
 
+type DeviceReplyWrite = { machine: StoredMachine; session: string; reply: OperatorReply; fence: CredentialFence; done: () => void };
+const deviceReplyWrites: DeviceReplyWrite[] = [];
+let writingDeviceReplies = false;
+
 async function persistDeviceReply(machine: StoredMachine, session: string, reply: OperatorReply, frameFence?: CredentialFence): Promise<void> {
   // Never authorize a conversation reply ACK for an attention-only notice.
   if (isOperatorNotice(reply)) return;
+  return new Promise(resolve => {
+    deviceReplyWrites.push({ machine, session, reply, fence: frameFence ?? credentialFence(machine), done: resolve });
+    if (!writingDeviceReplies) {
+      writingDeviceReplies = true;
+      queueMicrotask(() => { void flushDeviceReplyWrites(); });
+    }
+  });
+}
+
+async function flushDeviceReplyWrites(): Promise<void> {
   try {
-  const fence = frameFence ?? credentialFence(machine);
-  const scope = deliveryScope(machine, session);
-  if (!await sendJournal.persistReply(scope, reply, fence)) { markReplyNotKept(machine, session, reply); return; }
-  const current = (await catalog.snapshot()).machines.find((item) => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
-  if (!current || current.credentialId !== fence.credentialId || credentialFence(current).generation !== fence.generation || conversationPersistenceBlocked.has(machine.id)) return;
-  conversationHistory(sessionKey(machine.id, session)).markReplyPersisted(reply.notification_id);
-  // Device identity is derived by the hub, never trusted from this frame.
-  connections.get(machine.id)?.send(session, { OperatorReplyPersisted: { notification_id: reply.notification_id, device_id: "" } });
-  updateConversationViews();
-  } catch { markReplyNotKept(machine, session, reply); /* Display remains forwarded; failed storage cannot authorize ACK. */ }
+    while (deviceReplyWrites.length) {
+      const writes = deviceReplyWrites.splice(0, REPLY_WRITE_BATCH);
+      const saved = await Promise.all(writes.map(({ machine, session, reply, fence }) =>
+        sendJournal.persistReply(deliveryScope(machine, session), reply, fence).catch(() => false)));
+      // Recheck the active installation after the durable commit, once per
+      // batch. Neither an old frame nor a revoked pairing can authorize ACKs.
+      const snapshot = saved.some(Boolean) ? await catalog.snapshot().catch(() => undefined) : undefined;
+      writes.forEach(({ machine, session, reply, fence, done }, index) => {
+        try {
+          if (!saved[index]) { markReplyNotKept(machine, session, reply); return; }
+          const current = snapshot?.machines.find(item => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
+          if (!current || current.credentialId !== fence.credentialId || credentialFence(current).generation !== fence.generation || conversationPersistenceBlocked.has(machine.id)) return;
+          conversationHistory(sessionKey(machine.id, session)).markReplyPersisted(reply.notification_id);
+          // Device identity is derived by the hub, never trusted from this frame.
+          connections.get(machine.id)?.send(session, { OperatorReplyPersisted: { notification_id: reply.notification_id, device_id: "" } });
+        } catch { /* A closed socket retries the committed reply on reconnect. */ }
+        finally { done(); }
+      });
+      // Receipt display does not delay the next item in the same commit.
+      try { updateConversationViews(); } catch { /* presentation cannot invalidate a durable receipt */ }
+    }
+  } finally { writingDeviceReplies = false; }
 }
 
 /** cas-97d58 F05: say "Not kept on this device yet" only after storing it actually failed. */
 function markReplyNotKept(machine: StoredMachine, session: string, reply: OperatorReply): void {
   conversationHistory(sessionKey(machine.id, session)).markReplyStoreFailed(reply.notification_id);
-  updateConversationViews();
 }
 
 async function cancelWaitingMessage(machineId: string, session: string, id: string): Promise<void> {

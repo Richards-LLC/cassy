@@ -251,6 +251,11 @@ bug_families:
     tasks: [cas-dd2e]
     invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
     journeys: [HUB-J13]
+  null-label-reply-receipt:
+    title: Null live labels normalize before durable receipt; queued browser writes survive load and batch without losing receipt fences, draining pending replay across attaches
+    tasks: [cas-c641]
+    invariants: [HUB-J3-GOAL, HUB-J12-GOAL]
+    journeys: [HUB-J3, HUB-J12]
   clean-home-launch-remedies:
     title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
     tasks: [cas-a1bc]

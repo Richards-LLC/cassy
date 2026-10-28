@@ -718,6 +718,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     } finally {
       await context.close().catch(() => undefined);
       await command("cleanup");
+      await expect(access(dirname(fixture.project))).rejects.toMatchObject({ code: "ENOENT" });
     }
   }
 });

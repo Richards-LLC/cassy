@@ -114,6 +114,10 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
     const footer = page.locator("#hub-footer-badges .machine-badge-state");
     const panel = page.locator(".status-stale").filter({ visible: true });
     await hub.down("atlas");
+    // The first unanswered ping starts the wait; later beats measure misses.
+    const firstProbe = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
+    await clock.advance(5_000);
+    await firstProbe;
     for (let beat = 1; beat <= 4; beat++) {
       const failed = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
       await clock.advance(5_000);
@@ -183,21 +187,19 @@ test("HUB-J12 network switch: a message sent while unsteady waits, then goes onc
   await journey.stage("The connection wobbles and steadies without a reconnect", async () => {
     const { hub, clock, header, held } = await connected(page);
     const opens = hub.machineSocketOpens.get("atlas");
-    // Two heartbeats go unanswered; the machine socket itself survives.
-    const heartbeat = "https://atlas.test/v1/sessions";
-    await page.route(heartbeat, route => route.abort());
-    for (let beat = 1; beat <= 2; beat++) {
-      const failed = page.waitForEvent("requestfailed", request => request.url() === heartbeat);
-      await clock.advance(5_000);
-      await failed;
-    }
+    // Delay the actual socket pong, independent of the catalog's availability.
+    hub.healthPongDelayMs = 12_000;
+    const pongs = hub.pongs.get("atlas") ?? 0;
+    await clock.advance(5_000);
+    await expect.poll(() => hub.pongs.get("atlas")).toBe(pongs + 1);
+    await clock.advance(10_000);
     await expect(header).toHaveText(" · Unsteady");
     await sendNow(page, "While it wobbles");
     await expect(held).toHaveCount(1);
     expect(hub.sends).toHaveLength(0);
-    await page.unroute(heartbeat);
+    hub.healthPongDelayMs = 0;
     const next = hub.nextSend();
-    await clock.advance(5_000); // the next heartbeat, answered
+    await clock.advance(5_000); // the original delayed pong arrives with its original id
     expect((await next).text).toBe("While it wobbles");
     await expect(header).toHaveText(" · Live");
     await expect(held).toHaveCount(0);
@@ -246,7 +248,7 @@ test("HUB-J12 network switch: waking probes a half-open socket before sending", 
     const heartbeat = page.waitForResponse(response => response.url() === "https://atlas.test/v1/sessions");
     await clock.advance(6_000);
     await heartbeat;
-    const probe = page.waitForResponse(response => response.url() === "https://atlas.test/v1/machine");
+    const probe = page.waitForResponse(response => response.url() === "https://atlas.test/v1/health");
     await visibility("visible");
     await probe;
     await sendNow(page, "Right after waking");

@@ -569,6 +569,9 @@ describe('conversation evidence', () => {
     expect(connection).toBe('Waiting for supervisor');
     expect(conversationRowMarkup({ ...row, unreachable: dormant.unreachable, connection })).toContain('<span class="conversation-preview unreachable">Waiting for supervisor</span>');
     expect(pendingSessionLabel(dormant, false)).toBe(row.connection);
+    for (const state of ['Connecting', 'Reconnecting']) {
+      expect(pendingSessionLabel(dormant, false, state)).toBe(`${state} · message pending`);
+    }
     // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
     expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');

@@ -804,6 +804,33 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 Some(merge_sha.as_str()),
                 "{row}: Cassy binds the dispatch to the merge commit"
             );
+            if row == "green-approved" {
+                // cas-6a8b: the COMMITTED response preceded dispatch creation.
+                // Its owner must receive a wake-class handoff independently
+                // of the response and the background outcome note.
+                assert_eq!(dispatch.owner_agent_id, supervisor_id);
+                assert_eq!(dispatch.requester_agent_id, supervisor_id);
+                let handoffs: Vec<_> = cas::store::open_prompt_queue_store(&cas_root)
+                    .unwrap()
+                    .peek_all(50)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|prompt| prompt.source == format!("verification-dispatch:{}", dispatch.id))
+                    .collect();
+                assert_eq!(handoffs.len(), 1, "{row}: background dispatch {} must reach its owner before expiry", dispatch.id);
+                let handoff = &handoffs[0];
+                assert_eq!(handoff.target, "supervisor");
+                assert_eq!(handoff.origin, Some(cas_store::QueueOrigin::Daemon));
+                assert_eq!(handoff.priority, cas_store::NotificationPriority::High);
+                assert!(handoff.created_at < dispatch.deadline_at);
+                assert!(chrono::Utc::now() < dispatch.deadline_at);
+                // pin: the daemon's wake parser requires this typed XML envelope and its dispatch identity.
+                assert!(handoff.prompt.contains(&format!("<cas-verification-dispatch dispatch_id=\"{}\"", dispatch.id)), "{}", handoff.prompt);
+                // pin: the wake parser must route the dispatch to its bound supervisor owner.
+                assert!(handoff.prompt.contains(&format!("owner=\"{supervisor_id}\"")), "{}", handoff.prompt);
+                // pin: the wake parser revalidates the typed dispatch's exact deadline.
+                assert!(handoff.prompt.contains(&format!("deadline=\"{}\"", dispatch.deadline_at.to_rfc3339())), "{}", handoff.prompt);
+            }
             if row == "worker-blocked" {
                 // The relay this task removes: a worker close after the merge
                 // is refused on the dispatch and the worker blocks on it.

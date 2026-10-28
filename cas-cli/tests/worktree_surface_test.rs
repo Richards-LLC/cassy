@@ -3344,7 +3344,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
             "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
             [], |row| row.get(0),
         ).unwrap();
-        assert_eq!(self_handoffs, 0, "worktree_merge already returned this dispatch to its owning supervisor");
+        assert_eq!(self_handoffs, 1, "the dispatch must reach its owner independently of the merge response");
     } else {
         assert!(!retry.is_error.unwrap_or(false), "{text}");
         assert!(dispatch.is_none(), "override merges do not auto-close");
@@ -3390,6 +3390,11 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap(),
         dispatch
     );
+    let self_handoffs: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(self_handoffs, i64::from(!ci_override), "a repeated merge must not duplicate the dispatch handoff");
     let after: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",

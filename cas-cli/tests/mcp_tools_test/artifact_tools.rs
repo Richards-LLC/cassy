@@ -228,6 +228,16 @@ async fn showing_an_unknown_artifact_names_the_id() {
             "metadata_unavailable"
         );
         assert_eq!(error.data.as_ref().unwrap()["artifact_id"], "art-nope");
+        let mut command = std::process::Command::new(cas::test_paths::cas_binary());
+        command.current_dir(temp.path()).args(["--json", "artifact", action]);
+        if action == "fetch" {
+            command.args(["--task", "cas-proof"]);
+        }
+        let output = command.arg("art-nope").output().unwrap();
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["state"], "metadata_unavailable");
+        assert_eq!(report["artifact_id"], "art-nope");
     }
 }
 
@@ -496,6 +506,10 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     let owner_tasks = open_task_store(&owner.path().join(".cas")).unwrap();
     owner_tasks.add(&synced).unwrap();
     owner_tasks.append_trusted_note(&task.id, &published_proof).unwrap();
+    // These are two machines in one project, not two unrelated fixture projects.
+    let mut owner_config = cas::config::Config::load(&owner.path().join(".cas")).unwrap();
+    owner_config.project.get_or_insert_default().canonical_id = synced.origin_project.clone();
+    owner_config.save(&owner.path().join(".cas")).unwrap();
     std::fs::write(owner.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
     assert!(
         cas_store::SqliteArtifactStore::open(&owner.path().join(".cas"))

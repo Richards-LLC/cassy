@@ -104,8 +104,10 @@ pub fn execute(
         ArtifactCommands::Publish(args) => execute_publish(args, cas_root, cli.json),
         ArtifactCommands::Show(args) => execute_show(args, cas_root, cli.json),
         ArtifactCommands::Fetch(args) => {
-            let (artifact, path) =
-                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id)?;
+            let (artifact, path) = metadata_result(
+                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id),
+                cli.json,
+            )?;
             if cli.json {
                 println!(
                     "{}",
@@ -216,7 +218,7 @@ fn print_publish(outcome: &PublishOutcome) {
 }
 
 fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {
-    let artifact = crate::artifacts::proof::lookup(cas_root, None, &args.id)?;
+    let artifact = metadata_result(crate::artifacts::proof::lookup(cas_root, None, &args.id), json)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&artifact)?);
@@ -243,6 +245,22 @@ fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<
     }
     println!("     created {}", artifact.created_at);
     Ok(())
+}
+
+fn metadata_result<T>(result: anyhow::Result<T>, json: bool) -> anyhow::Result<T> {
+    result.map_err(|error| {
+        if json {
+            if let Some(missing) = error.downcast_ref::<crate::artifacts::proof::MetadataUnavailable>() {
+                println!("{}", serde_json::json!({
+                    "status": "error", "state": "metadata_unavailable",
+                    "artifact_id": missing.artifact_id, "task_id": missing.task_id,
+                    "message": error.to_string(),
+                }));
+                return super::JsonReportedFailure(error).into();
+            }
+        }
+        error
+    })
 }
 
 fn execute_list(args: &ListArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {

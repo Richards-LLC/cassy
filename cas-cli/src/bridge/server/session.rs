@@ -89,6 +89,7 @@ pub(crate) fn task_summary_json(
         status: format!("{:?}", t.status).to_lowercase(),
         priority: t.priority.0,
         assignee: t.assignee,
+        epic_verification_owner: t.epic_verification_owner,
         task_type: format!("{:?}", t.task_type).to_lowercase(),
         epic_id: t.epic.clone(),
         epic: t.epic,
@@ -642,9 +643,24 @@ mod focused_epic_tests {
         // terminal ones. Preserve ownership so Commander can scope honestly.
         let store = crate::store::open_task_store(&cas_root).unwrap();
         for (id, state, owner, verifier) in [
-            ("cas-owned", cas_types::TaskStatus::InProgress, Some("supervisor"), None),
-            ("cas-foreign", cas_types::TaskStatus::Open, Some("other"), None),
-            ("cas-closed", cas_types::TaskStatus::Closed, None, Some("supervisor")),
+            (
+                "cas-owned",
+                cas_types::TaskStatus::InProgress,
+                Some("supervisor"),
+                None,
+            ),
+            (
+                "cas-foreign",
+                cas_types::TaskStatus::Open,
+                Some("other"),
+                None,
+            ),
+            (
+                "cas-closed",
+                cas_types::TaskStatus::Closed,
+                None,
+                Some("supervisor"),
+            ),
         ] {
             let mut epic = cas_types::Task::new(id.into(), id.into());
             epic.task_type = cas_types::TaskType::Epic;

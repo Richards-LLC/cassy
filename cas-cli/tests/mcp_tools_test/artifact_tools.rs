@@ -639,16 +639,6 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             .get(&task.id)
             .is_err()
     );
-    let mut forged_id = foreign_fetch.clone();
-    forged_id.id = Some("art-forged".into());
-    let forged = foreign_service
-        .artifact(Parameters(forged_id))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        forged.data.as_ref().unwrap()["state"],
-        "metadata_unavailable"
-    );
     let mut foreign_fetch = req("fetch");
     foreign_fetch.task_id = Some(task.id.clone());
     foreign_fetch.id = Some(attached_id.clone());
@@ -664,6 +654,16 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .unwrap();
     assert_eq!(std::fs::read(foreign_path).unwrap(), b"hello world");
     assert!(fetched.contains(sha));
+    let mut forged_id = foreign_fetch.clone();
+    forged_id.id = Some("art-forged".into());
+    let forged = foreign_service
+        .artifact(Parameters(forged_id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        forged.data.as_ref().unwrap()["state"],
+        "metadata_unavailable"
+    );
     assert!(
         open_task_store(&foreign.path().join(".cas"))
             .unwrap()

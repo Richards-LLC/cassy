@@ -5316,9 +5316,11 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let read_credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
     let mut session = fixture_session("factory-a");
     session.project_dir = Some(root.parent().unwrap().display().to_string());
+    let mut other_session = session.clone();
+    other_session.name = "factory-b".into();
     let events = MachineEventBus::new(16);
     let app = router(HubState::new(
-        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session, other_session])),
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
@@ -5361,6 +5363,36 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let image: serde_json::Value = serde_json::from_slice(&to_bytes(image.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(image["mime"], "image/png");
     assert_eq!(std::fs::read(image["path"].as_str().unwrap()).unwrap(), png);
+    // cas-195a: the real upload must be previewable without publishing to Cloud,
+    // including by another read-only paired device, but only in its own session.
+    let image_id = image["artifact_id"].as_str().unwrap();
+    let ticket_request = |session: &str| {
+        let uri = format!("/v1/sessions/{session}/artifacts/{image_id}/ticket");
+        Request::post(&uri).header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", read_credential.credential))
+            .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .body(Body::empty()).unwrap()
+    };
+    assert_eq!(app.clone().oneshot(ticket_request("factory-b")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let response = app.clone().oneshot(ticket_request("factory-a")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a session's own upload must mint a preview ticket");
+    let ticket: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    for (session, range, expected) in [
+        ("factory-a", None, StatusCode::OK),
+        ("factory-a", Some("bytes=1-4"), StatusCode::PARTIAL_CONTENT),
+        ("factory-b", None, StatusCode::UNAUTHORIZED),
+    ] {
+        let mut request = Request::get(format!("/v1/sessions/{session}/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap()));
+        if let Some(range) = range { request = request.header("range", range); }
+        let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), expected);
+        if expected.is_success() {
+            assert_eq!(response.headers()["content-type"], "image/png");
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+            assert_eq!(bytes.as_ref(), if range.is_some() { &png[1..=4] } else { &png });
+        }
+    }
     // ISO-BMFF major and compatible brands, not the filename, identify phone media.
     for (brands, mime) in [
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),

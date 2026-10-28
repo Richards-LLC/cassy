@@ -230,7 +230,8 @@ mod internal_llm_tests {
     fn codex_factory_session_start_registers_only_the_cas_session_identity_cas_d0fe() {
         let project = tempfile::tempdir().expect("project");
         let cas_root = crate::store::init_cas_dir(project.path()).expect("cas root");
-        let _env = TestEnvGuard::with_optional_vars(&[
+        let mut env = TestEnvGuard::temp_home();
+        for (key, value) in [
             ("CAS_ROOT", Some(cas_root.to_str().expect("utf8 cas root"))),
             ("CAS_HOOK_HARNESS", Some("codex")),
             ("CAS_FACTORY_MODE", Some("1")),
@@ -238,7 +239,12 @@ mod internal_llm_tests {
             ("CAS_AGENT_NAME", Some("true-leopard-45")),
             ("CAS_SESSION_ID", Some("codex-true-leopard-45-registered")),
             (crate::internal_llm::INTERNAL_LLM_ENV, None),
-        ]);
+        ] {
+            match value {
+                Some(value) => env.set(key, value),
+                None => env.remove(key),
+            }
+        }
         // Codex 0.163 sends its thread UUID as the hook session_id.
         let output = handle_hook(
             "SessionStart",
@@ -257,8 +263,13 @@ mod internal_llm_tests {
             panic!("Codex startup must return session guidance");
         };
         // pin: Codex's explicit skill syntax must be directly usable at startup.
-        assert!(additional_context.contains("`$finish`"), "{additional_context}");
-        assert!(!additional_context.contains("/finish"), "{additional_context}");
+        let hint = additional_context
+            .lines()
+            .find(|line| line.starts_with("Codex skills:"))
+            .expect("Codex startup must explain how to invoke the finish skill");
+        assert!(hint.contains("`$finish`"), "{hint}");
+        assert!(hint.contains("say `finish`"), "{hint}");
+        assert!(!hint.contains("/finish"), "{hint}");
         let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
         let ids: Vec<String> = agents
             .list(None)

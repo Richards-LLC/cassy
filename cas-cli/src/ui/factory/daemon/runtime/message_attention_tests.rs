@@ -1376,7 +1376,9 @@ fn cas_afe0_reference_wire_never_becomes_a_body_receipt() {
             if terminal {
                 f.queue.acknowledge_for_recipients(id, &[SUPERVISOR.into()], None).unwrap();
             } else {
-                f.queue.poll_unseen_for_recipient(SUPERVISOR, Some(SESSION), 1).unwrap();
+                // The attention fixture deliberately ages rows beyond the
+                // automatic inbox TTL; this is an explicit body recovery.
+                f.queue.poll_named_for_recipient(SUPERVISOR, Some(SESSION), &[id]).unwrap();
             }
             let receipt = f.queue.recipient_receipt(id, SUPERVISOR).unwrap();
             let projected = f.queue.recipient_delivery(id, SUPERVISOR).unwrap().unwrap();

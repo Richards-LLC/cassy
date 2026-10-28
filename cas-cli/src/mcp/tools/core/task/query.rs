@@ -118,9 +118,14 @@ pub(super) fn excerpt(text: &str, budget: usize) -> String {
     format!("{}…", &text[..end])
 }
 
-pub(super) fn read_hint(id: &str, action: &str) -> String {
+pub(super) fn read_hint(id: &str, action: &str, clipped: bool) -> String {
+    let warning = if clipped {
+        "\nRead clipped instructions before acting."
+    } else {
+        ""
+    };
     format!(
-        "\nRead clipped instructions before acting.\nFull: task {action} id={id} full=true\nPage: task {action} id={id} offset=0 limit=1600"
+        "{warning}\nFull: task {action} id={id} full=true\nPage: task {action} id={id} offset=0 limit=1600"
     )
 }
 
@@ -160,7 +165,13 @@ pub(super) fn render_task_read(
             &full[start..end]
         ));
     }
-    let hint = read_hint(id, action);
+    // Reserve the longer warning before deciding whether the final budget clips.
+    let reserve = read_hint(id, action, true).len();
+    let hint = read_hint(
+        id,
+        action,
+        summary.contains('…') || summary.len() > 2000 - reserve,
+    );
     Ok(format!(
         "{}{}",
         excerpt(summary, 2000usize.saturating_sub(hint.len())),
@@ -749,8 +760,12 @@ impl CasCore {
             task.delivery_mode,
             excerpt(&target, 80),
         );
+        // Builtin verifier/epic flows consume Type and Demo from bare show.
+        // Name full-only sections so callers cannot silently infer absence.
         let summary = format!(
-            "{}\n{}{}{}\nNotes:\n{}",
+            "Type: {}\nDemo: {}\nOmitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}\nNotes:\n{}",
+            task.task_type,
+            excerpt(&task.demo_statement, 160),
             excerpt(&header, 400),
             task_scope(&task),
             excerpt(&read_status, 200),

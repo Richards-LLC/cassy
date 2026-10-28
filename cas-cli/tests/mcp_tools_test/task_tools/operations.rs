@@ -243,24 +243,52 @@ async fn task_read_default_show_preserves_gate_inputs() {
     task.deliverables.commit_hash = Some("a".repeat(40));
     store.add(&task).unwrap();
     let service = CasService::new(core, None);
-    let request = |full| Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
-        serde_json::json!({"action": "show", "id": task.id, "full": full})
-    ).unwrap());
+    let request = |full| {
+        Parameters(
+            serde_json::from_value::<cas_mcp::TaskRequest>(
+                serde_json::json!({"action": "show", "id": task.id, "full": full}),
+            )
+            .unwrap(),
+        )
+    };
     let brief = extract_text(service.task(request(false)).await.unwrap());
     // pin: task-verifier and epic-flow-walk parse these bare-show fields.
     assert!(brief.contains("Type: epic"), "epic gate hidden: {brief}");
-    assert!(brief.contains(&format!("Demo: {}", task.demo_statement)), "demo gate hidden: {brief}");
+    assert!(
+        brief.contains(&format!("Demo: {}", task.demo_statement)),
+        "demo gate hidden: {brief}"
+    );
     assert!(brief.len() <= 2_000, "{} bytes", brief.len());
-    for section in ["Design", "Deliverables", "Dependencies", "Epic", "Subtasks", "Outcome", "Terminal reason", "Superseded by"] {
-        assert!(brief.contains(section), "unmarked omission of {section}: {brief}");
+    for section in [
+        "Design",
+        "Deliverables",
+        "Dependencies",
+        "Epic",
+        "Subtasks",
+        "Outcome",
+        "Terminal reason",
+        "Superseded by",
+    ] {
+        assert!(
+            brief.contains(section),
+            "unmarked omission of {section}: {brief}"
+        );
     }
     let full = extract_text(service.task(request(true)).await.unwrap());
     assert!(full.contains(&task.design) && full.contains("dashboard.rs"));
     assert!(full.contains(task.deliverables.commit_hash.as_deref().unwrap()));
     // Short notes have no clipped instructions; navigation alone is sufficient.
-    let notes = extract_text(service.task(Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
-        serde_json::json!({"action": "notes", "id": task.id})
-    ).unwrap())).await.unwrap());
+    let notes = extract_text(
+        service
+            .task(Parameters(
+                serde_json::from_value::<cas_mcp::TaskRequest>(
+                    serde_json::json!({"action": "notes", "id": task.id}),
+                )
+                .unwrap(),
+            ))
+            .await
+            .unwrap(),
+    );
     assert!(!notes.contains("Read clipped instructions"), "{notes}");
 }
 
@@ -272,31 +300,61 @@ async fn task_read_default_start_preserves_complete_advisories() {
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
         let cas_dir = temp.path().join(".cas");
         let store = open_task_store(&cas_dir).unwrap();
-        let mut task = Task::new("cas-start-read".into(), "Start with complete instructions".into());
+        let mut task = Task::new(
+            "cas-start-read".into(),
+            "Start with complete instructions".into(),
+        );
         task.notes = "old evidence α".repeat(1000);
         let required: Vec<String>;
         if case == "qa-blockers" {
             task.labels.push("qa-pass".into());
             store.add(&task).unwrap();
             for id in ["cas-blocker-one", "cas-blocker-two"] {
-                store.add(&Task::new(id.into(), "Open blocker".into())).unwrap();
-                store.add_dependency(&cas::types::Dependency::new(task.id.clone(), id.into(), cas::types::DependencyType::Blocks)).unwrap();
+                store
+                    .add(&Task::new(id.into(), "Open blocker".into()))
+                    .unwrap();
+                store
+                    .add_dependency(&cas::types::Dependency::new(
+                        task.id.clone(),
+                        id.into(),
+                        cas::types::DependencyType::Blocks,
+                    ))
+                    .unwrap();
             }
             let now = chrono::Utc::now();
-            let cas_store::QaPassOpen::Dispatched(pass) = cas_store::open_qa_pass(&cas_dir, &cas_store::NewQaPass {
-                task_id: "cas-delivery", implementer_agent_id: "another-worker",
-                branch: "factory/another-worker", bound_head: "aaaa1111bbbb2222",
-                deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
-            }, now).unwrap() else { panic!("new QA round"); };
+            let cas_store::QaPassOpen::Dispatched(pass) = cas_store::open_qa_pass(
+                &cas_dir,
+                &cas_store::NewQaPass {
+                    task_id: "cas-delivery",
+                    implementer_agent_id: "another-worker",
+                    branch: "factory/another-worker",
+                    bound_head: "aaaa1111bbbb2222",
+                    deadline_at: now + chrono::Duration::minutes(30),
+                    max_rounds: 3,
+                },
+                now,
+            )
+            .unwrap() else {
+                panic!("new QA round");
+            };
             cas_store::set_qa_task(&cas_dir, &pass.id, &task.id).unwrap();
-            required = vec!["cas-blocker-one, cas-blocker-two".into(), "close remains gated until these tasks are done.".into(), "you are the reviewer; deadline".into()];
+            required = vec![
+                "cas-blocker-one, cas-blocker-two".into(),
+                "close remains gated until these tasks are done.".into(),
+                "you are the reviewer; deadline".into(),
+            ];
         } else if case == "unanchored" {
             let mut cloud = CloudConfig::default();
             cloud.endpoint = "http://127.0.0.1:1".into();
             cloud.token = Some("fixture-token".into());
             cloud.save_to_cas_dir(&cas_dir).unwrap();
             store.add(&task).unwrap();
-            required = vec!["stop now: working it here records lease, verification".into(), "target_repo=<path> target_branch=<branch>".into(), "cas cloud purge-foreign".into(), "foreign rows and re-pull.".into()];
+            required = vec![
+                "stop now: working it here records lease, verification".into(),
+                "target_repo=<path> target_branch=<branch>".into(),
+                "cas cloud purge-foreign".into(),
+                "foreign rows and re-pull.".into(),
+            ];
         } else {
             let root = temp.path();
             branch_transfer_git(root, &["init", "-b", "main"]);
@@ -320,22 +378,41 @@ async fn task_read_default_start_preserves_complete_advisories() {
             parked.assignee = Some("test-agent".into());
             parked.deliverables.factory_branch_anchor = Some(tip.clone());
             store.add(&parked).unwrap();
-            task.deliverables.work_target = Some(cas::types::WorkTarget { repo_selector: root.display().to_string(), target_branch: "main".into() });
+            task.deliverables.work_target = Some(cas::types::WorkTarget {
+                repo_selector: root.display().to_string(),
+                target_branch: "main".into(),
+            });
             store.add(&task).unwrap();
-            required = vec![format!("cas-parked is parked for merge at anchor {tip}; that SHA is its delivery."), "Don't force-push factory/test-agent while a PR is open on it.".into()];
+            required = vec![format!(
+                "cas-parked stays on factory/test-agent at {tip}. This task uses factory/test-agent-cas-start-read."
+            )];
         }
         let service = CasService::new(core, None);
-        let request = |action, full| Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
-            serde_json::json!({"action": action, "id": task.id, "full": full})
-        ).unwrap());
+        let request = |action, full| {
+            Parameters(
+                serde_json::from_value::<cas_mcp::TaskRequest>(
+                    serde_json::json!({"action": action, "id": task.id, "full": full}),
+                )
+                .unwrap(),
+            )
+        };
         let started = extract_text(service.task(request("start", false)).await.unwrap());
         assert!(started.len() <= 2_000, "{case}: {} bytes", started.len());
         let recovered = extract_text(service.task(request("notes", true)).await.unwrap());
         for instruction in required {
-            assert!(recovered.contains(&instruction), "{case}: start-only instruction unreachable: {instruction}\n{started}\n{recovered}");
-            assert!(started.contains(&instruction) || started.contains("Start advisories exceed"), "{case}: silently clipped instruction: {instruction}\n{started}");
+            assert!(
+                recovered.contains(&instruction),
+                "{case}: start-only instruction unreachable: {instruction}\n{started}\n{recovered}"
+            );
+            assert!(
+                started.contains(&instruction) || started.contains("Start advisories exceed"),
+                "{case}: silently clipped instruction: {instruction}\n{started}"
+            );
         }
-        assert!(started.contains("task notes id=cas-start-read"), "no durable recovery path: {started}");
+        assert!(
+            started.contains("task notes id=cas-start-read"),
+            "no durable recovery path: {started}"
+        );
     }
 }
 

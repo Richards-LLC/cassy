@@ -2315,6 +2315,46 @@ async fn test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child() {
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }
 
+#[test]
+fn test_spawn_workers_logged_out_default_names_account_remedies() {
+    run_isolated_codex_test(
+        "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic logged-out default Codex probe"]
+async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
+    );
+    env.create_epic("Test Epic");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    std::fs::remove_file(home.join(".codex/auth.json")).expect("log out default account");
+    let registered = home.join(".codex-registered@example.com");
+    std::fs::create_dir_all(&registered).expect("registered account directory");
+    std::fs::write(registered.join("auth.json"), "{}").expect("registered auth marker");
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.cli = Some("codex".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .expect_err("logged-out default must refuse before enqueue");
+    for detail in [
+        "default Codex home is absent or logged out",
+        "Pass config_dir",
+        "project worker config_dir",
+        registered.to_str().unwrap(),
+    ] {
+        assert!(error.message.contains(detail), "missing {detail:?}: {error}");
+    }
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
 #[tokio::test]
 async fn test_spawn_workers_invalid_cli_returns_error() {
     // An unrecognised cli value should return an MCP error, not silently use defaults.

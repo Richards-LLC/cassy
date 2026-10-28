@@ -10062,7 +10062,8 @@ impl SqlitePromptQueueStore {
             // cas-8cbe: a named read is the recipient asking for one row it
             // was told about (a compacted card's read-in-full escape), not an
             // automatic surfacing. It serves the row for as long as retention
-            // keeps it, acked or not.
+            // keeps it. Explicitly acknowledged or answered rows render a
+            // terminal reference, even for a named read.
             let named_read = matches!(transport, TransportEligibility::NamedRead);
             let stale_cutoff = if named_read {
                 String::new()

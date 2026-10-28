@@ -47,6 +47,10 @@ The operator can paste text, screenshots or files into Commander: long text beco
 3. A QA reviewer runs `cas qa impact` on a delivery, walks the touched journeys and records the verdict in the QA ledger.
 4. A supervisor messages a supervisor on another project or machine, sees RECEIVED or PENDING, or splits an epic with that peer.
 5. After a release merges, `cas serve` runs the post-release check, `cas release report` builds the branded release report, and Violet posts the release notes to Slack; `cas violet channels` and `cas doctor` check the configured channels.
+   After publication, the release workflow also updates `hub.petrastella.io`
+   from the released Commander bundle when its files change, verifies public
+   access and bytes, restores the previous deployment on a failed check,
+   and attaches deployment provenance to the release.
 6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change; `cas deliverable finalize --audience customer` brands it, embeds its screenshots, refuses internal vocabulary and prints and checks the A4 and Letter PDFs.
    For a client product, `cas-customer-release-notes` writes the period's customer release notes from its `docs/deliverables/PROFILE.md`; the client's `DESIGN.md` shapes the layout, and the same `finalize --audience customer` call produces the HTML and PDFs.
 7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.

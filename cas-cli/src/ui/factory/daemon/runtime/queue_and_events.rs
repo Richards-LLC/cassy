@@ -13726,48 +13726,59 @@ mod tests {
     #[test]
     fn ended_reminder_owner_cannot_stall_later_task_waits_cas_d8a1() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let root = tempfile::tempdir().unwrap();
-        let cas = root.path();
-        let mut owner = cas_types::Agent::new_with_role(
-            "live-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
-        owner.factory_session = Some("owner-session".into());
-        crate::store::open_agent_store(cas).unwrap().register(&owner).unwrap();
-        let tasks = crate::store::open_task_store(cas).unwrap();
-        for id in ["cas-live", "cas-done"] {
-            tasks.add(&Task::new(id.into(), id.into())).unwrap();
+        // Pin the history window before and after midnight. SQL-formatted
+        // creation dates must compare as instants against the RFC3339 cutoff.
+        for instant in ["2000-01-01T23:30:00Z", "2000-01-02T00:30:00Z"] {
+            let now = chrono::DateTime::parse_from_rfc3339(instant).unwrap().with_timezone(&chrono::Utc);
+            let root = tempfile::tempdir().unwrap();
+            let cas = root.path();
+            let mut owner = cas_types::Agent::new_with_role(
+                "live-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+            owner.factory_session = Some("owner-session".into());
+            crate::store::open_agent_store(cas).unwrap().register(&owner).unwrap();
+            let tasks = crate::store::open_task_store(cas).unwrap();
+            for id in ["cas-live", "cas-done"] {
+                tasks.add(&Task::new(id.into(), id.into())).unwrap();
+            }
+            let reminders = crate::store::open_reminder_store(cas).unwrap();
+            let mut ids = Vec::new();
+            for (owner_id, task_id, ttl) in [
+                ("deleted-owner", "cas-live", 60),
+                (owner.id.as_str(), "cas-done", 0),
+                (owner.id.as_str(), "cas-live", 60),
+            ] {
+                ids.push(reminders.create_with_scope(owner_id, None, "watch remote task",
+                    cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
+                    Some(&serde_json::json!({"task_id": task_id})), ttl,
+                    Some("owner-session"), None, true, None).unwrap());
+            }
+            let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+            conn.execute("UPDATE reminders SET created_at = ?1",
+                [(now - chrono::Duration::hours(2)).format("%Y-%m-%d %H:%M:%S").to_string()]).unwrap();
+            let old = tasks.get("cas-done").unwrap();
+            let mut closed = old.clone(); closed.status = TaskStatus::Closed;
+            tasks.update_from_sync(&closed, &old).unwrap();
+            for _ in 0..2 {
+                super::run_reminder_scan(super::ReminderScanInput {
+                    cas_dir: cas.to_path_buf(), session_name: "owner-session".into(), supervisor_name: owner.name.clone(),
+                    agent_id_to_name: HashMap::from([(owner.id.clone(), owner.name.clone())]),
+                    events: vec![], external_ready: vec![], ci_wakes: vec![],
+                });
+            }
+            let fired = reminders.list_recently_fired(60).unwrap();
+            assert_eq!(fired.len(), 1, "an orphan before this reminder cannot suppress its remote close");
+            assert_eq!(fired[0].id, ids[1]);
+            assert!(reminders.list_all_pending().unwrap().is_empty(), "orphan and later finite waits must expire");
+            let history = crate::store::SqliteReminderStore::open(cas).unwrap();
+            let ended = history.list_recently_ended_at(&owner.id, 86400, now).unwrap();
+            assert!(ended.iter().any(|row| row.id == ids[2] && row.status == cas_store::ReminderStatus::Expired));
+            let rows = crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap();
+            assert_eq!(rows.iter().filter(|row| cas_store::parse_reminder_delivery_id(&row.prompt) == Some(ids[1])).count(), 1);
+            conn.execute("UPDATE reminders SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![(now - chrono::Duration::hours(25)).format("%Y-%m-%d %H:%M:%S").to_string(), ids[2]]).unwrap();
+            assert!(!history.list_recently_ended_at(&owner.id, 86400, now).unwrap()
+                .iter().any(|row| row.id == ids[2]), "old history stays outside the pinned window at {instant}");
         }
-        let reminders = crate::store::open_reminder_store(cas).unwrap();
-        let mut ids = Vec::new();
-        for (owner_id, task_id, ttl) in [
-            ("deleted-owner", "cas-live", 60),
-            (owner.id.as_str(), "cas-done", 0),
-            (owner.id.as_str(), "cas-live", 60),
-        ] {
-            ids.push(reminders.create_with_scope(owner_id, None, "watch remote task",
-                cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
-                Some(&serde_json::json!({"task_id": task_id})), ttl,
-                Some("owner-session"), None, true, None).unwrap());
-        }
-        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
-            "UPDATE reminders SET created_at = datetime('now', '-2 hours')", []).unwrap();
-        let old = tasks.get("cas-done").unwrap();
-        let mut closed = old.clone(); closed.status = TaskStatus::Closed;
-        tasks.update_from_sync(&closed, &old).unwrap();
-        for _ in 0..2 {
-            super::run_reminder_scan(super::ReminderScanInput {
-                cas_dir: cas.to_path_buf(), session_name: "owner-session".into(), supervisor_name: owner.name.clone(),
-                agent_id_to_name: HashMap::from([(owner.id.clone(), owner.name.clone())]),
-                events: vec![], external_ready: vec![], ci_wakes: vec![],
-            });
-        }
-        let fired = reminders.list_recently_fired(60).unwrap();
-        assert_eq!(fired.len(), 1, "an orphan before this reminder cannot suppress its remote close");
-        assert_eq!(fired[0].id, ids[1]);
-        assert!(reminders.list_all_pending().unwrap().is_empty(), "orphan and later finite waits must expire");
-        let ended = reminders.list_recently_ended(&owner.id, 86400).unwrap();
-        assert!(ended.iter().any(|row| row.id == ids[2] && row.status == cas_store::ReminderStatus::Expired));
-        let rows = crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap();
-        assert_eq!(rows.iter().filter(|row| cas_store::parse_reminder_delivery_id(&row.prompt) == Some(ids[1])).count(), 1);
     }
 
     #[tokio::test]
@@ -21007,8 +21018,10 @@ mod gh_1153_idle_pty_delivery_tests {
         );
         let narrative = wake_attempt_narrative(report.wake_attempt, report.wake);
         assert!(
-            narrative.contains("NOT delivered to a turn"),
-            "message_status must not report success for a turn that never started: {narrative}"
+            narrative.contains("FAILED wake")
+                && narrative.contains("no message-specific turn receipt is recorded")
+                && !narrative.contains("was injected into a turn"),
+            "message_status must report the failed wake without inventing a recipient turn: {narrative}"
         );
         assert!(!daemon.normal_delivery_probes.contains_key(&row));
         let relays = queue.peek_all(20).unwrap();

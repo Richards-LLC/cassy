@@ -587,7 +587,7 @@ pub struct UndeliveredLifecycleRelay {
     /// Original lifecycle envelope. Consumers use its typed task payload to
     /// distinguish actionable relays from task-free informational events.
     pub prompt: String,
-    /// Terminal incident stage or current stage of a >60s pending relay.
+    /// Terminal incident stage, or current stage of an aged/held pending relay.
     pub stage: String,
     /// Recorded reason, when one was stamped.
     pub reason: Option<PendingReason>,
@@ -599,6 +599,12 @@ pub struct UndeliveredLifecycleRelay {
     pub created_at: DateTime<Utc>,
     /// When it was terminated.
     pub processed_at: Option<DateTime<Utc>>,
+    /// Durable next readiness check for a recoverable delivery hold.
+    #[serde(default)]
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    /// Independent operator escalation, when durably recorded for this relay.
+    #[serde(default)]
+    pub operator_alert_id: Option<i64>,
 }
 
 /// A pending queue row that has spent real transport attempts (cas-94a1).
@@ -9048,21 +9054,26 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // `transport_delivered_at IS NULL` is the whole test for "never
         // arrived" — it is stamped only by `mark_transport_delivered` /
         // a fully successful broadcast. Pending relays older than 60 seconds
-        // must be visible before their retry budget is exhausted.
-        let mut stmt = conn.prepare(
+        // must be visible before their retry budget is exhausted. Explicit
+        // readiness holds are visible immediately (GH #1400).
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, source, target, summary, highest_stage, last_pending_reason,
-                    last_pending_detail, factory_session, created_at, processed_at, prompt
+                    last_pending_detail, factory_session, created_at, processed_at, prompt,
+                    next_attempt_at,
+                    (SELECT alert.id FROM prompt_queue alert
+                     WHERE alert.dedupe_key = '{RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX}' || prompt_queue.id
+                     LIMIT 1)
              FROM prompt_queue
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
-                        AND created_at <= ?))
+                        AND (created_at <= ? OR last_pending_reason IN ('gated_not_ready', 'awaiting_busy_recipient'))))
                AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)
              ORDER BY id DESC
-             LIMIT ?",
-        )?;
+             LIMIT ?"
+        ))?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
         let rows = stmt.query_map(params![cutoff, limit as i64], |row| {
             let created_at: String = row.get(8)?;
@@ -9088,6 +9099,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                         .ok()
                         .map(|ts| ts.with_timezone(&Utc))
                 }),
+                next_attempt_at: row.get::<_, Option<String>>(11)?
+                    .as_deref().and_then(Self::parse_datetime),
+                operator_alert_id: row.get(12)?,
             })
         })?;
         let mut out = Vec::new();
@@ -9118,7 +9132,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND source LIKE 'lifecycle-wake:%'
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
-                        AND created_at <= ?))
+                        AND (created_at <= ? OR last_pending_reason IN ('gated_not_ready', 'awaiting_busy_recipient'))))
                AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)",
             params![(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()],
             |row| row.get(0),

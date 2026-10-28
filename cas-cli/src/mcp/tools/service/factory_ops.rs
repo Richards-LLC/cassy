@@ -1828,6 +1828,14 @@ fn format_undelivered_relay_section_at(
     rows: &[cas_store::UndeliveredLifecycleRelay],
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    format_undelivered_relay_detail_at(rows, now, false)
+}
+
+fn format_undelivered_relay_detail_at(
+    rows: &[cas_store::UndeliveredLifecycleRelay],
+    now: chrono::DateTime<chrono::Utc>,
+    detail: bool,
+) -> String {
     // cas-5871: a relay older than a day is counted with the action that
     // clears it; listing it on every call buried the live ones.
     let stale_before = now - chrono::Duration::hours(24);
@@ -1844,9 +1852,9 @@ fn format_undelivered_relay_section_at(
     }
     let (recent, stale): (Vec<_>, Vec<_>) = actionable
         .into_iter()
-        .partition(|row| row.created_at >= stale_before);
+        .partition(|row| detail || row.created_at >= stale_before);
     let total = recent.len() + stale.len();
-    let displayed = recent.len().min(10);
+    let displayed = if detail { recent.len() } else { recent.len().min(10) };
     let mut out = String::new();
     out.push_str(&format!(
         "🔴 UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
@@ -1875,6 +1883,22 @@ fn format_undelivered_relay_section_at(
         ));
         if let Some(detail) = &row.detail {
             out.push_str(&format!("    {detail}\n"));
+        }
+        if detail {
+            let next = if row.processed_at.is_some() {
+                "reconcile the pending work and acknowledge this relay".to_string()
+            } else if let Some(at) = row.next_attempt_at {
+                format!("recheck {}", at.to_rfc3339())
+            } else {
+                "retry when the recipient is ready".to_string()
+            };
+            out.push_str(&format!(
+                "    age {}s; next: {next}\n",
+                (now - row.created_at).num_seconds().max(0),
+            ));
+            if let Some(alert_id) = row.operator_alert_id {
+                out.push_str(&format!("    operator alert #{alert_id} recorded\n"));
+            }
         }
     }
     if !stale.is_empty() {
@@ -4506,12 +4530,17 @@ impl CasService {
                 let _ = queue.reconcile_lifecycle_relays();
                 queue
                     .list_undelivered_lifecycle_relays(
-                        super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+                        if req.detail.unwrap_or(false) { i64::MAX as usize }
+                        else { super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT },
                     )
                     .unwrap_or_default()
             })
             .unwrap_or_default();
-        let undelivered_section = format_undelivered_relay_section(&undelivered_relays);
+        let undelivered_section = if req.detail.unwrap_or(false) {
+            format_undelivered_relay_detail_at(&undelivered_relays, chrono::Utc::now(), true)
+        } else {
+            format_undelivered_relay_section(&undelivered_relays)
+        };
 
         // GH #699: `agents` is scoped to the caller's factory session, so a
         // second supervisor live on this same clone never appeared here — yet
@@ -12864,6 +12893,8 @@ mod spawn_lifecycle_tests {
             factory_session: Some("cas-src-fast-pelican-83".to_string()),
             created_at: chrono::Utc::now(),
             processed_at: Some(chrono::Utc::now()),
+            next_attempt_at: None,
+            operator_alert_id: None,
         }
     }
 
@@ -14217,6 +14248,54 @@ mod tests {
                 .all(|name| !workers.iter().any(|worker| worker_answers_to(worker, name))),
             "an unknown target must still fail to resolve"
         );
+    }
+
+    #[tokio::test]
+    async fn detailed_worker_status_lists_every_held_relay_with_age_and_next_action() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "draft-session");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "draft-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("draft-session".into());
+        supervisor.pid = Some(std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let next = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for index in 0..12 {
+            let label = format!("held-relay-{index:02}");
+            let id = match queue.enqueue_idempotent(
+                &format!("lifecycle-wake:{index}"), "supervisor", &label,
+                Some("draft-session"), Some(&label), None, &label,
+                Some(&cas_store::QueueOrigin::Daemon),
+            ).unwrap() {
+                cas_store::EnqueueIdempotentResult::Created(id) => id,
+                _ => panic!("fresh relay"),
+            };
+            queue.park_for_busy_recipient(id, Some("operator composer is dirty"), next).unwrap();
+            // Both a fresh protected draft and one older than the ordinary
+            // display window must remain inspectable in detail mode.
+            let age = if index == 0 { 0 } else { 2 * 24 * 60 * 60 };
+            conn.execute("UPDATE prompt_queue SET created_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(age)).to_rfc3339(), id]).unwrap();
+        }
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "detail":true})).unwrap();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        for index in 0..12 {
+            assert!(output.contains(&format!("held-relay-{index:02}")), "detail hides a deferred relay: {output}");
+        }
+        assert_eq!(output.lines().filter(|line| line.trim_start().starts_with("age ")).count(), 12,
+            "each deferred relay needs its age: {output}");
+        assert_eq!(output.matches("next: recheck ").count(), 12, "each deferred relay needs its next action: {output}");
+        assert!(output.contains(&next.to_rfc3339()), "next action uses the durable recheck time: {output}");
     }
 
     fn response_text(response: CallToolResult) -> String {

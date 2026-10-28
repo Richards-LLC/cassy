@@ -7222,6 +7222,16 @@ impl CasCore {
         task: &Task,
         declared_repo_context: Option<&super::super::repo_context::RepoContext>,
     ) -> Result<(), TaskLifecycleGateError> {
+        self.guard_close_merge_state_with_review(task_store, task, declared_repo_context, None)
+    }
+
+    fn guard_close_merge_state_with_review(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        declared_repo_context: Option<&super::super::repo_context::RepoContext>,
+        authenticated_review: Option<&str>,
+    ) -> Result<(), TaskLifecycleGateError> {
         if task.task_type == TaskType::Epic || !has_delivery_to_measure(task) {
             return Ok(());
         }
@@ -7329,11 +7339,19 @@ impl CasCore {
             search_manifest: None,
             commit_receipt: None,
         };
-        match run_factory_branch_merge_gate(
+        let review_window = authenticated_review.map(|reason| TaskCommitReceiptWindow {
+            supervisor_override_reason: Some(reason.to_string()),
+            not_before: task.created_at,
+            task_floor: task.created_at,
+            basis: "authenticated close preflight",
+            identity: task_commit_identity(task, None),
+        });
+        match run_factory_branch_merge_gate_with_attribution(
             task,
             &req,
             &resolved_parent_branch,
             &close_project_root,
+            TaskCommitAttribution { receipt: None, window: review_window.as_ref() },
         ) {
             MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
             MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
@@ -7702,10 +7720,11 @@ impl CasCore {
                         // requires this exact dispatch's independent verdict.
                         if close_disposition.requires_delivery_gates()
                             && task.status == TaskStatus::AwaitingMerge
-                            && let Err(message) = self.guard_direct_update_close_merge_state(
+                            && let Err(message) = self.guard_close_merge_state_with_review(
                                 task_store.as_ref(),
                                 &task,
                                 None,
+                                if supervisor_override { req.reason.as_deref() } else { None },
                             )
                         {
                             return Ok(Self::tool_error(message.to_string()));
@@ -14198,6 +14217,9 @@ fn epic_anchor_content_presence(
         (Some(note), Some(ledger)) => Some(format!("{note}; {ledger}")),
         (note, ledger) => note.or(ledger),
     };
+    if let Some((commits, note)) = delivery_evolution::worktree_regeneration_supersession(repo, anchor, target, paths) {
+        return (DeliveryContentPresence::Superseded { paths: paths.clone(), commits }, joined(Some(note)));
+    }
     if let Some((presence, note)) = epic_anchor_supersession(task, children, repo, anchor, target, paths) {
         return (presence, joined(Some(note)));
     }
@@ -14646,6 +14668,13 @@ fn anchored_delivery_content_gate_unbounded(
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
                     "DECISION: delivery content accepted for task {task_id}: {}.",
                     with_ledger(String::new())
+                )));
+            }
+            if let Some((_, note)) = delivery_evolution::worktree_regeneration_supersession(
+                repo_path, anchor, parent_branch, &paths,
+            ) {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {}.", with_ledger(note)
                 )));
             }
             // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
@@ -18848,27 +18877,29 @@ pub(crate) fn validate_task_commit_receipt(
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None
         }
-        DeliveryContentPresence::Dropped { paths }
-            if regenerated_artifact_drop_note(repo_path, &full_receipt, &paths).is_some() =>
-        {
-            regenerated_artifact_drop_note(repo_path, &full_receipt, &paths)
-                .map(|note| format!(" Regenerated build artifacts: {note}."))
-        }
         DeliveryContentPresence::Dropped { paths } => {
-            let review = validated_delivery_drop_review(
-                repo_path,
-                &full_receipt,
-                parent_branch,
-                &paths,
-                window.supervisor_override_reason.as_deref(),
-            )?;
-            if review.is_none() {
-                return Err(format!(
-                    "the commit is reachable from {parent_branch} or origin/{parent_branch}, but its delivery content is absent from the current target tree; dropped path(s): {}",
-                    paths.join(", ")
-                ));
+            if let Some((_, note)) = delivery_evolution::worktree_regeneration_supersession(
+                repo_path, &full_receipt, parent_branch, &paths,
+            ) {
+                Some(format!(" Regenerated build artifacts: {note}."))
+            } else if let Some(note) = regenerated_artifact_drop_note(repo_path, &full_receipt, &paths) {
+                Some(format!(" Regenerated build artifacts: {note}."))
+            } else {
+                let review = validated_delivery_drop_review(
+                    repo_path,
+                    &full_receipt,
+                    parent_branch,
+                    &paths,
+                    window.supervisor_override_reason.as_deref(),
+                )?;
+                if review.is_none() {
+                    return Err(format!(
+                        "the commit is reachable from {parent_branch} or origin/{parent_branch}, but its delivery content is absent from the current target tree; dropped path(s): {}",
+                        paths.join(", ")
+                    ));
+                }
+                review.map(|review| format!(" Explicit reviewed-drop authorization: {review}."))
             }
-            review.map(|review| format!(" Explicit reviewed-drop authorization: {review}."))
         }
         DeliveryContentPresence::Unknown { reason } => {
             return Err(format!(
@@ -33893,6 +33924,148 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                 assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}")
             }
             other => panic!("a bundle-only drop has no source proof: {other:?}"),
+        }
+    }
+
+    /// The final delivery may be only the bundle, or a source-only sync
+    /// merge. worktree_merge keeps target dist, then regenerates it separately.
+    #[test]
+    fn delivery_evolution_accepts_worktree_merge_regenerated_dist_cas_c765() {
+        for (sync_tip, dropped_source, provenance) in [
+            (false, false, true),
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let dir = init_factory_repo("worker");
+            let p = dir.path();
+            let source = "hub-web/src/main.ts";
+            let dist = "hub-web/dist/app.js";
+            std::fs::create_dir_all(p.join("hub-web/src")).unwrap();
+            std::fs::create_dir_all(p.join("hub-web/dist")).unwrap();
+            git(p, &["checkout", "main"]);
+            f2eb_commit(p, source, "base();\n", "seed source");
+            f2eb_commit(p, dist, "bundle(0);\n", "seed dist");
+            git(p, &["checkout", "-B", "factory/worker", "main"]);
+            f2eb_commit(
+                p,
+                source,
+                "base();\ndelivered();\n",
+                "feat(cas-test1): source",
+            );
+            let mut anchor = f2eb_commit(p, dist, "bundle(1);\n", "build(cas-test1): dist");
+            git(p, &["checkout", "main"]);
+            f2eb_commit(p, "sibling.txt", "sibling\n", "sibling delivery");
+            if sync_tip {
+                git(p, &["checkout", "factory/worker"]);
+                git(
+                    p,
+                    &["merge", "--no-ff", "main", "-m", "sync sources (cas-test1)"],
+                );
+                anchor = head_sha(p);
+                git(p, &["checkout", "main"]);
+            }
+            // Model merge=cas-generated keeping the target bundle, while
+            // all task source is integrated in the merge's tree.
+            git(
+                p,
+                &[
+                    "merge",
+                    "--no-ff",
+                    "--no-commit",
+                    "-s",
+                    "ours",
+                    "factory/worker",
+                ],
+            );
+            std::fs::write(
+                p.join(source),
+                if dropped_source {
+                    "base();\n"
+                } else {
+                    "base();\ndelivered();\n"
+                },
+            )
+            .unwrap();
+            git(p, &["add", source]);
+            git(p, &["commit", "-qm", "merge worker sources"]);
+            let merge = head_sha(p);
+            let mut task = worker_task("worker");
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let req = base_req(&task.id);
+            // A source-only integration without the rebuild still refuses.
+            if !sync_tip {
+                assert!(matches!(
+                    run_factory_branch_merge_gate(&task, &req, "main", p),
+                    MergeStateGateOutcome::Reject(_)
+                ));
+            }
+            let subject = "build(hub-web): regenerate dist from merged sources";
+            let message = if provenance {
+                format!(
+                    "{subject}\n\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-0c988).",
+                    &merge[..9]
+                )
+            } else {
+                subject.to_string()
+            };
+            let regeneration = f2eb_commit(p, dist, "bundle(merged);\n", &message);
+            let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
+            if dropped_source || !provenance {
+                assert!(
+                    matches!(outcome, MergeStateGateOutcome::Reject(_)),
+                    "{outcome:?}"
+                );
+                continue;
+            }
+            // pin: close audit must name the actual regeneration commit and proven source path.
+            assert!(
+                matches!(&outcome, MergeStateGateOutcome::ProceedWithNote(note)
+                    if note.contains(&regeneration) && note.contains(source)),
+                "{outcome:?}"
+            );
+            let row = collect_epic_branch_statuses(&[task.clone()], "main", p).remove(0);
+            assert!(!row.blocks_epic_close(), "{row:?}");
+            let receipt =
+                validate_task_commit_receipt(p, &anchor, "main", &window_at(0, "regenerated delivery"))
+                    .unwrap();
+            if !sync_tip {
+                assert!(receipt.contains(&regeneration), "{receipt}");
+            }
+            // A later sibling rebuild must still credit the earlier delivery.
+            git(p, &["checkout", "-b", "sibling"]);
+            f2eb_commit(p, "sibling.txt", "updated sibling\n", "sibling update");
+            git(p, &["checkout", "main"]);
+            git(
+                p,
+                &["merge", "--no-ff", "sibling", "-m", "merge later sibling"],
+            );
+            let later_merge = head_sha(p);
+            let later = f2eb_commit(
+                p,
+                dist,
+                "bundle(later);\n",
+                &format!(
+                    "{subject}\n\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-0c988).",
+                    &later_merge[..9]
+                ),
+            );
+            let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
+            assert!(
+                matches!(&outcome, MergeStateGateOutcome::ProceedWithNote(note) if note.contains(&later)),
+                "{outcome:?}"
+            );
+            // A dist-only handoff cannot borrow an older rebuild's authority
+            // for a subsequent manual deletion.
+            if !sync_tip {
+                git(p, &["rm", dist]);
+                git(p, &["commit", "-qm", "remove dist"]);
+                assert!(matches!(
+                    run_factory_branch_merge_gate(&task, &req, "main", p),
+                    MergeStateGateOutcome::Reject(_)
+                ));
+            }
         }
     }
 

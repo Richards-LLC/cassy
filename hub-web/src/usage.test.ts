@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { USAGE_ACTIONS, UsageCounter, type UsageEntry } from "./usage";
+import { USAGE_ACTIONS, UsageCounter, countAttentionDelivery, type UsageEntry } from "./usage";
 
 function memoryStore() {
   const values = new Map<string, string>();
@@ -19,9 +19,18 @@ describe("usage counter (cas-0b3d)", () => {
     ];
     counter.count("reply.typed");
     counter.count("reply.typed");
+    const resolved = { kind: "delivery_stall", acknowledgedAt: undefined as string | undefined };
+    // Self-resolution counts once; its replay and a resolution with no item do not.
+    countAttentionDelivery([{ kind: "session_transport" }, resolved], counter);
+    resolved.acknowledgedAt = now.toISOString();
+    countAttentionDelivery([resolved], counter);
+    countAttentionDelivery([], counter);
     await counter.flush(machines);
     await counter.flush(machines);
-    expect(received.soundwave).toEqual([[{ day: "2026-10-26", action: "reply.typed", journey: "HUB-J5", count: 2 }]]);
+    expect(received.soundwave).toEqual([[
+      { day: "2026-10-26", action: "reply.typed", journey: "HUB-J5", count: 2 },
+      { day: "2026-10-26", action: "attention.delivery", journey: "HUB-J15", count: 1 },
+    ]]);
     expect(received.prowl).toEqual([]);
     now = new Date("2026-10-27T08:00:00Z");
     counter.count("ask.answer");
@@ -30,6 +39,7 @@ describe("usage counter (cas-0b3d)", () => {
     expect(received.soundwave[1]).toEqual([{ day: "2026-10-27", action: "ask.answer", journey: "HUB-J7", count: 1 }]);
     expect(received.prowl).toEqual([[
       { day: "2026-10-26", action: "reply.typed", journey: "HUB-J5", count: 2 },
+      { day: "2026-10-26", action: "attention.delivery", journey: "HUB-J15", count: 1 },
       { day: "2026-10-27", action: "ask.answer", journey: "HUB-J7", count: 1 },
     ]]);
   });

@@ -260,6 +260,15 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await attentionItems.getByRole("button", { name: "Copy" }).click();
     await expect(page.locator("#toast")).toHaveText("Details copied");
     expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy copies the Details text").toBe(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
+    const deliveryCount = () => page.evaluate(() => {
+      const stored = JSON.parse(localStorage.getItem("commander.usage.v1") ?? "null") as { days?: Record<string, Record<string, number>> } | null;
+      return Object.values(stored?.days ?? {}).reduce((sum, actions) => sum + (actions["attention.delivery"] ?? 0), 0);
+    });
+    const beforeResolution = await deliveryCount();
+    const resolved = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: true } });
+    await hub.received(resolved);
+    await expect(attentionItems).toHaveCount(0);
+    await expect.poll(deliveryCount, { message: "a self-resolved notice records attention.delivery once" }).toBe(beforeResolution + 1);
     hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
@@ -267,6 +276,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
+    expect(await deliveryCount(), "resolved history and explicit resolution do not count twice").toBe(beforeResolution + 1);
     // cas-d043 G03: yesterday's blocker reads as the visit showed it; the time
     // this browser stored it is not a machine stamp to measure a clock by.
     await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 17:20");

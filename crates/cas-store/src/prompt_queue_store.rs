@@ -226,7 +226,7 @@ const POLLED_UNACKED_RECEIPT_SQL: &str = "AND seen.source = 'inbox_poll'
 /// it is returned whatever this recipient's receipt says, including a row it
 /// polled before or a hook already showed (CAS notes name these ids).
 const NAMED_READ_RECEIPT_SQL: &str = "AND (seen.prompt_id IS NULL
-          OR seen.source IN ('transport_delivered', 'transport_claimed', 'inbox_poll', 'hook_surfaced'))";
+          OR seen.source IN ('transport_delivered', 'transport_claimed', 'inbox_poll', 'hook_surfaced', 'observed_wake'))";
 
 /// cas-1f0c: the characters a hook may spend on message bodies in one output.
 ///
@@ -2939,8 +2939,8 @@ pub trait PromptQueueStore: Send + Sync {
         source: SurfacingSource,
     ) -> Result<()>;
 
-    /// Record positively transcript-correlated consumption only if the complete
-    /// expected row still matches. Revalidation and promotion must be atomic;
+    /// Record positively transcript-correlated consumption only if the expected
+    /// message identity still matches. Revalidation and promotion must be atomic;
     /// other adapters fail closed rather than infer a body read from transport.
     fn record_transcript_consumed(&self, _expected: &QueuedPrompt) -> Result<bool> {
         Ok(false)
@@ -7438,9 +7438,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            // A transcript-backed body observation may finish an active
-            // transport claim. No other source gains that authority, and an
-            // intervening hook/poll receipt remains stronger and unchanged.
             let changed = tx.execute(
                 "INSERT INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
@@ -7448,10 +7445,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  ON CONFLICT(prompt_id, recipient) DO UPDATE SET
                      seen_at = excluded.seen_at,
                      source = excluded.source
-                 WHERE (prompt_queue_recipient_seen.source = 'transport_delivered'
-                        AND excluded.source <> 'transport_delivered')
-                    OR (prompt_queue_recipient_seen.source = 'transport_claimed'
-                        AND excluded.source = 'observed_wake')",
+                 WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
+                   AND excluded.source <> 'transport_delivered'",
                 params![
                     prompt_id,
                     recipient,
@@ -7464,6 +7459,47 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             }
             tx.commit()?;
             Ok(())
+        })
+    }
+
+    fn record_transcript_consumed(&self, expected: &QueuedPrompt) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let Some(current) = Self::queued_prompt_on_conn(&tx, expected.id)? else {
+                return Ok(false);
+            };
+            // Hold the same SQLite write transaction across identity validation
+            // and receipt promotion. A stale read cannot consume a replacement,
+            // a different recipient/session, or a broadcast's other audience.
+            if current.target == "all_workers"
+                || current.target != expected.target
+                || current.source != expected.source
+                || current.prompt != expected.prompt
+                || current.created_at != expected.created_at
+                || current.factory_session != expected.factory_session
+                || current.origin != expected.origin
+                || current.acked_at.is_some()
+            {
+                return Ok(false);
+            }
+            let changed = tx.execute(
+                "INSERT INTO prompt_queue_recipient_seen
+                     (prompt_id, recipient, seen_at, source)
+                 VALUES (?1, ?2, ?3, 'observed_wake')
+                 ON CONFLICT(prompt_id, recipient) DO UPDATE SET
+                     seen_at = excluded.seen_at, source = excluded.source
+                 WHERE prompt_queue_recipient_seen.source IN
+                     ('transport_delivered', 'transport_claimed')",
+                params![expected.id, expected.target, Utc::now().to_rfc3339()],
+            )?;
+            // A named poll/hook that won first keeps its own receipt and
+            // settlement. Re-observing it must not count a second body read.
+            if changed > 0 {
+                crate::communication_slo::observe_body(&tx, expected.id, &expected.target)?;
+            }
+            tx.commit()?;
+            Ok(changed > 0)
         })
     }
 
@@ -13606,25 +13642,68 @@ mod tests {
     fn cas_ad3d_atomic_consumption_revalidates_the_row_and_preserves_named_poll() {
         for case in ["current", "replaced", "named poll"] {
             let (_temp, store) = create_test_store();
-            let id = store.enqueue_with_session("worker", "supervisor", "Review delivery", "session").unwrap();
+            let id = store
+                .enqueue_with_session("worker", "supervisor", "Review delivery", "session")
+                .unwrap();
             let expected = store.queued_prompt(id).unwrap().unwrap();
             if case == "replaced" {
-                assert!(store.rewrite_pending(id, "Different request", None).unwrap());
+                assert!(
+                    store
+                        .rewrite_pending(id, "Different request", None)
+                        .unwrap()
+                );
             }
             assert!(store.claim_recipient_transport(id, "supervisor").unwrap());
             if case == "named poll" {
-                assert_eq!(store.poll_named_for_recipient("supervisor", Some("session"), &[id]).unwrap().len(), 1);
-                store.settle_polled_rows(&["supervisor".into()], &[(id, "named full body rendered".into())]).unwrap();
+                assert_eq!(
+                    store
+                        .poll_named_for_recipient("supervisor", Some("session"), &[id])
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                store
+                    .settle_polled_rows(
+                        &["supervisor".into()],
+                        &[(id, "named full body rendered".into())],
+                    )
+                    .unwrap();
             }
             let changed = store.record_transcript_consumed(&expected).unwrap();
             assert_eq!(changed, case == "current", "{case}");
             let source = store.recipient_receipt(id, "supervisor").unwrap();
-            assert_eq!(source, Some(match case {
-                "current" => SurfacingSource::ObservedWake,
-                "replaced" => SurfacingSource::TransportClaimed,
-                _ => SurfacingSource::InboxPoll,
-            }), "{case}");
-            assert!(store.message_delivery_report(id).unwrap().unwrap().confirmed_at.is_none());
+            assert_eq!(
+                source,
+                Some(match case {
+                    "current" => SurfacingSource::ObservedWake,
+                    "replaced" => SurfacingSource::TransportClaimed,
+                    _ => SurfacingSource::InboxPoll,
+                }),
+                "{case}"
+            );
+            assert!(
+                store
+                    .message_delivery_report(id)
+                    .unwrap()
+                    .unwrap()
+                    .confirmed_at
+                    .is_none()
+            );
+            if case == "current" {
+                let named = store
+                    .poll_named_for_recipient("supervisor", Some("session"), &[id])
+                    .unwrap();
+                assert_eq!(
+                    named.len(),
+                    1,
+                    "explicit named reads remain available after consumption"
+                );
+                assert_eq!(named[0].prompt, expected.prompt);
+                assert_eq!(
+                    store.recipient_receipt(id, "supervisor").unwrap(),
+                    Some(SurfacingSource::ObservedWake)
+                );
+            }
         }
     }
 

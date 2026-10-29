@@ -743,11 +743,11 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
     let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n\n### Added — Violet push-wake\n\n- Mentions wake the supervisor.\n- Watched channels are read periodically.\n- **Behavior change:** push-wake is on by default.\n\n### Added — remote supervisors\n\nSetup guide and walkthrough.\n\n- **Peer discovery** lists supervisors.\n- **Peer messaging** reaches them.\n";
     for (version, body, expected, retained_titles) in [
         ("9.99.1", grouped, 27, &[][..]),
-        ("9.99.1", "## [9.99.1] - 2026-10-29\n\n### Fixed — runtime behavior\n- **Worker resumes** — Now: the worker resumes.\n\n### Documentation — release records\n- **Prior release record** — Now: the report is committed.\n\n### Tests — regression checks\n- **Readiness regression** — Now: tests await readiness.\n\n### Known limits — outstanding work\n- **Refresh flicker** — Still occurs.\n\n### Changed\n- **Clear receipts** — Now: receipts confirm completion.\n", 2, &[][..]),
         ("9.99.1", legacy, 5, &["Factory reminder probes", "Task coordination", "Violet push-wake", "Peer discovery", "Peer messaging"][..]),
         // Exercise the historical source through acquisition, front matter,
         // Markdown assembly and the renderer, rather than a hand-built table.
         ("3.88.0", include_str!("../../CHANGELOG.md"), 40, &[][..]),
+        ("9.99.1", "## [9.99.1] - 2026-10-29\n\n### Fixed — runtime behavior\n- **Worker resumes** — Now: the worker resumes.\n\n### Documentation — release records\n- **Prior release record** — Now: the report is committed.\n\n### Tests — regression checks\n- **Readiness regression** — Now: tests await readiness.\n\n### Known limits — outstanding work\n- **Refresh flicker** — Still occurs.\n\n### Changed\n- **Clear receipts** — Now: receipts confirm completion.\n", 2, &[][..]),
     ] {
         let fake_gh = install_fake_gh_version(&project, version);
         fs::write(project.path().join("CHANGELOG.md"), format!("# Changelog\n\n{body}")).unwrap();

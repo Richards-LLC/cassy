@@ -316,6 +316,18 @@ pub fn handle_pre_compact(
         None => return Ok(HookOutput::empty()),
     };
 
+    // Native PreCompact is an execution fact, unlike submission of /compact.
+    // Record it before optional context work; failures must not block compaction.
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_root,
+        "pre_compact_fired",
+        &[
+            ("session_id", input.session_id.as_str()),
+            ("transcript_path", input.transcript_path.as_deref().unwrap_or("")),
+            ("harness", crate::harness_policy::own_harness_from_env().backend().name()),
+        ],
+    );
+
     let mut context_parts: Vec<String> = Vec::new();
 
     // 1. Inject high-importance memories (importance >= 0.7)

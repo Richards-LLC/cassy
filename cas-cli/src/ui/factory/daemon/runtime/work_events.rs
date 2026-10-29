@@ -1162,6 +1162,82 @@ pub(crate) struct SupervisorPhase {
     pub(crate) stale: bool,
 }
 
+impl SupervisorPhase {
+    fn at(&self) -> Option<DateTime<Utc>> {
+        self.lifecycle.ended_at.as_deref().or(self.lifecycle.started_at.as_deref())
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc))
+    }
+}
+
+/// Native hooks bind the selected factory/name to an actual transcript even
+/// before its registration has caught up, and expose real compaction boundaries.
+/// Read only bounded current/prior-day log tails; never infer from model prose.
+#[derive(Default)]
+struct PhaseHooks {
+    transcript: Option<(SupervisorSource, PathBuf)>,
+    phase: Option<SupervisorPhase>,
+}
+
+fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str) -> PhaseHooks {
+    use std::io::Read;
+    let today = Utc::now().date_naive();
+    let mut rows = Vec::new();
+    for date in [today.pred_opt().unwrap_or(today), today] {
+        let path = cas_dir.join("logs").join(format!("factory-session-{date}.log"));
+        let Ok(mut file) = std::fs::File::open(path) else { continue };
+        let Ok(metadata) = file.metadata() else { continue };
+        let start = metadata.len().saturating_sub(64 * 1024);
+        if file.seek(SeekFrom::Start(start)).is_err() { continue; }
+        let mut bytes = Vec::new();
+        if file.take(64 * 1024).read_to_end(&mut bytes).is_err() { continue; }
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines().skip(usize::from(start > 0)) {
+            let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
+            if row["factory_session"] != session || row["agent"] != supervisor || row["role"] != "supervisor" { continue; }
+            if !matches!(row["event"].as_str(), Some("session_start_fired" | "pre_compact_fired")) { continue; }
+            if let Some(at) = timestamp(&row) { rows.push((at, row)); }
+        }
+    }
+    rows.sort_by_key(|(at, _)| *at);
+    let mut evidence = PhaseHooks::default();
+    let mut starts: HashMap<String, (String, String)> = HashMap::new();
+    for (at, row) in rows {
+        let Some(native_id) = row["session_id"].as_str().filter(|id| !id.is_empty()) else { continue };
+        if let (Some(path), Some(cli)) = (
+            row["transcript_path"].as_str().map(PathBuf::from).filter(|path| path.is_absolute() && path.is_file()),
+            row["harness"].as_str().and_then(|cli| cli.parse::<cas_mux::SupervisorCli>().ok())
+                .filter(|cli| matches!(cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex)),
+        ) {
+            evidence.transcript = Some((SupervisorSource {
+                agent_id: format!("phase-hook:{supervisor}"), agent_name: supervisor.into(),
+                harness_session: native_id.into(), cli, account_dir: None,
+            }, path));
+        }
+        let starting = row["event"] == "pre_compact_fired";
+        let completed = row["event"] == "session_start_fired" && row["source"] == "compact";
+        if !starting && !completed { continue; }
+        let event_id = format!("compact:{native_id}:{}", at.timestamp_millis());
+        let (id, started_at) = if starting {
+            starts.insert(native_id.into(), (event_id.clone(), at.to_rfc3339()));
+            (event_id.clone(), Some(at.to_rfc3339()))
+        } else {
+            starts.remove(native_id).map(|(id, at)| (id, Some(at))).unwrap_or((event_id.clone(), None))
+        };
+        evidence.phase = Some(SupervisorPhase {
+            event_id, kind: WorkEventKind::Notice,
+            lifecycle: WorkLifecycle {
+                id, stage: if starting { "phase" } else { "end" }.into(),
+                phase: Some(if starting { "compacting" } else { "compacted" }.into()),
+                outcome: completed.then(|| "success".into()), started_at,
+                ended_at: completed.then(|| at.to_rfc3339()),
+            },
+            observed_at: Utc::now().to_rfc3339(), stale: false,
+        });
+    }
+    evidence
+}
+
 /// Read the same v2 source for the ordinary status stream, without opting
 /// the browser into work rows or details. Keep each session's index incremental.
 pub(crate) fn supervisor_phase_for_session(
@@ -1172,11 +1248,18 @@ pub(crate) fn supervisor_phase_for_session(
 ) -> Option<SupervisorPhase> {
     type Cache = HashMap<(PathBuf, String), WorkEventIndex>;
     static INDEXES: std::sync::LazyLock<Mutex<Cache>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-    let agents = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?;
+    let agents = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?.into_iter()
+        .filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
     let (agents, _) = crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents);
     let mut scope = WorkEventScope::from_agents(session, &agents);
     scope.supervisors.retain(|source| source.agent_name == supervisor);
+    let hooks = phase_hooks(cas_dir, session, supervisor);
+    if let Some((source, _)) = &hooks.transcript {
+        scope.supervisors.push(source.clone());
+    }
     let resolve = |source: &SupervisorSource| {
+        if let Some((hook_source, path)) = &hooks.transcript
+            && source == hook_source { return Some(path.clone()); }
         crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
             project_path.to_str(), &source.harness_session, source.cli, source.account_dir.as_deref(),
         )
@@ -1189,7 +1272,11 @@ pub(crate) fn supervisor_phase_for_session(
         let oldest = indexes.iter().min_by_key(|(_, index)| index.phase_observed_at.clone()).map(|(key, _)| key.clone());
         if let Some(oldest) = oldest { indexes.remove(&oldest); }
     }
-    indexes.entry(key).or_default().supervisor_phase(&scope, &resolve)
+    let transcript_phase = indexes.entry(key).or_default().supervisor_phase(&scope, &resolve);
+    match (transcript_phase, hooks.phase) {
+        (Some(native), Some(hook)) => Some(if hook.at() > native.at() { hook } else { native }),
+        (native, hook) => native.or(hook),
+    }
 }
 
 /// Per-daemon transcript indexes, kept across requests so paging and

@@ -92,8 +92,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Known limits stay out of shipped totals** — Release-report shipped totals
   exclude Known limits sections while keeping their entries, tests and
   documentation in the report prose.
-- **Post-cut gate accepts an empty Unreleased section** — The release gate
-  validates entries that exist and rejects the documented example placeholders.
+- **Release gates accept empty post-cut sections and reject placeholders** — Fast
+  rows accept an empty [Unreleased] section, and both fast and park gates reject
+  template entries, including angle-bracket descriptions with trailing punctuation.
 
 ### Changed — Developer tooling
 

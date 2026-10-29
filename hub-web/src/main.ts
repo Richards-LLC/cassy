@@ -1,3 +1,4 @@
+import { StatusRefresh } from "./status-refresh";
 import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
 import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
@@ -2156,14 +2157,15 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
   placeholder.replaceChildren(message, retry);
 }
 
+const statusRefresh = new StatusRefresh();
+
 async function loadStatus(machineId: string, session: string): Promise<void> {
   const connection = connections.get(machineId);
   const machine = machines.get(machineId);
   const key = sessionKey(machineId, session);
   if (!connection || !machine) { if (statusPending.delete(key)) render(); return; }
   if (!statuses.has(key)) statusPending.add(key);
-  try {
-    const status = await connection.status(session);
+  await statusRefresh.request(key, () => connection.status(session), (status) => {
     // cas-0546: a task waiting to merge, or blocked, is progress, not
     // something waiting on the operator. Tasks & progress shows its state;
     // only the supervisor's own asks and blockers wait on the operator.
@@ -2172,13 +2174,13 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     statusReceivedAt.set(key, performance.now());
     statusPending.delete(key);
     render();
-  } catch {
+  }, () => {
     // The connection supervisor owns transport/auth reporting; the rail stops
     // holding a place for a status that is not coming.
     statusFailures.add(key);
     statusPending.delete(key);
     render();
-  }
+  });
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {

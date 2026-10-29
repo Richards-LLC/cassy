@@ -1008,7 +1008,6 @@ mod tests {
         );
         assert_eq!(active_choice_index(&profiles), 0);
         let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
-        let reset = |hours| crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(hours)), now);
         for provider in crate::accounts::Provider::ALL {
             let mut accounts = vec![
                 crate::account_selection::tests::row(provider, "main", 48, 0.0, 0.0),
@@ -1026,8 +1025,8 @@ mod tests {
             assert_eq!(
                 rows[..2],
                 [
-                    format!("main  active\n    weekly 100% left, {}", reset(48)),
-                    format!("alt  \x1b[38;2;40;145;75m\u{2713}\x1b[39m recommended  disabled\n    weekly 41% left, {}", reset(6)),
+                    "main  active\n    weekly 100% left, resets Thu Oct 29 8:00 AM ET (in 2d)".to_string(),
+                    "alt  \x1b[38;2;40;145;75m\u{2713}\x1b[39m recommended  disabled\n    weekly 41% left, resets Tue 2:00 PM ET (in 6h)".to_string(),
                 ]
             );
             assert_eq!(active_choice_index(&profiles), 1);

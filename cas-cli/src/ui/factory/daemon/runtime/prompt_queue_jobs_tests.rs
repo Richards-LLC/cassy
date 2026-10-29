@@ -100,11 +100,35 @@ fn request(cas_dir: &Path) -> QueueSelectRequest {
         supervisor_name: "lead".into(),
         worker_names: vec!["worker-a".into()],
         dead_workers: Default::default(),
+        replacement_workers: Default::default(),
         limit: 10,
         operator_replies: false,
         deferred_operator_replies: Default::default(),
         adopt_operator_notices: false,
     }
+}
+
+#[test]
+fn recycle_queued_after_selection_snapshot_preserves_mail_until_failure_cas_c71e() {
+    let (_root, cas_dir) = project();
+    let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+    let mut old = cas_types::Agent::new("old-id".into(), "worker-a".into());
+    old.factory_session = Some("s".into());
+    old.mark_shutdown();
+    agents.register(&old).unwrap();
+    let row = enqueue(&cas_dir, "worker-a", "resume the task");
+    let snapshot = request(&cas_dir);
+    let spawns = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+    let recycle = spawns.enqueue_recycle("worker-a", None, Some("s")).unwrap();
+    let selected = super::super::queue_and_events::run_queue_select(&snapshot, 1).unwrap();
+    assert!(selected.rows.iter().any(|prompt| prompt.id == row));
+    assert!(!selected.shut_down_recipients.iter().any(|name| name == "worker-a"));
+    spawns.record_spawn_state(recycle, cas_store::SpawnLifecycleState::Failed,
+        Some("worker-a"), Some("launch refused")).unwrap();
+    super::super::queue_and_events::run_queue_select(&snapshot, 2).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().pending_reason,
+        Some(cas_store::PendingReason::ShutdownCancelled));
 }
 
 /// Apply completions until `done` holds or ten seconds pass.

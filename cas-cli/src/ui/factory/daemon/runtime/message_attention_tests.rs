@@ -659,12 +659,26 @@ fn cas_07ee_unreadable_recipient_registry_still_needs_attention() {
 fn cas_07ee_respawned_worker_name_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
-    f.aged(
+    let id = f.aged(
         "supervisor",
         "worker",
         "Please handle this course correction",
     );
     f.daemon.dead_workers.insert("worker".into());
+    // cas-c71e: the name still has work before its replacement registers.
+    let agents = open_agent_store(&f.cas_dir).unwrap();
+    let mut old = agents.get("worker-id").unwrap();
+    old.mark_shutdown();
+    agents.register(&old).unwrap();
+    let snapshot = message_attention::AttentionInputs::from_daemon(&f.daemon);
+    open_spawn_queue_store(&f.cas_dir).unwrap()
+        .enqueue_recycle("worker", None, Some(SESSION)).unwrap();
+    let row = f.queue.queued_prompt(id).unwrap().unwrap();
+    assert_eq!(snapshot.decisions(f.queue.as_ref(), &[row]).get(&id),
+        Some(&MessageAttention::Needed));
+    let mut replacement = Agent::new("replacement-id".into(), "worker".into());
+    replacement.factory_session = Some(SESSION.into());
+    agents.register(&replacement).unwrap();
     let pty = cas_mux::Pty::spawn(
         "worker",
         cas_mux::PtyConfig {

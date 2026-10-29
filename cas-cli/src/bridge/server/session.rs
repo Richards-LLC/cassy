@@ -19,6 +19,10 @@ pub(crate) fn resolve_session_by_name(
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found"))
 }
 
+/// Resolve every session-scoped store from the selected project's metadata.
+/// Ambient CAS_ROOT belongs to the bridge/hub process and may name another
+/// project. An explicit fallback applies only without a resolvable project.
+/// This policy covers queue, activity, status, SSE and artifact consumers alike.
 pub(crate) fn cas_root_for_session_with_fallback(
     session: &crate::ui::factory::SessionInfo,
     fallback: Option<&std::path::Path>,
@@ -690,6 +694,37 @@ mod focused_epic_tests {
         assert_eq!(status["supervisor_phase"]["kind"], "tool", "selected session must read its own registered native source: {status}");
         assert_eq!(status["supervisor_phase"]["lifecycle"]["started_at"], "2026-10-29T06:04:27+00:00");
         assert!(!status["supervisor_phase"].to_string().contains("private command"));
+    }
+
+    #[test]
+    fn non_phase_session_routes_ignore_ambient_root_and_explicit_fallback() {
+        use cas_store::NotificationPriority;
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, session) = fixture();
+        crate::ui::factory::SessionManager::new().save_metadata(&session.metadata).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_root = crate::store::init_cas_dir(other.path()).unwrap();
+        env.set("CAS_ROOT", other_root.to_str().unwrap());
+        let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
+        let id = queue.notify("supervisor", "selected-only", "{}", NotificationPriority::Normal).unwrap();
+        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+        let request = |action: &str| {
+            let path = format!("/v1/sessions/{}/{action}", session.name);
+            let mut req = tiny_http::TestRequest::new().with_path(&path).into();
+            let response = super::super::routes::handle_session_routes(
+                &mut req, &path, "", None, Some(&other_root), &cache, 0,
+            ).unwrap();
+            assert_eq!(response.status_code().0, 200);
+            serde_json::from_reader::<_, serde_json::Value>(response.into_reader()).unwrap()
+        };
+        assert_eq!(request("ping")["cas_root"], root.to_string_lossy().as_ref());
+        assert_eq!(request("inbox/supervisor/pending_count")["pending_count"], 1);
+        assert_eq!(request("inbox/supervisor/peek")["notifications"][0]["id"], id);
+        assert_eq!(crate::store::open_supervisor_queue_store(&other_root).unwrap().pending_count("supervisor").unwrap(), 0);
+        let mut missing = session.clone();
+        missing.metadata.project_dir = None;
+        assert_eq!(cas_root_for_session_with_fallback(&missing, Some(&other_root)).unwrap(), other_root);
+        assert!(cas_root_for_session_with_fallback(&missing, None).is_err());
     }
 
     #[test]

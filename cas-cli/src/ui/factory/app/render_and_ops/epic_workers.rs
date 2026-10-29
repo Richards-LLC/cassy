@@ -6837,6 +6837,7 @@ mod tests {
                 agent.role = cas_types::AgentRole::Worker;
                 agent.status = cas_types::AgentStatus::Stale;
                 agent.pid = Some(i32::MAX as u32);
+                crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
                 agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
                 agents.register(&agent).unwrap();
                 let mut sibling = agent.clone();
@@ -6872,6 +6873,7 @@ mod tests {
                 let agents = open_agent_store(&root).unwrap();
                 agent.role = cas_types::AgentRole::Worker;
                 agent.pid = Some(i32::MAX as u32);
+                crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
                 agent.status = if disposition == "staged" { cas_types::AgentStatus::Stale } else { cas_types::AgentStatus::Shutdown };
                 agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
                 agents.register(&agent).unwrap();
@@ -7001,6 +7003,7 @@ mod tests {
         agent.role = cas_types::AgentRole::Worker;
         if dead {
             agent.pid = Some(i32::MAX as u32);
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
             agent.status = cas_types::AgentStatus::Shutdown;
         }
         agent.metadata.insert("clone_path".into(), worker.display().to_string());

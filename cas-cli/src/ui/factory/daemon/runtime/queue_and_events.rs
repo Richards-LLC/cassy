@@ -11497,6 +11497,15 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
+                        if let Some(request_id) = request_id {
+                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            if let Err(error) = bound {
+                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
+                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                return;
+                            }
+                        }
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
                         // codex+isolate async gaps cannot skip pre-assign.
@@ -11580,6 +11589,15 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
+                        if let Some(request_id) = request_id {
+                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            if let Err(error) = bound {
+                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
+                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                return;
+                            }
+                        }
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
                         if let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(

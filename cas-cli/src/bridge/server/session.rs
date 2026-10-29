@@ -338,7 +338,8 @@ fn project_deliveries(
     store: Option<&dyn cas_store::TaskStore>,
 ) {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
-        EpicStatusOptions, collect_epic_projection_statuses, last_commit_unix,
+        EpicStatusOptions, collect_epic_projection_statuses, git_commit_is_ancestor,
+        last_commit_unix,
     };
     let Some(store) = store else { return };
     let started = std::time::Instant::now();
@@ -486,6 +487,20 @@ fn project_deliveries(
                     .deliverables
                     .merge_commit
                     .as_deref()
+                    .or(child.deliverables.delivery_pr_merge_commit.as_deref())
+                    .or_else(|| {
+                        // Factory integration records the actual merge in its
+                        // green admission receipt rather than merge_commit.
+                        let delivery = &child.deliverables;
+                        let commit = delivery.green_merge_commit.as_deref()?;
+                        let child_target = delivery.work_target.as_ref()
+                            .map(|target| target.target_branch.as_str())
+                            .unwrap_or(target);
+                        (delivery.merge_ci_admission == Some(cas_types::MergeCiAdmission::Green)
+                            && (git_commit_is_ancestor(repo, commit, child_target)
+                                || git_commit_is_ancestor(repo, commit, &format!("origin/{child_target}"))))
+                            .then_some(commit)
+                    })
                     .and_then(|commit| last_commit_unix(repo, commit))
                     .and_then(|unix| chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0))
             });

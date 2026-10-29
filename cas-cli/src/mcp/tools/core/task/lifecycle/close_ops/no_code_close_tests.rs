@@ -228,7 +228,7 @@ fn fixture(env: &mut TestEnvGuard, target: &str) -> Fixture {
     std::fs::write(
         cas_dir.join("config.toml"),
         format!(
-            "[project]\ncanonical_id=\"{PROJECT}\"\n[factory]\nartifacts_root={:?}\n[verification]\nenabled=false\n",
+            "[project]\ncanonical_id=\"{PROJECT}\"\n[factory]\nartifacts_root={:?}\n[verification]\nenabled=false\n[qa]\nmode='per_task'\n",
             repo.join("durable-artifacts").display().to_string()
         ),
     )

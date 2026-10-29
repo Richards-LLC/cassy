@@ -29531,7 +29531,7 @@ esac
         env.set("CAS_ROOT", &cas_dir);
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(cas_dir.join("config.toml"),
-            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n").unwrap();
+            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n[qa]\nmode='per_task'\n").unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
         open_rule_store(&cas_dir).unwrap().init().unwrap();
         open_skill_store(&cas_dir).unwrap().init().unwrap();
@@ -29655,7 +29655,7 @@ esac
         std::fs::create_dir_all(&cas_dir).unwrap();
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[project]\ncanonical_id = \"cas-f1f4-fixture\"\n\n[verification]\nenabled = false\n",
+            "[project]\ncanonical_id = \"cas-f1f4-fixture\"\n\n[verification]\nenabled = false\n[qa]\nmode='per_task'\n",
         )
         .unwrap();
         std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();

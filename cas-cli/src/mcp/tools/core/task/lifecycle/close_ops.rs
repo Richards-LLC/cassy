@@ -6607,22 +6607,33 @@ impl CasCore {
         // parent, so `equivalent_prefix(recorded, candidate, ...)` correctly
         // rejects the whole merge range. Compare the first parent instead and
         // advance only when the merge restores that exact anchor unchanged.
-        if let Some(rebased) = resolve_branch_sha(repo_path, &format!("{candidate}^1"))
-            && rebased_delivery::equivalent_prefix(
-                repo_path, recorded, &rebased, &rebase_target, &task.id,
-            )
-            .as_deref()
-                == Some(rebased.as_str())
-        {
-            let branch = task.assignee.as_deref()
-                .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
-            let foreign_since = self.sibling_lease_boundary(task_store, task);
-            if self.tip_is_own_task_lineage(
-                task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
-            ) && restored_anchor_merge_is_attributable(
-                repo_path, recorded, &rebased, &candidate, &task.id, foreign_since,
+        if let Some(rebased_tip) = resolve_branch_sha(repo_path, &format!("{candidate}^1")) {
+            let rewritten_boundary = if rebased_delivery_has_same_patches(
+                repo_path, recorded, &rebased_tip, &rebase_target, &task.id,
             ) {
-                return Some(candidate);
+                Some(rebased_tip.clone())
+            } else {
+                rebased_delivery::equivalent_prefix(
+                    repo_path, recorded, &rebased_tip, &rebase_target, &task.id,
+                )
+            };
+            if let Some(rebased) = rewritten_boundary {
+                let branch = task.assignee.as_deref()
+                    .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
+                let foreign_since = self.sibling_lease_boundary(task_store, task);
+                let corrections_attributable = rebased == rebased_tip
+                    || parked_anchor_advance_with_target_is_attributable(
+                        repo_path, &rebased, &rebased_tip, &task.id, foreign_since, &target,
+                    );
+                if self.tip_is_own_task_lineage(
+                    task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
+                ) && corrections_attributable
+                    && restored_anchor_merge_is_attributable(
+                        repo_path, recorded, &rebased_tip, &candidate, &task.id, foreign_since,
+                    )
+                {
+                    return Some(candidate);
+                }
             }
         }
         // cas-749f: a rebase may be followed by a correction before the
@@ -36930,10 +36941,8 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
         let first_parent = rev_parse_local(p, "HEAD^1");
         let target = freshest_target_ref(p, "main");
-        assert_eq!(
-            rebased_delivery::equivalent_prefix(p, &recorded, &first_parent, &target, &parked.id)
-                .as_deref(),
-            Some(first_parent.as_str()),
+        assert!(
+            rebased_delivery_has_same_patches(p, &recorded, &first_parent, &target, &parked.id),
             "the rewritten first parent must prove the original delivery patch set"
         );
         assert!(restored_anchor_merge_is_attributable(
@@ -36943,6 +36952,13 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         assert!(core.tip_is_own_task_lineage(
             &store, &parked, p, Some(&measured), &first_parent, Some(&restored_tip),
         ), "the restored merge must remain on this task's delivery branch");
+        assert_eq!(
+            core.eligible_awaiting_merge_advance(
+                &store, &parked, p, "main", Some(&restored_tip),
+            ),
+            Some(restored_tip.clone()),
+            "the restored pushed merge must qualify as the next delivery anchor"
+        );
 
         core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&restored_tip))
             .unwrap();

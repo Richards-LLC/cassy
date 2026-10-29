@@ -702,6 +702,20 @@ mod tests {
     }
 
     #[test]
+    fn weekly_observation_date_follows_the_eastern_day() {
+        use crate::accounts::Provider;
+        let mut account = crate::account_selection::tests::row(Provider::Claude, "weekly", 1, 12.0, 34.0);
+        for (observed, now, expected) in [
+            ("2026-10-27T03:30:00Z", "2026-10-27T13:00:00Z", "as of 26 October 2026 · 11:30 PM ET"),
+            ("2026-10-26T22:30:00Z", "2026-10-27T03:55:00Z", "as of 6:30 PM ET"),
+        ] {
+            account.usage_observed_at = Some(observed.parse().unwrap());
+            let summary = summarize_account_at(&account, now.parse().unwrap()).unwrap();
+            assert!(summary.contains(expected), "{observed} at {now}: {summary}");
+        }
+    }
+
+    #[test]
     fn native_claude_snapshot_reaches_limits_and_picker_without_authentication() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join(".claude-fixture");

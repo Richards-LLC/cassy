@@ -5,7 +5,7 @@ import { SCOPES } from "./hub-double";
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test.describe(`${viewport.width}`, () => {
     test.use({ viewport });
-    test("HUB-J26 run a supervisor command and read its actual outcome", journeyPart, async ({ page, journey }) => {
+    test("HUB-J27 run a supervisor command and read its actual outcome", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const input = page.locator("#message-text");
@@ -55,7 +55,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
   });
 }
 
-test("HUB-J26 explain commands without control rights and keep Raw output usable", journeyPart, async ({ page, journey }) => {
+test("HUB-J27 explain commands without control rights and keep Raw output usable", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [{ ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) }], paired: ["atlas"], commands: [PELICAN], scopes: { atlas: SCOPES.filter(scope => scope !== "pane-input") } });
   await journey.stage("Open the quick controls and read the permission explanation", async () => {
     await journey.open();

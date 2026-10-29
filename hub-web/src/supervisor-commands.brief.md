@@ -40,4 +40,4 @@ Uses hub-web/DESIGN.md, hub-web/src/tokens.css and hub-web/src/glass.css. Reuses
 | Craft | 4 | Strict 1280×800 and 390×844 light/dark live-DOM polish passed with zero findings; all six choices fit on the phone. |
 | Accessibility | 4 | Keyboard selection and confirmation return focus; the existing Raw output skip route is preserved. Forced-colors, reduced-motion and more-contrast captures are in the task bundle. |
 
-Scored by the implementation worker on 2026-10-28. Token sources: `tokens.css` and `glass.css`; real-build preview, four-view before/after captures and HUB-J26 provide evidence.
+Scored by the implementation worker on 2026-10-28. Token sources: `tokens.css` and `glass.css`; real-build preview, four-view before/after captures and HUB-J27 provide evidence.

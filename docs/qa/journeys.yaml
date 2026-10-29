@@ -2112,3 +2112,34 @@ journeys:
     basis: No per-journey usage instrumentation.
   spec: hub-web/e2e/journeys/history-window.journey.ts
   catalog_gaps: The hub double supplies cursor pages; frozen real-thread performance is measured separately.
+
+- id: HUB-J27
+  name: Run supervisor commands with native outcome receipts
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: Open a paired Claude or Codex conversation at desktop or 390 px.
+  steps:
+  - Type a slash, filter the curated palette, and run Usage by keyboard.
+  - Read submission separately from an observed native outcome without repeating a mutation.
+  - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.
+  - Without pane input, read the permission reason; adjacent Raw output stays usable.
+  goal: The operator runs only supported supervisor controls and sees truthful harness outcomes.
+  owner_groups: [commander_runtime, commander_dependencies]
+  owners:
+  - hub-web/src/supervisor-commands.ts
+  - hub-web/src/supervisor-commands.brief.md
+  - hub-web/e2e/journeys/supervisor-commands.journey.ts
+  - cas-cli/src/ui/factory/supervisor_commands.rs
+  - cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs
+  edge_paths:
+  - Busy prompts and operator drafts refuse injection.
+  - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
+  - A lost outcome stays unconfirmed and never automatically repeats a mutation.
+  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME]
+  traffic:
+    share_pct: null
+    basis: New controls; no production traffic attribution yet.
+  spec: hub-web/e2e/journeys/supervisor-commands.journey.ts
+  catalog_gaps: Browser outcomes use a protocol double; Rust security tests and disposable Claude/Codex runs prove native mappings and observations.

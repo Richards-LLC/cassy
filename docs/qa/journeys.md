@@ -835,7 +835,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
 - A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.
 
-### HUB-J26 · Run a supervisor command and read what the harness did
+### HUB-J27 · Run a supervisor command and read what the harness did
 
 - **Entry:** `/commander/`, paired Claude or Codex conversation, desktop and 390 px
 - **Goal:** choose a curated command from `/` or the header, confirm destructive actions, and distinguish requested input from observed harness execution

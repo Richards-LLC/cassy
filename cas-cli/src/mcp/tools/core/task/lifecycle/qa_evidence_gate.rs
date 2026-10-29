@@ -523,10 +523,20 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
                 .and_then(|(from, to)| range_paths(repo, from, to)),
         }
     };
-    let journeys = changed
+    let mut journeys = changed
         .as_deref()
         .map(|paths| catalog_journeys_for(repo, Some(&head), paths))
         .unwrap_or_default();
+    // cas-1b4d: in an operator's rapid-response window only journeys whose
+    // owned files the delivery touched need evidence; the rest back-fill.
+    let rapid = crate::rapid_response::active_for_task_at(cas_root, task, changed.as_deref());
+    if let Some(window) = rapid.as_ref()
+        && let Some(owned) = changed
+            .as_deref()
+            .and_then(|paths| crate::rapid_response::owned_journeys(repo, &qa, paths))
+    {
+        crate::rapid_response::narrow_journeys(cas_root, window, &task.id, &mut journeys, &owned);
+    }
     let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
     let terminal_render = changed
         .as_deref()
@@ -579,7 +589,12 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         None
     };
     if deferred && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
-        return Err(crate::qa_batch::debt_refusal(&task.id));
+        match rapid.as_ref() {
+            Some(window) => crate::rapid_response::record_skip(
+                cas_root, window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt",
+            ),
+            None => return Err(crate::qa_batch::debt_refusal(&task.id)),
+        }
     }
     // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
     let batch_defer =

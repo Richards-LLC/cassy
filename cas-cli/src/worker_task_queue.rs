@@ -331,6 +331,34 @@ impl CasCore {
             selected
         };
         let Some(id) = selected else { return Ok(None) };
+        let selected_task = match tasks.get(&id) {
+            Ok(task) => Some(task),
+            Err(cas_store::StoreError::NotFound(_) | cas_store::StoreError::TaskNotFound(_)) => {
+                None
+            }
+            Err(cause) => return Err(error(cause)),
+        };
+        if selected_task.as_ref().is_none_or(|task| {
+            !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
+                || task
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|a| a != worker.name && a != worker.id)
+        }) {
+            let note = format!("Task queue skipped {id}: changed ownership or status before start");
+            queue.notes.push(note.clone());
+            if let Some(previous) = predecessor {
+                tasks.append_note(previous, &note).map_err(error)?;
+            }
+            queue.current_task = predecessor.map(str::to_string);
+            queue.starting = false;
+            queues
+                .save(session, &worker.name, &mut queue)
+                .map_err(error)?;
+            drop(start_fence);
+            drop(_lock);
+            return Box::pin(self.advance_worker_task_queue(&worker.name, predecessor)).await;
+        }
         let result = async {
             let mut task = tasks.get(&id).map_err(error)?;
             if task

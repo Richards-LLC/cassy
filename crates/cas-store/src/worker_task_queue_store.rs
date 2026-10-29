@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS worker_task_queues (
     revision INTEGER NOT NULL,
     state TEXT NOT NULL,
     PRIMARY KEY(factory_session, worker_name)
-);
+);";
+
+pub const SPAWN_TASK_QUEUE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS spawn_task_queues (
     request_id INTEGER PRIMARY KEY,
     task_ids TEXT NOT NULL,
@@ -44,6 +46,7 @@ impl SqliteWorkerTaskQueueStore {
     pub fn open(root: &Path) -> Result<Self> {
         let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
         crate::shared_db::lock_connection(&conn)?.execute_batch(WORKER_TASK_QUEUE_SCHEMA)?;
+        crate::shared_db::lock_connection(&conn)?.execute_batch(SPAWN_TASK_QUEUE_SCHEMA)?;
         Ok(Self { conn })
     }
 

@@ -2214,7 +2214,7 @@ impl CasCore {
     async fn start_task_with_principal(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {
-        let queued_start = principal.is_some();
+        let mut queued_start = principal.is_some();
         let agent_id = match principal.as_ref() {
             Some(principal) => principal.agent().id.clone(),
             None => self.get_agent_id()?,
@@ -2226,6 +2226,18 @@ impl CasCore {
                 .map(|worker| crate::worker_task_queue::worker_lock(&self.cas_root, worker, "start"))
                 .transpose()?
         };
+        if !queued_start && let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {
+            let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.cas_root)
+                .and_then(|queues| queues.get(worker.factory_session.as_deref().unwrap_or_default(), &worker.name))
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            if queue.starting {
+                if queue.current_task.as_deref() != Some(req.id.as_str()) {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "The worker has a reserved queue task; resolve or start that task before starting another"));
+                }
+                queued_start = true;
+            }
+        }
         let task_store = self.open_task_store()?;
 
         if let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {

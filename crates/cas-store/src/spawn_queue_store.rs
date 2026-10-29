@@ -535,6 +535,7 @@ impl SqliteSpawnQueueStore {
 
             if !task_ids.is_empty() {
                 conn.execute_batch(crate::worker_task_queue_store::WORKER_TASK_QUEUE_SCHEMA)?;
+                conn.execute_batch(crate::worker_task_queue_store::SPAWN_TASK_QUEUE_SCHEMA)?;
             }
             let tx = conn.unchecked_transaction()?;
             tx.execute(

@@ -16,7 +16,13 @@ pub(crate) struct Snapshot {
 
 pub(crate) fn record(cas_root: &Path, task_id: &str) -> anyhow::Result<()> {
     let store = crate::store::open_task_store(cas_root)?;
-    let task = store.get(task_id)?;
+    let task = match store.get(task_id) {
+        Ok(task) => task,
+        // A QA child can arrive before its delivery in an incremental pull.
+        // Claiming it remains valid; there is no owner row to publish yet.
+        Err(cas_store::StoreError::TaskNotFound(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let existing = snapshots(&task.notes, task_id);
     for pass in cas_store::list_qa_passes(cas_root, task_id)? {
         if existing

@@ -333,6 +333,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
             let mut local = published.clone();
             local.notes.clear();
             local.title = "Newer peer merge metadata".into();
+            local.deliverables.green_merge_commit = Some(head.clone());
             local.updated_at += chrono::Duration::hours(2);
             tasks.add(&local).unwrap();
         }

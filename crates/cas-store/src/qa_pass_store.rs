@@ -911,7 +911,7 @@ pub fn import_qa_pass(cas_dir: &Path, pass: &QaPass, changed_at: DateTime<Utc>) 
             || previous.branch != pass.branch || previous.implementer_agent_id != pass.implementer_agent_id
             || previous.requested_at != pass.requested_at || previous.round != pass.round
             || previous.deadline_at != pass.deadline_at
-            || (previous.qa_task_id.is_some() && previous.qa_task_id != pass.qa_task_id)
+            || (previous.qa_task_id.is_some() && pass.qa_task_id.is_some() && previous.qa_task_id != pass.qa_task_id)
         {
             return Err(StoreError::Parse("QA snapshot changes immutable delivery identity".into()));
         }
@@ -958,7 +958,7 @@ pub fn import_qa_pass(cas_dir: &Path, pass: &QaPass, changed_at: DateTime<Utc>) 
          qa_task_id, reviewer_agent_id, state, summary, issues_json, ledger_path, issuer_agent_id,
          requested_at, deadline_at, resolved_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
-         ON CONFLICT(id) DO UPDATE SET qa_task_id=excluded.qa_task_id,
+         ON CONFLICT(id) DO UPDATE SET qa_task_id=COALESCE(excluded.qa_task_id, qa_passes.qa_task_id),
          reviewer_agent_id=excluded.reviewer_agent_id, state=excluded.state,
          summary=excluded.summary, issues_json=excluded.issues_json, ledger_path=excluded.ledger_path,
          issuer_agent_id=excluded.issuer_agent_id, resolved_at=excluded.resolved_at",
@@ -1012,6 +1012,7 @@ mod tests {
         for (index, pass) in [&pending, &claimed, &passed].into_iter().enumerate() {
             import_qa_pass(peer.path(), pass, now + Duration::milliseconds(index as i64 * 500)).unwrap();
         }
+        import_qa_pass(peer.path(), &pending, now).unwrap();
         import_qa_pass(peer.path(), &claimed, now + Duration::hours(1)).unwrap();
         assert_eq!(list_qa_passes(peer.path(), "cas-ui1").unwrap(), vec![passed.clone()]);
         let expired_peer = TempDir::new().unwrap();

@@ -501,8 +501,9 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
-    let restored = if waiver.is_none() && carried_bundle.is_none()
-        && (tier == EvidenceTier::Bundle || pair_coverage.is_err()) {
+    let needs_bundle = tier == EvidenceTier::Bundle && batch_receipt.is_none()
+        && !batch_defer && covering_pass.is_none() && carried_bundle.is_none();
+    let restored = if waiver.is_none() && (needs_bundle || pair_coverage.is_err()) {
         crate::artifacts::qa::restore(cas_root, task, &notes, &artifacts_dir)
             .map_err(|error| format!("QA EVIDENCE REJECTED: cannot restore published bundle: {error}"))?
     } else { None };

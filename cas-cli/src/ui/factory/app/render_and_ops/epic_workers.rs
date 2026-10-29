@@ -1549,6 +1549,36 @@ impl WorkerCleanupJob {
     }
 }
 
+const WORKER_CLEANUP_STAGED: &str = "shutdown_target_cleanup_staged";
+
+/// Staging and adoption share one short metadata transition, never target I/O.
+fn worker_cleanup_staging_lock(root: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let directory = root.join("worker-cleanups");
+    std::fs::create_dir_all(&directory)?;
+    if !std::fs::symlink_metadata(&directory)?.file_type().is_dir() {
+        return Err(std::io::Error::other("cleanup intent directory is not a real directory"));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(directory.join(".staging.lock"))
+}
+
+fn worker_cleanup_occurrence(agent: &cas_types::Agent, path: &str) -> String {
+    use sha2::Digest;
+    // Stable custom UUID: tuple encoding avoids ID/path separator ambiguity.
+    let key = serde_json::to_vec(&("dead-worker-cleanup-v1", &agent.id, path)).unwrap();
+    let digest = sha2::Sha256::digest(key);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 /// Pending work survives a bounded daemon exit, independently of agent-row deletion.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DeferredWorkerCleanup {
@@ -2738,23 +2768,35 @@ impl FactoryApp {
     /// Stage only metadata on the caller's lane; the daemon reserves each name
     /// before starting these jobs. Capture every ID before shutdown parks bindings.
     pub(crate) fn stage_dead_worker_cleanup(root: &std::path::Path, agents: &[cas_types::Agent]) -> std::io::Result<()> {
-        let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?;
-        let active = root.join("worker-cleanups");
-        std::fs::create_dir_all(&active)?;
-        if !std::fs::symlink_metadata(&active)?.file_type().is_dir() {
-            return Err(std::io::Error::other("cleanup intent directory is not a real directory"));
-        }
-        let mut paths = std::collections::HashSet::new();
+        use fs2::FileExt;
+        let lock = worker_cleanup_staging_lock(root)?;
+        lock.lock_exclusive()?;
+        let store = open_agent_store(root).map_err(std::io::Error::other)?;
+        let mut pending = Vec::new();
         for agent in agents {
-            let Some(path) = agent.metadata.get("clone_path") else { continue; };
-            if !paths.insert(path) { continue; }
-            let request = DeferredWorkerCleanup {
-                occurrence: uuid::Uuid::new_v4().to_string(), agent: agent.clone(),
-                additional_agents: agents.iter().filter(|other| other.id != agent.id).cloned().collect(),
-                tasks: tasks.clone(), worktree: None,
-            };
-            let incoming = root.join("worker-cleanups/incoming").join(format!("{}.json", request.occurrence));
-            request.persist_at(&incoming).map_err(std::io::Error::other)?;
+            let current = store.get(&agent.id).map_err(std::io::Error::other)?;
+            if !current.metadata.contains_key(WORKER_CLEANUP_STAGED) { pending.push((agent, current)); }
+        }
+        if pending.is_empty() { return Ok(()); }
+        let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?;
+        for (agent, mut current) in pending {
+            if let Some(path) = agent.metadata.get("clone_path") {
+                let request = DeferredWorkerCleanup {
+                    occurrence: worker_cleanup_occurrence(agent, path), agent: agent.clone(),
+                    additional_agents: agents.iter().filter(|other| other.id != agent.id).cloned().collect(),
+                    tasks: tasks.clone(), worktree: None,
+                };
+                let incoming = root.join("worker-cleanups/incoming").join(format!("{}.json", request.occurrence));
+                // Under the shared staging/adoption lock, either location is
+                // the original immutable request. Never replace its task facts.
+                if !request.path(root).try_exists()? && !incoming.try_exists()? {
+                    request.persist_at(&incoming).map_err(std::io::Error::other)?;
+                }
+            }
+            // Commit progress per registration, not after the whole batch. A
+            // later failure can retry without restaging a completed prefix.
+            current.metadata.insert(WORKER_CLEANUP_STAGED.into(), "true".into());
+            store.update(&current).map_err(std::io::Error::other)?;
         }
         Ok(())
     }
@@ -3532,8 +3574,15 @@ impl FactoryApp {
         if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_dir()) { return; }
         if incoming { directory.push("incoming"); }
         if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_dir()) { return; }
+        let _staging_lock = if incoming {
+            let Ok(lock) = worker_cleanup_staging_lock(self.cas_dir()) else { return; };
+            if fs2::FileExt::try_lock_exclusive(&lock).is_err() { return; }
+            Some(lock)
+        } else { None };
         for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) { continue; }
+            if !entry.file_type().is_ok_and(|kind| kind.is_file())
+                || entry.path().extension().is_none_or(|extension| extension != "json")
+            { continue; }
             let request = std::fs::read(entry.path()).ok()
                 .and_then(|bytes| serde_json::from_slice::<DeferredWorkerCleanup>(&bytes).ok());
             let Some(request) = request else {
@@ -3542,8 +3591,21 @@ impl FactoryApp {
             };
             if uuid::Uuid::parse_str(&request.occurrence).is_err()
                 || directory.join(format!("{}.json", request.occurrence)) != entry.path()
+                // Different registrations/checkouts with one display name
+                // serialize through the same existing worker-name reservation.
                 || self.crash_cleanup_pending(&request.agent.name)
             { continue; }
+            if incoming {
+                let Ok(store) = open_agent_store(self.cas_dir()) else { continue; };
+                match store.get(&request.agent.id) {
+                    Ok(agent) if !agent.metadata.contains_key(WORKER_CLEANUP_STAGED) => continue,
+                    Ok(_) | Err(cas_store::StoreError::NotFound(_)) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "could not confirm staged cleanup ownership");
+                        continue;
+                    }
+                }
+            }
             if incoming {
                 // Move the queue entry before launch. A crash still leaves a
                 // normal recovery record; retained errors never requeue per tick.
@@ -6750,7 +6812,7 @@ mod tests {
             cleanup_on_close: false, promote_entries_on_merge: false,
         }).unwrap();
         for (name, disposition) in [
-            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"),
+            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"), ("stage-retry", "retry"),
             ("interrupted-worker", "interrupted"), ("failed-worker", "error"),
         ] {
             manager.create_for_worker(name).unwrap();
@@ -6769,6 +6831,42 @@ mod tests {
                 let target = crate::factory_scratch::worker_target_dir(&worker);
                 std::fs::create_dir_all(&target).unwrap();
                 std::fs::write(target.join("unverified.log"), "preserve").unwrap();
+            }
+            if disposition == "retry" {
+                let agents = open_agent_store(&root).unwrap();
+                agent.role = cas_types::AgentRole::Worker;
+                agent.status = cas_types::AgentStatus::Stale;
+                agent.pid = Some(i32::MAX as u32);
+                agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
+                agents.register(&agent).unwrap();
+                let mut sibling = agent.clone();
+                sibling.id = format!("{name}-other-id");
+                sibling.metadata.insert("clone_path".into(), root.join("worktrees/other-checkout").display().to_string());
+                agents.register(&sibling).unwrap();
+                let mut task = Task::new(format!("{name}-task"), "Still working".into());
+                task.assignee = Some(agent.id.clone());
+                task.status = TaskStatus::InProgress;
+                let tasks = crate::store::open_task_store_cached(&root).unwrap();
+                tasks.add(&task).unwrap();
+                // Reconstruct a partial batch through the actual staging API.
+                FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).unwrap();
+                let incoming = root.join("worker-cleanups/incoming");
+                let original = std::fs::read_dir(&incoming).unwrap().next().unwrap().unwrap().path();
+                let captured = std::fs::read(&original).unwrap();
+                let saved = root.join("worker-cleanups/saved");
+                std::fs::rename(&incoming, &saved).unwrap();
+                std::fs::write(&incoming, "not a directory").unwrap();
+                let failed = crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None);
+                std::fs::remove_file(&incoming).unwrap();
+                std::fs::rename(saved, &incoming).unwrap();
+                assert!(failed.is_err(), "an undurable snapshot must fail shutdown");
+                assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee, "failed staging retains WIP bindings");
+                crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None).unwrap();
+                assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 2, "partial retry stages each registration once");
+                assert_eq!(std::fs::read(original).unwrap(), captured, "retry must not overwrite original task facts");
+                let mut app = FactoryApp::for_test_at(root.clone());
+                for _ in 0..2 { app.resume_deferred_worker_cleanups(); app.join_worker_worktree_cleanups(); }
+                continue;
             }
             if disposition == "duplicates" || disposition == "staged" {
                 let agents = open_agent_store(&root).unwrap();
@@ -6807,7 +6905,9 @@ mod tests {
                 } else {
                     app.shutdown_worker_for_recycle(name).await.unwrap();
                 }
-                app.join_worker_worktree_cleanups();
+                // Two registrations share a name; each has its own immutable
+                // intent, consumed in separate reservation phases.
+                for _ in 0..2 { app.poll_worker_worktree_cleanups(); app.join_worker_worktree_cleanups(); }
                 assert!(proof.is_file(), "{disposition}: original WIP facts must protect retired output");
                 app.resume_deferred_worker_cleanups();
                 assert!(!app.worker_worktree_cleanups_pending(), "completed holds do not replay");
@@ -6967,7 +7067,10 @@ mod tests {
         assert!(intent_durable, "cleanup intent must be durable before retirement I/O");
         let recovery_path = recovery_path.unwrap();
         if dead {
-            FactoryApp::stage_dead_worker_cleanup(&cas, std::slice::from_ref(&agent)).unwrap();
+            let mut queued = agent.clone();
+            queued.id = format!("{}-next", agent.id);
+            agents.register(&queued).unwrap();
+            FactoryApp::stage_dead_worker_cleanup(&cas, std::slice::from_ref(&queued)).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             while !app.worktree_cleanup_jobs[0].handle.is_finished() {
                 assert!(std::time::Instant::now() < deadline, "released cleanup finishes before handoff");

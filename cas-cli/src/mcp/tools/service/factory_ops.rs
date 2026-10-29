@@ -9133,15 +9133,7 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     // The MCP call can precede the daemon's queued shutdown. Stage the original
     // task facts once per registration before either path releases bindings;
     // the later daemon call must not replace them with an empty snapshot.
-    const CLEANUP_STAGED: &str = "shutdown_target_cleanup_staged";
-    if matching.iter().any(|agent| !agent.metadata.contains_key(CLEANUP_STAGED)) {
-        crate::ui::factory::FactoryApp::stage_dead_worker_cleanup(cas_root, &matching)?;
-        for agent in &matching {
-            let mut staged = agent.clone();
-            staged.metadata.insert(CLEANUP_STAGED.into(), "true".into());
-            agents.update(&staged)?;
-        }
-    }
+    crate::ui::factory::FactoryApp::stage_dead_worker_cleanup(cas_root, &matching)?;
     let queue = crate::store::open_prompt_queue_store(cas_root)?;
     let detail =
         format!("Cancelled: shutdown requested for dead worker {name}; its recipient is retired");

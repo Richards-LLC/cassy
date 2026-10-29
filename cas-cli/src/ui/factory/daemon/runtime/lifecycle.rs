@@ -4281,10 +4281,10 @@ impl FactoryDaemon {
 
     /// Run the worker-action phase of one real control-loop pass.
     async fn process_worker_control_tick(&mut self) {
-        if self.spawn_task.is_some()
-            || !self.pending_spawns.is_empty()
-            || self.app.worker_worktree_cleanups_pending()
-        {
+        // Incoming cleanup intents are independent of the spawn FIFO. Poll
+        // their small metadata queue even when the daemon has no other work.
+        self.poll_worker_cleanup_jobs_at(Instant::now());
+        if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
             self.process_pending_spawns().await;
         }
     }

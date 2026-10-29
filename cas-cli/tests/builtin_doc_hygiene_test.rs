@@ -677,6 +677,16 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Names the architecture vocabulary taught by cas-codebase-design.",
     ),
     (
+        "skills/cas-tdd/SKILL.md",
+        "journey",
+        "Names the registry-backed Playwright journey test layer and its 60s budget.",
+    ),
+    (
+        "agents/task-verifier.md",
+        "journey",
+        "Names the journey test layer the verifier weighs against unit and integration tests.",
+    ),
+    (
         "skills/cas-cut-release/SKILL.md",
         "journey",
         "Names the journey-eval QA command and required release evidence.",

@@ -156,6 +156,17 @@ impl Fixture {
         worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
         worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
         agents.update(&worker).unwrap();
+        self.mark_ready("cas-9efb-test");
+    }
+
+    fn mark_ready(&self, task_id: &str) {
+        let store = crate::store::open_task_store_local(&self.app.cas_dir).unwrap();
+        let mut task = store.get(task_id).unwrap();
+        let tip = git(self.repo.path(), &["rev-parse", "HEAD"]);
+        task.notes.push_str(&format!(
+            "\n[2026-10-29 09:07] 📝 PROGRESS status: ready\ntip: {tip}\n"
+        ));
+        store.update(&task).unwrap();
     }
 
     fn ci(&self, conclusion: Option<&str>) {
@@ -271,6 +282,7 @@ fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
                 next.deliverables.factory_branch_anchor = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
                 tasks.update(&next).unwrap();
             }
+            f.mark_ready(&next.id);
         }
         let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
         f.app.set_director_data_for_test(data);
@@ -354,6 +366,7 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     std::fs::write(f.repo.path().join("delivery.rs"), "// new pushed tip\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.mark_ready("cas-9efb-test");
     f.ci(None);
     f.app.revalidate_and_prompt_for_delivery(&events);
     let pending = counts(&f);
@@ -380,6 +393,7 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     std::fs::write(f.repo.path().join("delivery.rs"), "// already merged correction\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test merged correction"]);
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.mark_ready("cas-9efb-test");
     f.advance_target(true);
     f.app.revalidate_and_prompt_for_delivery(&events[..1]);
     let merged = counts(&f);
@@ -1293,6 +1307,7 @@ fn cas_43d2_declined_tip_settles_until_the_worker_commits() {
     std::fs::write(f.repo.path().join("delivery.rs"), "// corrected\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.mark_ready("cas-9efb-test");
     f.relay();
     assert!(probes(&f) > settled, "a new commit is read again");
 }

@@ -1,4 +1,4 @@
-//! Merge idle prompts require settled CI and live target evidence.
+//! Merge idle prompts require worker completion, settled CI and live target evidence.
 use super::{DirectorData, DirectorEvent};
 use crate::ui::factory::director::{
     MergeAlertEvidence, MergeAlertFreshness, check_merge_alert_freshness,
@@ -366,7 +366,7 @@ pub(super) fn ready_prompt(
     Some(crate::ui::factory::director::Prompt {
         merge_ready: true, merge_alert: Some(ready.evidence.clone()), target: supervisor.to_string(),
         text: format!(
-            "READY TO MERGE — pushed delivery {} has green lane CI.\nTask {} on {}.\nMerge target: {target}.\nLive evidence: {} unmerged commit(s) on {} vs {target} (checked {} at {}).\n{action}\nDo not wait for park or a merge request; the merge needs no worker action. Existing CI and QA merge gates still apply.",
+            "READY TO MERGE — worker-declared delivery {} has green lane CI.\nTask {} on {}.\nMerge target: {target}.\nLive evidence: {} unmerged commit(s) on {} vs {target} (checked {} at {}).\n{action}\nThe worker declared this exact tip ready. Existing CI and QA merge gates still apply.",
             ready.tip, ready.evidence.task_id, ready.evidence.factory_branch,
             ready.evidence.unmerged_count, ready.evidence.factory_branch,
             ready.evidence.checked_epic_ref, ready.evidence.epic_sha,

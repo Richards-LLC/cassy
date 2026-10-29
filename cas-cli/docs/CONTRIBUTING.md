@@ -2895,6 +2895,13 @@ does not call them.
 
 ### Task close delivery attribution
 
+Green lane CI does not declare worker completion. Director merge readiness
+requires `awaiting_merge` or an explicit `status: ready` return contract naming
+the exact pushed tip, regardless of the task's methodology. Red checkpoints and
+ordinary check/test receipts do not satisfy that boundary. A manually requested
+merge of an `in_progress` task remains available and returns an unparked-task
+warning; its existing CI, QA and authorization gates still apply.
+
 Close posture checks (`additive-only`, `value-only`), no-code intent, and the
 receipt diff stat share task delivery attribution in
 `mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs`. The remote-tracking

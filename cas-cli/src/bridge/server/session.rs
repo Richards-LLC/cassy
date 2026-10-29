@@ -425,17 +425,17 @@ fn project_deliveries(
             .any(|owner| supervisors.contains(owner))
         })
         .min_by_key(|epic| {
-            std::cmp::Reverse(
-                status
-                    .tasks_in_progress
-                    .iter()
-                    .filter(|task| {
-                        task.status == "inprogress"
-                            && task.epic_id.as_deref() == Some(epic.id.as_str())
-                            && staffed_tasks.contains(task.id.as_str())
-                    })
-                    .count(),
-            )
+            let staffed: Vec<_> = status.tasks_in_progress.iter()
+                .filter(|task| task.epic_id.as_deref() == Some(epic.id.as_str())
+                    && staffed_tasks.contains(task.id.as_str()))
+                .collect();
+            // Keep ongoing work first, then parked/blocked staffing. The
+            // last worker parking cannot demote its release behind idle
+            // history and starve the bounded delivery evidence read.
+            std::cmp::Reverse((
+                staffed.iter().filter(|task| task.status == "inprogress").count(),
+                staffed.len(),
+            ))
         })
         .map(|epic| epic.id.as_str());
     let mut order: Vec<_> = (0..status.epics.len()).collect();

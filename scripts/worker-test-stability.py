@@ -50,6 +50,17 @@ def items(source):
                     attr_start = i
                 i = end + 1
                 continue
+            if t.value == 'include' and i + 2 < right and ts[i+1].value == '!' and ts[i+2].value == '(':
+                end = ps[i+2]
+                if end == i+4 and ts[i+3].string:
+                    literal = ts[i+3].value
+                    # Ordinary literal includes inherit this namespace. Macro-
+                    # computed paths remain unresolved and cannot satisfy park.
+                    if literal.startswith('"'):
+                        modules.append((scope, inline, None, json.loads(literal)))
+                i = end + 1
+                attrs, attr_start = [], None
+                continue
             if t.value == 'mod' and i + 2 < right:
                 name, after = ts[i+1].value, ts[i+2].value
                 if after == ';':
@@ -75,10 +86,12 @@ def items(source):
                     if body < right and ts[body].value == '{':
                         end = ps[body]
                         labels = [''.join(t.value for t in a if not t.string).split('(')[0] for a in attrs]
-                        if any(a in ('test', 'tokio::test', 'async_std::test', 'rstest', 'test_case') for a in labels):
+                        kinds = [label.split('::')[-1] for label in labels]
+                        if any(a in ('test', 'rstest', 'test_case') for a in kinds):
                             begin = i if attr_start is None else attr_start
                             signature = [(t.value, t.string) for t in ts[begin:end+1]]
                             tests.append({'function': '::'.join((*scope, name)),
+                                          'parameterized': any(a in ('rstest', 'test_case') for a in kinds),
                                           'fingerprint': hashlib.sha256(json.dumps(signature).encode()).hexdigest()})
                         i = end + 1
                         attrs, attr_start = [], None
@@ -147,9 +160,12 @@ def source_graph(root, package, harness, target=None):
         found.setdefault(path, []).append(prefix)
         if path not in cached:
             source = path.read_text()
-            cached[path] = items(source)[1] if re.search(r'\bmod\s+\w+\s*;', source) else []
+            cached[path] = items(source)[1] if re.search(r'\bmod\s+\w+\s*;|\binclude\s*!', source) else []
         mod_dir = path.parent if path.stem in ('lib', 'main', 'mod') else path.with_suffix('')
         for scope, inline, name, explicit in cached[path]:
+            if name is None:
+                pending.append(((path.parent / explicit).resolve(), (*prefix, *scope)))
+                continue
             context = mod_dir.joinpath(*inline)
             if explicit:
                 child = (context if inline else path.parent) / explicit
@@ -232,12 +248,15 @@ def selected(root, touched, requested, cargo, target=None):
     identities, exact = [], set()
     for test in candidates:
         expected = {'::'.join((*prefix, test['function'])) for prefix in graph[(root / test['file']).resolve()]}
-        resolved = [name for name in names if any(name == target or name.startswith(target+'::') for target in expected)]
+        resolved = [name for name in names if any(name == target or
+                    (test.get('parameterized', False) and name.startswith(target+'::')) for target in expected)]
         if not resolved:
             raise ValueError('cannot resolve touched Rust test '+test['id']+' in selected target; platform/macro proof required')
         selected_names = [name for name in resolved if matches(name, requested[index+1])]
         if not selected_names:
             continue
+        if len(selected_names) != len(resolved):
+            raise ValueError('filter selects only some cases of touched Rust test '+test['id']+'; select the whole test function')
         for name in selected_names:
             if names[name].get('ignored'):
                 raise ValueError('touched test is ignored; explicit platform/provider proof required: '+test['id'])

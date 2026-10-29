@@ -326,6 +326,11 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
         "widget",
         "test(gear::tests)",
     );
+    let base = git(&f.worker_path, &["rev-parse", "origin/main"]);
+    crate::factory_worker_check::record_stability_for_tests(
+        &f.cas_dir(), &f.worker_path, &head, &base, "widget", "test(gear::tests)",
+        "crates/widget/src/gear_tests.rs::turns",
+    );
     let parked = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",
     })).await;

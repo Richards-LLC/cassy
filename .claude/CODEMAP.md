@@ -76,6 +76,9 @@
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
 
+- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_worker_check/stability.rs` - capped proof admission, touched-test plans and concurrent-run receipt validation.
+- `scripts/worker-proof-guards.py`, `scripts/worker-test-stability.py` - existing worker proof node, Rust module/name selection and five concurrent no-retry copies.
+
 ## MCP and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.

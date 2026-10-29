@@ -1755,6 +1755,47 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+### Touched Rust tests: five concurrent passes before park
+
+The existing capped worker test command runs its requested affected scope once,
+then repeats only the added or token-changed Rust test functions in that target
+five times concurrently. Each copy uses zero retries and one test thread; a
+failed copy, zero/missing count, incomplete parameter cases or unresolved name
+produces no stability receipt. Original copy logs and load snapshots remain in
+the worker log. This happens inside the existing worker node; park reads proof
+and runs no test, build or new CI stage. Quarantine is outside this policy.
+
+Selection compares immutable merge-base and delivery Git blobs, ignoring comments
+and whitespace. The module graph follows ordinary modules, `#[path]` mounts and
+literal `include!` files. Built-in/qualified `test`, `rstest` and `test_case`
+attributes map source functions to compiled nextest names. A parameterized
+function requires every compiled case; ordinary functions require exact names.
+Ignored, platform-disabled and unresolvable cases fail closed at park. They need
+an owner to supply an executable supported target; the lane never enables ignored
+provider probes automatically. Dynamic includes and arbitrary test-generating
+macros require explicit supported selection work rather than guessed coverage.
+Helper-only changes retain the normal whole affected-module/harness obligation
+but do not trigger five repeats of every caller. Non-Rust adapters are tracked
+separately; this initial protocol applies to Rust.
+
+The optional internal test-receipt `stability` object binds `version=1`, `base`,
+`head`, source `tests`, compiled `names`, `runs=5`, `parallelism=5`, `retries=0`
+and five `trials` (exit code, exact count, monotonic start/end and original log).
+All intervals must overlap and all counts must equal the selected names. Old
+receipts still prove crate coverage but cannot prove touched-test stability.
+Documentation-only receipt reuse retains the existing unchanged-input checks.
+A supervisor's ordinary single-run attestation also does not waive this policy.
+
+Test fixtures should use `TestEnvGuard::for_store(actual_root)`, or borrow their
+existing guard and call `bind_store_root(actual_root)` before root-sensitive
+readers. Keep the guard alive through teardown. Shared MCP store builders bind
+this automatically. Use `test_env_guard::git_fixture(repo)` for Git children:
+author/committer identity and dates are fixed, configuration is isolated and
+repository-routing variables are removed without mutating process environment.
+The test-shape lint rejects obvious UUID/random values compared to assertion
+literals, including simple local aliases; it is deliberately not a dataflow
+proof. Pin deterministic fixture inputs when an exact commit SHA is contractual.
+
 When worker admission is unavailable but a supervisor has already run the
 selection in a scratch checkout, a **live registered supervisor** may record
 that run without executing it again. Use `factory action=record_test_receipt

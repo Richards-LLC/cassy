@@ -1332,9 +1332,9 @@ pub(crate) fn record_passing_test_for_tests(
 }
 
 #[cfg(test)]
-pub(crate) fn record_stability_for_tests(cas_root: &Path, repo: &Path, head: &str, base: &str, id: &str) {
+pub(crate) fn record_stability_for_tests(cas_root: &Path, repo: &Path, head: &str, base: &str, package: &str, filter: &str, id: &str) {
     let repo = repo.canonicalize().unwrap();
-    let test = TargetedTest { package: "cas".into(), harness: None, filter: "test(worker)".into() };
+    let test = TargetedTest { package: package.into(), harness: None, filter: filter.into() };
     let path = test_receipt_path(cas_root, &repo, head, &test);
     let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let proof = serde_json::json!({
@@ -1908,7 +1908,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         {
             let mut guarded = Command::new("python3");
             guarded.env("PYTHONDONTWRITEBYTECODE", "1");
-            guarded.arg("-c").arg(include_str!("../../scripts/worker-proof-guards.py"))
+            guarded.arg("-I").arg("-c").arg(include_str!("../../scripts/worker-proof-guards.py"))
                 .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
                 .arg("--verified-script").arg(verified)
                 .arg("--cargo").arg(cargo)
@@ -1918,7 +1918,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             guarded
         } else {
             let mut plain = Command::new("python3");
-            plain.arg("-c").arg(stability::SCRIPT)
+            plain.arg("-I").arg("-c").arg(stability::SCRIPT)
                 .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
                 .arg("--verified-script").arg(verified)
                 .arg("--cargo").arg(cargo)

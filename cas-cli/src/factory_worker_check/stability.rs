@@ -77,7 +77,7 @@ fn plan(repo: &Path, target: &str, head: &str) -> Result<Plan> {
     let base = super::git(repo, &["merge-base", &remote, head])
         .or_else(|_| super::git(repo, &["merge-base", target, head]))?;
     let output = Command::new("python3")
-        .args(["-c", SCRIPT, "--plan", "--base", &base, "--head", head])
+        .args(["-I", "-c", SCRIPT, "--plan", "--base", &base, "--head", head])
         .current_dir(repo)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .output().context("plan touched Rust tests")?;

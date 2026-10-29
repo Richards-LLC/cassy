@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -13,6 +14,10 @@ SCRIPTS = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('worker_guards', SCRIPTS / 'worker-proof-guards.py')
 GUARDS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GUARDS)
+sys.path.insert(0, str(SCRIPTS))
+SPEC = importlib.util.spec_from_file_location('worker_stability', SCRIPTS / 'worker-test-stability.py')
+STABILITY = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(STABILITY)
 
 
 class ChangedStrings(unittest.TestCase):
@@ -139,6 +144,38 @@ else:
                     self.assertEqual(proof['tests'], ['src/lib.rs::touched'])
                     self.assertEqual(proof['runs'], 5)
                     self.assertEqual(proof['parallelism'], 5)
+
+    def test_selection_covers_every_parameter_case_without_claiming_plain_name_descendants(self):
+        (self.repo / 'Cargo.toml').write_text('[package]\nname="cas"\nversion="0.1.0"\n')
+        (self.repo / 'src').mkdir()
+        source = self.repo / 'src/lib.rs'
+        fake = self.repo / 'cargo-fixture'
+        cases = [
+            ('#[test] fn touched() {}', ['touched', 'touched::unrelated'], 'test(touched)', ['touched']),
+            ('#[rstest] fn touched() {}', ['touched::case_1', 'touched::case_2'], 'test(case_1)', ValueError),
+            ('#[rstest] fn touched() {}', ['touched::case_1', 'touched::case_2'], 'test(touched)', ['touched::case_1', 'touched::case_2']),
+            ('#[test] fn touched() {}', ['touched::unrelated'], 'test(touched)', ValueError),
+            ('include!("included.rs");', ['nested::touched'], 'test(touched)', ['nested::touched']),
+        ]
+        for body, names, expression, expected in cases:
+            with self.subTest(body=body, expression=expression, names=names):
+                source.write_text(body)
+                included = self.repo / 'src/included.rs'
+                included.write_text('mod nested { #[test] fn touched() {} }')
+                path = 'src/included.rs' if body.startswith('include!') else 'src/lib.rs'
+                test = STABILITY.items((self.repo / path).read_text())[0][0]
+                touched = {'tests': [{**test, 'file': path, 'id': path+'::'+test['function']}]}
+                listing = {'rust-suites': {'fixture': {'testcases': {name: {'ignored': False} for name in names}}}}
+                fake.write_text('#!/usr/bin/env python3\nprint('+repr(json.dumps(listing))+')\n')
+                fake.chmod(0o755)
+                requested = ['nextest', 'run', '-p', 'cas', '--lib', '-E', expression]
+                if expected is ValueError:
+                    with self.assertRaises(ValueError):
+                        STABILITY.selected(self.repo, touched, requested, str(fake))
+                else:
+                    ids, resolved = STABILITY.selected(self.repo, touched, requested, str(fake))
+                    self.assertEqual(ids, [touched['tests'][0]['id']])
+                    self.assertEqual(resolved, expected)
 
 
 if __name__ == '__main__':

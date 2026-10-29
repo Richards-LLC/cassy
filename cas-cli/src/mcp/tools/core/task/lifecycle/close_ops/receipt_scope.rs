@@ -648,7 +648,7 @@ mod tests {
         assert!(refusal.contains("TOUCHED TEST STABILITY REQUIRED"), "{refusal}");
         assert!(refusal.contains("cas-cli/src/lib.rs::new_test"), "{refusal}");
         crate::factory_worker_check::record_stability_for_tests(
-            cas_root.path(), repo.path(), &delivery, &head, "cas-cli/src/lib.rs::new_test",
+            cas_root.path(), repo.path(), &delivery, &head, "cas", "test(worker)", "cas-cli/src/lib.rs::new_test",
         );
         assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").is_none());
 

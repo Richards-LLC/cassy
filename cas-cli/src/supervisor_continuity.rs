@@ -190,7 +190,9 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         if let Some(moved) = rerouted.get(&handoff.id).filter(|ids| !ids.is_empty()) {
             let ids: Vec<String> = moved.iter().map(|id| format!("#{id}")).collect();
             detail.push_str(&format!(
-                "Unread operator messages re-routed to you: {}. Answer them with target=operator.\n",
+                "Unread operator messages re-routed to you: {}. Answer each once in your final pane reply; \
+                 use explicit routing only for disabled or unmirrored delivery \
+                 (cas-supervisor/references/reference.md#verified-commander-messages).\n",
                 ids.join(", ")
             ));
         }

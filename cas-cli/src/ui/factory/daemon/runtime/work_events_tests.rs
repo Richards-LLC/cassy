@@ -417,7 +417,7 @@ fn native_phase_uses_scoped_hook_identity_and_compaction_boundaries() {
     let path = project.path().join("native.jsonl");
     let logs = root.join("logs");
     std::fs::create_dir_all(&logs).unwrap();
-    let log = logs.join(format!("factory-session-{}.log", Utc::now().date_naive()));
+    let log = logs.join("factory-session-2026-10-27.log");
     let hook = |event: &str, at: &str, source: &str| json!({"event":event,"timestamp":at,
         "factory_session":"native-phase","agent":"actual-supervisor","role":"supervisor",
         "session_id":"real-native-session","harness":"claude","transcript_path":path,"source":source});
@@ -427,7 +427,9 @@ fn native_phase_uses_scoped_hook_identity_and_compaction_boundaries() {
         {"type":"tool_use","id":"native-tool","name":"Bash","input":{"command":"private input"}}
     ]}})]);
     write_lines(&log, &[hook("session_start_fired", &at(0), "startup")]);
-    let phase = || supervisor_phase_for_session(&root, project.path(), "native-phase", "actual-supervisor");
+    let now: DateTime<Utc> = at(3).parse().unwrap();
+    let phase_at = |now| supervisor_phase_for_session_at(&root, project.path(), "native-phase", "actual-supervisor", now);
+    let phase = || phase_at(now);
     let running = phase().expect("native hook identity reaches the real transcript without a matching registration");
     assert_eq!(running.kind, WorkEventKind::Tool);
     assert_eq!(running.lifecycle.started_at.as_deref(), Some("2026-10-27T12:00:01+00:00"));
@@ -439,6 +441,9 @@ fn native_phase_uses_scoped_hook_identity_and_compaction_boundaries() {
     let compacting = phase().unwrap();
     assert_eq!(compacting.lifecycle.phase.as_deref(), Some("compacting"));
     assert_eq!(compacting.lifecycle.started_at.as_deref(), Some("2026-10-27T12:00:02+00:00"));
+    assert_eq!(phase_at(now + chrono::Duration::seconds(298)).unwrap().lifecycle.phase.as_deref(), Some("compacting"));
+    assert!(phase_at(now + chrono::Duration::seconds(299)).is_none(),
+        "an unmatched/cancelled compaction must stop reporting activity after five minutes, without reviving an older tool");
     write_lines(&log, &[hook("session_start_fired", &at(4), "compact")]);
     let compacted = phase().unwrap();
     assert_eq!(compacted.lifecycle.phase.as_deref(), Some("compacted"));

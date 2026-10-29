@@ -11962,13 +11962,50 @@ pub(crate) fn worker_liveness_for_agent(
             };
         }
     }
-    super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs)
+    let mut observation = super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs);
+    // A recycled harness can perform authenticated work before its new
+    // transcript resolves or the first CPU delta is available. Use its own
+    // local activity, never heartbeat or another worker's progress, in that
+    // observation gap. Concrete turn/terminal and process-death evidence wins.
+    if observation.state == super::worker_liveness::Liveness::Stalled
+        && path.as_deref().is_none_or(|path| !path.exists())
+    {
+        let recent_age = |at: chrono::DateTime<chrono::Utc>| {
+            let age = (now - at).num_seconds();
+            (0..=stall_secs).contains(&age).then_some(age)
+        };
+        let activity = crate::store::open_event_store(cas_root).ok()
+            .and_then(|events| events.latest_worker_activity(&agent.id, &agent.name).ok().flatten())
+            .and_then(|event| recent_age(event.created_at))
+            .map(|age| ("worker activity", age))
+            .or_else(|| {
+                let targets: std::collections::BTreeSet<String> = crate::store::open_agent_store(cas_root).ok()
+                    .and_then(|agents| agents.list(None).ok()).unwrap_or_default().into_iter()
+                    .filter(|other| other.visible_to_factory_session(agent.factory_session.as_deref())
+                        && matches!(other.role, cas_types::AgentRole::Supervisor | cas_types::AgentRole::Director))
+                    .flat_map(|other| [other.name, other.id])
+                    .chain(["supervisor".to_string(), "director".to_string()]).collect();
+                let targets: Vec<_> = targets.iter().map(String::as_str).collect();
+                crate::store::open_prompt_queue_store(cas_root).ok()
+                    .and_then(|queue| queue.latest_created_at_for_targets_from_sources(
+                        &[&agent.name, &agent.id], &targets, agent.factory_session.as_deref(),
+                    ).ok())
+                    .and_then(|timestamps| timestamps.into_values().max())
+                    .and_then(recent_age)
+                    .map(|age| ("outbound message", age))
+            });
+        if let Some((source, age)) = activity {
+            observation.state = super::worker_liveness::Liveness::Executing;
+            observation.evidence = format!("recent {source} {age}s ago; {}", observation.evidence);
+        }
+    }
+    observation
 }
 
 /// cas-9bf6: the execution evidence `worker_status` reports for `worker`,
 /// reused by the director's stall classifier so the two surfaces agree.
-/// `executing` is the worker_status liveness verdict (turn evidence within
-/// `stall_secs`, or a CPU-busy harness); `worktree_activity_age` is the
+/// `executing` is the shared worker_status verdict: turn/process evidence,
+/// or recent local work while the transcript is unresolved. `worktree_activity_age` is the
 /// freshest scoped dirty-file or HEAD commit age, using the same probe as
 /// is-wedged. Only this registered worker's checkout is read.
 /// `None` when the worker is unknown.
@@ -18835,9 +18872,9 @@ effort = "high"
     }
 
     #[tokio::test]
-    async fn worker_liveness_summary_five_workers_under_one_second() {
+    async fn cas_070a_recycled_worker_with_unresolved_artifact_and_fresh_activity_executes() {
         let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
-        use cas_store::{AgentStore, SqliteAgentStore};
+        use cas_store::{AgentStore, EventStore, PromptQueueStore, SqliteAgentStore, SqliteEventStore, SqlitePromptQueueStore};
         use cas_types::{Agent, AgentRole};
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",
@@ -18846,6 +18883,9 @@ effort = "high"
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let store = SqliteAgentStore::open(&root).unwrap();
+        let events = SqliteEventStore::open(&root).unwrap();
+        let queue = SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
         let sessions = temp.path().join("account/sessions/2026/09/10");
         std::fs::create_dir_all(&sessions).unwrap();
         let now = chrono::Utc::now();
@@ -18871,6 +18911,7 @@ effort = "high"
             ("task_started", 1, false),
             ("task_started", 1800, false),
             ("task_started", 1, true),
+            ("task_started", 1, false),
         ]
         .into_iter()
         .enumerate()
@@ -18903,8 +18944,42 @@ effort = "high"
                 "worker_account_dir".into(),
                 temp.path().join("account").to_string_lossy().into(),
             );
+            if matches!(index, 2 | 3 | 5) {
+                agent.last_heartbeat = now - chrono::Duration::minutes(30);
+                agent.cc_session_id = Some("pre-recycle-session".into());
+            }
             store.register(&agent).unwrap();
+            if matches!(index, 2 | 3 | 5) {
+                // A confirmed recycle replaces the transcript identity but
+                // must not need an MCP heartbeat before work is visible.
+                assert_eq!(
+                    record_reset_registration(&store, &agent, &agent.id),
+                    ResetRegistration::Recorded,
+                );
+                assert_eq!(store.get(&agent.id).unwrap().last_heartbeat, agent.last_heartbeat);
+                std::fs::remove_file(&path).unwrap();
+            }
+            if index == 4 {
+                std::fs::remove_file(&path).unwrap();
+            }
+            // Terminal turns and confirmed exits still beat fresh activity.
+            // Row 3 has only expired own activity and fresh foreign activity.
+            if matches!(index, 0 | 2 | 3 | 4) {
+                events.record(&make_event(cas_types::EventType::WorkerActivity,
+                    &agent.id, if index == 3 { 1800 } else { 0 })).unwrap();
+            }
+            if index == 5 {
+                queue.enqueue_with_session(&agent.name, "supervisor", "working after recycle",
+                    "liveness-fixture-session").unwrap();
+            }
+            if index == 3 {
+                queue.enqueue_with_session(&agent.name, "supervisor", "different factory",
+                    "foreign-factory-session").unwrap();
+            }
         }
+        events.record(&make_event(cas_types::EventType::WorkerActivity, "foreign-worker", 0)).unwrap();
+        queue.enqueue_with_session("foreign-worker", "supervisor", "another worker is active",
+            "liveness-fixture-session").unwrap();
         drop(store);
         let core = CasCore::with_daemon(root, None, None);
         #[cfg(feature = "mcp-proxy")]
@@ -18919,7 +18994,7 @@ effort = "high"
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
         let liveness_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("liveness:")).collect();
-        assert_eq!(liveness_lines.len(), 5, "{output}");
+        assert_eq!(liveness_lines.len(), 6, "{output}");
         assert!(lines.iter().any(|line| line.starts_with("Factory MCP versions")), "{output}");
         assert!(
             lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
@@ -18928,7 +19003,7 @@ effort = "high"
         );
         assert!(
             lines[0].contains("Factory session: liveness-fixture-session")
-                && lines[0].contains("worker rows in scope: 5"),
+                && lines[0].contains("worker rows in scope: 6"),
             "summary must lead with its session scope: {output}"
         );
         for (index, expected) in [
@@ -18937,6 +19012,7 @@ effort = "high"
             "executing",
             "stalled",
             "dead",
+            "executing",
         ]
         .into_iter()
         .enumerate()
@@ -18951,10 +19027,10 @@ effort = "high"
         }
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "five-worker poll: {elapsed:?}"
+            "six-worker poll: {elapsed:?}"
         );
         if let Ok(dir) = proof_dir {
-            std::fs::write(std::path::Path::new(&dir).join("five-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n5 workers; 4 MiB rollout each; fresh heartbeat each; local process lookup\n{output}\n")).unwrap();
+            std::fs::write(std::path::Path::new(&dir).join("six-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n6 workers; recycled workers have stale heartbeat and unresolved artifacts; worker 2 has fresh own activity; worker 5 has fresh outbound; worker 3 has expired own activity and fresh foreign activity; local process lookup\n{output}\n")).unwrap();
         }
     }
 

@@ -45,13 +45,13 @@ export class SlashCommands {
     input.setAttribute("aria-controls", this.panel.id);
     input.addEventListener("input", () => { this.escaped = false; this.sync(); }, { signal: this.events.signal });
     input.addEventListener("keydown", event => {
-      if (!input.value.startsWith("/") || event.isComposing) return;
-      if (event.key === "Escape") { event.preventDefault(); this.close(); }
+      if (event.isComposing) return;
+      if (event.key === "Escape" && !this.panel.hidden) { event.preventDefault(); this.close(); }
       if (event.key === "ArrowDown" && !this.panel.hidden) {
         event.preventDefault(); this.panel.querySelector<HTMLButtonElement>("[data-supervisor-command]")?.focus();
       }
-      if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
-        event.preventDefault(); this.submit();
+      if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && this.submit()) {
+        event.preventDefault();
       }
     }, { capture: true, signal: this.events.signal });
     this.panel.addEventListener("keydown", event => {
@@ -68,13 +68,14 @@ export class SlashCommands {
   show(): void { this.open = true; this.escaped = false; this.sync(); this.panel.querySelector<HTMLButtonElement>("button")?.focus(); }
   close(): void { this.open = false; this.escaped = true; this.panel.hidden = true; }
   sync(): void {
-    this.panel.hidden = this.escaped || (!this.open && !this.input.value.startsWith("/"));
+    const query = this.input.value.startsWith("/") ? this.input.value.slice(1).toLowerCase() : "";
+    const suggestion = this.input.value.startsWith("/") && commands.some(command => command.id.startsWith(query));
+    this.panel.hidden = this.escaped || (!this.open && !suggestion);
     if (this.panel.hidden || this.pending) return;
     this.panel.replaceChildren();
     const heading = document.createElement("strong"); heading.textContent = `Commands · ${this.options.label()}`; this.panel.append(heading);
     const unavailable = this.options.unavailable();
     if (unavailable) { this.notice(unavailable); return; }
-    const query = this.input.value.startsWith("/") ? this.input.value.slice(1).toLowerCase() : "";
     const shown = commandsForHarness(this.options.harness()).filter(command => command.id.startsWith(query));
     if (!shown.length) this.notice("No supported command. Choose a listed command without arguments.");
     for (const command of shown) {
@@ -84,14 +85,14 @@ export class SlashCommands {
       button.append(name, effect); button.onclick = () => this.choose(command); this.panel.append(button);
     }
   }
-  /** Returns true for every leading slash, including unsupported strings. */
+  /** Claim only exact supported command tokens; other text uses the normal send. */
   submit(): boolean {
-    if (!this.input.value.startsWith("/")) return false;
+    const token = this.input.value.split(/\s/, 1)[0];
+    const command = commands.find(item => `/${item.id}` === token);
+    if (!command) return false;
     this.escaped = false; this.open = true; this.sync();
     if (this.pending || this.options.unavailable()) return true;
-    const query = this.input.value.slice(1).toLowerCase();
-    const command = commandsForHarness(this.options.harness()).find(item => item.id.startsWith(query));
-    if (command) this.choose(command);
+    if (this.input.value.trimEnd() === token && commandsForHarness(this.options.harness()).includes(command)) this.choose(command);
     return true;
   }
   private notice(text: string): void {

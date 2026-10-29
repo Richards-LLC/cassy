@@ -106,7 +106,7 @@ fn assert_unknown_grace_expires(mode: &str) {
     );
 }
 
-async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
+async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>, expect_fresh: bool) {
     use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
     use super::super::queue_control_jobs::PromptPreparation;
     let temp = tempfile::tempdir().unwrap();
@@ -162,8 +162,8 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
         );
     }
     if let Some(action) = action {
-        // Active worker / invalid recipe prevent a real harness launch. The
-        // production handler still crosses its pane replacement boundary.
+        // Active worker / invalid recipe prevent a real harness launch.
+        // Refused recycle must not cross the pane replacement boundary.
         daemon.pending_spawns.push_back(action);
         daemon.process_pending_spawns().await;
     } else {
@@ -173,11 +173,10 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
     }
     let _lane =
         super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
-    assert!(
-        daemon
-            .prepared_wake_evidence("worker-a")
-            .awaiting_first_prompt,
-        "reused pane must receive fresh boot grace, not the expired snapshot's sighting"
+    assert_eq!(
+        daemon.prepared_wake_evidence("worker-a").awaiting_first_prompt,
+        expect_fresh,
+        "replacement renews boot grace; refused recycle retains the existing session's grace"
     );
     assert!(
         !daemon
@@ -189,19 +188,19 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
 
 #[tokio::test]
 async fn cas_7b6b_round4_forget_pane_restarts_expired_grace_under_c6() {
-    assert_replacement_gets_fresh_grace(None).await;
+    assert_replacement_gets_fresh_grace(None, true).await;
 }
 #[tokio::test]
 async fn cas_7b6b_round4_respawn_forgets_expired_pane_grace() {
-    assert_replacement_gets_fresh_grace(Some(PendingSpawn::Respawn("worker-a".into()))).await;
+    assert_replacement_gets_fresh_grace(Some(PendingSpawn::Respawn("worker-a".into())), true).await;
 }
 #[tokio::test]
-async fn cas_7b6b_round4_recycle_forgets_expired_pane_grace() {
+async fn cas_08e6_refused_recycle_preserves_existing_pane_grace() {
     assert_replacement_gets_fresh_grace(Some(PendingSpawn::Recycle {
         request_id: 1,
         name: "worker-a".into(),
         spec: None,
-    }))
+    }), false)
     .await;
 }
 

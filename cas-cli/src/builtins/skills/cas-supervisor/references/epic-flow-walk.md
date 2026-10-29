@@ -38,7 +38,7 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    surface; a surface fixed by one child must not contradict another child's
    surface. Map conflicting claims to child IDs and captures in Contradictions.
    This combined-tip check catches regressions that each child's own QA misses.
-6. At the deadline mark all unrun cells `NOT EXERCISED`; keep them as owed
+6. At the deadline mark all unrun cells `NOT EXERCISED: <reason>`; keep them as owed
    work. File one task per defect without patching the build. Finish the single
    ledger with status `complete` and add exactly one epic note headed
    `Epic flow walk` with tip, child coverage, ledger path, counts, and label
@@ -61,9 +61,10 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    verdict retry close. After rejection, keep the epic open until the owed
    evidence is resolved; the next close creates a fresh review dispatch.
 
-## Example epic note
+## Example epic note and ledger
 
-Illustrative receipt, not proof of an actual run:
+Illustrative receipt and matching matrix, not proof of an actual run. Copy the
+whole block to the ledger and supply the named captures before checking it:
 
 ```text
 Epic flow walk
@@ -75,4 +76,11 @@ labels: source-inferred=1; fixture=0; real-build=3; eyewitness=0
 Budget: 60 minutes; status: complete
 Owed: M04 keyboard revisit (time box expired).
 Contradictions: none in captured terminal states; M04 remains unexercised.
+
+| id | cell | expected | observed | verdict | label | evidence path | defect task |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M01 | combined demo happy path | both child actions complete | both actions completed | PASS | real-build | M01.txt | - |
+| M02 | invalid input | clear refusal | clear refusal shown | PASS | real-build | M02.txt | - |
+| M03 | adjacent status | count agrees with list | count and list agree | PASS | real-build | M03.txt | - |
+| M04 | keyboard revisit | focus and state persist | time box expired | NOT EXERCISED: time box expired | source-inferred | - | - |
 ```

@@ -104,7 +104,7 @@
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - authenticated streams, recovery and session subscriptions.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - history paging, receipt progress and windowed turns.
 - `hub-web/src/supervisor-commands.ts` - slash palette, confirmations, native chooser controls and command receipts.
-- `hub-web/src/live-phase.ts` - measured phase/elapsed view with explicit waiting, stale and unreported states.
+- `hub-web/src/live-phase.ts`, `hub-web/src/status-refresh.ts` - measured phase/elapsed view with explicit waiting, stale and unreported states; session-scoped latest status response ownership.
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts` - shared release/task state, lazy Team and receipt trail.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - typed operation disclosures and live work pages.
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/conversation-view.ts` - fenced source, native evidence/status tables and two-format copy.
@@ -127,6 +127,7 @@
 - **Contributor contracts:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`; design/terminal briefs and captures under `docs/design/`.
 - **Release records:** `CHANGELOG.md`, `docs/release-notes/`, `docs/release-reports/` for titled entries, Slack drafts and Markdown/HTML/PDF proof.
 - **Release tools:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`.
+- **Host release installation:** `scripts/install-on-publish.sh` installs a Linux systemd user timer or macOS LaunchAgent; `scripts/test-install-on-publish.sh` proves the scheduler lifecycle and release timer.
 - **Hosted publication:** `.github/workflows/release.yml`, `scripts/deploy-hub-release.py`, `scripts/verify-hub-dist.sh`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
 - **Runtime/config:** `ops/systemd/`, `docs/ci/`, `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`.

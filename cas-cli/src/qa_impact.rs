@@ -438,41 +438,41 @@ pub fn codemap_labels(text: &str) -> Vec<CodemapLabel> {
         .collect()
 }
 
+/// Predict journeys from paths named in the task, shared by task start and ledger init.
+pub fn predicted(repo: &Path, qa: &QaConfig, task: &cas_types::Task) -> Result<Impact> {
+    let tracked = io::git(&repo, &["ls-files", "-z", "--cached", "--full-name"])?;
+    let content = format!(
+        "{}\n{}\n{}\n{}",
+        task.title,
+        task.description,
+        task.design,
+        task.proof_targets.join("\n")
+    );
+    let mut paths = std::collections::BTreeSet::new();
+    for word in content.split_whitespace() {
+        let path =
+            word.trim_matches(|c: char| matches!(c, '`' | '\'' | '"' | '(' | ')' | ',' | ';'));
+        let path = path
+            .split(':')
+            .next()
+            .unwrap_or(path)
+            .trim_start_matches("./");
+        if !path.contains('/') && !path.contains('.') {
+            continue;
+        }
+        for file in tracked.split('\0').filter(|file| !file.is_empty()) {
+            if file == path
+                || file.starts_with(&format!("{}/", path.trim_end_matches('/')))
+                || crate::qa_registry::matches_path([path], file)
+            {
+                paths.insert(file.to_string());
+            }
+        }
+    }
+    let changes: Vec<_> = paths.into_iter().map(Change::modified).collect();
+    analyze(repo, qa, &changes, None, None)
+}
+
 #[cfg(test)]
 #[path = "qa_impact_tests.rs"]
 mod tests;
-
-/// Predict journeys from paths named in the task, shared by task start and ledger init.
-pub fn predicted(repo: &Path, qa: &QaConfig, task: &cas_types::Task) -> Result<Impact> {
-        let tracked = io::git(&repo, &["ls-files", "-z", "--cached", "--full-name"])?;
-        let content = format!(
-            "{}\n{}\n{}\n{}",
-            task.title,
-            task.description,
-            task.design,
-            task.proof_targets.join("\n")
-        );
-        let mut paths = std::collections::BTreeSet::new();
-        for word in content.split_whitespace() {
-            let path =
-                word.trim_matches(|c: char| matches!(c, '`' | '\'' | '"' | '(' | ')' | ',' | ';'));
-            let path = path
-                .split(':')
-                .next()
-                .unwrap_or(path)
-                .trim_start_matches("./");
-            if !path.contains('/') && !path.contains('.') {
-                continue;
-            }
-            for file in tracked.split('\0').filter(|file| !file.is_empty()) {
-                if file == path
-                    || file.starts_with(&format!("{}/", path.trim_end_matches('/')))
-                    || crate::qa_registry::matches_path([path], file)
-                {
-                    paths.insert(file.to_string());
-                }
-            }
-        }
-        let changes: Vec<_> = paths.into_iter().map(Change::modified).collect();
-        analyze(repo, qa, &changes, None, None)
-}

@@ -322,6 +322,8 @@ pub(crate) struct QueueSelectRequest {
     pub(crate) supervisor_name: String,
     pub(crate) worker_names: Vec<String>,
     pub(crate) dead_workers: HashSet<String>,
+    /// Same-name replacements queued, provisioning or awaiting registration.
+    pub(crate) replacement_workers: HashSet<String>,
     pub(crate) limit: usize,
     /// Read the operator replies Commander clients are owed (cas-786a6).
     pub(crate) operator_replies: bool,
@@ -343,6 +345,8 @@ pub(crate) struct QueueSelection {
     pub(crate) retargeted_rows: Vec<i64>,
     /// Recipients that shut down; their unread rows were withdrawn.
     pub(crate) shut_down_recipients: Vec<String>,
+    /// Replacement intent read by selection, retained through control delivery.
+    pub(crate) replacement_workers: HashSet<String>,
     /// Session agents served by their native extension, not by the daemon.
     pub(crate) native_agents: HashSet<String>,
     /// The batch, stamped `Selected`. No claims: control claims each row just

@@ -3337,9 +3337,17 @@ async fn worker_status_usage_limit_names_each_provider() {
             // pin: status must not fetch live usage or guess a reset from prose.
             assert!(block.contains("5h: reset time unknown") && block.contains("weekly: reset time unknown"), "{block}");
         } else {
-            for reset in [reset_five, reset_week] {
-                let stamp = reset.with_timezone(&chrono::Local).format("%H:%M").to_string();
-                assert!(block.contains(&stamp) && block.contains("(in "), "{block}");
+            let reset_rows: Vec<_> = block.lines().filter(|line| line.contains(": resets ")).collect();
+            assert_eq!(reset_rows.len(), 2, "{block}");
+            for row in reset_rows {
+                let stamp = row.split_once("resets ").unwrap().1;
+                let (eastern_stamp, relative) = stamp.split_once(" ET ").expect("reset is labeled ET");
+                assert!(relative.starts_with("(in "), "{row}");
+                let fields: Vec<_> = eastern_stamp.split_whitespace().collect();
+                assert!(matches!(fields.last().copied(), Some("AM" | "PM")), "{row}");
+                let hour = fields.iter().rev().nth(1).and_then(|time| time.split(':').next())
+                    .and_then(|hour| hour.parse::<u8>().ok()).expect("12-hour time");
+                assert!((1..=12).contains(&hour), "{row}");
             }
         }
     }

@@ -13,6 +13,7 @@ merged history. The fixture repository carries this checkout's scripts and
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -91,6 +92,52 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         self.git("commit", "-q", "-am", f"{branch}: regenerate the ledger")
         self.git("checkout", "-q", "main")
 
+    def prepare_hub_web(self, build):
+        self.write(".gitignore", "hub-web/node_modules\n")
+        self.write("hub-web/package.json", json.dumps({
+            "name": "hub-regeneration-fixture", "version": "1.0.0",
+            "scripts": {"build": build},
+            "dependencies": {"regeneration-test-dependency": "file:fixture-dependency"},
+        }))
+        self.write("hub-web/fixture-dependency/package.json", json.dumps({
+            "name": "regeneration-test-dependency", "version": "1.0.0", "main": "index.cjs",
+        }))
+        self.write("hub-web/fixture-dependency/index.cjs", "module.exports = 'locked dependency';\n")
+        subprocess.run(["npm", "install", "--package-lock-only", "--ignore-scripts", "--offline",
+                        "--no-audit", "--no-fund"], cwd=self.repo / "hub-web", env=self.env,
+                       check=True, capture_output=True, text=True)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "hub-web fixture with a local locked dependency")
+
+    def test_hub_web_regeneration_installs_locked_dependencies_before_building(self):
+        self.prepare_hub_web('node -e "const fs = require(\'node:fs\'); '
+                             'fs.mkdirSync(\'dist\', {recursive: true}); '
+                             'fs.writeFileSync(\'dist/app.txt\', require(\'regeneration-test-dependency\'))"')
+        modules = self.repo / "hub-web/node_modules"
+        shared = self.repo / ".git/shared-node-modules"
+        shared.mkdir()
+        (shared / "keep.txt").write_text("another checkout's installation")
+        for state in ("absent", "stale", "shared-symlink"):
+            with self.subTest(node_modules=state):
+                if modules.exists():
+                    shutil.rmtree(modules)
+                if state == "stale":
+                    modules.mkdir()
+                elif state == "shared-symlink":
+                    modules.symlink_to(shared, target_is_directory=True)
+                before = self.git("rev-parse", "HEAD").stdout.strip()
+                self.write("hub-web/src/app.ts", f"// {state}\n")
+                self.git("add", "-A")
+                self.git("commit", "-q", "-m", f"merge hub sources with {state} modules")
+                after = self.git("rev-parse", "HEAD").stdout.strip()
+                self.run_script("regenerate-generated-artifacts.sh", before, after)
+                # pin: fixture dependency exports these bytes; the build must consume the installed package.
+                self.assertEqual((self.repo / "hub-web/dist/app.txt").read_text(), "locked dependency")
+                self.assertEqual(self.git("status", "--porcelain").stdout, "")
+                self.assertFalse(modules.is_symlink(), "regeneration owns its checkout's dependencies")
+                self.assertEqual([p.name for p in shared.iterdir()], ["keep.txt"],
+                                 "another checkout's node_modules must stay untouched")
+
     def test_two_lanes_adding_builtin_history_merge_cleanly_and_the_ledger_equals_a_fresh_run(self):
         self.lane("factory/one", "first")
         self.lane("factory/two", "second")
@@ -127,11 +174,8 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         self.assert_ledger_fresh()
 
     def test_a_failed_hub_web_build_still_regenerates_the_ledger_and_is_reported(self):
-        self.write("hub-web/package.json", '{"scripts": {"build": "echo vite exploded >&2; exit 3"}}\n')
+        self.prepare_hub_web("echo vite exploded >&2; exit 3")
         (self.repo / "hub-web/node_modules").mkdir(parents=True)
-        self.write(".gitignore", "hub-web/node_modules\n")
-        self.git("add", "-A")
-        self.git("commit", "-q", "-m", "hub-web")
         before = self.git("rev-parse", "HEAD").stdout.strip()
         self.write("hub-web/src/app.ts", "export {};\n")
         self.write("cas-cli/src/builtins/skills/demo/references/third.md", "# third\n")
@@ -141,6 +185,15 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         result = self.run_script("regenerate-generated-artifacts.sh", before, after, ok=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(result.stderr.splitlines()[0], r"hub-web/dist.*failed")
+        # The merge receipt keeps only line one, so its log must survive exit.
+        match = re.search(r"log: ([^)]+)", result.stderr.splitlines()[0])
+        self.assertIsNotNone(match, result.stderr)
+        log = Path(match[1])
+        try:
+            # pin: the fixture emits this diagnostic; the retained log must contain the actual build error.
+            self.assertIn("vite exploded", log.read_text())
+        finally:
+            shutil.rmtree(log.parent)
         self.assert_ledger_fresh()
         ledger = json.loads((self.repo / LEDGER).read_text())["files"]
         self.assertIn("skills/demo/references/third.md", ledger)

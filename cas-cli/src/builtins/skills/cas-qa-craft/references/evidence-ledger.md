@@ -34,7 +34,7 @@ sources qualify:
 - the installed release, once the revision is published and `--version` names it.
 
 When the build guard refuses you a compile, do not work around it: ask the
-supervisor for a candidate, and leave the binary cells `NOT EXERCISED` until it
+supervisor for a candidate, and leave the binary cells `NOT EXERCISED: <reason>` until it
 arrives. An installed release whose version names another revision proves
 nothing about this one.
 

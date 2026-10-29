@@ -42,9 +42,12 @@ macOS: compile-checked and launch-tested; suite runs on Linux.
    run's archives by tree id, runs the ISA audit and the operator launch smoke
    on the packaged Linux and macOS assets, creates the annotated tag and the
    GitHub release, and dispatches the install-path proof. The host installs
-   within a minute through the `cassy-install-on-publish` timer (set it up
-   once per host with `scripts/install-on-publish.sh --install`), and the
-   notes print one timer, PR opened to installed; confirm: `cas --version`.
+   through the `cassy-install-on-publish` systemd user timer on Linux or the
+   `dev.cassy.install-on-publish` LaunchAgent on macOS (set it up once per host
+   with `scripts/install-on-publish.sh --install`). While the user session is
+   active it checks every minute; after a successful update and version check,
+   the notes record the first host's actual install time and PR opened to
+   installed timer. Confirm the local version with `cas --version`.
 6. Off the clock: fill the draft checksums with
    `release-published-receipt.sh --write-draft`, post through the Violet hub
    (`cas-release-notes`; never a personal Slack route), and publish the report

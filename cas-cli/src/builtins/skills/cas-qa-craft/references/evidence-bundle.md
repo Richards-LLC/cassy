@@ -25,7 +25,7 @@ mixed rendered changes still require the web bundle below.
 ## Playwright evidence bundle
 
 Rendered web/hub cells use this bundle with `@playwright/test` `^1.63`.
-Older Playwright means `NOT EXERCISED`. CLI cells use terminal captures.
+Older Playwright means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
 
 ## Layout
 

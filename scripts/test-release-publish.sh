@@ -94,7 +94,7 @@ check '[[ $status -ne 0 && "$output" == *"missing release asset cas-aarch64-appl
 # 3. First publication: annotated tag at the commit, notes, release with assets.
 : >"$tmp/gh.log"
 created=$((1760500000 - 25 * 60))
-pr_json="{\"number\":4242,\"created_at\":\"$(date -u -d "@$created" +%Y-%m-%dT%H:%M:%SZ)\"}"
+pr_json="{\"number\":4242,\"created_at\":\"$(date -u -d "@$created" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$created" +%Y-%m-%dT%H:%M:%SZ)\"}"
 FAKE_PR_JSON="$pr_json" run_publish --version 9.99.2 --sha "$sha" --assets "$assets" \
     --notes-out "$tmp/notes.md" >/dev/null
 check '[[ "$(git -C "$remote" cat-file -t refs/tags/v9.99.2)" == tag ]]' 'the pushed tag is annotated'

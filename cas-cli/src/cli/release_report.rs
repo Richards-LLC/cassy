@@ -3035,7 +3035,11 @@ fn heading_from_entry(text: &str) -> String {
     let text = text.split_once(" — ").map(|(head, _)| head).unwrap_or(text);
     let mut heading = text.trim().to_string();
     if heading.len() > 100 {
-        heading.truncate(97);
+        let mut end = 97;
+        while !heading.is_char_boundary(end) {
+            end -= 1;
+        }
+        heading.truncate(end);
         heading.push_str("...");
     }
     if heading.is_empty() {

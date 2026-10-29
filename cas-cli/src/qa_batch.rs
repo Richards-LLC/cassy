@@ -26,6 +26,18 @@ pub(crate) fn commit(repo: &Path, rev: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Recovery retires the active merge authority, but retains delivery identity.
+/// QA may attest that same immutable delivery after an evidence-only restart.
+/// Prefer an active anchor; otherwise use only the latest recorded history.
+/// An unresolvable newer anchor must never resurrect an older reviewed tip.
+pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
+    task.deliverables
+        .factory_branch_anchor
+        .as_ref()
+        .or_else(|| task.deliverables.historical_factory_branch_anchors.last())
+        .and_then(|head| commit(repo, head))
+}
+
 pub(crate) fn ancestor(repo: &Path, from: &str, to: &str) -> Option<bool> {
     let code = Command::new("git")
         .args(["merge-base", "--is-ancestor", from, to])
@@ -237,11 +249,7 @@ pub(crate) fn prepare_receipt(
         }) {
             return Err(format!("no self-review: recorder implemented {id}"));
         }
-        let anchor = task
-            .deliverables
-            .factory_branch_anchor
-            .as_deref()
-            .and_then(|head| commit(&repo, head))
+        let anchor = delivery_anchor(&repo, &task)
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {
@@ -283,12 +291,7 @@ pub(crate) fn satisfying_receipt(
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
         return Ok(None);
     }
-    let Some(anchor) = task
-        .deliverables
-        .factory_branch_anchor
-        .as_deref()
-        .and_then(|h| commit(repo, h))
-    else {
+    let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
     let receipts = cas_store::qa_batch_receipts_for_task(root, &project, &task.id)
@@ -331,12 +334,7 @@ pub(crate) fn covering_pass(
     target: &str,
     head: &str,
 ) -> Result<Option<cas_types::QaPass>, String> {
-    let Some(anchor) = task
-        .deliverables
-        .factory_branch_anchor
-        .as_deref()
-        .and_then(|a| commit(repo, a))
-    else {
+    let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
     if ancestor(repo, &anchor, head) != Some(true)
@@ -371,9 +369,10 @@ pub(crate) fn ensure_deferred_close(
         return Ok(());
     }
     let (repo, target) = task_context(root, task)?;
-    let head = receipt
-        .or(task.deliverables.factory_branch_anchor.as_deref())
-        .and_then(|head| commit(&repo, head))
+    let head = match receipt {
+        Some(head) => commit(&repo, head),
+        None => delivery_anchor(&repo, task),
+    }
         .ok_or_else(|| debt_refusal(&task.id))?;
     let satisfies = |head: &str| -> Result<bool, String> {
         Ok(

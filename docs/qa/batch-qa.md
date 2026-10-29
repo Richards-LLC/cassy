@@ -56,6 +56,15 @@ unrelated branch does not establish containment. Containment uses the merge
 gate's local-or-origin rule, so a stale origin does not hide local integration.
 Refresh target refs before recording.
 
+After an evidence-only `request_changes` and restart, the active anchor may
+be empty while the delivery remains in recorded history. Receipt recording,
+status and close use the latest historical anchor in that case. An active
+anchor always takes precedence; an invalid active or latest historical anchor
+does not fall back to older records or a mutable branch tip. All staging,
+target, independent-recorder and published-ledger checks still apply. This
+recovers delivery identity for QA; it does not restore declined merge authority
+or clear deferred evidence without its receipt or passed independent round.
+
 The runtime verifies nonempty UTF-8 ledger bytes against the published
 artifact's size and SHA-256. It stores an immutable receipt with project,
 recorder, time, staging commit, ledger binding and deduplicated task anchors.

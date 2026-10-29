@@ -883,9 +883,28 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
     fx.reject(serde_json::json!({}), "configured target main")
         .await;
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let ledger = std::fs::read(&fx.ledger).unwrap();
     std::fs::write(&fx.ledger, "changed after publish\n").unwrap();
     fx.reject(serde_json::json!({}), "ledger bytes differ")
         .await;
+    std::fs::write(&fx.ledger, ledger).unwrap();
+    // Recovery is not a search through old approvals or mutable lane refs.
+    // A missing record, an invalid active anchor, or invalid newest history
+    // must fail even when a valid older delivery and staging are available.
+    let known = tasks.get("cas-bq01").unwrap().deliverables.factory_branch_anchor.unwrap();
+    for (name, active, history) in [
+        ("missing", None, vec![]),
+        ("active", Some("f".repeat(40)), vec![known.clone()]),
+        ("history", None, vec![known, "f".repeat(40)]),
+    ] {
+        let id = format!("cas-anchor-{name}");
+        let mut task = Task::new(id.clone(), "Invalid recovery boundary".into());
+        task.assignee = Some("test-agent".into());
+        task.deliverables.factory_branch_anchor = active;
+        task.deliverables.historical_factory_branch_anchors = history;
+        tasks.add(&task).unwrap();
+        fx.reject(serde_json::json!({"task_ids":[id]}), "no resolvable delivery anchor").await;
+    }
 }
 
 #[tokio::test]

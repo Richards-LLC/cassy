@@ -818,6 +818,7 @@ async fn cas_cc89_stopped_worker_does_not_starve_pointer_or_bounce() {
         supervisor_name: daemon.app.supervisor_name().into(),
         worker_names: daemon.app.worker_names().to_vec(),
         dead_workers: daemon.dead_workers.clone(),
+        replacement_workers: Default::default(),
         limit: 0,
         operator_replies: false,
         deferred_operator_replies: Default::default(),

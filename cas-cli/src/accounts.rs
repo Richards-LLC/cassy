@@ -5,9 +5,10 @@
 //! keeps only its login and runtime state; the shared configuration surface
 //! (commands, skills, agents, settings, project memory, ...) is a symlink into
 //! one base folder, `~/.cas/claude-base` or `~/.cas/codex-base`. The default
-//! directories (`~/.claude`, `~/.claude-alt`, `~/.codex`) stop being accounts:
-//! a login that duplicates a named account is retired into the backup, a
-//! unique one is renamed to its named directory.
+//! Claude defaults (`~/.claude`, `~/.claude-alt`) with non-secret login email
+//! metadata can be retired into the backup or renamed to their named directory.
+//! Codex aliases remain distinct because credential contents cannot establish
+//! their email or identity.
 //!
 //! The work is a [`Plan`] (read-only, what `cas accounts link --dry-run`
 //! prints) and [`apply`]. Apply never discards: every item it replaces is
@@ -81,7 +82,8 @@ impl Provider {
     ///
     /// Claude: `oauthAccount.emailAddress` in `<dir>/.claude.json`; for the
     /// default `~/.claude`, Claude Code keeps that file at `~/.claude.json`,
-    /// which wins. Codex: the `email` claim of the `auth.json` id token.
+    /// which wins. Codex does not expose a proven non-secret email source;
+    /// its email stays unknown rather than decoding a credential's id token.
     pub fn login_email(self, home: &Path, dir: &Path) -> Option<String> {
         match self {
             Self::Claude => {
@@ -93,7 +95,7 @@ impl Provider {
                 };
                 candidates.iter().find_map(|path| claude_email(path))
             }
-            Self::Codex => codex_email(&dir.join("auth.json")),
+            Self::Codex => None,
         }
     }
 }
@@ -137,23 +139,6 @@ fn claude_email(path: &Path) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-fn codex_email(path: &Path) -> Option<String> {
-    use base64::Engine as _;
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let token = value["tokens"]["id_token"].as_str()?;
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    claims["email"]
-        .as_str()
-        .map(str::trim)
-        .filter(|email| !email.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
 /// The login email of the Claude account a process runs as (cas-e1f4):
 /// `<config_dir>/.claude.json` when `CLAUDE_CONFIG_DIR` is set, else Claude
 /// Code's default `~/.claude.json`.
@@ -164,14 +149,10 @@ pub fn active_claude_email(home: &Path, config_dir: Option<&Path>) -> Option<Str
     }
 }
 
-/// The login email of the Codex home a process runs as: `$CODEX_HOME`, else
-/// `~/.codex`.
-pub fn active_codex_email(home: &Path, codex_home: Option<&Path>) -> Option<String> {
-    let dir = codex_home
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".codex"));
-    codex_email(&dir.join("auth.json"))
+/// Codex does not publish a proven non-secret login email source. Keep this
+/// optional interface stable without opening the active home's auth.json.
+pub fn active_codex_email(_home: &Path, _codex_home: Option<&Path>) -> Option<String> {
+    None
 }
 
 /// One account directory found under the home directory.

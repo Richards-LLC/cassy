@@ -3464,7 +3464,7 @@ impl CasCore {
             // snapshot may then split UTF-8 or skip the instructions entirely.
             // Begin recovery at the stable document boundary instead.
             let navigation = format!(
-                "\nStart advisories: task notes id={} offset=0 limit=1600 (follow next= to START CONTEXT)\nAll start advisories: task notes id={} full=true",
+                "\nStart advisories: task notes id={} offset=0 limit=1600 (follow next= to end; read latest START CONTEXT)\nAll start advisories: task notes id={} full=true",
                 task.id, task.id
             );
             let cited_pointer =

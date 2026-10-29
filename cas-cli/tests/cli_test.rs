@@ -3389,23 +3389,52 @@ fn qa_ledger_init_check_and_no_overwrite() {
 #[test]
 fn qa_ledger_check_accepts_copied_skill_examples() {
     for (name, guide, marker) in [
-        ("epic-flow-walk", include_str!("../src/builtins/skills/cas-supervisor/references/epic-flow-walk.md"), "## Example epic note"),
-        ("exemplar", include_str!("../src/builtins/skills/cas-qa-craft/references/exemplar.md"), "# Worked exemplar"),
+        (
+            "epic-flow-walk",
+            include_str!("../src/builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
+            "## Example epic note",
+        ),
+        (
+            "exemplar",
+            include_str!("../src/builtins/skills/cas-qa-craft/references/exemplar.md"),
+            "# Worked exemplar",
+        ),
     ] {
         let temp = TempDir::new().unwrap();
-        let example = guide.split_once(marker).unwrap().1
-            .split_once("```text\n").unwrap().1.split_once("```").unwrap().0;
+        let example = guide
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("```text\n")
+            .unwrap()
+            .1
+            .split_once("```")
+            .unwrap()
+            .0;
         // Copy the example verbatim; only supply the captures it cites.
         for line in example.lines() {
-            let cells: Vec<_> = line.trim().trim_matches('|').split('|').map(str::trim).collect();
+            let cells: Vec<_> = line
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect();
             if cells.len() == 8 && cells[4] == "PASS" {
                 std::fs::write(temp.path().join(cells[6]), "captured output").unwrap();
             }
         }
         let path = temp.path().join("LEDGER.md");
         std::fs::write(&path, example).unwrap();
-        let output = cas_cmd(temp.path()).current_dir(temp.path())
-            .args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"]).output().unwrap();
-        assert!(output.status.success(), "{name}: {} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let output = cas_cmd(temp.path())
+            .current_dir(temp.path())
+            .args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

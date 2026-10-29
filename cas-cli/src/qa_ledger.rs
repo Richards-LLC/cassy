@@ -45,7 +45,6 @@ impl Verdict {
             "PASS" => Some(Self::Pass),
             "FAIL" => Some(Self::Fail),
             "NOT A ROUTE" => Some(Self::NotARoute),
-            "NOT EXERCISED" => Some(Self::NotExercised),
             "DEFERRED" => Some(Self::Deferred),
             _ if value
                 .strip_prefix("NOT EXERCISED:")
@@ -267,7 +266,7 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
                 "verdict",
                 "verdict",
                 format!("invalid verdict {:?}; partial is not a verdict", c[4]),
-                "use a scaffold verdict and record unrun work as NOT EXERCISED",
+                "use a scaffold verdict; unrun work needs NOT EXERCISED: <reason>",
             );
             continue;
         };
@@ -400,6 +399,7 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
             label_re
                 .captures_iter(s)
                 .map(|c| (c[1].to_owned(), c[2].parse::<usize>().unwrap_or(usize::MAX)))
+                .filter(|(_, count)| *count != 0)
                 .collect()
         })
         .unwrap_or_default();
@@ -516,7 +516,7 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
     let verdict = if no_code {
         "NOT A ROUTE"
     } else {
-        "NOT EXERCISED"
+        "NOT EXERCISED: not run against the named build"
     };
     let clean = |s: &str| s.replace(['\n', '\r'], " ").replace('|', "\\|");
     let mut out = format!(
@@ -582,7 +582,14 @@ mod tests {
         std::fs::write(dir.path().join("capture.txt"), "usage").unwrap();
         std::fs::write(&path, &base).unwrap();
         assert!(check(&path, 1).ok);
-        std::fs::write(&path, base.replace("labels: real-build=1", "labels: fixture=0; real-build=1; eyewitness=0")).unwrap();
+        std::fs::write(
+            &path,
+            base.replace(
+                "labels: real-build=1",
+                "labels: fixture=0; real-build=1; eyewitness=0",
+            ),
+        )
+        .unwrap();
         let report = check(&path, 1);
         assert!(report.ok, "zero label counts: {}", report.refusal());
         for (body, code) in [

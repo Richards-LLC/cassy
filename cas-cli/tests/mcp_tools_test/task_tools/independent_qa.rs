@@ -251,9 +251,16 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
          | SEND | compose | sent | sandbox unavailable | NOT EXERCISED: sandbox unavailable | source-inferred | - | - |\n\
          | REPLY | reply | saved | persisted reply read back | PASS | real-build | LEDGER.md | - |\n").unwrap();
     let explained = std::fs::read_to_string(&ledger).unwrap();
-    std::fs::write(&ledger, explained.replace("NOT EXERCISED: sandbox unavailable", "NOT EXERCISED")).unwrap();
-    let error = service.verification(request()).await.expect_err("bare NOT EXERCISED needs a reason");
-    assert!(error.message.contains("QA RECORD REJECTED") && error.message.contains("reason"), "{}", error.message);
+    std::fs::write(
+        &ledger,
+        explained.replace("NOT EXERCISED: sandbox unavailable", "NOT EXERCISED"),
+    ).unwrap();
+    let error = service.verification(request()).await
+        .expect_err("bare NOT EXERCISED needs a reason");
+    assert!(
+        error.message.contains("QA RECORD REJECTED") && error.message.contains("reason"),
+        "{}", error.message
+    );
     std::fs::write(&ledger, explained).unwrap();
     let result = extract_text(service.verification(request()).await.unwrap());
     assert!(result.contains("APPROVAL"), "{result}");

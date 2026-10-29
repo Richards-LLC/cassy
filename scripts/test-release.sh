@@ -176,7 +176,7 @@ git -C "$epic" add "$original_notes"
 git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
-head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ')"
+head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ' -)"
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
 check 'grep -q "^version = \"9.100.0\"" "$epic/cas-cli/Cargo.toml" && grep -q "^version = \"9.100.0\"" "$epic/crates/cas-mcp/Cargo.toml"' 'every release crate is bumped'
 check '[[ "$(grep -c "^version = \"9.100.0\"" "$epic/Cargo.lock")" -eq 6 ]] && grep -q "^version = \"0.1.0\"" "$epic/Cargo.lock"' 'Cargo.lock bumps the release packages and nothing else'

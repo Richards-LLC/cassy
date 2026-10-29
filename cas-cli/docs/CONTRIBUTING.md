@@ -3143,6 +3143,24 @@ exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
 
+### Generated dist for exact-tip journeys
+
+When a factory lane changes Commander product inputs, commit the source changes
+first, then run `npm run build` in `hub-web`. If `hub-web/dist` changes, commit
+that generated output in a separate final build commit on the lane before
+running `scripts/journey-eval.sh <task-artifact-dir>`. Review the build diff;
+token-source changes and any regenerated files outside `dist` belong with the
+source changes. Never hand-edit the bundle. If source changes again, rebuild
+and commit the updated output before obtaining a new receipt.
+
+The runner rejects dirty `hub-web` inputs, serves `hub-web/dist`, and records
+`HEAD` plus its committed dist tree in the journey bundles. An uncommitted
+scratch build cannot supply this evidence. Record the final build commit as the
+evaluated delivery tip. The integration owner rebuilds the merged sources and
+commits the generated result when it differs, superseding lane builds. Lane
+receipts prove their recorded inputs; the merge queue proves the integrated
+tree through its existing Commander checks.
+
 ### Test shape and runner evidence
 
 `python3 scripts/check-test-shape.py` checks tracked Rust tests and test-only

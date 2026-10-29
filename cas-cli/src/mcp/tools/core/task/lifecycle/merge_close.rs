@@ -83,9 +83,6 @@ pub(crate) fn pushed_delivery_tip(
             "{tip} is on origin/{branch} but not on {worker}'s own {branch}; a commit pushed by someone else is not the worker's delivery"
         ));
     }
-    if !delivery_tip_belongs_to_task(repo, task, branch, tip) {
-        return Err(format!("{tip} on {branch} has no delivery work attributable to {}", task.id));
-    }
     Ok(())
 }
 
@@ -634,7 +631,6 @@ mod tests {
         let mut task = Task::new("cas-e9d6".into(), "lane".into());
         task.assignee = Some("w".into());
         let worker_tip = git(repo, &["rev-parse", "HEAD"]);
-        task.deliverables.factory_branch_anchor = Some(worker_tip.clone());
         assert_eq!(pushed_delivery_tip(repo, &task, "factory/w", &worker_tip), Ok(()));
 
         let other = tempfile::tempdir().unwrap();

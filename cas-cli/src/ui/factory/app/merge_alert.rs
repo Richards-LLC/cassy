@@ -578,7 +578,9 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     // ordinary slow-retry interval, like a failed CI read.
     if crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
         repo, &task, &branch, &tip,
-    ).is_err() {
+    ).is_err() || !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(
+        repo, &task, &branch, &tip,
+    ) {
         *observed_ci = "not-ready";
         return None;
     }

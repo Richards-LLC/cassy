@@ -736,25 +736,38 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
     let mut config = cas::config::Config::load(&project.path().join(".cas")).unwrap();
     config.set("issues.repo", "example/project").unwrap();
     config.save(&project.path().join(".cas")).unwrap();
-    let fake_gh = install_fake_gh_version(&project, "9.99.1");
     // A captured release input keeps the historical shape stable after version bumps.
     let grouped = include_str!("fixtures/changelog_grouped_387.md");
     assert_eq!(grouped.lines().filter(|line| line.starts_with("### ")).count(), 7);
     assert_eq!(grouped.lines().filter(|line| line.starts_with("- **")).count(), 27);
     let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n\n### Added — Violet push-wake\n\n- Mentions wake the supervisor.\n- Watched channels are read periodically.\n- **Behavior change:** push-wake is on by default.\n\n### Added — remote supervisors\n\nSetup guide and walkthrough.\n\n- **Peer discovery** lists supervisors.\n- **Peer messaging** reaches them.\n";
-    for (body, expected, retained_titles) in [
-        (grouped, 27, &[][..]),
-        (legacy, 5, &["Factory reminder probes", "Task coordination", "Violet push-wake", "Peer discovery", "Peer messaging"][..]),
+    for (version, body, expected, retained_titles) in [
+        ("9.99.1", grouped, 27, &[][..]),
+        ("9.99.1", legacy, 5, &["Factory reminder probes", "Task coordination", "Violet push-wake", "Peer discovery", "Peer messaging"][..]),
+        // Exercise the historical source through acquisition, front matter,
+        // Markdown assembly and the renderer, rather than a hand-built table.
+        ("3.88.0", include_str!("../../CHANGELOG.md"), 38, &[][..]),
     ] {
+        let fake_gh = install_fake_gh_version(&project, version);
         fs::write(project.path().join("CHANGELOG.md"), format!("# Changelog\n\n{body}")).unwrap();
         let output = cas_cmd(&project)
             .env("GH_BIN", &fake_gh)
-            .args(["--json", "release", "report", "9.99.1", "--refresh-sources"])
+            .args(["--json", "release", "report", version, "--refresh-sources"])
             .assert().success().get_output().stdout.clone();
         let report: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(report["change_count"], expected, "{report}");
         assert_eq!(report["issue_count"], 2, "official GitHub count is independent: {report}");
-        let html = fs::read_to_string(project.path().join("docs/release-reports/v9.99.1.html")).unwrap();
+        let source = fs::read_to_string(project.path().join(format!("docs/release-reports/v{version}.md"))).unwrap();
+        assert!(source.starts_with(&format!("---\nversion: {version}\n")), "real report front matter: {source}");
+        if version == "3.88.0" {
+            assert!(source.contains("| Changes shipped | 38 | 8 added, 24 fixed, 6 changed;"), "{source}");
+            let prose = source.split_once("## Under the hood").unwrap().1;
+            for title in ["Previous-release records are complete", "Regression checks follow the current interface", "Team refresh after reassignment", "Codex Clear can stay unconfirmed"] {
+                assert!(prose.contains(title), "excluded entry must remain in prose: {title}");
+                assert!(!report["change_areas"].to_string().contains(title), "excluded entry must not be plotted: {title}");
+            }
+        }
+        let html = fs::read_to_string(project.path().join(format!("docs/release-reports/v{version}.html"))).unwrap();
         assert_eq!(html.matches("data-change=\"").count(), expected, "one rendered mark per shipped change");
         for title in retained_titles {
             // pin: the report must retain the legacy heading as its plotted change title.

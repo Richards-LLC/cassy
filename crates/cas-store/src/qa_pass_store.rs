@@ -38,6 +38,8 @@ pub const QA_PASS_SCHEMA_STATEMENTS: &[&str] = &[
         deadline_at TEXT NOT NULL,
         resolved_at TEXT
     )",
+    "CREATE TABLE IF NOT EXISTS qa_pass_sync_versions (
+        id TEXT PRIMARY KEY, changed_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS idx_qa_passes_task ON qa_passes(task_id, requested_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_qa_passes_qa_task ON qa_passes(qa_task_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_passes_active_task
@@ -899,8 +901,6 @@ pub fn import_qa_pass(cas_dir: &Path, pass: &QaPass, changed_at: DateTime<Utc>) 
     let conn = open_conn(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
-    tx.execute_batch("CREATE TABLE IF NOT EXISTS qa_pass_sync_versions (
-        id TEXT PRIMARY KEY, changed_at TEXT NOT NULL)")?;
     let previous = match by_id_with_conn(&tx, &pass.id) {
         Ok(previous) => Some(previous),
         Err(StoreError::NotFound(_)) => None,
@@ -920,14 +920,24 @@ pub fn import_qa_pass(cas_dir: &Path, pass: &QaPass, changed_at: DateTime<Utc>) 
             |row| row.get(0)).optional()?;
         let old_time = version.map(parse_time).transpose()?.unwrap_or(
             previous.resolved_at.unwrap_or(previous.requested_at));
+        // An authenticated verdict made before the deadline beats a peer's
+        // lazy timeout. Later delivery invalidation still wins by resolution.
+        let late_verdict = previous.state == QaPassState::TimedOut
+            && matches!(pass.state, QaPassState::Passed | QaPassState::Failed)
+            && pass.resolved_at.is_some_and(|at| at <= pass.deadline_at);
+        if matches!(previous.state, QaPassState::Passed | QaPassState::Failed)
+            && pass.state == QaPassState::TimedOut {
+            return Ok(());
+        }
         // Terminal decisions never regress to an open round, including a
         // stale source snapshot delivered after a local deadline transition.
-        if (!previous.state.is_active() && pass.state.is_active()) || changed_at < old_time
-            || previous.resolved_at > pass.resolved_at && !previous.state.is_active()
+        if (!previous.state.is_active() && pass.state.is_active())
+            || !late_verdict && (changed_at < old_time
+                || previous.resolved_at > pass.resolved_at && !previous.state.is_active())
         {
             return Ok(());
         }
-        if changed_at == old_time && previous != pass {
+        if !late_verdict && changed_at == old_time && previous != pass {
             return Err(StoreError::Parse("conflicting independent QA snapshots".into()));
         }
     }
@@ -1004,6 +1014,11 @@ mod tests {
         }
         import_qa_pass(peer.path(), &claimed, now + Duration::hours(1)).unwrap();
         assert_eq!(list_qa_passes(peer.path(), "cas-ui1").unwrap(), vec![passed.clone()]);
+        let expired_peer = TempDir::new().unwrap();
+        import_qa_pass(expired_peer.path(), &claimed, now).unwrap();
+        latest_qa_pass(expired_peer.path(), "cas-ui1", now + Duration::hours(2)).unwrap();
+        import_qa_pass(expired_peer.path(), &passed, now + Duration::seconds(1)).unwrap();
+        assert_eq!(list_qa_passes(expired_peer.path(), "cas-ui1").unwrap(), vec![passed.clone()]);
         for kind in ["self-review", "head", "implementer", "task", "deadline"] {
             let mut forged = passed.clone();
             match kind {

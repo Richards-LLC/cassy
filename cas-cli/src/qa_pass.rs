@@ -557,6 +557,9 @@ pub fn carry_verdict(
             return None;
         }
     };
+    if let Err(error) = sync::record(cas_root, &task.id) {
+        tracing::warn!(task = %task.id, %error, "carried QA snapshot not recorded");
+    }
     let line = format!(
         "[{}] DECISION: independent QA verdict carried over from @{} to @{} (pass {} → {}): {reason}. (cas-0c988)",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),

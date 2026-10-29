@@ -17,11 +17,13 @@ const PROVENANCE_BLOCKS: &[(&str, &str)] = &[
     ),
 ];
 
-pub fn is_reserved_line(line: &str) -> bool {
-    line.starts_with("QA_PASS_PROOF:")
+fn is_proof_line(line: &str) -> bool {
+    line.starts_with("ARTIFACT_PROOF:") || line.starts_with("QA_PASS_PROOF:")
         || line.starts_with("QA_EVIDENCE_PROOF:")
-        || line.starts_with("ARTIFACT_PROOF:")
-        || PROVENANCE_BLOCKS
+}
+
+pub fn is_reserved_line(line: &str) -> bool {
+    is_proof_line(line) || PROVENANCE_BLOCKS
             .iter()
             .any(|(begin, end)| line.starts_with(begin) || line.starts_with(end))
 }
@@ -53,7 +55,7 @@ pub fn note_blocks(notes: &str) -> Vec<&str> {
     for (offset, _) in notes.match_indices("\n\n") {
         let next = &notes[offset + 2..];
         if is_timestamped_note(next)
-            || next.starts_with("ARTIFACT_PROOF:")
+            || next.lines().next().is_some_and(is_proof_line)
             || PROVENANCE_BLOCKS.iter().any(|(begin, _)| next.starts_with(begin))
             || !is_timestamped_note(notes[start..offset].trim())
         {
@@ -153,7 +155,7 @@ pub fn neutralize_new_markers<'a>(notes: &'a str, previous: Option<&str>) -> Cow
     let prior_markers: HashSet<&str> = previous
         .into_iter()
         .flat_map(str::lines)
-        .filter(|line| line.starts_with("ARTIFACT_PROOF:"))
+        .filter(|line| is_proof_line(line))
         .collect();
     let preserved_blocks = provenance_blocks(notes)
         .into_iter()

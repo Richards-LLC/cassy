@@ -70,3 +70,30 @@
   .code-frame-actions, .code-frame-status { display: none; }
   .code-frame .code-frame-content pre.markdown-code { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
 }
+
+/* Syntax roles are independent of action and status colors; see DESIGN.md. */
+.code-frame {
+  --syntax-keyword: #5B3FE0;
+  --syntax-string: #14635F;
+  --syntax-comment: var(--ink-mid);
+  --syntax-literal: #854321;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-scheme="light"]) .code-frame {
+    --syntax-keyword: #C4B5FD;
+    --syntax-string: #81D8CB;
+    --syntax-literal: #DCB590;
+  }
+}
+html[data-scheme="dark"] .code-frame {
+  --syntax-keyword: #C4B5FD;
+  --syntax-string: #81D8CB;
+  --syntax-literal: #DCB590;
+}
+.code-frame .syntax-keyword { color: var(--syntax-keyword); }
+.code-frame .syntax-string { color: var(--syntax-string); }
+.code-frame .syntax-comment { color: var(--syntax-comment); }
+.code-frame .syntax-literal { color: var(--syntax-literal); }
+@media (forced-colors: active) {
+  .code-frame :is(.syntax-keyword, .syntax-string, .syntax-comment, .syntax-literal) { color: CanvasText; }
+}

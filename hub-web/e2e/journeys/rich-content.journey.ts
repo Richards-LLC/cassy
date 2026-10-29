@@ -101,11 +101,30 @@ for (const [index, variant] of variants.entries()) {
       });
 
       await journey.stage("Copy exact source and wrap a code frame with the keyboard", async () => {
-        const source = `const message = "<script>&amp;雪 ${"long_source_".repeat(18)}";  \n\tconsole.log(message);\n| literal | source |\n| --- | --- |`;
+        const source = `// Literal source stays selectable\nconst message = "<script>&amp;雪 ${"long_source_".repeat(18)}";  \n\tconsole.log(message);\n| literal | source |\n| --- | --- |`;
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        await page.route("**/chunk-rich-syntax-*.js", async route => { await gate; await route.continue(); });
         hub.supervisorSays(PELICAN, `# Source ready to copy\n\n\`\`\`ts src/example.ts\n${source}\n\`\`\`\n\n~~~unknown\nUnknown languages stay readable.\n~~~`);
         const frame = log.locator(".code-frame").first();
         await expect(frame.locator(".code-frame-label")).toHaveText("src/example.ts");
         await expect(frame.locator("code")).toHaveText(source, { useInnerText: false });
+        await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "loading");
+        const selected = await frame.locator("code").evaluate(code => {
+          const selection = getSelection()!;
+          selection.setBaseAndExtent(code.firstChild!, 52, code.firstChild!, 8);
+          return selection.toString();
+        });
+        release();
+        await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "ready");
+        await expect(frame.locator(".syntax-keyword").first()).toHaveText("const");
+        await expect(frame.locator(".syntax-comment")).toHaveText("// Literal source stays selectable");
+        await expect(frame.locator(".syntax-string")).toContainText("<script>");
+        expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
+        hub.supervisorSays(PELICAN, "Source review is still open.");
+        await expect(log.getByText("Source review is still open.", { exact: true })).toBeVisible();
+        expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
+        await page.evaluate(() => getSelection()!.removeAllRanges());
         const wrap = frame.getByRole("button", { name: "Wrap lines in src/example.ts" });
         await wrap.focus(); await page.keyboard.press("Enter");
         await expect(wrap).toHaveAttribute("aria-pressed", "true");
@@ -268,3 +287,27 @@ for (const [index, variant] of variants.entries()) {
     });
   });
 }
+
+
+test("HUB-J22 unavailable syntax color retains source and reading controls", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await page.route("**/chunk-rich-syntax-*.js", route => route.abort("failed"));
+  await journey.stage("Open source when its color chunk is unavailable", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    const source = 'const unsafe = "<script>still text</script>"; // no colors';
+    hub.supervisorSays(PELICAN, `\`\`\`ts fallback.ts\n${source}\n\`\`\``);
+    const frame = page.getByRole("log").locator(".code-frame");
+    await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "plain");
+    await expect(frame.locator("code")).toHaveText(source, { useInnerText: false });
+    await expect(frame.locator(".code-syntax-status")).toHaveText("Plain text · colors unavailable");
+    await expect(frame.locator("script")).toHaveCount(0);
+    const wrap = frame.getByRole("button", { name: "Wrap lines in fallback.ts" });
+    await wrap.focus(); await page.keyboard.press("Enter");
+    await expect(wrap).toHaveAttribute("aria-pressed", "true");
+    await frame.getByRole("button", { name: "Copy source from fallback.ts" }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
+    await expect(frame.locator('[role="status"]')).toHaveText("Copied");
+  });
+});

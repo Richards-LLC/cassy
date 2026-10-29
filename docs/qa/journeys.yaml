@@ -310,6 +310,9 @@ invariants:
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
+  HUB-J22-SYNTAX-SOURCE:
+    statement: Tagged code loads color after plain source, preserves selection across coloring and message repaint, and remains readable and copyable when the color chunk fails or source exceeds its budget.
+    check: Run the code-frame stage and unavailable syntax color part of rich-content.journey.ts in the production snapshot; prove no syntax request before tagged source, delayed-load selection, safe token text, light/dark and forced-color readability, exact Copy/Wrap and visible fallback. markdown-renderer.test.ts covers oversized input.
   HUB-J22-CACHED-PREVIEW-RECOVERY:
     statement: A transiently failed image keeps a compact note and recovers when its cached card scrolls back into the live conversation after an offscreen reconnect.
     check: Run the HUB-J22 cached failed thumbnail Chromium regression; prove the same node leaves the DOM during reconnect, returns, decodes the image and removes its note, with exactly one renewed ticket.
@@ -1973,6 +1976,8 @@ journeys:
   - hub-web/src/code-frame.ts
   - hub-web/src/code-frame.css
   - hub-web/src/rich-code.ts
+  - hub-web/src/rich-syntax.ts
+  - hub-web/src/code-syntax.brief.md
   - hub-web/src/rich-diagram.ts
   - hub-web/src/rich-diff.ts
   - hub-web/src/rich-attachment.ts
@@ -1983,7 +1988,7 @@ journeys:
   - hub-web/e2e/journeys/rich-content.journey.ts
   - hub-web/playwright.rich-content-hub.config.ts
   - hub-web/scripts/rich-content-visual-qa.mjs
-  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY]
+  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY, HUB-J22-SYNTAX-SOURCE]
   traffic:
     share_pct: null
     basis: New evidence-reading journey; no per-journey usage instrumentation.

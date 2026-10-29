@@ -77,5 +77,22 @@ export function createCodeFrame(document: Document, { source, language, filename
   pre.append(code);
   content.append(pre);
   frame.append(header, content, status);
+  if (/^(?:[cm]?js|javascript|[cm]?ts|typescript|jsx|tsx|json|py|python|rs|rust|sh|bash|shell)$/i.test(language ?? "")) {
+    const note = document.createElement("span");
+    note.className = "code-frame-status code-syntax-status";
+    note.textContent = "Plain text · loading colors";
+    pre.dataset.syntaxState = "loading";
+    frame.append(note);
+    // No grammar or token painter enters the initial route bundle. Source is
+    // already available for selection and Copy while this chunk is in flight.
+    void import("./rich-syntax").then(({ highlightCode }) => {
+      const reason = highlightCode(pre, language!);
+      pre.dataset.syntaxState = reason ? "plain" : "ready";
+      note.textContent = reason ? `Plain text · ${reason}` : "";
+    }).catch(() => {
+      pre.dataset.syntaxState = "plain";
+      note.textContent = "Plain text · colors unavailable";
+    });
+  }
   return { frame, content, pre };
 }

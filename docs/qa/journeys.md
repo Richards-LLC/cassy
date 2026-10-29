@@ -740,7 +740,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/`, a paired machine and its supervisor conversation, at 1280×800 and 390×844 in light and dark
 - **Goal:** inspect a Mermaid diagram, a collapsible unified diff, an image, a PDF first page and playable video/audio without leaving the conversation, with source and original files reachable
-- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
+- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-syntax.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
 - **Suite:** `hub-web/e2e/journeys/rich-content.journey.ts`
 - **Gaps:** hub tickets and proxy responses are doubled; actual PNG, PDF, WebM and WAV bytes are decoded by the production browser build under a self-only media CSP. Ticket binding, revocation and proxy authorization are proven by the hub handler tests. Hosted Commander cross-origin media remains outside this hub-served proof.
 
@@ -758,6 +758,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Expected experience
 
+- Tagged JS/TS, JSON, Python, Rust and shell source colors lazily in light/dark; forced colors use system ink. Delayed coloring and message repaint retain selection. Failed or oversized coloring keeps exact source and a visible Plain text note.
 - Copy retains literal source; clipboard refusal is visible. Wrap is per block and long lines fit 390px without page overflow; unknown languages stay readable.
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.

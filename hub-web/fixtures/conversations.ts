@@ -294,7 +294,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(63, 61, 'Tagged gabber-studio v2.4.1 and pushed.', 'receipt', at(9, 31));
     working = true;
   } else if (state === 'conversation-code-frames') {
-    reply(91, null, '# Source ready to copy\n\nThe source stays literal. Turn on Wrap to read long lines here.\n\n```ts src/example.ts\nconst message = "<script>&amp;雪 ' + 'long_source_'.repeat(18) + '";  \n\tconsole.log(message);\n```\n\n~~~unknown\nUnknown languages stay readable.\n~~~', 'answer', at(9, 44));
+    reply(91, null, '# Source ready to copy\n\nThe source stays literal. Turn on Wrap to read long lines here.\n\n```ts src/example.ts\n// Literal source stays selectable\nconst message = "<script>&amp;雪 ' + 'long_source_'.repeat(18) + '";  \n\tconsole.log(message);\n```\n\n~~~unknown\nUnknown languages stay readable.\n~~~', 'answer', at(9, 44));
   } else if (state === 'conversation-rich-content') {
     // Visual fixture only: transport, decode and unavailable states are HUB-J22.
     installAttachmentSheet((sheet, file) => {

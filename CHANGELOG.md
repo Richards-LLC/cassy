@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.89.0] - 2026-10-29
+
 ### Added — Installation
 
 - **Automatic updates on macOS** — Was: The published-update watcher depended on Linux

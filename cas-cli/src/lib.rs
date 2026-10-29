@@ -432,6 +432,9 @@ pub(crate) mod test_support {
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let source = std::fs::read_to_string(&path).expect("read Rust source");
                     for (line_index, line) in source.lines().enumerate() {
+                        if line.trim_start().starts_with("//") {
+                            continue;
+                        }
                         let mutates_sensitive_var =
                             ["HOME", "XDG_CONFIG_HOME", "PATH", "CAS_AGENT_ROLE"]
                                 .iter()

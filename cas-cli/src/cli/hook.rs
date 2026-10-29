@@ -654,7 +654,20 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
     force: bool,
     config_dirs: &[std::path::PathBuf],
 ) -> anyhow::Result<bool> {
-    for dir in config_dirs { config_gen::migrate_claude_statusline(dir)?; }
+    configure_claude_hooks_with_warnings(project_root, force, config_dirs, |warning| eprintln!("{warning}"))
+}
+
+fn configure_claude_hooks_with_warnings(
+    project_root: &Path,
+    force: bool,
+    config_dirs: &[std::path::PathBuf],
+    mut warning: impl FnMut(String),
+) -> anyhow::Result<bool> {
+    for dir in config_dirs {
+        if let Err(error) = config_gen::migrate_claude_statusline(dir) {
+            warning(format!("Warning: {error:#}\n  Repair this profile settings file, then run `cas hook configure` again."));
+        }
+    }
     configure_claude_hooks_at(project_root, force, config_dirs, project_root)
 }
 

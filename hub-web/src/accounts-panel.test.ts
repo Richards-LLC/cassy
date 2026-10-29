@@ -73,3 +73,13 @@ it("formats reset and observation times locally in 12-hour form and clears expir
   expect(fresh).toContain("weekly 62% left"); expect(fresh).toContain("as of"); expect(fresh).toMatch(/AM|PM/);
   expect(accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], null, now)[0]).toContain("usage unknown");
 });
+
+
+it("shows the Codex alias and valid login help when identity metadata is unavailable", async () => {
+  const { host } = setup(false, { ...row, key: "codex:work", provider: "codex", name: "work", display_name: "work", login_state: "unknown" });
+  await settle();
+  expect(document.querySelector(".accounts-identity strong")!.textContent).toBe("work");
+  expect(document.body.textContent).toContain("codex:work");
+  click("[data-login]"); await settle();
+  expect(host.copy).toHaveBeenCalledWith("cas codex login work");
+});

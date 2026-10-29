@@ -1,5 +1,6 @@
-//! Shared read model for Claude and Codex accounts. Claude data comes from
-//! non-credential metadata and official binary output. Legacy folder aliases remain launch keys;
+//! Shared read model for Claude and Codex accounts. Identity comes only from
+//! non-credential metadata; login and capacity come from official binary output.
+//! Unknown provider fields remain absent. Legacy folder aliases remain launch keys;
 //! display names are presentation only. Consumers should require `LoggedIn`,
 //! known usage, and their own flag policy before automatically choosing an account.
 
@@ -99,16 +100,6 @@ fn json_file(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-fn codex_claims(auth: &serde_json::Value) -> Option<serde_json::Value> {
-    use base64::Engine as _;
-    let token = auth.pointer("/tokens/id_token")?.as_str()?;
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
 fn string_at(value: &serde_json::Value, pointer: &str) -> Option<String> {
     value
         .pointer(pointer)?
@@ -142,29 +133,9 @@ fn metadata(
             });
             (identity, None) // Never load Claude secret-bearing credential JSON.
         }
-        Provider::Codex => {
-            let auth = json_file(&folder.join(provider.credentials())).unwrap_or_default();
-            let claims = codex_claims(&auth).unwrap_or_default();
-            let account = string_at(&auth, "/tokens/account_id")
-                .or_else(|| string_at(&auth, "/account_id"))
-                .or_else(|| {
-                    string_at(
-                        &claims,
-                        "/https:~1~1api.openai.com~1auth/chatgpt_account_id",
-                    )
-                });
-            let identity = account.map(|account| {
-                let workspace = string_at(&auth, "/tokens/workspace_id")
-                    .or_else(|| string_at(&auth, "/workspace_id"));
-                AccountIdentity {
-                    account_id: Some(account),
-                    workspace_id: workspace,
-                    email: None,
-                }
-            });
-            let plan = string_at(&claims, "/https:~1~1api.openai.com~1auth/chatgpt_plan_type");
-            (identity, plan)
-        }
+        // Codex publishes capacity/plan in native rollout metadata, but no
+        // demonstrated non-secret email/account/workspace identity source.
+        Provider::Codex => (None, None),
     }
 }
 
@@ -548,11 +519,15 @@ mod tests {
                 let row = rows.iter().find(|a| a.name == name).unwrap();
                 assert_eq!(
                     row.flags.duplicate_of.is_some(),
-                    duplicate,
+                    duplicate && provider == Provider::Claude,
                     "{provider:?}/{name}"
                 );
-                assert_eq!(row.display_name, email);
+                assert_eq!(row.display_name, if provider == Provider::Claude { email } else { name });
                 let identity = serde_json::to_value(&row.identity).unwrap();
+                if provider == Provider::Codex {
+                    assert!(row.email.is_none() && identity.is_null(), "secret-only metadata stays unknown");
+                    continue;
+                }
                 assert!(
                     identity.is_object(),
                     "identity must be structured, not JSON text"

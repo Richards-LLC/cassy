@@ -2908,7 +2908,7 @@ fn date_from_timestamp(value: &str) -> Option<String> {
 /// 2:00 AM EST (07:00 UTC) to the first Sunday in November at 2:00 AM EDT
 /// (06:00 UTC); standard time (UTC-5) covers the rest of the year. Machine
 /// fields (front matter, JSON, receipts) stay in UTC ISO-8601.
-fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
+pub(crate) fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
     let year = instant.year();
     let nth_sunday = |month: u32, nth: i64| {
         let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month start");

@@ -1634,11 +1634,11 @@ while lacking the fast-row delegate; inspect them rather than assuming absence.
 Do not copy those guards into the main checkout. A hook-install warning during
 spawn/reuse means enforcement is not proven.
 
-At park, `receipt_scope::park_refusal` reads the exact-tip fast-row receipt and
-passing capped test receipts for every changed Rust crate. Missing fast rows
-produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
-REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
-waive these refusals or the merge queue's final-tree proof.
+At park, `receipt_scope::park_refusal` reads passing capped test receipts for
+every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
+Park executes neither checks nor tests. Local fast-row receipts and exception
+files are not park proof: workers can write them. CI runs the fast rows before
+merge admission; the pre-push hook provides early local feedback.
 
 ## Project capture configuration
 
@@ -2005,15 +2005,16 @@ writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
 attempts print a retained log directory under the Git common directory's
 `cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
 Each attempt has its own directory so a later push preserves the original failure.
-With
-the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
-and no broad Rust tests for factory pushes; unset (the default) the lanes run as
-before, so the switch waits for a runtime with these guards. Park reads, and
-never runs, the exact-tip receipts: the fast-rows PASS and a capped test PASS in
-every workspace crate whose sources or tests changed. A receipt in another
-crate does not count, and a missing receipt is refused with its fix. Pull
-requests without worker receipts keep the lane fast rows and the targeted
-`ci-test-impact.py` fallback. The merge queue is the final-tree integration gate
+With the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs the
+fast rows once in `lane.yml`'s classification job, for both docs and code;
+non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
+queue does not add another fast-row run. CI is authoritative for these checks;
+local PASS receipts are reusable pre-push feedback, never a park requirement.
+Slim lanes omit broad Rust tests for factory pushes. Park reads, and never
+runs, a capped test PASS in every workspace crate whose sources or tests
+changed. A receipt in another crate does not count, and a missing test receipt
+is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
+fallback. The merge queue is the final-tree integration gate
 and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a

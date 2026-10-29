@@ -34,7 +34,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 3. Commit scoped work; push once before parking, once per review round, unless
    `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
    `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
-   Park reads the exact-tip fast-rows and capped test receipts, never runs checks.
+   CI owns fast-row proof; local receipts are pre-push feedback. Park reads
+   exact-tip capped test receipts, never runs checks.
    Add milestones with `task action=notes note_type=progress`.
 4. Scaffold with `cas qa ledger init --task <id>`; run
    `cas qa ledger check <path> --task <id>` before close. Follow

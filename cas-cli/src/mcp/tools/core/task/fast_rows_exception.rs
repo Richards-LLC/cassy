@@ -74,6 +74,13 @@ fn scope(text: &str, head: &str) -> Option<Vec<String>> {
     let files = lines
         .filter_map(|line| line.strip_prefix("SCOPE release-notes-draft "))
         .collect::<BTreeSet<_>>();
+    let complete = format!("scope complete count={}", files.len());
+    if text.lines().last() != Some(complete.as_str())
+        || text.lines().filter(|line| line.starts_with("scope complete count=")).count() != 1
+        || text.lines().filter(|line| line.starts_with("SCOPE release-notes-draft ")).count() != files.len()
+    {
+        return None;
+    }
     (!files.is_empty() && files.iter().all(|file| draft_path(file)))
         .then(|| files.into_iter().map(str::to_owned).collect())
 }
@@ -92,8 +99,25 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
 
 /// Park reads only: the original failed result remains authoritative, with
 /// approval of precisely those failed draft files recorded separately.
-pub(super) fn approved(directory: &Path, task_id: &str, head: &str, failure: &str) -> bool {
+pub(super) fn approved(
+    cas_root: &Path,
+    directory: &Path,
+    task: &Task,
+    head: &str,
+    failure: &str,
+) -> bool {
     let Some(files) = scope(failure, head) else {
+        return false;
+    };
+    // Receipt files are caller-writable. A nonempty name in one is not
+    // registered authority, and an old approval cannot revive a dead owner.
+    let Ok(agents) = crate::store::open_agent_store(cas_root) else {
+        return false;
+    };
+    let Some(worker) = task.assignee.as_deref()
+        .and_then(|id| super::resolve_agent_identity(agents.as_ref(), id))
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+    else {
         return false;
     };
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -113,12 +137,16 @@ pub(super) fn approved(directory: &Path, task_id: &str, head: &str, failure: &st
                 .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok())
                 .is_some_and(|receipt| {
                     receipt.schema == 1
-                        && receipt.task_id == task_id
+                        && receipt.task_id == task.id
                         && receipt.head == head
                         && receipt.check == CHECK
                         && receipt.files == files
                         && receipt.failure_sha256 == expected_hash
-                        && !receipt.approver.trim().is_empty()
+                        && agents.get(&receipt.approver).is_ok_and(|approver| {
+                            approver.role == cas_types::AgentRole::Supervisor
+                                && approver.is_alive()
+                                && approver.factory_session == worker.factory_session
+                        })
                         && !receipt.reason.trim().is_empty()
                 })
         })

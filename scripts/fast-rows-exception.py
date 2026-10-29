@@ -27,6 +27,11 @@ def approved(directory, head):
             return None
         files = sorted(set(line.removeprefix("SCOPE release-notes-draft ")
                            for line in lines[1:] if line.startswith("SCOPE release-notes-draft ")))
+        scopes = [line for line in lines if line.startswith("SCOPE release-notes-draft ")]
+        if (not lines or lines[-1] != f"scope complete count={len(files)}"
+                or len(scopes) != len(files)
+                or sum(line.startswith("scope complete count=") for line in lines) != 1):
+            return None
         if not files or any(not re.fullmatch(r"docs/release-notes/[A-Za-z0-9_.-]+-(?:slack|thread)\.md", file)
                             for file in files):
             return None

@@ -244,7 +244,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     let service = CasService::new(reviewer, None);
     let request: VerificationRequest = serde_json::from_value(serde_json::json!({
         "action": "qa_record", "task_id": TASK, "status": "approved",
-        "summary": "Independent review of the unchanged delivery",
+        "summary": format!("Independent review; qa-bundle: {}", reviewer_bundle.display()),
         "ledger_path": ledger.display().to_string(),
     })).unwrap();
     let recorded = extract_text(service.verification(Parameters(request)).await.unwrap());

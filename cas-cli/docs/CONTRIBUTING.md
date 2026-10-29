@@ -1761,8 +1761,7 @@ The existing capped worker test command runs its requested affected scope once,
 then repeats only the added or token-changed Rust test functions in that target
 five times concurrently. Each copy uses zero retries and one test thread; a
 failed copy, zero/missing count, incomplete parameter cases or unresolved name
-produces no stability receipt. Original copy logs and load snapshots remain in
-the worker log. This happens inside the existing worker node; park reads proof
+produces no stability receipt. Original copy logs remain in the worker log. This happens inside the existing worker node; park reads proof
 and runs no test, build or new CI stage. Quarantine is outside this policy.
 
 Selection compares immutable merge-base and delivery Git blobs, ignoring comments

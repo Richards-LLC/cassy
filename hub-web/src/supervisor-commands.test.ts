@@ -57,21 +57,56 @@ describe("supervisor command receipts", () => {
     expect(document.activeElement).toBe(parent.querySelector("summary"));
   });
 
-  it("settles a pending Exit from the authoritative session end without claiming Finish completed", async () => {
+  it("settles Exit after disconnect, timeout or late status without claiming other commands completed", async () => {
     vi.useFakeTimers();
     try {
-      for (const command of ["exit", "finish"] as const) {
-        const send = vi.fn().mockReturnValue(true);
-        const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
-        await session.run(command, true);
-        session.ended("prompt_input_exit");
-        const receipt = [...session.receipts.values()][0];
-        expect(receipt.phase).toBe(command === "exit" ? "observed" : "unconfirmed");
-        expect(receipt.detail).toContain("prompt_input_exit");
-        await vi.advanceTimersByTimeAsync(5_000);
-        expect(send).toHaveBeenCalledTimes(1);
+      for (const command of ["exit", "finish", "usage"] as const) {
+        for (const ordering of ["ended", "reject-ended", "ended-reject", "timeout-ended", "ended-status"] as const) {
+          const send = vi.fn().mockReturnValue(true);
+          const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+          await session.run(command, true);
+          const ref = [...session.receipts.keys()][0];
+          const disconnected = "The session is reconnecting, so the message was not sent. Retry once live.";
+          if (ordering === "reject-ended") session.reject(ref, disconnected);
+          if (ordering === "timeout-ended") await vi.advanceTimersByTimeAsync(125_000);
+          session.ended("prompt_input_exit");
+          if (ordering === "ended-reject") session.reject(ref, disconnected);
+          if (ordering === "ended-status") session.receive({ client_ref: ref, command, phase: "submitted", detail: "Awaiting harness", output: "", interactive: false });
+          const receipt = session.receipts.get(ref)!;
+          expect(receipt.phase, `${command}/${ordering}`).toBe(command === "exit" ? "observed" : "unconfirmed");
+          expect(receipt.detail).toContain("prompt_input_exit");
+          expect(receipt.detail).not.toMatch(/not sent|Retry/);
+          const sent = send.mock.calls.length;
+          await vi.advanceTimersByTimeAsync(125_000);
+          expect(send).toHaveBeenCalledTimes(sent);
+          expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
+        }
       }
-    } finally { vi.useRealTimers(); }
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("does not borrow session-end evidence for a refused, unsent or foreign command", async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn().mockReturnValue(true);
+      const options = { unavailable: () => undefined, control: async () => {}, send, changed: () => {} };
+      const ended = new SupervisorCommandSession(options);
+      const other = new SupervisorCommandSession(options);
+      await ended.run("exit", true);
+      await other.run("exit", true);
+      const ref = [...ended.receipts.keys()][0];
+      const refused: CommandReceipt = { client_ref: ref, command: "exit", phase: "refused", detail: "Not sent: control was refused. Retry after taking control.", output: "", interactive: false };
+      ended.receive({ ...refused, command: "usage" });
+      expect(ended.receipts.get(ref)?.phase).toBe("submitted");
+      ended.receive(refused);
+      ended.ended("prompt_input_exit");
+      expect(ended.receipts.get(ref)).toEqual(refused);
+      expect([...other.receipts.values()][0].phase).toBe("submitted");
+      const unsent = new SupervisorCommandSession({ ...options, send: () => false });
+      await expect(unsent.run("exit", true)).rejects.toThrow("not sent");
+      unsent.ended("prompt_input_exit");
+      expect(unsent.receipts.size).toBe(0);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
   it("polls only the outcome and stops after observation, without replaying a mutation", async () => {

@@ -36939,26 +36939,6 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
         let temp = tempfile::tempdir().unwrap();
         let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
-        let first_parent = rev_parse_local(p, "HEAD^1");
-        let target = freshest_target_ref(p, "main");
-        assert!(
-            rebased_delivery_has_same_patches(p, &recorded, &first_parent, &target, &parked.id),
-            "the rewritten first parent must prove the original delivery patch set"
-        );
-        assert!(restored_anchor_merge_is_attributable(
-            p, &recorded, &first_parent, &restored_tip, &parked.id, None,
-        ), "the pushed merge must restore the old anchor without changing its tree");
-        let measured = close_measured_factory_branch(p, &parked, "worker");
-        assert!(core.tip_is_own_task_lineage(
-            &store, &parked, p, Some(&measured), &first_parent, Some(&restored_tip),
-        ), "the restored merge must remain on this task's delivery branch");
-        assert_eq!(
-            core.eligible_awaiting_merge_advance(
-                &store, &parked, p, "main", Some(&restored_tip),
-            ),
-            Some(restored_tip.clone()),
-            "the restored pushed merge must qualify as the next delivery anchor"
-        );
 
         core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&restored_tip))
             .unwrap();

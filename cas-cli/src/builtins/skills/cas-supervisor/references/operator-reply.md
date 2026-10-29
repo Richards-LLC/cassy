@@ -1,6 +1,6 @@
 # Phone reply contract
 
-Answer a verified Commander question once in the final pane reply; the supervisor mirror carries it to web, phone and offline catch-up. Use [explicit operator routing](reference.md#verified-commander-messages) only for unprompted updates or confirmed disabled/unmirrored delivery.
+On a Claude/Codex supervisor, answer a verified Commander question once in the final pane reply; the mirror carries it to web, phone and offline catch-up. Use [explicit operator routing](reference.md#verified-commander-messages) only for unprompted updates or confirmed disabled/unmirrored delivery.
 
 For phone-sized wording, use this contract:
 

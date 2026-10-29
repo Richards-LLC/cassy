@@ -186,13 +186,9 @@ impl CasCore {
         let task_content = format!("{} {}", task.title, task.description);
 
         let hook_input = HookInput {
-
             model: None,
-
             from_model: None,
-
             to_model: None,
-
             effort: None,
             prompt_id: None,
             session_id: "mcp".to_string(),

@@ -740,6 +740,46 @@ mod focused_epic_tests {
     }
 
     #[test]
+    fn executing_workers_current_task_agrees_with_the_same_status_payload() {
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (project, root, session) = fixture();
+        let account = tempfile::tempdir().unwrap();
+        let rollouts = account.path().join("sessions/2026/10/29");
+        std::fs::create_dir_all(&rollouts).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let native = [
+            serde_json::json!({"type":"session_meta", "payload":{"id":"worker-native-session", "cwd":project.path(), "source":"cli", "originator":"codex_cli_rs"}}),
+            serde_json::json!({"timestamp":now, "type":"event_msg", "payload":{"type":"task_started"}}),
+        ];
+        std::fs::write(rollouts.join("rollout-worker-native-session.jsonl"),
+            native.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let mut worker = Agent::new_with_role("worker-native-session".into(), "worker-a".into(), AgentRole::Worker);
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("clone_path".into(), project.path().to_string_lossy().into_owned());
+        worker.metadata.insert("worker_account_dir".into(), account.path().to_string_lossy().into_owned());
+        worker.factory_session = Some(session.name.clone());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-current-executing".into(), "Current executing task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        // Both spellings decode to the supported domain status. The legacy
+        // spelling exposes separate filtered/unfiltered read disagreement.
+        let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for stored_status in ["in_progress", "inprogress"] {
+            db.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", rusqlite::params![stored_status, task.id]).unwrap();
+            let status = build_status_json(&session, &root, 20).unwrap();
+            let reported = status.tasks_in_progress.iter().find(|row| row.id == task.id).unwrap();
+            assert_eq!(reported.assignee.as_deref(), Some(worker.name.as_str()));
+            let agent = status.agents.iter().find(|agent| agent.name == worker.name).unwrap();
+            assert_eq!(agent.liveness.as_deref(), Some("executing"), "native turn evidence: {stored_status}");
+            assert_eq!(agent.current_task.as_deref(), Some(task.id.as_str()), "same response: {stored_status}");
+        }
+    }
+
+    #[test]
     fn staffing_reassignment_replaces_parked_work_after_registration_recycle() {
         use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
         let _home = crate::test_env_guard::TestEnvGuard::temp_home();

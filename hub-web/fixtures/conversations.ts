@@ -55,10 +55,10 @@ export const FIXTURE_SUPERVISOR = 'patient-pelican-9';
 export function fixtureConversationRows(selected: boolean): ConversationRow[] {
   const base = { freshness: 'Catalog checked just now', connection: 'Live', attention: 0, unread: 0, selected: false };
   return [
-    { ...base, key: 'atlas-linux:one', machineId: 'atlas-linux', session: 'one', supervisor: FIXTURE_SUPERVISOR, projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix the warning in-train, or ship allowlisted?', attention: 1, selected },
-    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', when: '09:41', preview: 'Pass two is green — every pack in one place.', unread: 2 },
-    { ...base, key: 'atlas-linux:three', machineId: 'atlas-linux', session: 'three', supervisor: 'steady-heron-2', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue', freshness: 'Catalog checked 1m ago', preview: 'Preview is up for the alias merge.' },
-    { ...base, key: 'studio-mac:four', machineId: 'studio-mac', session: 'four', supervisor: 'quiet-marten-7', projectDir: '/projects/openclaw', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Rebased and pushed; nothing waiting.' },
+    { ...base, key: 'atlas-linux:one', machineId: 'atlas-linux', session: 'one', supervisor: FIXTURE_SUPERVISOR, harness: 'claude', supervisorState: 'needs-you', projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix the warning in-train, or ship allowlisted?', attention: 1, selected },
+    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', harness: 'codex', supervisorState: 'working', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', when: '09:41', preview: 'Pass two is green — every pack in one place.', unread: 2 },
+    { ...base, key: 'atlas-linux:three', machineId: 'atlas-linux', session: 'three', supervisor: 'steady-heron-2', harness: 'grok', supervisorState: 'idle', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue', freshness: 'Catalog checked 1m ago', preview: 'Preview is up for the alias merge.' },
+    { ...base, key: 'studio-mac:four', machineId: 'studio-mac', session: 'four', supervisor: 'quiet-marten-7', harness: 'opencode', projectDir: '/projects/openclaw', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Rebased and pushed; nothing waiting.' },
     { ...base, key: 'bench-1:five', machineId: 'bench-1', session: 'five', supervisor: 'bright-otter-3', projectDir: '/projects/violet', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Posted both threads to the channel.' },
     { ...base, key: 'bench-1:six', machineId: 'bench-1', session: 'six', supervisor: 'calm-heron-5', projectDir: '/projects/cas-hub-static', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Nothing waiting on you.' },
   ];
@@ -125,7 +125,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       : state === 'conversation-sessions' || state === 'conversation-earlier'
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, harness: "claude", model: "claude-opus-5-5", effort: "high", host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
   // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
   const needsPairing = state === 'conversation-needs-pairing';
   const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()

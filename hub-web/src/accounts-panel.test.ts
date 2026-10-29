@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
-import { accountCapacity, type AccountRow, type AccountOperation } from "./accounts-model";
+import { accountCapacity, accountTime, type AccountRow, type AccountOperation } from "./accounts-model";
 const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
@@ -19,12 +19,16 @@ function setup(manage = true, account = row) {
 }
 function click(selector: string) { document.querySelector<HTMLButtonElement>(selector)!.click(); }
 
-it("lists state and capacity for read-only pairings and copies only a valid login command", async () => {
+it("shows read-only pairings their disabled actions and the exact manage-access command", async () => {
   const { host } = setup(false); await settle();
   expect(document.body.textContent).toContain("Stale login");
   expect(document.body.textContent).toContain("Usage unknown");
-  expect(document.body.textContent).toContain("Read-only");
-  expect(document.querySelector("[data-operation]")).toBeNull();
+  expect(document.body.textContent).toContain("Read-only on Soundwave");
+  const operations = [...document.querySelectorAll<HTMLButtonElement>("[data-operation]")];
+  expect(operations.map(button => button.textContent)).toEqual(["Set default", "Rename", "Disable", "Remove"]);
+  expect(operations.every(button => button.disabled && button.title === "Needs manage access on this machine")).toBe(true);
+  click("[data-grant-command]"); await settle();
+  expect(host.copy).toHaveBeenCalledWith(`cas hub pair --origin ${location.origin} --scopes machine:read,factory:manage`);
   click("[data-login]"); await settle();
   expect(host.copy).toHaveBeenCalledWith("cas claude login spare");
   click("[data-accounts-close]"); expect(host.returnFocus).toHaveBeenCalledOnce();
@@ -85,11 +89,37 @@ it("keeps other machines readable, retries failures, and refreshes after an unce
   expect(document.body.textContent).toContain("Could not verify the complete change");
 });
 
+it("groups by provider in headroom order, says where each lives, and cleans up stale duplicates in one confirmation", async () => {
+  const healthy: AccountRow = { ...row, key: "claude:work", name: "work", display_name: "work@example.test", location: "~/.claude-work", login_state: "logged_in", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }] };
+  const duplicate: AccountRow = { ...row, key: "claude:main", name: "main", location: "~/.claude", duplicate_of: "claude:work", is_default: false };
+  const tight: AccountRow = { ...healthy, key: "claude:tight", name: "tight", display_name: "tight@example.test", location: "~/.claude-tight", windows: [{ name: "weekly", used_percent: 95, resets_at: "2099-11-02T18:20:00Z" }] };
+  const { host, sheet } = setup(true, healthy);
+  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy] });
+  sheet.open(); await settle();
+  const groups = [...document.querySelectorAll(".accounts-provider-group")];
+  expect(groups.map(group => group.querySelector("h4")!.textContent)).toEqual(["Claude · 2", "Needs cleanup · 1"]);
+  expect([...groups[0]!.querySelectorAll(".accounts-identity strong")].map(name => name.textContent)).toEqual(["work@example.test", "tight@example.test"]);
+  expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
+  expect(groups[0]!.textContent).toContain("Lives in ~/.claude-work on Soundwave · used by Claude Code");
+  expect(groups[0]!.textContent).toContain("62% left");
+  expect(groups[1]!.textContent).toContain("Duplicate of claude:work with a stale login.");
+  click("[data-cleanup]");
+  const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+  input.value = "clean up"; input.dispatchEvent(new Event("input"));
+  document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));
+  await settle();
+  expect(host.change).toHaveBeenCalledExactlyOnceWith("linux", { operation: "remove", account: "claude:main", confirmation: "claude:main" });
+  expect(document.body.textContent).toContain("Account updated.");
+});
+
 it("formats reset and observation times locally in 12-hour form and clears expired capacity", () => {
   const now = new Date("2026-10-28T16:00:00Z").getTime();
   const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
   expect(fresh).toContain("weekly 62% left"); expect(fresh).toContain("as of"); expect(fresh).toMatch(/AM|PM/);
   expect(accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], null, now)[0]).toContain("usage unknown");
+  const zone = process.env.TZ;
+  try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
+  finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
 });
 
 

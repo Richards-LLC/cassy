@@ -340,8 +340,11 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();
     await expect(studio().getByRole("button", { name: "Filter conversations on Borealis, online", exact: true })).toBeVisible();
     await expect(studio().locator(".conversation-account")).toHaveText("operator@example.test");
-    await expect(studio().locator('[data-harness="codex"]')).toHaveText(">_");
-    await expect(studio().locator('[data-harness="claude"]')).toHaveText("✳");
+    // DESIGN.md Avatars: each provider's mark at a legible 24px, not a glyph.
+    for (const [harness, provider] of [["codex", "OpenAI"], ["claude", "Claude"]]) {
+      await expect(studio().locator(`[data-harness="${harness}"]`)).toHaveAttribute("title", provider);
+      expect((await studio().locator(`[data-harness="${harness}"] svg.provider-mark`).boundingBox())?.width).toBeGreaterThanOrEqual(20);
+    }
     await expect(studio().locator(".project-card-summary")).toHaveText("1 live worker");
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     await expect(old.locator(".conversation-account")).toHaveCount(0);

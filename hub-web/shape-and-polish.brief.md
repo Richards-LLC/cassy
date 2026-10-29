@@ -41,3 +41,14 @@ Appended per step after render, with before/after pairs at 1280 and 390 in light
 | Accessibility | 4 | Shape only; contrast pairs unchanged; more-contrast and forced-colours edges keep --line-strong. |
 
 Before/after: the 3.88 catalog pages 20, 21 and 77 against `step1/after/*` (1280 and 390, light and dark) in the task artifacts.
+
+### Steps 2-3 (Accounts, left nav, header, avatars, cards)
+
+| Screen | Distinctiveness | Fit | Hierarchy | Craft | Accessibility | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| Accounts | 5 | 5 | 4 | 4 | 4 | Machine → provider cards in headroom order; "Lives in ~/.claude-…" answers where; one usage-as-of per machine; cleanup banner; Set default + ⋯ menu; read-only shows the exact factory:manage command. |
+| Left nav | 4 | 5 | 4 | 4 | 4 | Surface cards, pill machine chips, provider-mark avatars (24px mark on 42px), "Version unknown" as evidence. |
+| Conversation header | 4 | 5 | 5 | 4 | 4 | One desktop row: mark, project, "Claude Opus 5.5 · high", machine and session in one typeface, actions right; wraps when the rail leaves under 20rem; phone keeps one avatar row. |
+| Tasks & progress, Team | 4 | 5 | 4 | 4 | 4 | Worker cards and lanes on the card rule with lane-size marks; Activity is a 32px action pill. |
+
+Strict visual QA PASS, 72 fixtures (Accounts and Accounts read-only added) x 2 schemes x 3 viewports; it caught Default/Recommended badges at 4.41:1 in dark and the phone header overflowing, both fixed. Affected journeys 27 / 211 PASS at 4d5af7f70 after HUB-J13 caught a 390px Accounts overflow. Before: the 3.88 catalog (pages 20, 21, 77, 96) and the operator's screenshots; after: `cas-652f/after/*` at 1280 and 390 in light and dark.

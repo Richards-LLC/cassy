@@ -273,7 +273,7 @@ Glass has no square-cornered rectangles. Anything with its own fill or edge take
 - **Conversation row** (`conversation-list.ts`). Optional harness marks, account email and a state dot identify supervisors inside project cards; absent metadata leaves a generic avatar without a blank line. Names and preview text stay available to assistive technology. Open: `--look-row-open` wash plus the 2px `--color-action` edge (5.7:1 light, 7.5:1 dark against the list). Hover is a faint `--bg-hover` wash with no edge, so hover can never look open.
 - **Primary button** (`styles.css`, `glass.css`). `--look-send` with `--look-send-glow`; hover deepens to `--look-send-hover` and never brightens.
 - **Dialog** (`glass.css`). Glass-strong sheet; its sticky action bar is a light `--look-glass-bar` frost with a hairline and a 12px gap; plain buttons (Close, Back) are outlined pills; a destructive Remove is a `--crit-bg` outlined pill.
-- **Ask card and pinned ask** (`attention-view.ts`, `context-rail.ts`). The full stepped question lives once, in the thread; the "Waiting on you" bookmark points to it. Only asks and blockers count as waiting on the operator.
+- **Ask card and pinned ask** (`attention-view.ts`, `context-rail.ts`). The full stepped question lives once, in the thread; the "Waiting on you" bookmark points to it, and the context rail never repeats the pinned question. Only asks and blockers count as waiting on the operator.
 - **Conversation header.** Interrupt (`#conversation-interrupt`, `--state-crit` outline, `aria-disabled` with its reason when it cannot act) and Raw output (`dialog#raw-output`, a read-only `transcript-view.ts` on `--bg-terminal`: a 640px right sheet on desktop, a bottom sheet on a phone).
 - **Project badge.** `--bg-active` fill, `--color-action` text, 15px semibold, wraps; named from the catalog `project_dir` with an honest missing state.
 - **New session** (`#launch-dialog`, `launch-session.ts`). Chosen rows carry `--bg-active` and a `--color-action` edge (`.is-checked`); Attach and Start are its only `.primary`; progress is a `--rule-hero` rule with a quiet elapsed count, never a spinner.
@@ -316,8 +316,14 @@ The heading answers, in this order of weight: which project, which model, where,
 
 - **Avatar.** The provider-mark avatar (`--avatar-size`, `--avatar-mark`) with its status dot leads the identity row; a session with no harness keeps the machine monogram.
 - **Line 1.** The project name (`typography.title-md`, 600; the codename when there is no project), then the live-state status pill ("Live", "Reconnecting", "Ended") on the same baseline. The state is a pill, not a trailing "· Live" word.
-- **Line 2.** The model and version in `--ink` at `--fs-meta` 500 ("Claude Opus 5.5", "GPT-5 Sol"), then the machine as a machine chip, then the session codename in mono `--ink-mid`. Separators are `--space-2` gaps, not dot-joined mono strings. When the hub does not report a model, line 2 names the harness ("Claude Code", "Codex") instead; the header never shows "Model not reported".
-- Header actions (Raw output, Interrupt, Show work) are action pills in one cluster above or beside the identity, never between avatar and name. On a phone the identity keeps one avatar row (about 56px), line 2 ellipsises with its full text in `title`.
+- **Line 2.** The model and version in `--ink` at `--fs-meta` 500 ("Claude Opus 5.5", "GPT-5 Sol"), then the machine, then the session codename, all in one typeface (`--font-ui`, `--ink-mid` after the model). When the hub does not report a model, line 2 names the harness ("Claude Code", "Codex") instead; the header never shows "Model not reported".
+- Header actions (Raw output, Interrupt, Show work) are action pills in one cluster. On desktop the identity and the actions share one row, identity left and actions right; never between avatar and name. On a phone the identity keeps one avatar row (about 56px): the provider mark carries the maker, the model label stays spoken but is not drawn, and line 2 keeps the machine and codename, ellipsising with its full text in `title`.
+
+### Accounts
+
+- Machine, then provider, then one card per account in headroom order (least capacity left sorts last). Each card: provider mark, identity (the profile id lives in the name's `title` and accessible name, not a second line), where it lives ("Lives in `~/.claude-work` on soundwave · used by Claude Code"), the login state pill and one usage bar per window: `--state-ok`, amber `--state-warn` below 25% left, `--state-crit` below 10%, each with its reset in ET.
+- One "usage as of" stamp per machine, not per card. Stale logins and duplicates sort into a Needs cleanup group, announced by a top banner whose Clean up action removes every removable copy behind one typed confirmation.
+- Set default stays on the card; Rename, Disable or Enable, and Remove sit in a `⋯` menu, and Remove confirms by typing the profile id. A read-only pairing keeps every action visible but disabled beside the exact `cas hub pair … factory:manage` command.
 
 ### Header and action spacing
 

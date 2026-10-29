@@ -31,7 +31,9 @@ describe("project-first navigation", () => {
     expect(cards[0]!.querySelectorAll(".project-machine-chip")).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".project-machine-chip")[1]!.getAttribute("aria-label")).toBe("Filter conversations on prowl, offline");
     expect(cards[0]!.textContent).toContain("2 live workers");
-    expect(cards[0]!.querySelector('[data-harness="codex"]')?.textContent).toBe(">_");
+    // DESIGN.md Avatars: the provider's drawn mark, never a tiny glyph.
+    expect(cards[0]!.querySelector('[data-harness="codex"]')?.getAttribute("title")).toBe("OpenAI");
+    expect(cards[0]!.querySelector('[data-harness="codex"] svg.provider-mark')).not.toBeNull();
     expect(cards[0]!.querySelector(".conversation-account")?.textContent).toBe("operator@example.test");
     expect(cards[1]!.querySelector(".conversation-account")).toBeNull();
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);

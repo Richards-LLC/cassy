@@ -1,38 +1,82 @@
-.accounts-sheet { width: min(56rem, calc(100vw - var(--space-6))); max-height: calc(100dvh - var(--space-6)); overflow: auto; background: var(--look-glass-strong); color: var(--ink); }
+/* Accounts (DESIGN.md Cards and rows, Pills, Avatars): machine → provider → card. */
+.accounts-sheet { width: min(60rem, calc(100vw - var(--space-6))); max-height: calc(100dvh - var(--space-6)); overflow: auto; background: var(--look-glass-strong); color: var(--ink); }
 /* Beat the shell dialog[open] overflow rule so every account is reachable. */
 .accounts-sheet[open] { overflow: auto; }
 .accounts-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .accounts-heading h2 { margin: 0; }
-.accounts-heading p, .accounts-notice, .accounts-readonly { color: var(--ink-mid); }
+.accounts-heading p { margin: var(--space-1) 0 0; }
+.accounts-heading button { border-radius: var(--radius-pill); }
+.accounts-heading p, .accounts-notice, .accounts-readonly, .accounts-empty, .accounts-machine-summary, .accounts-cleanup-lead { color: var(--ink-mid); }
 .accounts-notice:empty { display: none; }
-.accounts-machines section + section { margin-top: var(--space-6); border-top: 1px solid var(--line-strong); }
-.accounts-provider { text-transform: capitalize; color: var(--ink-mid); font-size: var(--fs-meta); margin-bottom: var(--space-2); }
-.accounts-ledger { list-style: none; margin: 0; padding: 0; }
-.accounts-row { padding: var(--space-4) 0; border-top: 1px solid var(--line-subtle); min-width: 0; overflow-wrap: anywhere; }
-.accounts-identity { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
-.accounts-identity strong { font-weight: var(--weight-semibold); }
-.accounts-alias { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-mid); }
-.accounts-badges { display: inline-flex; gap: var(--space-2); color: var(--color-verdict); font-size: var(--fs-meta); }
-.accounts-capacity { margin-block: var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
-.accounts-capacity p { margin: var(--space-1) 0; }
+.accounts-machines > section { margin-top: var(--space-6); }
+.accounts-machines > section + section { padding-top: var(--space-6); border-top: var(--line-width) solid var(--line-subtle); }
+.accounts-machine { margin: 0; font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); }
+.accounts-machine-summary { margin: var(--space-1) 0 var(--space-3); font-size: var(--fs-meta); }
+.accounts-provider-group { margin-top: var(--space-4); }
+.accounts-provider { margin: 0 0 var(--space-2); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.accounts-cleanup-lead { margin: 0 0 var(--space-2); font-size: var(--fs-meta); }
+.accounts-ledger { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr)); gap: var(--card-gap); list-style: none; margin: 0; padding: 0; }
+.accounts-row { display: flex; gap: var(--space-3); align-items: flex-start; min-width: 0; padding: var(--card-padding); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-surface); background: var(--bg-raised); overflow-wrap: anywhere; }
+.accounts-row.needs-cleanup { border-color: var(--state-warn); }
+.accounts-card-body { display: grid; gap: var(--space-1); flex: 1; min-width: 0; }
+.accounts-card-body p { margin: 0; }
+.accounts-identity { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.accounts-identity strong { font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
+.accounts-badges { display: inline-flex; gap: var(--space-1); margin-inline-start: auto; }
+.accounts-badges:empty { display: none; }
+.accounts-badge { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/22px var(--font-ui); }
+.accounts-alias { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); }
+.accounts-where { color: var(--ink-mid); font-size: var(--fs-meta); }
+.accounts-where code { color: var(--ink); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
+.accounts-state .status-chip { text-transform: none; letter-spacing: 0; font-family: var(--font-ui); font-weight: var(--weight-medium); }
+.accounts-cleanup-why { color: var(--warn-text, var(--state-warn)); font-size: var(--fs-meta); }
+.accounts-usage { display: grid; gap: var(--space-1); margin-top: var(--space-1); }
+.accounts-meter { display: grid; grid-template-columns: 3.5rem minmax(3rem, 4.5rem) minmax(0, 1fr); align-items: center; gap: var(--space-2); font-size: var(--fs-meta); }
+.accounts-meter-name { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
+.accounts-bar { block-size: 6px; border-radius: var(--radius-pill); background: var(--bg-active); overflow: hidden; }
+.accounts-bar > span { display: block; block-size: 100%; inline-size: 0; border-radius: var(--radius-pill); background: var(--state-ok); }
+.accounts-bar > span.low { background: var(--state-warn); }
+.accounts-bar > span.crit { background: var(--state-crit); }
+.accounts-meter-text { min-width: 0; color: var(--ink); }
+.accounts-reset { color: var(--ink-mid); white-space: nowrap; }
+.accounts-observed { color: var(--ink-mid); font-size: var(--fs-xs); }
 .accounts-actions, .accounts-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.accounts-actions { margin-top: var(--space-3); }
-.accounts-actions button, .accounts-login button { min-height: 40px; }
-.accounts-actions button[data-operation="remove"] { color: var(--state-crit); }
-.accounts-actions button:disabled { cursor: not-allowed; }
-.accounts-login code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.accounts-editor { margin-top: var(--space-4); border-top: 2px solid var(--color-action); padding-top: var(--space-3); }
+.accounts-actions { margin-top: var(--space-2); }
+.accounts-actions button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-actions button:hover:not(:disabled), .accounts-login button:hover { background: var(--bg-hover); }
+.accounts-actions button[data-operation="remove"] { color: var(--crit-bg); border-color: var(--crit-bg); }
+.accounts-actions button:disabled { cursor: not-allowed; border-style: dashed; color: var(--ink-mid); }
+.accounts-login code { min-width: 0; padding: var(--space-1) var(--space-2); border-radius: var(--radius-control); background: var(--bg-panel); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-xs); }
+.accounts-readonly { font-size: var(--fs-meta); }
+.accounts-grant { display: grid; gap: var(--space-2); margin-bottom: var(--space-2); padding: var(--card-padding); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-surface); background: var(--bg-raised); font-size: var(--fs-meta); }
+.accounts-grant p { margin: 0; }
+.accounts-editor { margin-top: var(--space-4); padding: var(--card-padding); border: 2px solid var(--color-action); border-radius: var(--radius-surface); background: var(--bg-raised); }
+.accounts-cleanup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); padding: var(--space-2) var(--space-2) var(--space-2) var(--card-padding); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-surface); background: var(--bg-raised); font-size: var(--fs-meta); }
+.accounts-cleanup-banner p { margin: 0; }
+.accounts-cleanup-banner button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-cleanup-banner button:disabled { border-style: dashed; color: var(--ink-mid); cursor: not-allowed; }
+.accounts-more { position: relative; }
+.accounts-more > summary { display: inline-flex; align-items: center; justify-content: center; min-width: var(--pill-action-height); min-height: var(--pill-action-height); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); cursor: pointer; list-style: none; font-size: var(--fs-md); }
+.accounts-more > summary::-webkit-details-marker { display: none; }
+.accounts-more > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.accounts-menu { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
 /* The shared dialog form grid overrides the browser's [hidden] display. */
 .accounts-sheet .accounts-editor[hidden] { display: none; }
 .accounts-field { display: grid; gap: var(--space-2); }
-.accounts-field input { width: 100%; box-sizing: border-box; }
+.accounts-field input { width: 100%; box-sizing: border-box; border-radius: var(--radius-control); }
 .accounts-sheet button:focus-visible, .accounts-field input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 @media (max-width: 600px) {
   .accounts-sheet { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--space-4)); padding: var(--space-4); }
-  .accounts-identity { display: grid; gap: var(--space-1); }
   .accounts-heading { gap: var(--space-2); }
+  .accounts-row { padding: var(--space-3) var(--space-2); }
+  .accounts-meter { grid-template-columns: 3rem minmax(2.5rem, 4rem) minmax(0, 1fr); }
+  .accounts-reset { white-space: normal; }
+  .accounts-actions button, .accounts-login button, .accounts-more > summary, .accounts-cleanup-banner button { min-height: var(--rail-item-min); }
+  .accounts-more > summary { min-width: var(--rail-item-min); }
 }
 @media (prefers-contrast: more), (forced-colors: active) {
   .accounts-sheet { background: var(--bg-panel); color: var(--ink); border: 1px solid currentColor; }
+  .accounts-row, .accounts-grant { border-color: var(--line-strong); }
+  .accounts-bar { outline: 1px solid currentColor; }
 }
 @media print { .accounts-actions, .accounts-login button, .accounts-editor, [data-accounts-close] { display: none; } }

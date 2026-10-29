@@ -872,11 +872,11 @@ mod focused_epic_tests {
         // more than one refresh's soft budget. Repeated real status builds
         // must finish those live proofs, rather than restarting at child zero.
         let load = crate::git_evidence::measurement::test_load::Guard::new(
-            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(700),
             std::time::Duration::from_secs(20),
         );
         let mut status = serde_json::Value::Null;
-        for _ in 0..4 {
+        for _ in 0..2 {
             status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
             if status["epics"].as_array().unwrap().iter().any(|item| {
                 item["id"] == epic.id && item["progress"]["total"] == 5

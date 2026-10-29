@@ -68,6 +68,26 @@ async fn publish_returns_a_citable_id_digest_and_size() {
         text.contains("status: local"),
         "with no cloud credentials the record stays local: {text}"
     );
+
+    // A manifest can be published while its evidence is too large to travel.
+    let trace = temp.path().join("docs/trace.zip");
+    std::fs::File::create(trace)
+        .unwrap()
+        .set_len(cas::types::ARTIFACT_MAX_BYTES + 1)
+        .unwrap();
+    let bundle = write_in_checkout(&temp, "bundle.json", serde_json::json!({
+        "schema": 1, "task_id": "cas-b72a", "producer": "journey", "files": {"trace": "trace.zip"}
+    }).to_string().as_bytes());
+    let mut request = req("publish");
+    request.task_id = Some("cas-b72a".into());
+    request.path = Some(bundle);
+    let text = extract_text(service.artifact(Parameters(request)).await.unwrap());
+    assert!(text.starts_with("QA bundle not portable art-"), "{text}");
+    assert!(
+        text.contains("metadata_state: qa_bundle_not_portable"),
+        "{text}"
+    );
+    assert!(text.contains("byte limit"), "{text}");
 }
 
 #[tokio::test]

@@ -202,7 +202,12 @@ sync_with_base() {
                 # Generated files may conflict when two releases change web
                 # inputs. Take the base output (including deletions); prepare
                 # regenerates it from the merged sources and bumped version.
-                git restore --source="$remote/$base" --staged --worktree -- "$file"
+                if git cat-file -e "$remote/$base:$file" 2>/dev/null; then
+                    git restore --source="$remote/$base" --staged --worktree -- "$file"
+                else
+                    git rm --quiet -- "$file"
+                    continue # The deletion is staged; no path remains to add.
+                fi
                 ;;
             CHANGELOG.md)
                 git show ":3:$file" >"$scratch/base-changelog.md"
@@ -388,7 +393,7 @@ wait_for_pr_ci() {
 # Failing test names from CI logs: nextest, cargo test, Python unittest and
 # the scripts' own "FAIL <name>" lines, de-duplicated, at most 20.
 failing_tests() {
-    sed -E 's/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
+    sed -E $'s/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
         | sed -nE 's/^ *FAIL \[ *[0-9.]+s\] +(.*)$/\1/p; s/^test (.+) \.\.\. FAILED$/\1/p; s/^(FAIL|ERROR): (.+)$/\2/p; s/^FAIL (.+)$/\1/p' \
         | awk '!seen[$0]++' | head -20 | paste -sd ';' - | sed 's/;/; /g'
 }

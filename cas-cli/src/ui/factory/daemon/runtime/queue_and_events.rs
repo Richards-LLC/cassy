@@ -703,14 +703,12 @@ pub(crate) fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> Stri
         return queued.prompt.clone();
     }
     use crate::mcp::tools::service::agent_search_system::message::{
-        commander_reply_command, first_message_provenance,
+        commander_reply_framing, first_message_provenance,
     };
     format!(
         "{}\n{}\n{}",
         first_message_provenance(queued),
-        commander_reply_command(queued)
-            .map(|command| format!("Reply with: `{command}`"))
-            .unwrap_or_default(),
+        commander_reply_framing(queued).unwrap_or_default().trim_end(),
         queued.prompt,
     )
 }
@@ -2616,7 +2614,14 @@ fn worker_recipient_shut_down(
     dead: &std::collections::HashSet<String>,
     live: &[String],
     agents: &[cas_types::Agent],
+    replacements: &std::collections::HashSet<String>,
 ) -> bool {
+    // A retired registration cannot withdraw mail addressed to its reusable
+    // name while its successor is launching. Explicit old registration IDs
+    // remain retired: replacement intent is keyed by worker name only.
+    if replacements.contains(target) {
+        return false;
+    }
     // Registration IDs retire independently of reusable pane names. Only the
     // newest registration for a name may veto a live replacement.
     if agents
@@ -2899,9 +2904,19 @@ pub(crate) fn run_queue_select(
     retired_candidates.extend(request.dead_workers.iter().cloned());
     retired_candidates.sort();
     retired_candidates.dedup();
+    let spawn_queue = super::prompt_queue_jobs::job_thread_store(
+        "spawn_queue", &request.cas_dir, |dir| Ok(open_spawn_queue_store(dir)?),
+    )?;
+    let mut replacement_workers = request.replacement_workers.clone();
     let mut shut_down_recipients = Vec::new();
     for name in retired_candidates {
-        if worker_recipient_shut_down(&name, &request.dead_workers, &request.worker_names, &registered_agents) {
+        if worker_recipient_shut_down(&name, &request.dead_workers, &request.worker_names, &registered_agents, &replacement_workers) {
+            // Read durable intent on the writer too: a recycle may have been
+            // queued after control submitted this selection snapshot.
+            if spawn_queue.has_pending_spawn(&name, Some(session))? {
+                replacement_workers.insert(name);
+                continue;
+            }
             queue.cancel_unread_for_shutdown(&name, Some(session),
                 "wake withdrawn: recipient has shut down")?;
             shut_down_recipients.push(name);
@@ -2939,6 +2954,7 @@ pub(crate) fn run_queue_select(
         generation,
         retargeted_rows,
         shut_down_recipients,
+        replacement_workers,
         ..Default::default()
     };
     // An all-native session has no rows for the PTY/inbox delivery path. The
@@ -8637,6 +8653,21 @@ impl FactoryDaemon {
         ready
     }
 
+    fn pending_worker_replacements(&self) -> std::collections::HashSet<String> {
+        let mut names = self.pending_spawns.iter().filter_map(|pending| match pending {
+            PendingSpawn::Named { name, .. } | PendingSpawn::Recycle { name, .. }
+                | PendingSpawn::Respawn(name) => Some(name.clone()),
+            _ => None,
+        }).collect::<std::collections::HashSet<_>>();
+        if let Some((name, ..)) = &self.spawn_task {
+            names.insert(name.clone());
+        }
+        names.extend(self.spawn_verifications.iter()
+            .filter(|(_, verification)| verification.registered_at.is_none())
+            .map(|(name, _)| name.clone()));
+        names
+    }
+
     fn next_unprepared_queue_selection(
         &mut self,
     ) -> Option<super::prompt_queue_jobs::QueueSelection> {
@@ -8653,6 +8684,7 @@ impl FactoryDaemon {
             supervisor_name: self.app.supervisor_name().to_string(),
             worker_names: self.app.worker_names().to_vec(),
             dead_workers: self.dead_workers.clone(),
+            replacement_workers: self.pending_worker_replacements(),
             limit: 10,
             operator_replies: !self.ws_clients.is_empty(),
             deferred_operator_replies: self.deferred_operator_replies(),
@@ -8686,11 +8718,13 @@ impl FactoryDaemon {
             registered_agents,
             retargeted_rows,
             shut_down_recipients,
+            mut replacement_workers,
             native_agents,
             rows: prompts,
             facts: row_facts,
             operator_replies,
         } = selection;
+        replacement_workers.extend(self.pending_worker_replacements());
         // Reuse the hook's message-class seam for inline operator/peer labels.
         // The roster arrived from QueueSelect; there is no loop-thread read.
         let supervisor_senders: HashMap<String, String> = registered_agents.iter()
@@ -8868,7 +8902,7 @@ impl FactoryDaemon {
             }
             // cas-786a6: the roster QueueSelect read for this batch.
             let current_agents = &registered_agents;
-            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), current_agents) {
+            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), current_agents, &replacement_workers) {
                 // cas-786a6 (L4): a QueueStamp on the writer.
                 self.queue_jobs.stamp(
                     self.app.cas_dir(),
@@ -9336,11 +9370,11 @@ impl FactoryDaemon {
                     &queued
                 ),
                 supervisor_lane.map_or("", |lane| lane.label()),
-                crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
+                crate::mcp::tools::service::agent_search_system::message::commander_reply_framing(
                     &queued,
                 )
-                .map(|command| format!("Reply with: `{command}`"))
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .trim_end(),
                 prompt_with_instructions,
             );
 
@@ -9979,7 +10013,7 @@ impl FactoryDaemon {
                         // Skip native extension agents (they self-serve via extension polling).
                         !native_agents.contains(name.as_str())
                             && !worker_recipient_shut_down(name, &self.dead_workers,
-                                self.app.worker_names(), &current_agents)
+                                self.app.worker_names(), &current_agents, &replacement_workers)
                     })
                     .cloned()
                     .collect();
@@ -11848,8 +11882,6 @@ impl FactoryDaemon {
                 // and pane buffers are keyed by name and append-only. Without
                 // this, its register-timeout detail quoted the previous
                 // session's transcript and hid what the new Codex printed.
-                self.pane_buffers.remove(&name);
-                self.forget_probe_pane(&name);
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
                     let color_idx = self.app.worker_names().len();
@@ -11880,6 +11912,12 @@ impl FactoryDaemon {
                             "recipe refused before stopping {name}; the worker keeps running: {error}"
                         )
                     })?;
+                    self.app.preflight_worker_recycle(&name, teams_config.as_ref(), &spec)
+                        .map_err(|error| anyhow::anyhow!(
+                            "launch refused before stopping {name}; the worker keeps running: {error}"
+                        ))?;
+                    self.pane_buffers.remove(&name);
+                    self.forget_probe_pane(&name);
                     self.app.shutdown_worker_for_recycle(&name).await?;
                     // cas-981e: the relaunch queues the worker's intro and
                     // tracks its process group; give it the same bounded
@@ -20517,27 +20555,32 @@ mod wake_recipient_regressions_gh1101 {
     #[test]
     fn gh1101_shutdown_recipient_is_skipped_and_name_reuse_is_live() {
         let dead = std::collections::HashSet::from(["old-worker".to_string()]);
-        assert!(worker_recipient_shut_down("old-worker", &dead, &[], &[]));
+        assert!(worker_recipient_shut_down("old-worker", &dead, &[], &[], &Default::default()));
         let live = vec!["old-worker".to_string()];
-        assert!(!worker_recipient_shut_down("old-worker", &dead, &live, &[]));
+        assert!(!worker_recipient_shut_down("old-worker", &dead, &live, &[], &Default::default()));
         let mut agent = cas_types::Agent::new("shutdown-id".into(), "shutdown-worker".into());
         agent.mark_shutdown();
         assert!(worker_recipient_shut_down(
             "shutdown-worker",
             &dead,
             &[],
-            &[agent]
+            &[agent],
+            &Default::default(),
         ));
-        assert!(!worker_recipient_shut_down("new-worker", &dead, &[], &[]));
+        assert!(!worker_recipient_shut_down("new-worker", &dead, &[], &[], &Default::default()));
         let mut old = cas_types::Agent::new("old-id".into(), "reused-name".into());
         old.mark_shutdown();
+        let pending = std::collections::HashSet::from(["reused-name".into()]);
+        assert!(!worker_recipient_shut_down("reused-name", &dead, &[], std::slice::from_ref(&old), &pending));
+        assert!(worker_recipient_shut_down("old-id", &dead, &[], std::slice::from_ref(&old), &pending));
         let mut replacement = cas_types::Agent::new("new-id".into(), "reused-name".into());
         replacement.registered_at = old.registered_at + chrono::Duration::seconds(1);
         assert!(!worker_recipient_shut_down(
             "reused-name",
             &dead,
             &["reused-name".into()],
-            &[old, replacement]
+            &[old, replacement],
+            &Default::default(),
         ));
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -20545,7 +20588,7 @@ mod wake_recipient_regressions_gh1101 {
         let id = queue
             .enqueue_with_session("supervisor", "old-worker", "fix findings", "session")
             .unwrap();
-        if worker_recipient_shut_down("old-worker", &dead, &[], &[]) {
+        if worker_recipient_shut_down("old-worker", &dead, &[], &[], &Default::default()) {
             queue
                 .cancel_unread_for_shutdown("old-worker", Some("session"), "recipient shutdown")
                 .unwrap();

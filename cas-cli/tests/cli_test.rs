@@ -3370,4 +3370,71 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");
     assert_eq!(report["ok"], false);
     assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["row_id"] == "FLOW-J1" && d["field"] == "verdict"));
+
+    #[cfg(unix)]
+    {
+        let aliased_base = root.join("aliased-artifacts");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&aliased_base).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let project_dir = cas::config::project_factory_artifacts_root(&cas_root, &aliased_base);
+        std::os::unix::fs::symlink(&outside, &project_dir).unwrap();
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root={:?}\n", aliased_base.display().to_string())).unwrap();
+        cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id])
+            .assert().failure().stderr(predicate::str::contains("escapes its project namespace"));
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "refused init created directories outside the namespace");
+    }
+}
+
+#[test]
+fn qa_ledger_check_accepts_copied_skill_examples() {
+    for (name, guide, marker) in [
+        (
+            "epic-flow-walk",
+            include_str!("../src/builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
+            "## Example epic note",
+        ),
+        (
+            "exemplar",
+            include_str!("../src/builtins/skills/cas-qa-craft/references/exemplar.md"),
+            "# Worked exemplar",
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let example = guide
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("```text\n")
+            .unwrap()
+            .1
+            .split_once("```")
+            .unwrap()
+            .0;
+        // Copy the example verbatim; only supply the captures it cites.
+        for line in example.lines() {
+            let cells: Vec<_> = line
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect();
+            if cells.len() == 8 && cells[4] == "PASS" {
+                std::fs::write(temp.path().join(cells[6]), "captured output").unwrap();
+            }
+        }
+        let path = temp.path().join("LEDGER.md");
+        std::fs::write(&path, example).unwrap();
+        let output = cas_cmd(temp.path())
+            .current_dir(temp.path())
+            .args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

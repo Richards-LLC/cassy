@@ -1,0 +1,4 @@
+title: Only exact supported command tokens claim composer submits; paths, unknown slash text and double-slash escapes reach ordinary sends through Enter and Send, while Usage remains a structured command
+tasks: [cas-62ea]
+invariants: [HUB-J27-GOAL]
+journeys: [HUB-J27]

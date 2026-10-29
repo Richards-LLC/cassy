@@ -413,10 +413,36 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
   await journey.open();
   const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
-    await journey.stage(`Accounts at ${width} in ${colorScheme}`, async () => {
+    await journey.stage(`Header accounts control at ${width} in ${colorScheme}`, async () => {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
       await page.reload();
+      const accounts = page.getByRole("button", { name: "Accounts", exact: true });
+      await expect(accounts).toHaveAttribute("title", "Accounts");
+      await expect(accounts).toBeInViewport({ ratio: 1 });
+      const geometry = await accounts.evaluate(button => {
+        const box = (node: Element) => { const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
+        const header = button.closest(".conversation-list-heading")!;
+        const settings = header.querySelector("#command-palette-toggle")!;
+        const styles = getComputedStyle(header);
+        return { button: box(button), icon: box(button.querySelector("svg")!), settings: box(settings), header: box(header), inset: parseFloat(styles.paddingRight), gap: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-2")) };
+      });
+      if (process.env.DELIVERY_QA) {
+        mkdirSync(process.env.DELIVERY_QA, { recursive: true });
+        await page.screenshot({ path: join(process.env.DELIVERY_QA, `header-${width}-${colorScheme}.png`) });
+        writeFileSync(join(process.env.DELIVERY_QA, `header-${width}-${colorScheme}.json`), JSON.stringify(geometry, null, 2));
+      }
+      // cas-a9d3: a named button can still be an empty square or push settings out of its panel.
+      expect(geometry.icon.width).toBeGreaterThanOrEqual(16);
+      expect(geometry.icon.width).toBeLessThanOrEqual(24);
+      expect(geometry.icon.height).toBeGreaterThanOrEqual(16);
+      expect(geometry.icon.height).toBeLessThanOrEqual(24);
+      expect(geometry.icon.x).toBeGreaterThanOrEqual(geometry.button.x);
+      expect(geometry.icon.right).toBeLessThanOrEqual(geometry.button.right);
+      expect(geometry.settings.x - geometry.button.right).toBeGreaterThanOrEqual(geometry.gap);
+      expect(geometry.header.right - geometry.settings.right).toBeGreaterThanOrEqual(geometry.inset - 0.5);
+    });
+    await journey.stage(`Accounts at ${width} in ${colorScheme}`, async () => {
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(dialog.locator(".accounts-editor")).toBeHidden();

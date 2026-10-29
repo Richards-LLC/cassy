@@ -498,6 +498,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A named-profile startup brief written to Teams before pane readiness retries its wake once ready, submits once and leaves one Teams body (the real queue/PTY regression for cas-dd2e).
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
 - The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.
+- The Accounts entry remains visible before the dialog opens: a user-group glyph, tooltip and accessible name "Accounts", with the header actions inside the panel inset and spaced apart at desktop/390px in light/dark (cas-a9d3).
 
 ### HUB-J14 · Tell a project's live sessions apart
 
@@ -826,6 +827,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Expected experience
 
+- Live status never regresses when an older heartbeat read arrives late; an unmatched compaction start stops claiming activity after five minutes without newer native evidence (cas-d17e). Deferred status success/failure is covered by `status-refresh.test.ts`; native expiry and selected-session queue isolation by the Rust work-events and bridge session tests.
 - Work reads as quiet context between replies, never as a reply: one muted line, chips for task moves, rows a tap deeper.
 - The timeline replaces watching a worker's terminal: state, task and the last things it did, updating by itself.
 - Nothing heavy loads until asked: no work page while Show work is off, and no detail until a row opens.
@@ -840,7 +842,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 - **Entry:** `/commander/` at desktop 1280 and phone 390, a supervisor conversation with three live worker registrations
 - **Goal:** see the selected supervisor's workers, tasks, authoritative state and receipt trail alongside epic merge progress without opening raw output
-- **Touches:** `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/bridge/server/session.rs`, `cas-cli/src/bridge/server/types.rs`
+- **Touches:** `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/bridge/server/session.rs`, `cas-cli/src/bridge/server/types.rs`, `crates/cas-pty/src/pty.rs`
 - **Suite:** `hub-web/e2e/journeys/team.journey.ts`
 - **Gaps:** the protocol double supplies lifecycle events; acceptance additionally compares a read-only real hub with simultaneous factory worker and epic readbacks
 
@@ -854,12 +856,14 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 - Team loads only when selected, with the same session roster, task titles and epic progress as Tasks & progress.
 - Every receipt mark names actual lifecycle evidence; missing model, start time and evidence remain explicitly unreported.
+- A Codex worker's resolved spawn model reaches its CAS registration through the restricted MCP environment; an omitted model stays unreported across registration and status reads.
 - Needs you opens the existing conversation or fleet controls, and the conversation draft stays intact while viewing Team.
 
 #### Edge paths
 
 - An empty session roster stays empty; unrelated project workers never enter the view.
 - Unavailable or stale status remains labeled and a failed status request offers Retry staffing.
+- When the last active worker parks, its staffed release keeps priority over idle historical epics for bounded delivery reads; Git-proven merged tasks retain their merged state.
 - Forced colors and reduced motion preserve textual state and evidence without decorative animation or phone overflow.
 
 ### HUB-J27 · Run a supervisor command and read what the harness did
@@ -874,14 +878,17 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 1. Choose Usage from the slash palette with the keyboard
 2. Read the observed native result without resending the command
-3. Cancel Clear, then confirm Exit for the named supervisor
-4. Settle Exit from the ended catalog after its status request loses the daemon
-5. Open the quick controls and read the permission explanation
-6. Read adjacent Raw output and return by keyboard
+3. Send pasted paths and unknown slash text as messages (cas-62ea)
+4. Submit an exact Usage token from the composer (cas-62ea)
+5. Cancel Clear, then confirm Exit for the named supervisor
+6. Settle Exit from the ended catalog after its status request loses the daemon
+7. Open the quick controls and read the permission explanation
+8. Read adjacent Raw output and return by keyboard
 
 #### Expected experience
 
 - Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
+- Only an exact supported first token reserves a command. Paths such as `/home/pippenz/notes.md`, unknown slash text and `//usage` send as ordinary messages; prefix suggestions still require an explicit choice (cas-62ea). A leading space also sends a supported command as ordinary text.
 - Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
 - After a disconnect refusal followed by an authenticated ended catalog, Exit is observed without a not-sent/retry claim or mutation replay; an earlier Usage keeps its own observed result (cas-7f2a).
 - Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.

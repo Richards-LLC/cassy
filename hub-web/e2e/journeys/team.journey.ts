@@ -10,7 +10,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       const names = ["swift-lark-3", "quiet-owl-7", "brisk-wren-9"];
       const fleet: FleetWorld = {
         agents: names.map((name, i) => ({ name, generation: 1, status: "active", current_task: `task-${i}`, liveness: i === 0 ? "executing" : "waiting_for_input",
-          harness: "codex", model: "gpt-6.1", task_started_at: new Date(journeyNow() - 42 * 60_000).toISOString(),
+          harness: "codex", model: i === 2 ? undefined : "gpt-6.1", task_started_at: new Date(journeyNow() - 42 * 60_000).toISOString(),
           recent_trail: [{ step: "started", reference: "event:1" }], latest_activity: { summary: "RAW TOOL OUTPUT MUST STAY PRIVATE" } })),
         tasks: names.map((name, i) => ({ id: `task-${i}`, title: ["Build the Team view", "Review the delivery", "Write the notes"][i], status: i === 1 ? "awaiting_merge" : "in_progress", epic_id: "release", assignee: name, updated_at: new Date(journeyNow()).toISOString() })),
         epics: [{ id: "release", title: "Commander staffing release", status: "inprogress", progress: { total: 8, merged: 3, merges_per_hour: 1.5, last_merged_at: new Date(journeyNow()).toISOString() } }], focused_epic: "release", spawnNames: [],
@@ -31,6 +31,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel.locator(".team-lane")).toHaveCount(3);
         await expect(panel).toContainText("3 of 8 merged");
         await expect(panel).toContainText("Build the Team view");
+        await expect(panel.locator('.team-lane[data-worker="swift-lark-3"] .team-model')).toHaveText("codex · gpt-6.1");
+        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-model')).toHaveText("codex · Model not reported");
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();
         expect(hub.frames.filter(frame => ["ScrollbackRequest", "WorkEventsRequest", "WorkEventDetailRequest"].includes(frame.kind))).toEqual([]);

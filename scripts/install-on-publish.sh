@@ -5,15 +5,15 @@
 #   scripts/install-on-publish.sh --uninstall   # remove it
 #   scripts/install-on-publish.sh --once        # one check; what the timer runs
 #
-# Trigger: a systemd user timer runs --once every 60 s. Each run makes one
-# authenticated GitHub API call (latest release), 60 of gh's 5,000 calls an
-# hour. It was chosen over the alternatives because it is the smallest thing
+# Trigger: a systemd user timer (Linux) or LaunchAgent (macOS) runs --once
+# every 60 s. Each run makes one authenticated GitHub API call (latest release),
+# 60 of gh's 5,000 calls an hour. It was chosen over the alternatives because it is the smallest thing
 # that keeps working: a webhook cannot reach this host; the GitHub release
 # event has nothing on this host to deliver to; and a watcher inside the cas
 # daemon would be Rust that only a new release could ship, would stop when the
 # daemon stops, and would update the binary it is running. The timer survives
-# reboots and daemon restarts, and its journal is the install log
-# (`journalctl --user -u cassy-install-on-publish`).
+# reboots and daemon restarts. Linux logs go to the systemd journal; macOS
+# logs go to ~/.local/state/cassy/install-on-publish.log (or XDG_STATE_HOME).
 #
 # When the latest release is newer than `cas --version`, --once runs
 # `cas update --yes --version <x.y.z>`, checks `cas --version`, and completes
@@ -34,13 +34,69 @@ state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/cassy"
 state_file="$state_dir/install-on-publish.last-failure"
 retry_seconds="${RELEASE_INSTALL_RETRY_SECONDS:-600}"
 unit_name=cassy-install-on-publish
+agent_label=dev.cassy.install-on-publish
+platform="$(uname -s)"
 script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 log() { printf 'install-on-publish: %s\n' "$*"; }
 now() { printf '%s\n' "${RELEASE_INSTALL_NOW:-$(date -u +%s)}"; }
-iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+iso() {
+    if [[ "$platform" == Darwin ]]; then
+        date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
+    else
+        date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+    fi
+}
+
+xml() { printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
+
+install_agent() {
+    local libexec="$HOME/.local/libexec/cassy" agents="$HOME/Library/LaunchAgents"
+    local plist="$HOME/Library/LaunchAgents/$agent_label.plist" domain
+    local resolved_cas resolved_gh
+    domain="gui/$(id -u)"
+    resolved_cas="$(command -v "$cas_bin")"
+    resolved_gh="$(command -v "$gh_bin")"
+    mkdir -p "$libexec" "$agents" "$state_dir"
+    # Unload the old job before replacing its executable on a reinstall.
+    launchctl bootout "$domain" "$plist" 2>/dev/null || true
+    install -m 0755 "$script_path" "$libexec/install-on-publish.sh"
+    cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>$agent_label</string>
+    <key>ProgramArguments</key><array>
+        <string>$(xml "$libexec/install-on-publish.sh")</string><string>--once</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>StartInterval</key><integer>60</integer>
+    <key>EnvironmentVariables</key><dict>
+        <key>PATH</key><string>$(xml "$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")</string>
+        <key>CAS_BIN</key><string>$(xml "$resolved_cas")</string>
+        <key>GH_BIN</key><string>$(xml "$resolved_gh")</string>
+        <key>CAS_RELEASE_REPO</key><string>$(xml "$repo")</string>
+        <key>XDG_STATE_HOME</key><string>$(xml "${XDG_STATE_HOME:-$HOME/.local/state}")</string>
+    </dict>
+    <key>StandardOutPath</key><string>$(xml "$state_dir/install-on-publish.log")</string>
+    <key>StandardErrorPath</key><string>$(xml "$state_dir/install-on-publish.log")</string>
+</dict></plist>
+EOF
+    chmod 0644 "$plist"
+    launchctl enable "$domain/$agent_label"
+    launchctl bootstrap "$domain" "$plist"
+    log "installed $agent_label LaunchAgent; logs: $state_dir/install-on-publish.log"
+}
+
+uninstall_agent() {
+    local plist="$HOME/Library/LaunchAgents/$agent_label.plist"
+    launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
+    rm -f "$plist" "$HOME/.local/libexec/cassy/install-on-publish.sh"
+    log "removed $agent_label LaunchAgent"
+}
 
 install_units() {
+    if [[ "$platform" == Darwin ]]; then install_agent; return; fi
     local libexec="$HOME/.local/libexec/cassy" units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     local source_dir
     source_dir="$(cd "$(dirname "$script_path")/.." && pwd)/ops/systemd"
@@ -54,6 +110,7 @@ install_units() {
 }
 
 uninstall_units() {
+    if [[ "$platform" == Darwin ]]; then uninstall_agent; return; fi
     local units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     systemctl --user disable --now "$unit_name.timer" 2>/dev/null || true
     rm -f "$units/$unit_name.service" "$units/$unit_name.timer" "$HOME/.local/libexec/cassy/install-on-publish.sh"
@@ -71,7 +128,7 @@ installed_version() {
 
 # Replace "Installed: pending." with the install time and the full timer.
 complete_timer() {
-    local tag="$1" installed_at="$2" body notes marker pr opened minutes host
+    local tag="$1" installed_at="$2" body notes marker pr opened minutes host replacement
     body="$("$gh_bin" api "repos/$repo/releases/tags/$tag" --jq .body 2>/dev/null)" || {
         log "could not read the $tag release notes; timer not completed"
         return 0
@@ -102,6 +159,15 @@ complete_timer() {
     rm -f "$notes"
 }
 
+update_release() {
+    if [[ "$platform" == Darwin ]]; then
+        # Stock macOS has Perl but no GNU timeout. The alarm survives exec.
+        perl -e 'alarm 900; exec @ARGV or die "exec: $!\n"' "$cas_bin" update --yes --version "$1"
+    else
+        timeout 900 "$cas_bin" update --yes --version "$1"
+    fi
+}
+
 run_once() {
     local tag latest current started last_version last_at
     tag="$("$gh_bin" api "repos/$repo/releases/latest" --jq .tag_name 2>/dev/null)" || {
@@ -122,7 +188,7 @@ run_once() {
     fi
     started="$(now)"
     log "installing $tag over ${current:-nothing}"
-    if timeout 900 "$cas_bin" update --yes --version "$latest" && [[ "$(installed_version)" == "$latest" ]]; then
+    if update_release "$latest" && [[ "$(installed_version)" == "$latest" ]]; then
         rm -f "$state_file"
         log "installed $tag in $(( $(now) - started )) s"
         complete_timer "$tag" "$(now)"
@@ -139,8 +205,16 @@ case "${1:---once}" in
     --uninstall) uninstall_units ;;
     --once)
         mkdir -p "$state_dir"
-        exec 9>"$state_dir/install-on-publish.lock"
-        flock -n 9 || { log "another install check is running"; exit 0; }
+        if [[ "$platform" == Darwin ]]; then
+            # shlock atomically claims a PID lock and recovers a dead owner's lock.
+            shlock -p "$$" -f "$state_dir/install-on-publish.lock" || { log "another install check is running"; exit 0; }
+            trap 'rm -f "$state_dir/install-on-publish.lock"' EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+        else
+            exec 9>"$state_dir/install-on-publish.lock"
+            flock -n 9 || { log "another install check is running"; exit 0; }
+        fi
         run_once
         ;;
     -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' ;;

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::bounded_process::{Deadline, run_command};
+use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedRepo {
@@ -37,11 +37,24 @@ pub(crate) fn origin_slug(cwd: &Path, timeout: Duration) -> Result<Option<String
     let mut git = Command::new("git");
     // Read the configured identity before Git's url.*.insteadOf transport
     // rewriting (SSH aliases and local fixture servers are not repository IDs).
-    git.current_dir(cwd).args(["config", "--get", "remote.origin.url"]);
-    let output = run_command(&mut git, Deadline::after(timeout), timeout)
-        .map_err(|_| "cannot inspect GitHub origin (bounded Git lookup unavailable)".to_string())?;
-    if !output.status.success() {
+    git.current_dir(cwd)
+        .args(["config", "--get", "remote.origin.url"]);
+    let output = run_command(&mut git, Deadline::after(timeout), timeout).map_err(|error| {
+        match error {
+            BoundedCommandError::TimedOut => "GitHub origin lookup timed out",
+            BoundedCommandError::Io => {
+                "GitHub origin lookup unavailable (cannot start or capture git)"
+            }
+        }
+        .to_string()
+    })?;
+    // `git config --get` exits 1 for an unset key. Other failures, such as
+    // an unreadable/malformed config, must not masquerade as absent origin.
+    if output.status.code() == Some(1) {
         return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(format!("GitHub origin lookup failed ({})", output.status));
     }
     Ok(
         crate::cli::integrate::github::parse_origin_url(&String::from_utf8_lossy(&output.stdout))
@@ -70,7 +83,14 @@ pub(crate) fn resolve_slug(
         "nameWithOwner",
     ]);
     let output = run_command(&mut command, Deadline::after(timeout), timeout)
-        .map_err(|_| "canonical GitHub repository lookup unavailable or timed out".to_string())?;
+        .map_err(|error| match error {
+            BoundedCommandError::TimedOut => {
+                format!("canonical GitHub repository lookup timed out for origin {origin}")
+            }
+            BoundedCommandError::Io => format!(
+                "canonical GitHub repository lookup unavailable for origin {origin} (cannot start or capture gh)"
+            ),
+        })?;
     if !output.status.success() {
         // No stderr here: gh can include credentials in an error. The CI
         // receipt names the failed operation, not arbitrary provider output.
@@ -155,7 +175,6 @@ pub(crate) fn merge_queue_enabled(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +214,49 @@ mod tests {
             "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"bad/repo/extra\"}'\n",
         );
         assert!(resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).is_err());
-        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
-        assert!(resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).is_err());
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\necho 'GH_TOKEN=fixture-secret' >&2\nexit 7\n",
+        );
+        let failed =
+            resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).unwrap_err();
+        assert!(failed.contains("exit status: 7"), "{failed}");
+        assert!(!failed.contains("fixture-secret"), "{failed}");
+        let timed_out = resolve_slug("pippenz/cas", temp.path(), &gh, Duration::ZERO).unwrap_err();
+        assert!(timed_out.contains("timed out"), "{timed_out}");
+        assert!(!timed_out.contains("unavailable"), "{timed_out}");
+        let unavailable = resolve_slug(
+            "pippenz/cas",
+            temp.path(),
+            &temp.path().join("missing-gh"),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(unavailable.contains("unavailable"), "{unavailable}");
+        assert!(!unavailable.contains("timed out"), "{unavailable}");
+    }
+
+    #[test]
+    fn github_origin_inspection_distinguishes_git_failure_from_absent_origin_cas_e1ca() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(temp.path())
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            origin_slug(temp.path(), Duration::from_secs(2)).unwrap(),
+            None
+        );
+        std::fs::write(temp.path().join(".git/config"), "[broken\n").unwrap();
+        let failed = origin_slug(temp.path(), Duration::from_secs(2)).unwrap_err();
+        assert!(failed.contains("GitHub origin lookup failed"), "{failed}");
+        assert!(failed.contains("128"), "{failed}");
+        let timed_out = origin_slug(temp.path(), Duration::ZERO).unwrap_err();
+        assert!(timed_out.contains("timed out"), "{timed_out}");
     }
 }

@@ -2005,8 +2005,8 @@ while read local_ref local_sha remote_ref remote_sha; do
     [ \"$local_sha\" = \"$zero_sha\" ] || ! git merge-base --is-ancestor \"$remote_sha\" \"$local_sha\";
   }; then
     record_push_rejection \"$remote_ref\"
-    echo \"Cassy PUSH GUARD: refused non-fast-forward update to '$remote_ref'; the published tip is a delivery anchor.\" >&2
-    echo \"Cassy PUSH GUARD: merge the target in, don't rebase; preserve the published delivery history.\" >&2
+    echo \"Cassy PUSH GUARD: non-fast-forward would rewrite the parked delivery.\" >&2
+    echo \"Merge the target in, don't rebase.\" >&2
     exit 1
   fi
   refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha
@@ -5059,7 +5059,8 @@ mod tests {
         let stderr = String::from_utf8_lossy(&push.stderr);
         assert!(!push.status.success(), "a rewritten delivery must be refused: {stderr}");
         assert!(stderr.contains("Cassy PUSH GUARD"), "{stderr}");
-        assert!(stderr.contains("merge the target in, don't rebase"), "{stderr}");
+        assert!(stderr.contains("non-fast-forward would rewrite the parked delivery"), "{stderr}");
+        assert!(stderr.contains("Merge the target in, don't rebase."), "{stderr}");
         assert_eq!(
             String::from_utf8_lossy(&git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout).trim(),
             parked,

@@ -3203,6 +3203,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
    buttons, fields and sheet controls clear the bands. With no inset (portrait,
    or a desktop tab) env() is 0 and nothing moves. */
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .conversation-tabs { padding-left: calc(var(--space-4) + env(safe-area-inset-left)); padding-right: calc(var(--space-4) + env(safe-area-inset-right)); }
+  .team-panel { padding-left: calc(var(--space-3) + env(safe-area-inset-left)); padding-right: calc(var(--space-3) + env(safe-area-inset-right)); }
   #conversation-list { padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
   .compose-fab { margin-left: calc(12px + env(safe-area-inset-left)); margin-right: calc(12px + env(safe-area-inset-right)); }
   .conversation-shell .conversation-sidebar > footer { padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }

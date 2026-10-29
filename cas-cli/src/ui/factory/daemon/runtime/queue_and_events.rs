@@ -708,7 +708,7 @@ pub(crate) fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> Stri
     format!(
         "{}\n{}\n{}",
         first_message_provenance(queued),
-        commander_reply_framing(queued).unwrap_or_default(),
+        commander_reply_framing(queued).unwrap_or_default().trim_end(),
         queued.prompt,
     )
 }
@@ -9373,7 +9373,8 @@ impl FactoryDaemon {
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_framing(
                     &queued,
                 )
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .trim_end(),
                 prompt_with_instructions,
             );
 

@@ -1121,6 +1121,7 @@ mod supervisor_handoff_tests {
         let output = serde_json::to_value(output).unwrap();
         let context = output["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(context.contains("Answer each once in your final pane reply"), "{context}");
+        assert!(context.contains("explicit routing only for disabled or unmirrored delivery"), "{context}");
         assert!(!context.contains("Answer them with target=operator"), "{context}");
         handle_session_start(&start, Some(&root)).unwrap();
 

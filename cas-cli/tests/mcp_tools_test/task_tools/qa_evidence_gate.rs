@@ -362,7 +362,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed,
             "team={team}: the real close gate lost the peer verdict: {closed}");
         let notes = tasks.get(TASK).unwrap().notes;
-        let restored = notes.lines().find_map(|line| line.split_once("QA evidence bundle accepted: "))
+        let restored = notes.lines().rev().find_map(|line| line.split_once("QA evidence bundle accepted: "))
             .unwrap().1.split(" (head ").next().unwrap();
         let restored_trace = Path::new(restored).parent().unwrap().join("trace.zip");
         assert_eq!(std::fs::metadata(restored_trace).unwrap().modified().unwrap()

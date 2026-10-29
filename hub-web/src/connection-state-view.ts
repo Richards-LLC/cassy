@@ -39,6 +39,8 @@ export interface ConnectionSurfaceActions {
 }
 
 export interface ConnectionSurfaceOptions {
+  /** Name the machine on recovery controls, as the retained-thread banner does. */
+  readonly repairLabel?: string;
   /** Title while the attach is in progress; defaults to "Connecting to <session>…". */
   readonly openingTitle?: string;
   /**
@@ -192,12 +194,12 @@ export function connectingView(snapshot: ConnectionSnapshotView, now = Date.now(
   const elapsed = elapsedSeconds(snapshot, now);
   // A failure retrying cannot fix has nothing to disclose progressively: say
   // what broke and offer the escape hatch on the first frame.
-  const fatal = snapshot.fatal === true;
+  const stopped = snapshot.fatal === true || Boolean(snapshot.authFailure);
   return {
     elapsedSeconds: elapsed,
     elapsedLabel: formatElapsed(elapsed),
-    step: fatal || elapsed >= 5 ? snapshot.reason ?? STAGE_COPY[snapshot.stage] : undefined,
-    actionsAvailable: fatal || elapsed >= 15,
+    step: stopped || elapsed >= 5 ? snapshot.reason ?? STAGE_COPY[snapshot.stage] : undefined,
+    actionsAvailable: stopped || elapsed >= 15,
   };
 }
 
@@ -299,18 +301,19 @@ export function renderConnectionSurfaceInto(
   if (view.actionsAvailable) {
     const actionRow = document.createElement("div");
     actionRow.className = "terminal-connecting-actions";
-    const addAction = (label: string, action: (() => void) | undefined): void => {
+    const addAction = (label: string, action: (() => void) | undefined, accessibleLabel?: string): void => {
       if (!action) return;
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
+      if (accessibleLabel) button.setAttribute("aria-label", accessibleLabel);
       button.onclick = action;
       actionRow.append(button);
     };
-    addAction("Retry", actions.retry);
+    if (!snapshot.authFailure) addAction("Retry", actions.retry);
     addAction("Diagnose", actions.diagnose);
-    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing") {
-      addAction("Re-pair", actions.repair);
+    if (snapshot.authFailure) {
+      addAction("Re-pair", actions.repair, options.repairLabel);
     }
     if (actionRow.childElementCount > 0) target.append(actionRow);
   }

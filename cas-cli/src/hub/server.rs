@@ -27,6 +27,8 @@ use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid
 
 #[path = "composer_upload.rs"]
 mod composer_upload;
+#[path = "account_routes.rs"]
+mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
 
@@ -180,6 +182,8 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/account/enrollment",
             post(account_enrollment::<R>).options(preflight::<R>),
         )
+        .route("/v1/accounts", get(account_routes::list::<R>).options(preflight::<R>))
+        .route("/v1/accounts/operations", post(account_routes::operate::<R>).options(preflight::<R>))
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route(
             "/v1/launch/profiles",
@@ -664,6 +668,7 @@ async fn machine<R: SessionReadModel>(
                 "machine_multiplex_v2",
                 "tailscale_serve",
                 "cloud_device_suggestions",
+                "supervisor_commands",
             ],
             transport: state.metadata.transport,
             cloud_devices: state.metadata.cloud_devices,
@@ -1781,7 +1786,7 @@ mod launch_profile_tests {
                 logged_in: true,
                 is_default: false,
                 recommendation: None,
-                usage: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None,
                 exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
@@ -1789,7 +1794,7 @@ mod launch_profile_tests {
                 logged_in: false,
                 is_default: true,
                 recommendation: None,
-                usage: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None,
                 exclusion: None,
             },
         ];
@@ -1823,7 +1828,7 @@ mod launch_profile_tests {
             logged_in: true,
             is_default: true,
             recommendation: None,
-            usage: None,
+            usage: None, windows: Vec::new(), usage_observed_at: None,
             exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});
@@ -2968,11 +2973,19 @@ async fn handle_client_message(
     bytes: &[u8],
 ) -> anyhow::Result<()> {
     let (store, context) = auth.as_ref().context("authentication required")?;
-    let mut message: ClientMessage = serde_json::from_slice(bytes)?;
-    let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
-    let read_message = is_pane_read_message(&message);
     store.ensure_active_context(context, now)?;
+    let mut message: ClientMessage = match serde_json::from_slice(bytes) {
+        Ok(message) => message,
+        Err(error) => {
+            if serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|frame| frame.get("SupervisorCommand").is_some()) {
+                store.audit(Some(context), "denied", "supervisor_command_invalid", Some(Scope::PaneInput), Some(session), now)?;
+            }
+            return Err(error.into());
+        }
+    };
+    let scope = required_scope(&message).context("operation is not exposed by Commander")?;
+    let read_message = is_pane_read_message(&message);
     let allowed = if read_message {
         context.has(Scope::PaneRead)
     } else if matches!(&message, ClientMessage::SendMessage { .. }) {
@@ -2999,7 +3012,10 @@ async fn handle_client_message(
         }
         anyhow::bail!("authorization refused")
     }
-    if let ClientMessage::SendMessage { attribution, .. } = &mut message {
+    if let ClientMessage::SendMessage { attribution, .. }
+        | ClientMessage::SupervisorCommand { attribution, .. }
+        | ClientMessage::SupervisorCommandStatus { attribution, .. }
+        | ClientMessage::SupervisorCommandStep { attribution, .. } = &mut message {
         // cas-e8df: identity comes from the authenticated device session, never
         // from what the client put in the frame. Whatever labels arrived are
         // discarded here, and `operator_verified` is only ever set on this path.
@@ -3029,6 +3045,12 @@ async fn handle_client_message(
             device = %device_id,
             "forwarding Commander conversation history request"
         );
+    }
+    if let ClientMessage::SupervisorCommand { command, confirmed, client_ref, .. } = &message {
+        let action = format!("supervisor_command_{command:?}").to_ascii_lowercase();
+        store.audit_operation(context, "requested", &action, scope, session,
+            Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string()), now)?;
+        anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
     }
     if let Err(error) = connector.send(session, message).await {
         // cas-a0e2: the hub accepted the device and the message, but the
@@ -3087,7 +3109,8 @@ pub(crate) fn verified_attribution(context: &AuthContext) -> MessageAttribution 
 pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
     matches!(
         message,
-        ClientMessage::RequestPaneKeyframe { .. }
+        ClientMessage::SupervisorCommandStatus { .. }
+            | ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
             | ClientMessage::WorkEventsRequest { .. }
@@ -3603,6 +3626,7 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PendingRefKind {
     Send,
+    SupervisorCommand,
     History,
     /// Not a pending answer: this socket has read a work-events page, so the
     /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
@@ -3622,6 +3646,12 @@ pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRef
     client_message_ref(bytes)
         .map(|client_ref| (client_ref, PendingRefKind::Send))
         .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
+        .or_else(|| match serde_json::from_slice::<ClientMessage>(bytes).ok()? {
+            ClientMessage::SupervisorCommand { client_ref, .. }
+            | ClientMessage::SupervisorCommandStatus { client_ref, .. }
+            | ClientMessage::SupervisorCommandStep { client_ref, .. } => Some((client_ref, PendingRefKind::SupervisorCommand)),
+            _ => None,
+        })
 }
 
 /// What the browser is told when the session's daemon upstream could not take
@@ -3727,6 +3757,18 @@ pub(crate) fn admit_correlated_daemon_frame(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> bool {
+    if let Ok(DaemonMessage::SupervisorCommandReceipt { receipt }) = serde_json::from_slice::<DaemonMessage>(bytes) {
+        let Some((store, context)) = auth else { return false };
+        if context.device_id != receipt.device_id { return false; }
+        if pending.get(&(session.to_owned(), receipt.client_ref.clone())) != Some(&PendingRefKind::SupervisorCommand) { return false; }
+        let detail = serde_json::json!({"client_ref": receipt.client_ref, "command": receipt.command, "phase": receipt.phase}).to_string();
+        if store.audit_operation(context, match receipt.phase {
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Submitted => "submitted",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Unconfirmed => "unconfirmed",
+        }, "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
+    }
     match correlate_daemon_frame(pending, session, bytes) {
         Correlation::Refused => false,
         Correlation::Uncorrelated | Correlation::Consumed(None) => true,
@@ -3760,11 +3802,12 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             Some(PendingRefKind::Send) => {
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
-            Some(PendingRefKind::History) => Correlation::Consumed(None),
+            Some(PendingRefKind::History | PendingRefKind::SupervisorCommand) => Correlation::Consumed(None),
             Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
+        Ok(DaemonMessage::SupervisorCommandReceipt { receipt }) => consume(receipt.client_ref, None),
         Ok(DaemonMessage::MessageQueued {
             client_ref,
             notification_id,
@@ -4842,6 +4885,52 @@ mod catalog_visibility_tests {
 mod upstream_unavailable_tests {
     use super::*;
     use crate::hub::SessionMultiplexer;
+
+    #[tokio::test]
+    async fn supervisor_commands_require_control_confirmation_and_private_audited_receipts() {
+        use crate::ui::factory::supervisor_commands::{SupervisorCommand, SupervisorCommandPhase, SupervisorCommandReceipt};
+        let temp = crate::test_support::private_hub_tempdir();
+        let root = temp.path().join("hub");
+        let auth = AuthStore::open(&root, "command-machine").unwrap();
+        let now = chrono::Utc::now();
+        let scopes: std::collections::BTreeSet<Scope> = [Scope::PaneInput, Scope::PaneRead].into_iter().collect();
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), now).unwrap();
+        let credential = auth.exchange_pairing(PairingExchange::test_fixture(invitation.token, "command-machine", "https://controller.example", scopes.clone()), now).unwrap();
+        let context = AuthContext {
+            device_id: credential.device_id, credential_id: credential.credential_id,
+            device_label: "phone".into(), operator_label: "Operator".into(),
+            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(),
+        };
+        let trusted = Some((auth.clone(), context.clone()));
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let command = |name: &str, confirmed: bool| serde_json::to_vec(&serde_json::json!({
+            "SupervisorCommand": {"command": name, "confirmed": confirmed, "client_ref": "cmd-test"}
+        })).unwrap();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&no_lease), "a command without control reached the daemon boundary");
+        auth.acquire_lease(&context, "command-session", now).unwrap();
+        let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false)).await.unwrap_err();
+        assert!(unconfirmed.to_string().contains("confirmation"));
+        let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true)).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&arbitrary));
+        let allowed = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        assert!(is_upstream_unavailable(&allowed), "allowlisted leased command did not reach the connector: {allowed:#}");
+
+        let mut pending = PendingRefs::new();
+        pending.insert(("command-session".into(), "cmd-test".into()), PendingRefKind::SupervisorCommand);
+        let mut receipt = SupervisorCommandReceipt { device_id: "another-device".into(), client_ref: "cmd-test".into(), command: SupervisorCommand::Compact,
+            phase: SupervisorCommandPhase::Observed, detail: "Native context reset observed".into(), output: String::new(), interactive: false };
+        let frame = |receipt| serde_json::to_vec(&DaemonMessage::SupervisorCommandReceipt { receipt }).unwrap();
+        assert!(!admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &frame(receipt.clone())));
+        receipt.device_id = context.device_id;
+        let bytes = frame(receipt);
+        assert!(admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &bytes));
+        assert!(!admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &bytes));
+        let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = audit.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(rows.iter().any(|row| row["action"] == "supervisor_command_invalid" && row["outcome"] == "denied"));
+        assert!(rows.iter().any(|row| row["action"] == "supervisor_command_receipt" && row["outcome"] == "observed"));
+    }
 
     /// Semantic sends need message:send alone, even without a pane lease.
     /// They reach the upstream boundary; raw terminal input remains refused.

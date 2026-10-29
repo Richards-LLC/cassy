@@ -71,7 +71,6 @@ async fn machine_health_answers_while_subscription_catalog_is_busy() {
 /// provider environment; a machine-only pairing cannot read those identities.
 #[tokio::test]
 async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_c021() {
-    use base64::Engine as _;
     use chrono::Utc;
     use p256::ecdsa::SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
@@ -87,10 +86,6 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     }
     std::fs::write(claude.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"claude@example.test"}}"#).unwrap();
     std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"default-claude@example.test"}}"#).unwrap();
-    for (dir, email) in [(&codex, "codex@example.test"), (&home.join(".codex"), "default-codex@example.test")] {
-        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"email":"{email}"}}"#));
-        std::fs::write(dir.join("auth.json"), serde_json::json!({"tokens":{"id_token":format!("header.{claims}.signature")}}).to_string()).unwrap();
-    }
     let project = home.join("project");
     let cas_root = init_cas_dir(&project).unwrap();
     std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"catalog-project\"\n").unwrap();
@@ -98,11 +93,13 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     env.set("CAS_ROOT", unrelated);
     let agents = SqliteAgentStore::open(&cas_root).unwrap();
     agents.init().unwrap();
+    // Codex has no proven non-secret email source. Its recorded account
+    // directory is enough for catalog coverage; no token fixture is needed.
     let cases = [
         ("claude", "claude", Some(claude.clone()), Some("claude@example.test")),
-        ("codex", "codex", Some(codex.clone()), Some("codex@example.test")),
+        ("codex", "codex", Some(codex.clone()), None),
         ("default-claude", "claude", Some(home.join(".claude")), Some("default-claude@example.test")),
-        ("default-codex", "codex", Some(home.join(".codex")), Some("default-codex@example.test")),
+        ("default-codex", "codex", Some(home.join(".codex")), None),
         ("grok", "grok", None, None),
         ("opencode", "opencode", None, None),
         ("legacy", "claude", None, None),
@@ -2729,6 +2726,21 @@ fn hub_audit_group_commit_rotates_and_bounds_retention() {
     #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(root.join("audit.jsonl.3")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn supervisor_commands_are_a_closed_leased_control_without_freeform_input() {
+    let known: ClientMessage = serde_json::from_value(serde_json::json!({
+        "SupervisorCommand": { "command": "compact", "client_ref": "cmd-1", "confirmed": false }
+    })).expect("an allowlisted supervisor command is exposed");
+    assert_eq!(required_scope(&known), Some(Scope::PaneInput));
+    assert!(!super::server::is_pane_read_message(&known));
+    for command in ["/compact", "compact; exit", "unknown", "model gpt-anything", "exit\nwhoami"] {
+        let frame = serde_json::json!({"SupervisorCommand": {
+            "command": command, "client_ref": "cmd-2", "confirmed": true
+        }});
+        assert!(serde_json::from_value::<ClientMessage>(frame).is_err(), "arbitrary command accepted: {command}");
     }
 }
 
@@ -6139,3 +6151,6 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert!(rows[0].ended.is_none());
     assert_eq!(rows[0].machine_online, Some(true));
 }
+
+#[path = "accounts_route_tests.rs"]
+mod accounts_route_tests;

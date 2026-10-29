@@ -4,6 +4,7 @@ import { CONFIRM_CUE_MS, ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conve
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
+import { livePhase } from "./live-phase";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
 function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to: number | null = null): OperatorReply {
@@ -11,6 +12,43 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
+  it("shows measured lifecycle phases, freezes unavailable clocks and keeps waiting still", () => {
+    const history = new ConversationHistory();
+    history.reply(reply(1, "status", "A real lifecycle follows."), at(9, 0));
+    let now = 1000;
+    let state = { connected: true, stale: false, waiting: false, now, receivedAt: now };
+    let snapshot = { event_id: "phase", kind: "notice", lifecycle: { id: "turn", stage: "phase", phase: "compacting", started_at: "2026-10-28T12:00:00Z", ended_at: undefined as string | undefined }, observed_at: "2026-10-28T12:00:42Z", stale: false };
+    const view = new ConversationView(document, history, { supervisor: "sup", working: () => true, ...{ phase: () => livePhase(snapshot, { ...state, now }) } });
+    onTestFinished(() => view.dispose()); document.body.replaceChildren(view.element); view.update();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Compacting");
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
+    now += 1000; view.refreshWorking();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:43");
+    expect(livePhase(snapshot, { ...state, now, waiting: true })?.label).toBe("Compacting");
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, phase: "waiting_on_you" } };
+    state = { ...state, waiting: true }; view.refreshWorking();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Waiting on you");
+    expect(view.element.querySelector(".phase-line")?.getAttribute("data-active")).toBe("false");
+    expect(view.element.querySelector(".phase-clock")).toBeNull();
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, phase: "compacting" } };
+    state = { ...state, waiting: false, stale: true }; view.refreshWorking();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Update stale");
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
+    state = { ...state, stale: false, connected: false }; view.refreshWorking();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Disconnected");
+    expect(view.element.querySelector(".phase-line")?.getAttribute("data-active")).toBe("false");
+    state = { ...state, connected: true };
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, stage: "end", ended_at: "2026-10-28T12:00:45Z" } };
+    view.refreshWorking();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:45");
+    now += 60_000; view.refreshWorking();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:45");
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, ended_at: "2026-10-28T12:00:46Z" } };
+    view.update();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:46");
+    expect(livePhase(null, { ...state, now, working: true })?.label).toBe("Phase not reported");
+    expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
+  });
   it("keeps a short fenced status as a code frame with exact Copy and retained Wrap", async () => {
     const source = '\tconst literal = "雪";  \r\n| literal | source |\r\n| --- | --- |\r\n\r\n  done();';
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -386,12 +424,41 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | **412** | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
     const table = view.element.querySelector<HTMLElement>(".evi")!;
     expect(table.dataset.columns).toBe("3");
+    expect(table.querySelector("table tbody")).not.toBeNull();
     expect(table.querySelectorAll(".evi-row")).toHaveLength(3);
-    expect(table.querySelector(".evi-head span")?.textContent).toBe("pack");
+    expect(table.querySelector("thead th[scope=col]")?.textContent).toBe("pack");
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");
-    expect([...table.querySelectorAll('.evi-number[role="cell"]')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
+    expect([...table.querySelectorAll('td.evi-number')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
+  });
+  it.each(["answer", "status"] as const)("copies a %s table as original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async (kind) => {
+    const markdown = '| item | note | result |\r\n| --- | --- | --- |\r\n| `a\\|b` | said "ready", now | **pass** |';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { Reflect.deleteProperty(navigator, "clipboard"); });
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(0, "status", "Checking evidence"), at(9, 29));
+    history.reply(reply(1, kind, markdown), at(9, 30)); view.update();
+    expect(view.element.querySelector(".coalesce")?.textContent).toContain("Checking evidence");
+    expect([...view.element.querySelectorAll("thead th")].map(cell => cell.textContent)).toEqual(["item", "note", "result"]);
+    const table = view.element.querySelector<HTMLElement>(".evi")!;
+    const buttons = [...table.querySelectorAll<HTMLButtonElement>("button")];
+    buttons.find(button => button.textContent === "Copy Markdown")!.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("Markdown copied"));
+    expect(writeText).toHaveBeenLastCalledWith(markdown);
+    const csv = buttons.find(button => button.textContent === "Copy CSV")!;
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
+    expect(writeText).toHaveBeenLastCalledWith('item,note,result\r\na|b,"said ""ready"", now",pass');
+    writeText.mockRejectedValueOnce(new Error("Permission denied"));
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toContain("Copy failed"));
+    expect(csv.disabled).toBe(false);
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
+    view.dispose();
   });
   it("renders markdown bodies in the thread and a plain-text waiting bookmark", () => {
     const unregister = registerTurnRenderer("ask", (_reply, context) => {

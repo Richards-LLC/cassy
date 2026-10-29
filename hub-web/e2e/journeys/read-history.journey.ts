@@ -37,7 +37,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
           writeFileSync(`${process.env.DELIVERY_QA}/table-${index + 2}.html`, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style><body><div class="thread"><div class="bub">${await table.evaluate(node => node.outerHTML)}</div></div></body></html>`);
         }
         const rendered = await table.evaluate(node => {
-          const cells = [...node.querySelectorAll<HTMLElement>('[role="cell"]')];
+          const cells = [...node.querySelectorAll<HTMLElement>('td')];
           // A word's Range stays on one line, including C2 in the three-column case.
           const words = cells.flatMap(cell => {
             const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
@@ -59,7 +59,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
             proseAlignment: getComputedStyle(cells[1]!).textAlign,
             proseFont: getComputedStyle(cells[1]!).fontFamily,
             bodyFont: getComputedStyle(document.querySelector(".bub")!).fontFamily,
-            overflow: getComputedStyle(node).overflowX,
+            overflow: getComputedStyle(node.parentElement!).overflowX,
             right: node.getBoundingClientRect().right,
             pageWidth: document.documentElement.clientWidth,
             pageScrollWidth: document.documentElement.scrollWidth,
@@ -80,6 +80,87 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
       }
     });
   }
+});
+
+test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const path = `src/${"a-long-path-segment/".repeat(8)}report.ts`;
+  const markdown = `| Item | Note | Result |\r\n| --- | --- | --- |\r\n| \`a\\|b\` | said "ready", now | **pass** |\r\n| \`${path}\` | inspect [receipt](https://example.org/receipt) | 1 flake |`;
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  hub.supervisorSays(PELICAN, `# Evidence ready to reuse\n\n${markdown}\n\n~~~txt\n| literal | source |\n| --- | --- |\n~~~`);
+  const log = page.getByRole("log");
+  const table = log.getByRole("table", { name: "Evidence", exact: true }).filter({ has: page.getByRole("columnheader", { name: "Item", exact: true }) });
+  const sheet = table.locator("xpath=../..");
+  await journey.stage("Read a native table with escaped pipes and copy its two formats", async () => {
+    await expect(table).toHaveCount(1);
+    await expect(table.getByRole("columnheader")).toHaveText(["Item", "Note", "Result"]);
+    await expect(table.getByRole("cell").first()).toHaveText("a|b");
+    await expect(log.locator(".code-frame code")).toHaveText("| literal | source |\n| --- | --- |");
+    await expect(table.locator(".pass")).toHaveText("pass");
+    await expect(table.locator(".flake")).toHaveText("1 flake");
+    const copy = sheet.getByRole("button", { name: "Copy CSV", exact: true });
+    await copy.focus(); await page.keyboard.press("Enter");
+    await expect(sheet.getByRole("status")).toHaveText("CSV copied");
+    const csv = await page.evaluate(() => navigator.clipboard.readText());
+    expect(csv).toBe(`Item,Note,Result\r\na|b,"said ""ready"", now",pass\r\n${path},inspect receipt,1 flake`);
+    await page.keyboard.press("Shift+Tab");
+    await expect(sheet.getByRole("button", { name: "Copy Markdown", exact: true })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(sheet.getByRole("status")).toHaveText("Markdown copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(markdown);
+    if (process.env.TABLE_QA) {
+      mkdirSync(process.env.TABLE_QA, { recursive: true });
+      writeFileSync(`${process.env.TABLE_QA}/copied.csv`, csv);
+    }
+  });
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia({ colorScheme });
+    await journey.stage(`Read and copy a wrapping table at ${width} in ${colorScheme}`, async () => {
+      await sheet.scrollIntoViewIfNeeded();
+      expect(await table.evaluate(node => node.parentElement!.scrollWidth <= node.parentElement!.clientWidth + 1)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await expect(sheet.getByRole("button", { name: "Copy CSV", exact: true })).toBeVisible();
+      if (process.env.TABLE_QA) {
+        const dir = process.env.TABLE_QA;
+        await page.screenshot({ path: `${dir}/table-${width}-${colorScheme}.png` });
+        writeFileSync(`${dir}/final.aria.yml`, await sheet.ariaSnapshot());
+        writeFileSync(`${dir}/table.html`, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style><body><main class="thread"><div class="bub">${await sheet.evaluate(node => node.outerHTML)}</div></main></body></html>`);
+      }
+    });
+  }
+  await journey.stage("Read a short status table without folding plain progress into it (cas-2656)", async () => {
+    const short = "| Name | Value |\r\n| --- | --- |\r\n| quoted | comma, \"quote\" 雪 |";
+    hub.supervisorSays(PELICAN, "Checking evidence", { kind: "status" });
+    hub.supervisorSays(PELICAN, short, { kind: "status" });
+    const statusTable = log.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Name", exact: true }) });
+    await expect(statusTable.getByRole("columnheader")).toHaveText(["Name", "Value"]);
+    await expect(statusTable.getByRole("cell")).toHaveText(["quoted", 'comma, "quote" 雪']);
+    await expect(log.locator(".coalesce")).toHaveText("Checking evidence");
+    const controls = statusTable.locator("xpath=../..");
+    await controls.getByRole("button", { name: "Copy CSV", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('Name,Value\r\nquoted,"comma, ""quote"" 雪"');
+    await controls.getByRole("button", { name: "Copy Markdown", exact: true }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(short);
+  });
+  await journey.stage("Retry after clipboard refusal and read a headerless empty cell", async () => {
+    await page.evaluate(() => { Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: () => Promise.reject(new Error("Permission denied")) }); });
+    const copy = sheet.getByRole("button", { name: "Copy CSV", exact: true });
+    await copy.click();
+    await expect(sheet.getByRole("status")).toContainText("Copy failed");
+    await expect(copy).toBeEnabled();
+    await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
+    await copy.click();
+    await expect(sheet.getByRole("status")).toHaveText("CSV copied");
+    hub.supervisorSays(PELICAN, "| first | |\n| second | value |", { kind: "status" });
+    const headerless = log.getByRole("table").last();
+    await expect(headerless.getByRole("columnheader")).toHaveCount(0);
+    await expect(headerless.getByRole("cell")).toHaveText(["first", "", "second", "value"]);
+    if (process.env.TABLE_QA) await page.screenshot({ path: `${process.env.TABLE_QA}/copy-recovery-headerless.png` });
+  });
 });
 
 test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", journeyPart, async ({ page, journey }) => {
@@ -646,6 +727,10 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     const tabs = tab.context().pages().length;
 
     await journey.stage(`See a page the supervisor sent, inline (${name})`, async () => {
+      // Page tickets are lazy: bring the persistent page card into view before
+      // asking for the iframe it creates. A shorter conversation viewport may
+      // leave the first card outside the observer's preload margin.
+      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
       const report = log.getByTitle("Gate report.html, a page from the supervisor");
       await report.scrollIntoViewIfNeeded();
       await expect(report).toHaveAttribute("sandbox", "");

@@ -1152,6 +1152,141 @@ impl WorkEventStores {
 /// Finds a supervisor's transcript.
 pub(crate) type TranscriptResolver<'a> = &'a dyn Fn(&SupervisorSource) -> Option<PathBuf>;
 
+/// The status endpoint's allowlisted lifecycle projection, with no work text.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct SupervisorPhase {
+    pub(crate) event_id: String,
+    pub(crate) kind: WorkEventKind,
+    pub(crate) lifecycle: WorkLifecycle,
+    pub(crate) observed_at: String,
+    pub(crate) stale: bool,
+}
+
+impl SupervisorPhase {
+    fn at(&self) -> Option<DateTime<Utc>> {
+        self.lifecycle.ended_at.as_deref().or(self.lifecycle.started_at.as_deref())
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc))
+    }
+}
+
+/// Native hooks bind the selected factory/name to an actual transcript even
+/// before its registration has caught up, and expose real compaction boundaries.
+/// Read only bounded current/prior-day log tails; never infer from model prose.
+#[derive(Default)]
+struct PhaseHooks {
+    transcript: Option<(SupervisorSource, PathBuf)>,
+    phase: Option<SupervisorPhase>,
+}
+
+fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str) -> PhaseHooks {
+    use std::io::Read;
+    let today = Utc::now().date_naive();
+    let mut rows = Vec::new();
+    for date in [today.pred_opt().unwrap_or(today), today] {
+        let path = cas_dir.join("logs").join(format!("factory-session-{date}.log"));
+        let Ok(mut file) = std::fs::File::open(path) else { continue };
+        let Ok(metadata) = file.metadata() else { continue };
+        let start = metadata.len().saturating_sub(64 * 1024);
+        if file.seek(SeekFrom::Start(start)).is_err() { continue; }
+        let mut bytes = Vec::new();
+        if file.take(64 * 1024).read_to_end(&mut bytes).is_err() { continue; }
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines().skip(usize::from(start > 0)) {
+            let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
+            if row["factory_session"] != session || row["agent"] != supervisor || row["role"] != "supervisor" { continue; }
+            if !matches!(row["event"].as_str(), Some("session_start_fired" | "pre_compact_fired")) { continue; }
+            if let Some(at) = timestamp(&row) { rows.push((at, row)); }
+        }
+    }
+    rows.sort_by_key(|(at, _)| *at);
+    let mut evidence = PhaseHooks::default();
+    let mut starts: HashMap<String, (String, String)> = HashMap::new();
+    for (at, row) in rows {
+        let Some(native_id) = row["session_id"].as_str().filter(|id| !id.is_empty()) else { continue };
+        if let (Some(path), Some(cli)) = (
+            row["transcript_path"].as_str().map(PathBuf::from).filter(|path| path.is_absolute() && path.is_file()),
+            row["harness"].as_str().and_then(|cli| cli.parse::<cas_mux::SupervisorCli>().ok())
+                .filter(|cli| matches!(cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex)),
+        ) {
+            evidence.transcript = Some((SupervisorSource {
+                agent_id: format!("phase-hook:{supervisor}"), agent_name: supervisor.into(),
+                harness_session: native_id.into(), cli, account_dir: None,
+            }, path));
+        }
+        let starting = row["event"] == "pre_compact_fired";
+        let completed = row["event"] == "session_start_fired" && row["source"] == "compact";
+        if row["event"] == "session_start_fired" && !completed {
+            // A new/cleared context cannot inherit the previous context's
+            // compaction interval when its transcript has no lifecycle yet.
+            starts.clear();
+            evidence.phase = None;
+        }
+        if !starting && !completed { continue; }
+        let event_id = format!("compact:{native_id}:{}", at.timestamp_millis());
+        let (id, started_at) = if starting {
+            starts.insert(native_id.into(), (event_id.clone(), at.to_rfc3339()));
+            (event_id.clone(), Some(at.to_rfc3339()))
+        } else {
+            starts.remove(native_id).map(|(id, at)| (id, Some(at))).unwrap_or((event_id.clone(), None))
+        };
+        evidence.phase = Some(SupervisorPhase {
+            event_id, kind: WorkEventKind::Notice,
+            lifecycle: WorkLifecycle {
+                id, stage: if starting { "phase" } else { "end" }.into(),
+                phase: Some(if starting { "compacting" } else { "compacted" }.into()),
+                outcome: completed.then(|| "success".into()), started_at,
+                ended_at: completed.then(|| at.to_rfc3339()),
+            },
+            observed_at: Utc::now().to_rfc3339(), stale: false,
+        });
+    }
+    evidence
+}
+
+/// Read the same v2 source for the ordinary status stream, without opting
+/// the browser into work rows or details. Keep each session's index incremental.
+pub(crate) fn supervisor_phase_for_session(
+    cas_dir: &Path,
+    project_path: &Path,
+    session: &str,
+    supervisor: &str,
+) -> Option<SupervisorPhase> {
+    type Cache = HashMap<(PathBuf, String), WorkEventIndex>;
+    static INDEXES: std::sync::LazyLock<Mutex<Cache>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    let agents = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?.into_iter()
+        .filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
+    let (agents, _) = crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents);
+    let mut scope = WorkEventScope::from_agents(session, &agents);
+    scope.supervisors.retain(|source| source.agent_name == supervisor);
+    let hooks = phase_hooks(cas_dir, session, supervisor);
+    if let Some((source, _)) = &hooks.transcript {
+        // The native hook names this exact factory and supervisor; do not
+        // combine it with a lagging pre-/clear registration or parse it twice.
+        scope.supervisors = vec![source.clone()];
+    }
+    let resolve = |source: &SupervisorSource| {
+        if let Some((hook_source, path)) = &hooks.transcript
+            && source == hook_source { return Some(path.clone()); }
+        crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
+            project_path.to_str(), &source.harness_session, source.cli, source.account_dir.as_deref(),
+        )
+    };
+    let mut indexes = INDEXES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (cas_dir.to_owned(), session.to_owned());
+    // Browsing ended conversations must not retain an index per historical
+    // factory forever. Eviction changes performance, never phase evidence.
+    if indexes.len() >= 16 && !indexes.contains_key(&key) {
+        let oldest = indexes.iter().min_by_key(|(_, index)| index.phase_observed_at.clone()).map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest { indexes.remove(&oldest); }
+    }
+    let transcript_phase = indexes.entry(key).or_default().supervisor_phase(&scope, &resolve);
+    match (transcript_phase, hooks.phase) {
+        (Some(native), Some(hook)) => Some(if hook.at() > native.at() { hook } else { native }),
+        (native, hook) => native.or(hook),
+    }
+}
+
 /// Per-daemon transcript indexes, kept across requests so paging and
 /// detail reads never re-parse a transcript.
 #[derive(Default)]
@@ -1160,15 +1295,51 @@ pub(crate) struct WorkEventIndex {
     /// Worker transcript paths the change probe stats (cas-ff22), resolved
     /// once per agent.
     probe_paths: HashMap<String, PathBuf>,
+    phase_observed_at: Option<String>,
 }
 
 impl WorkEventIndex {
+    pub(crate) fn supervisor_phase(
+        &mut self,
+        scope: &WorkEventScope,
+        resolve: TranscriptResolver<'_>,
+    ) -> Option<SupervisorPhase> {
+        let sources = scope.transcripts(None);
+        let fresh = self.refresh(scope, &sources, resolve);
+        if fresh { self.phase_observed_at = Some(Utc::now().to_rfc3339()); }
+        let events: Vec<&WorkEvent> = sources.iter()
+            .filter_map(|source| self.transcripts.get(&source.agent_id))
+            .flat_map(|index| index.events.iter().map(|item| &item.event))
+            .collect();
+        let latest = events.iter().copied().filter(|event| event.lifecycle.is_some())
+            .max_by_key(|event| {
+                event.lifecycle.as_ref().and_then(|life| life.ended_at.as_deref())
+                    .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| at.timestamp_millis())
+                    .unwrap_or_else(|| DateTime::parse_from_rfc3339(&event.at).map(|at| at.timestamp_millis()).unwrap_or(0))
+            })?;
+        let mut lifecycle = latest.lifecycle.clone()?;
+        // Only the matching operation's recorded start can complete an end.
+        // A compaction boundary has no in-progress interval to recover.
+        if lifecycle.stage == "end" && lifecycle.started_at.is_none() {
+            lifecycle.started_at = events.iter().filter_map(|event| event.lifecycle.as_ref())
+                .find(|prior| prior.id == lifecycle.id && prior.stage == "start")
+                .and_then(|prior| prior.started_at.clone());
+        }
+        Some(SupervisorPhase {
+            event_id: latest.id.clone(), kind: latest.kind, lifecycle,
+            observed_at: self.phase_observed_at.clone().unwrap_or_else(|| latest.at.clone()),
+            stale: !fresh,
+        })
+    }
+
     fn refresh(
         &mut self,
         scope: &WorkEventScope,
         sources: &[&SupervisorSource],
         resolve: TranscriptResolver<'_>,
-    ) {
+    ) -> bool {
+        let mut fresh = true;
         self.transcripts
             .retain(|id, _| scope.members().any(|source| &source.agent_id == id));
         for &source in sources {
@@ -1186,6 +1357,7 @@ impl WorkEventIndex {
                     }
                     None => {
                         self.transcripts.remove(&source.agent_id);
+                        fresh = false;
                         continue;
                     }
                 }
@@ -1193,9 +1365,11 @@ impl WorkEventIndex {
             if let Some(index) = self.transcripts.get_mut(&source.agent_id)
                 && let Err(error) = index.refresh()
             {
+                fresh = false;
                 tracing::debug!(agent = %source.agent_name, %error, "work events: transcript unreadable");
             }
         }
+        fresh
     }
 
     /// One page, newest `limit` events before `before`, oldest first.

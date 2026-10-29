@@ -417,6 +417,39 @@ test("HUB-J12 network switch: stale proofs retry with no re-pair request", journ
   });
 });
 
+test("HUB-J12 expired credentials before the first Welcome offer Re-pair on a phone", journeyPart, async ({ page, journey }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const releaseAttach = hub.holdAttach(PELICAN);
+  const recovery = page.locator("#conversation-stage");
+  await journey.stage("Expired credentials leave a named recovery on the phone", async () => {
+    await journey.open();
+    await chooseConversation(page);
+    await expect.poll(() => hub.hasSocket(PELICAN)).toBe(true);
+    await expect(page.locator(".conversation-loading")).toHaveText("Opening the conversation…");
+    // A failed refresh must remain expired, rather than the double silently
+    // supplying a new credential before the recovery surface is exercised.
+    await page.route("https://atlas.test/v1/auth/refresh", route => route.fulfill({
+      status: 401, json: { error: "unauthorized", reason: "expired", retryable: false },
+    }));
+    hub.refuseProofs("atlas", 1_000, "expired", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await expect(recovery).toContainText("Connection failed — re-pair required.");
+    await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/expired-auth-390.png` });
+    const repair = recovery.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true });
+    await expect(repair).toBeVisible();
+    await expect(repair).toBeInViewport();
+    await expect(recovery.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+    expect(hub.refusedProofs.some(refusal => refusal.reason === "expired")).toBe(true);
+  });
+  await journey.stage("The phone recovery opens pairing", async () => {
+    await recovery.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true }).click();
+    releaseAttach();
+    await expect(page.locator("#pair-dialog")).toBeVisible();
+  });
+});
+
 test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on desktop and phone", journeyPart, async ({ page, journey }) => {
   await journey.stage("A revoked pairing says so and offers Re-pair, on a phone too", async () => {
     // Keep the original two-machine world. A singleton fleet currently leaves
@@ -784,6 +817,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   const row = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
   const studioRow = list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row"));
   const footer = page.locator(".hub-footer-meta");
+  const expectFooter = async (count: string) => {
+    await expect(footer.locator(":scope > span").first()).toHaveText(count);
+    await expect(footer.getByTitle("Web client release and build")).toHaveText(/^Web \S/);
+  };
   const empty = page.getByText(/No live supervisors listed/);
   const outages = [
     ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
@@ -799,7 +836,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       if (down.length === 1) await expect(studioRow).not.toContainText("last known");
       else await expect(studioRow).toContainText("last known");
       await expect(empty).toHaveCount(0);
-      await expect(footer).toContainText(new RegExp(`^${count}Hub `));
+      await expectFooter(count);
     });
     await journey.stage(down.length === 1
       ? "Atlas reconnects — the full conversation count is live again"
@@ -808,7 +845,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       await clock.advance(10_000);
       await expect(header).toHaveText(" · Live");
       await expect(list).not.toContainText("last known");
-      await expect(footer).toContainText(/^2 conversationsHub /);
+      await expectFooter("2 conversations");
     });
   }
   await journey.stage("The machines answer with no live supervisors: the list is empty", async () => {
@@ -818,7 +855,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
     await expect(row).toHaveCount(0);
     await expect(studioRow).toHaveCount(0);
     await expect(empty).toBeVisible();
-    await expect(footer).toContainText(/^0 conversationsHub /);
+    await expectFooter("0 conversations");
   });
 });
 
@@ -830,12 +867,17 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
 test("HUB-J12 network switch: re-pairing by code says plainly that starting sessions must be allowed again (cas-0e14)", journeyPart, async ({ page, journey }) => {
   test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, relay: { machine: "atlas", claimAfter: 1, authorizeAfter: 2 } });
+  // Revoke before the first Welcome: the machine's verdict must replace a
+  // pending attach, not leave Opening visible beside Needs pairing (cas-3286).
+  const releaseAttach = hub.holdAttach(PELICAN);
   const dialog = page.locator("#pair-dialog");
   const header = page.locator("#conversation-connection");
 
   await journey.stage("A pairing that could start sessions is revoked", async () => {
     await journey.open();
     await chooseConversation(page);
+    await expect.poll(() => hub.hasSocket(PELICAN)).toBe(true);
+    await expect(page.locator(".conversation-loading")).toHaveText("Opening the conversation…");
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
@@ -844,7 +886,10 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
   });
 
   await journey.stage("Re-pair says starting sessions won't come with a code, and how to keep it", async () => {
-    await page.getByRole("button", { name: "Re-pair Atlas · Linux" }).filter({ visible: true }).first().click();
+    const recovery = page.locator("#conversation-stage");
+    await expect(recovery).toContainText("Connection failed — re-pair required.");
+    await recovery.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true }).click();
+    releaseAttach();
     await expect(dialog).toBeVisible();
     await expect(dialog.locator(".pair-status")).toContainText("starting sessions will need to be allowed again");
     // cas-093d F02: the command is its own code token with Copy, not prose
@@ -1158,6 +1203,16 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     await chooseConversation(page);
     await expect(header).toHaveText(" · Live");
     const before = [hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)];
+    // cas-c971: replaying another session must not fan out status/lease reads
+    // for the open conversation (over 2,000 requests in the original trace).
+    await clock.advance(1);
+    const replayStarted = clock.now();
+    const catalogsBeforeReplay = hub.catalogFetchCount("atlas");
+    const controlReads: string[] = [];
+    page.on("request", request => {
+      const path = new URL(request.url()).pathname;
+      if (path === `/v1/sessions/${PELICAN}/status` || path === `/v1/sessions/${PELICAN}/lease`) controlReads.push(path);
+    });
     atlas.sessions = [...ATLAS.sessions];
     hub.hold(peer);
     hub.drop(peer);
@@ -1175,12 +1230,31 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
       for (const event of [metadata, ...prior, { kind: "replay_complete" }, ...tail,
         metadata, ...prior, ...tail, { kind: "replay_complete" }]) emit(event);
     }, { prior, tail });
-    await hub.waitFor(() => hub.catalogFetchCount("atlas") > 1);
+    await hub.waitFor(() => hub.catalogFetchCount("atlas") > catalogsBeforeReplay);
+    await clock.advance(1);
+    expect(controlReads.length, "peer replay must not reload the open session's controls").toBe(0);
     for (let step = 0; step < 12; step++) {
       await clock.advance(1_000);
       await expect(header).toHaveText(" · Live");
       expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
     }
+    // cas-5f06 deliberately refreshes the selected live phase on the 5s
+    // health heartbeat; each control route is bounded by that schedule.
+    // Status must refresh, while a lease may remain cached.
+    const maxHeartbeatPairs = Math.ceil((clock.now() - replayStarted) / 5_000);
+    const statusReads = controlReads.filter(path => path.endsWith("/status")).length;
+    const leaseReads = controlReads.filter(path => path.endsWith("/lease")).length;
+    expect(statusReads).toBeGreaterThan(0);
+    expect(statusReads).toBeLessThanOrEqual(maxHeartbeatPairs);
+    expect(leaseReads).toBeLessThanOrEqual(maxHeartbeatPairs);
+    controlReads.length = 0;
+    // The selected session's live event must still refresh both controls.
+    await page.evaluate(session => {
+      (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number })
+        .__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "pane_added", session }));
+    }, PELICAN);
+    await clock.advance(1);
+    expect(controlReads.sort()).toEqual([`/v1/sessions/${PELICAN}/lease`, `/v1/sessions/${PELICAN}/status`]);
     // A route hint and repeated event-only loss must not condemn either
     // recently speaking terminal. Empty output preserves the visible frame.
     hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });

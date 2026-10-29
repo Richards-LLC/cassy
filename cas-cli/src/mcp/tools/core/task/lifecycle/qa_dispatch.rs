@@ -374,6 +374,8 @@ impl CasCore {
         }
         let claimed = cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
             .map_err(reject)?;
+        crate::qa_pass::sync::record(&self.cas_root, &pass.task_id)
+            .map_err(|error| reject(cas_store::StoreError::Other(error.to_string())))?;
         let preflight_note = preflight
             .map(|report| format!("\nQA preflight:\n{}", report.render()))
             .unwrap_or_default();
@@ -696,6 +698,9 @@ impl CasCore {
         let qa = config.qa();
         if qa.mode == crate::config::QaMode::Batch && requested.is_none() {
             let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            // Batch parks do not start QA, but an explicitly recorded review
+            // still owes its successor after a moved tip or rejection (GH #1001).
+            // gate_applies excludes the latest logged waiver in batch mode.
             if !crate::qa_pass::gate_applies(task, &qa, &passes) {
                 if let Some(head) = head {
                     crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
@@ -967,6 +972,9 @@ impl CasCore {
         {
             crate::qa_pass::github_gate::publish_pass_status(&self.cas_root, &current);
         }
+        if let Err(error) = crate::qa_pass::sync::record(&self.cas_root, &task.id) {
+            return Some(QaDispatchStatus::required(format!("QA snapshot could not be recorded: {error}")));
+        }
         Some(QaDispatchStatus {
             text: status,
             satisfied,
@@ -1004,13 +1012,18 @@ impl CasCore {
             &format!("QA task {qa_task_id} cancelled: {reason}"),
             now,
         ) {
-            Ok(Some(pass)) => format!(
+            Ok(Some(pass)) => {
+                if let Err(error) = crate::qa_pass::sync::record(&self.cas_root, &pass.task_id) {
+                    return format!(" QA withdrawal sync receipt failed: {error}");
+                }
+                format!(
                 " Independent QA round {} (pass {}) for {} @{} withdrawn.",
                 pass.round,
                 pass.id,
                 pass.task_id,
                 pass.head8()
-            ),
+            )
+            },
             Ok(None) => String::new(),
             Err(error) => format!(
                 " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
@@ -1772,6 +1785,8 @@ impl CasCore {
                 ));
             }
         }
+        crate::qa_pass::sync::record(&self.cas_root, task_id)
+            .map_err(|error| cas_store::StoreError::Other(error.to_string()))?;
         Ok((waived, status))
     }
 
@@ -1803,6 +1818,9 @@ impl CasCore {
     /// Cancel the QA work item of a withdrawn round (cas-5c38) so no
     /// reviewer is spawned for a pass that no longer binds the delivery.
     pub(crate) fn cancel_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
+        if let Err(error) = crate::qa_pass::sync::record(&self.cas_root, &pass.task_id) {
+            return format!("QA withdrawal sync receipt failed: {error}");
+        }
         let close_reason = format!(
             "Independent QA round {} for {} @{} withdrawn: {}",
             pass.round,
@@ -2051,7 +2069,7 @@ mod squash_close_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+            "[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n",
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -2487,7 +2505,7 @@ mod squash_close_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+            "[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n",
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -2651,7 +2669,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+            "[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n",
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -2844,7 +2862,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         git(repo, &["push", "-q", "origin", "main", WORKER_TASK_BRANCH]);
         let cas_dir = repo.join(".cas");
         std::fs::write(cas_dir.join("config.toml"),
-                "[project]\ncanonical_id='cas-9668-fixture'\n[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n").unwrap();
+                "[project]\ncanonical_id='cas-9668-fixture'\n[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n").unwrap();
         f.task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:cas-9668-fixture".into(),
             target_branch: "main".into(),

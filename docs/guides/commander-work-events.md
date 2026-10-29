@@ -151,6 +151,27 @@ does not interpret JavaScript or shell scripts to guess their inner operations.
 No adapter invents setup, approval waiting, completion or file changes from
 prose. Some harness versions do not publish every phase; absence is unknown.
 
+Session status also carries optional `supervisor_phase`: the selected supervisor's
+latest lifecycle, kind, event identity, observation time and stale flag, without
+labels, tool input/output or reasoning. It uses the same incremental v2 adapter.
+The hub resolves the selected session's project independently of its own
+`CAS_ROOT`. Native factory SessionStart records bind the exact session and
+supervisor to the harness-provided transcript path; this also covers a lagging
+auto-registration or a context changed by `/clear`, without guessing an alias
+or using the hub's account. Only that supervisor's scoped hook records apply.
+Claude's native PreCompact hook supplies an actual compaction start;
+SessionStart with `source=compact` supplies its end. Matching native session IDs
+recover the duration. A boundary without a start still has no duration. A new
+or cleared context drops the preceding compaction phase. These hook facts are
+read from bounded current/prior-day log tails; missing records stay unknown.
+Commander can display this while Show work is off. The existing five-second
+machine health heartbeat refreshes the open session's status even without a
+fleet event, independently of catalog reads. Its local clock advances from the observed server duration,
+freezes for stale/disconnected snapshots and stops at an explicit end. A missing
+start reports no duration; a completed compaction boundary never becomes a live
+compaction interval. An explicit unresolved operator ask can show Waiting on you
+without inventing its start time.
+
 All new text passes the same redactor as labels/details. Lists and strings are
 bounded. The hub validates correlation using the shared protocol and forwards
 the original frame bytes, preserving optional fields through mixed versions.

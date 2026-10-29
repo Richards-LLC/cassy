@@ -24,6 +24,7 @@ fn cas_cmd(home: &std::path::Path) -> Command {
         .env_remove("CAS_ROOT")
         .env_remove("CAS_CLONE_PATH")
         .env_remove("COLUMNS")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
@@ -69,6 +70,43 @@ fn home_with_profiles() -> TempDir {
     let home = TempDir::new().unwrap();
     setup_home_with_profiles(home.path());
     home
+}
+
+#[test]
+fn generated_statusline_records_usage_even_for_a_factory_supervisor() {
+    let home = home_with_profiles();
+    let project = TempDir::new().unwrap();
+    cas_cmd(home.path()).current_dir(project.path())
+        .env_remove("CAS_AGENT_ROLE")
+        .args(["init", "--yes", "--no-integrations", "--json"])
+        .assert().success();
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.path().join(".claude/settings.json")).unwrap()).unwrap();
+    let command = settings["statusLine"]["command"].as_str().unwrap();
+    let args = command.strip_prefix("cas ").expect("generated Cassy command");
+    for role in ["supervisor", "worker"] {
+        let dir = home.path().join(format!(".claude-{role}"));
+        std::fs::create_dir(&dir).unwrap();
+        cas_cmd(home.path()).current_dir(project.path())
+            .env("CLAUDE_CONFIG_DIR", &dir).env("CAS_AGENT_ROLE", role)
+            .args(args.split_whitespace())
+            .write_stdin(serde_json::json!({"rate_limits": {
+                "seven_day": {"used_percentage": 38, "resets_at": chrono::Utc::now().timestamp() + 86400}
+            }}).to_string())
+            .assert().success();
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join(".cas-claude-usage.json")).expect("generated command must record the native snapshot")).unwrap();
+        assert_eq!(snapshot["windows"][0]["used_percent"].as_f64(), Some(38.0));
+        // Idle profiles retain their observation until the window resets.
+        let mut old = snapshot;
+        old["observed_at"] = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339().into();
+        std::fs::write(dir.join(".cas-claude-usage.json"), old.to_string()).unwrap();
+    }
+    cas_cmd(home.path()).args(["claude", "--list-profiles"])
+        .assert().success()
+        .stdout(predicate::str::contains("weekly 38%").count(2))
+        .stdout(predicate::str::contains("as of ").count(2))
+        .stdout(predicate::str::contains(" ET"));
 }
 
 #[test]
@@ -183,13 +221,16 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     let team = row("codex", "team");
     assert_eq!(team["plan"], "pro");
     assert!(row("codex", "past")["windows"][0]["used_percent"].is_null());
-    assert_eq!(team["windows"][0]["used_percent"], 45.0);
-    assert_eq!(row("codex", "team@example.com")["windows"], team["windows"]);
+    assert_eq!(team["email"], serde_json::Value::Null);
+    assert_eq!(team["identity"], serde_json::Value::Null);
+    assert_eq!(team["flags"]["duplicate_of"], serde_json::Value::Null);
+    assert_eq!(team["windows"][0]["used_percent"], 12.0);
+    assert_eq!(row("codex", "team@example.com")["windows"][0]["used_percent"], 45.0);
     assert!(
         rows.iter()
             .position(|a| a["name"] == "team@example.com")
             .unwrap()
-            < rows.iter().position(|a| a["name"] == "team").unwrap()
+            > rows.iter().position(|a| a["name"] == "team").unwrap()
     );
     assert_eq!(
         chrono::DateTime::parse_from_rfc3339(team["windows"][0]["resets_at"].as_str().unwrap())
@@ -269,7 +310,8 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
                 .args([provider, "--bare", name, "--version"]);
             cmd
         };
-        command("main@example.com")
+        let main_key = if provider == "claude" { "main@example.com" } else { "main" };
+        command(main_key)
             .assert()
             .success()
             .stdout(predicate::str::contains("SELECTED=main"));
@@ -277,7 +319,7 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
             .env_remove("CODEX_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-            .args([provider, "main@example.com"])
+            .args([provider, main_key])
             .assert()
             .failure()
             .stderr(predicate::str::contains(
@@ -289,12 +331,21 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
                 .join(format!(".{provider}-main@example.com"))
                 .exists()
         );
-        command("shared@example.com")
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("ambiguous"))
-            .stderr(predicate::str::contains("alt"))
-            .stderr(predicate::str::contains("work"));
+        if provider == "claude" {
+            command("shared@example.com")
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("ambiguous"))
+                .stderr(predicate::str::contains("alt"))
+                .stderr(predicate::str::contains("work"));
+        } else {
+            for email in ["main@example.com", "shared@example.com"] {
+                command(email).assert().failure()
+                    .stderr(predicate::str::contains("unknown"));
+            }
+            command("alt").assert().success()
+                .stdout(predicate::str::contains(".codex-alt"));
+        }
         command("altt")
             .assert()
             .failure()
@@ -567,9 +618,11 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
 /// newer is the terminal's own input.
 #[cfg(unix)]
 #[tokio::test]
-async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_providers() {
+async fn picker_email_type_ahead_answers_the_duplicate_question_for_claude() {
     use cas_pty::{Pty, PtyConfig, PtyEvent};
-    for provider in ["claude", "codex"] {
+    // Only Claude publishes a non-secret identity for the duplicate question.
+    {
+        let provider = "claude";
         let home = TempDir::new().unwrap();
         let bin = home.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1206,20 +1259,26 @@ fi
             .env_remove("CODEX_HOME")
             .args([provider, "login", "mistyped@example.com"])
             .assert().success();
-        let expected_name = if stable_path { "mistyped@example.com" } else { "real@example.com" };
+        let unknown_identity = provider == "codex";
+        let expected_name = if stable_path || unknown_identity { "mistyped@example.com" } else { "real@example.com" };
         assert!(home.path().join(format!(".{provider}-{expected_name}")).is_dir());
-        if !stable_path {
+        if !stable_path && !unknown_identity {
             assert!(!home.path().join(format!(".{provider}-mistyped@example.com")).exists());
         }
-        cas_cmd(home.path())
+        let duplicate = cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
             .args([provider, "login", "another-typo"])
             .write_stdin("y\n")
             .assert()
-            .success()
-            .stderr(predicate::str::contains("already exists"));
+            .success();
+        if unknown_identity {
+            duplicate.stderr(predicate::str::contains("already exists").not());
+            assert!(home.path().join(".codex-another-typo").is_dir());
+        } else {
+            duplicate.stderr(predicate::str::contains("already exists"));
+        }
         let names: Vec<_> = std::fs::read_dir(home.path())
             .unwrap()
             .flatten()
@@ -1231,7 +1290,7 @@ fi
             .collect();
         assert_eq!(
             names.len(),
-            1,
+            if unknown_identity { 2 } else { 1 },
             "failed/duplicate logins must leave no scratch accounts"
         );
         cas_cmd(home.path())
@@ -1244,7 +1303,7 @@ fi
             .assert()
             .success()
             .stderr(predicate::str::contains("already exists").not());
-        let second_name = if stable_path { "another-subscription" } else { "real@example.com-2" };
+        let second_name = if stable_path || unknown_identity { "another-subscription" } else { "real@example.com-2" };
         assert!(home.path().join(format!(".{provider}-{second_name}")).is_dir());
     }
 }

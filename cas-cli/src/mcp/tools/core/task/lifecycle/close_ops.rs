@@ -6417,6 +6417,7 @@ impl CasCore {
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
+        expected: &Task,
         reason: &str,
         message: &str,
         factory_branch_anchor: Option<String>,
@@ -6468,7 +6469,7 @@ impl CasCore {
             format!("{}\n\n{}", parked.notes, audit)
         };
 
-        match task_store.update_if_current(&parked, task) {
+        match update_close_snapshot_preserving_notes(task_store, &mut parked, expected) {
             Err(e) => {
                 tracing::warn!(
                     task_id = %task.id,
@@ -8867,6 +8868,9 @@ impl CasCore {
                     &evidence_repo, &resolved_parent_branch, window, Some(&head),
                 )
             });
+            if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
+                return Ok(Self::tool_error(message));
+            }
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
@@ -9084,6 +9088,7 @@ impl CasCore {
                         if let Err(error) = self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &parking,
+                            &task,
                             "MERGE REQUIRED",
                             &msg,
                             anchor.clone(),
@@ -9780,6 +9785,10 @@ impl CasCore {
                         } else {
                             None
                         };
+                        if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, true) {
+                            return Ok(Self::tool_error(message));
+                        }
+
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {
@@ -14268,7 +14277,7 @@ fn target_identical_delivered_paths(
         identity: content_identity.clone(),
     };
     let window = content_window.unwrap_or(&fallback_window);
-    let base = task_attribution::delivery_base(repo_path, parent_branch, window, Some(&anchor))?;
+    let base = task_attribution::final_snapshot_delivery_base(repo_path, parent_branch, window, &anchor)?;
     let mut delivered = vec![anchor.clone()];
     if include_live_tip
         && let Some(assignee) = task.assignee.as_deref()
@@ -19595,6 +19604,51 @@ impl<'a> CloseNoteTracker<'a> {
     }
 }
 
+/// A long close can overlap receipt/upkeep note appends. Refresh only an
+/// append-only timeline change, then CAS against that exact refreshed row.
+/// Other fields, rewritten history and request_changes still invalidate the
+/// snapshot. Keep the generic store and replication CAS strict.
+fn update_close_snapshot_preserving_notes(
+    task_store: &dyn cas_store::TaskStore,
+    task: &mut Task,
+    expected: &Task,
+) -> cas_store::Result<chrono::DateTime<chrono::Utc>> {
+    let pending = task.notes.strip_prefix(&expected.notes)
+        .map(|suffix| suffix.strip_prefix("\n\n").unwrap_or(suffix).to_owned())
+        .ok_or_else(|| cas_store::StoreError::Other(
+            "close audit does not extend its expected task timeline".into(),
+        ))?;
+    let mut baseline = expected.clone();
+    for attempt in 0..3 {
+        match task_store.update_if_current(task, &baseline) {
+            Ok(stamp) => {
+                task.updated_at = stamp;
+                return Ok(stamp);
+            }
+            Err(error @ cas_store::StoreError::Other(_)) if attempt < 2 => {
+                let current = task_store.get(&expected.id)?;
+                if !only_notes_changed(&baseline, &current)
+                    || !current.notes.strip_prefix(&baseline.notes).is_some_and(|suffix| {
+                        baseline.notes.is_empty() || suffix.starts_with("\n\n")
+                    })
+                {
+                    return Err(error);
+                }
+                // Rebuild from the frozen suffix, so retries cannot duplicate
+                // this close's audits or discard the intervening appends.
+                task.notes = match (current.notes.is_empty(), pending.is_empty()) {
+                    (_, true) => current.notes.clone(),
+                    (true, false) => pending.clone(),
+                    (false, false) => format!("{}\n\n{pending}", current.notes),
+                };
+                baseline = current;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final guarded update returns its result")
+}
+
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) -> bool {
     if task.notes.contains(note) {
         return false;
@@ -19607,7 +19661,7 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
     } else {
         format!("{}\n\n{formatted}", task.notes)
     };
-    match task_store.update_if_current(task, &expected) {
+    match update_close_snapshot_preserving_notes(task_store, task, &expected) {
         Ok(persisted_at) => {
             task.updated_at = persisted_at;
             true
@@ -20582,6 +20636,66 @@ fn child_delivery_target<'a>(child: &'a Task, epic_target: &'a str) -> &'a str {
         .map(|target| target.target_branch.trim())
         .filter(|branch| !branch.is_empty() && is_safe_git_refname(branch))
         .unwrap_or(epic_target)
+}
+
+/// Ancestry-based display only: immutable task delivery anchors reachable
+/// from their recorded targets count as historical merges. One batched Git
+/// read per target replaces per-child close/content proofs. This produces no
+/// reusable close verdict; close gates and squash reconciliation keep their
+/// full content/lost-work checks below. Unreadable or timed-out input is None.
+pub(crate) fn collect_epic_ancestry_merges(
+    subtasks: &[Task],
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    budget: std::time::Duration,
+) -> Option<std::collections::HashSet<String>> {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    let mut groups: BTreeMap<&str, Vec<&Task>> = BTreeMap::new();
+    for child in subtasks {
+        if child.has_delivery_to_integrate() && child.deliverables.factory_branch_anchor.is_some() {
+            groups.entry(child_delivery_target(child, parent_branch)).or_default().push(child);
+        }
+    }
+    let mut merged = HashSet::new();
+    if groups.is_empty() {
+        return Some(merged);
+    }
+    let _scope = epic_measurement::Scope::new(budget);
+    let snapshot = EpicGitSnapshot::collect(repo_path, parent_branch, subtasks);
+    for (target, children) in groups {
+        let targets: BTreeSet<_> = [target.to_string(), format!("origin/{target}")]
+            .iter()
+            .filter_map(|name| snapshot.ref_info(name).map(|info| info.commit.clone()))
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let mut anchors = BTreeSet::new();
+        for child in &children {
+            let anchor = child.deliverables.factory_branch_anchor.as_deref()?;
+            if anchor.len() != 40 || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !snapshot.commit_exists(anchor)
+            {
+                return None;
+            }
+            anchors.insert(anchor);
+        }
+        // Use captured immutable target SHAs, so ref movement cannot mix
+        // two repository states within this display measurement.
+        let output = std::process::Command::new("git")
+            .arg("rev-list").args(&anchors).arg("--not").args(&targets)
+            .current_dir(repo_path).measurement_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let uncontained = std::str::from_utf8(&output.stdout).ok()?.lines().collect::<HashSet<_>>();
+        for child in children {
+            if !uncontained.contains(child.deliverables.factory_branch_anchor.as_deref()?) {
+                merged.insert(child.id.clone());
+            }
+        }
+    }
+    (!epic_measurement::expired()).then_some(merged)
 }
 
 /// Collect an epic-status view with an explicit page and deadline. The close
@@ -27427,19 +27541,43 @@ mod merge_state_gate_tests {
     }
 
     #[test]
-    fn ct2_p1_park_sends_one_relay() {
+    fn ct2_p1_park_sends_one_relay_after_upkeep_notes() {
         use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
 
         let _env = TestEnvGuard::temp_home();
         let dir = TempDir::new().unwrap();
-        let (core, tasks, queue, task) = close_relay_fixture_cas_3a82(dir.path());
+        let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(dir.path());
+        // Deterministically interleave the writes a long close can encounter:
+        // its upkeep audits, a receipt imported by another store connection,
+        // and another append after the last upkeep audit but before parking.
+        let receipts = cas_store::SqliteTaskStore::open(dir.path()).unwrap();
+        let mut upkeep = CloseNoteTracker::new(&tasks, &task);
+        upkeep.record(&mut task, "UPKEEP: registry checked");
+        receipts.append_trusted_note(&task.id, "Receipt imported during close").unwrap();
+        upkeep.record(&mut task, "UPKEEP: documentation checked");
+        assert!(tasks.get(&task.id).unwrap().notes.contains("UPKEEP: documentation checked"),
+            "an intervening receipt note must not prevent close's own upkeep audit");
+        receipts.append_trusted_note(&task.id, "Final receipt imported before park").unwrap();
+        // Anchor advancement is an unpersisted close-owned change. It must
+        // be written against the original snapshot, not mistaken for a
+        // conflicting change made by another actor.
+        let mut parking = task.clone();
+        parking.deliverables.factory_branch_anchor = Some("delivery-tip".into());
+        parking.notes.push_str("\n\nDelivery anchor advanced during close");
         core.park_task_awaiting_merge(
-            &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
+            &tasks, &parking, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: relay fixture"),
         ).unwrap();
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        for note in ["UPKEEP: registry checked", "Receipt imported during close",
+            "UPKEEP: documentation checked", "Final receipt imported before park",
+            "Delivery anchor advanced during close"]
+        {
+            assert_eq!(parked.notes.matches(note).count(), 1,
+                "park must retain each intervening audit exactly once: {note}");
+        }
         assert_eq!(
             parked.deliverables.parked_close_reason.as_deref(),
             Some("PASS delivery-tip: relay fixture"),
@@ -27462,7 +27600,7 @@ mod merge_state_gate_tests {
         append_close_decision_note(&tasks, &mut stale_close, "stale pre-park audit");
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
         let refused = core.park_task_awaiting_merge(
-            &tasks, &stale_close, "MERGE REQUIRED", "stale close still running",
+            &tasks, &stale_close, &stale_close, "MERGE REQUIRED", "stale close still running",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: stale close"),
         ).expect_err("GH #1276: a stale close cannot erase the review rejection");
@@ -27473,6 +27611,44 @@ mod merge_state_gate_tests {
         assert!(reopened.deliverables.factory_branch_anchor.is_none());
         assert_eq!(queue.peek("relay-supervisor-id", 10).unwrap().len(), 1,
             "a refused park cannot enqueue another relay");
+    }
+
+    #[test]
+    fn park_note_refresh_preserves_concurrent_task_corrections_cas_62e0f() {
+        use cas_store::{SupervisorQueueStore, TaskStore};
+
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let (core, tasks, queue, mut original) = close_relay_fixture_cas_3a82(dir.path());
+        original.notes = "Original timeline".into();
+        let edits: [(&str, fn(&mut Task)); 6] = [
+            ("status", |task| task.status = TaskStatus::Open),
+            ("assignee", |task| task.assignee = Some("replacement-worker".into())),
+            ("proof scope", |task| task.proof_targets = vec!["new proof target".into()]),
+            ("acceptance", |task| task.acceptance_criteria = "Corrected acceptance".into()),
+            ("delivery", |task| task.deliverables.factory_branch_anchor = Some("replacement-tip".into())),
+            ("timeline rewrite", |task| task.notes = "Original timeline corrected".into()),
+        ];
+        for (field, edit) in edits {
+            tasks.update(&original).unwrap();
+            let snapshot = tasks.get(&original.id).unwrap();
+            let mut corrected = snapshot.clone();
+            corrected.notes.push_str("\n\nConcurrent audit");
+            edit(&mut corrected);
+            tasks.update(&corrected).unwrap();
+            let corrected = tasks.get(&original.id).unwrap();
+
+            let refused = core.park_task_awaiting_merge(
+                &tasks, &snapshot, &snapshot, "MERGE REQUIRED", "stale close",
+                Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+                Some("PASS delivery-tip: stale close"),
+            ).expect_err(field);
+            assert!(refused.to_string().contains("task changed"), "{field}: {refused}");
+            assert_eq!(serde_json::to_value(tasks.get(&original.id).unwrap()).unwrap(),
+                serde_json::to_value(corrected).unwrap(), "park overwrote {field}");
+            assert!(queue.peek("relay-supervisor-id", 10).unwrap().is_empty(),
+                "refused {field} correction must not relay a park");
+        }
     }
 
     #[tokio::test]
@@ -29531,7 +29707,7 @@ esac
         env.set("CAS_ROOT", &cas_dir);
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(cas_dir.join("config.toml"),
-            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n").unwrap();
+            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n[qa]\nmode='per_task'\n").unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
         open_rule_store(&cas_dir).unwrap().init().unwrap();
         open_skill_store(&cas_dir).unwrap().init().unwrap();
@@ -29655,7 +29831,7 @@ esac
         std::fs::create_dir_all(&cas_dir).unwrap();
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[project]\ncanonical_id = \"cas-f1f4-fixture\"\n\n[verification]\nenabled = false\n",
+            "[project]\ncanonical_id = \"cas-f1f4-fixture\"\n\n[verification]\nenabled = false\n[qa]\nmode='per_task'\n",
         )
         .unwrap();
         std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();

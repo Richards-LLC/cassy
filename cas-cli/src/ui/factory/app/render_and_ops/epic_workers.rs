@@ -3092,18 +3092,65 @@ impl FactoryApp {
         let _store_budget = cas_store::wait_budget::grant_waits_for(
             crate::ui::factory::daemon::runtime::store_worker::SHUTDOWN_STORE_WAIT_BUDGET,
         );
+        // Shutdown authorization must not queue behind a background writer's
+        // process-shared connection mutex. Read the same committed registry on
+        // an independent connection (no schema writes). Ordinary dead-pane
+        // cleanup is deferred; recycle retires the old identity before relaunch.
+        let agent_store: std::sync::Arc<dyn cas_store::AgentStore> = std::sync::Arc::new(
+            cas_store::SqliteAgentStore::with_connection(
+                cas_store::shared_db::dedicated_connection(&self.cas_dir().join("cas.db"))?,
+            ),
+        );
+        let agents = agent_store.list(None)?;
         // Crash/recycle handling can remove the pane before shutdown arrives.
         // A dead registration in our session is still a valid cleanup target.
         if !self.worker_names.contains(&name.to_string()) {
-            if crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(
-                self.cas_dir(),
-                name,
-                self.factory_session.as_deref(),
-            )?
-            .is_some()
+            let matching: Vec<_> = agents
+                .iter()
+                .filter(|agent| {
+                    agent.name == name
+                        && agent.role == cas_types::AgentRole::Worker
+                        && agent.visible_to_factory_session(self.factory_session.as_deref())
+                })
+                .collect();
+            if !matching.is_empty()
+                && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(matching.iter().copied(), name)
             {
+                if preserve_worktree {
+                    // Recycle must finish retiring the old identities before
+                    // launching the same-name replacement. Deferred shutdown
+                    // cleanup could cancel its resume brief before registration.
+                    // Like a live-pane recycle, release only the old leases:
+                    // task bindings and unread mail belong to the replacement.
+                    for agent in matching {
+                        agent_store.graceful_shutdown(&agent.id)?;
+                    }
+                    self.last_db_fingerprint = None;
+                    return Ok(Vec::new());
+                }
+                // The process is already dead. Inline notification/identity
+                // cleanup can spend this worker's entire budget and falsely
+                // report a failed stop. Revalidate on the store worker before
+                // cleanup, so a live replacement keeps its identity and mail.
+                let cas_dir = self.cas_dir().to_path_buf();
+                let worker_name = name.to_string();
+                let session = self.factory_session.clone();
+                let queued = crate::ui::factory::daemon::runtime::store_worker::submit_write(
+                    "retire dead worker after shutdown",
+                    move || {
+                        crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(
+                            &cas_dir,
+                            &worker_name,
+                            session.as_deref(),
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                    },
+                );
+                if queued == crate::ui::factory::daemon::runtime::store_worker::Persisted::Dropped {
+                    anyhow::bail!("Dead worker '{name}' cleanup could not be queued");
+                }
                 self.last_db_fingerprint = None;
-                let _ = self.refresh_data();
                 return Ok(Vec::new());
             }
             anyhow::bail!("Worker '{name}' not found");
@@ -3113,8 +3160,6 @@ impl FactoryApp {
 
         // Mark agent as shutdown in Cassy first; this must succeed so supervisor sees errors
         // instead of silently leaving stale idle agents in director panels.
-        let agent_store = open_agent_store(self.cas_dir())?;
-        let agents = agent_store.list(None)?;
         let matching_agents =
             worker_registry_rows_for_shutdown(&agents, name, self.factory_session.as_deref());
         let agent = matching_agents.first().copied().ok_or_else(|| {

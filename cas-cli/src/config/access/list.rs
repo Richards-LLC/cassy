@@ -5,7 +5,7 @@ impl Config {
         let cloud = self.cloud.clone().unwrap_or_default();
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
-        let qa = self.qa.clone().unwrap_or_default();
+        let qa = self.resolved_qa();
         let dev = self.dev.clone().unwrap_or_default();
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
@@ -930,7 +930,7 @@ impl Config {
 
     /// Get QA gate configuration with defaults.
     pub fn qa(&self) -> QaConfig {
-        self.qa.clone().unwrap_or_default()
+        self.resolved_qa()
     }
 
     /// Get worktrees config with defaults

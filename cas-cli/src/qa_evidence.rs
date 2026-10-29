@@ -447,6 +447,12 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
     notes
         .match_indices(BUNDLE_CITATION)
         .filter_map(|(index, token)| {
+            // Proof records carry quoted audit fields, not producer citations.
+            // A review summary mentioning qa-bundle must not shadow the note.
+            let line_start = notes[..index].rfind('\n').map_or(0, |offset| offset + 1);
+            if cas_store::task_note_markers::is_reserved_line(&notes[line_start..]) {
+                return None;
+            }
             let rest = &notes[index + token.len()..];
             let line = rest.lines().next()?;
             if line.contains("(independent QA round ") {
@@ -2020,7 +2026,7 @@ fn resolve_inside_task_dir(
     Ok(resolved)
 }
 
-fn resolve_bundle_file(
+pub(crate) fn resolve_bundle_file(
     bundle_dir: &Path,
     key: &str,
     relative: &str,
@@ -2254,44 +2260,16 @@ fn validate_ledger_receipt(
             command,
         ));
     }
-    let mut has_pass = false;
-    let mut deferred = Vec::new();
-    for line in body.lines() {
-        let cells: Vec<&str> = line
-            .trim()
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
-        has_pass |= cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build");
-        if cells.get(4) != Some(&"DEFERRED") || cells.get(5) != Some(&"deployed-verification") {
-            continue;
-        }
-        let owner = cells
-            .get(6)
-            .and_then(|cell| cell.strip_prefix("deferred: deployed-verification owner="));
-        let Some(owner) = owner.filter(|owner| {
-            !owner.is_empty() && !owner.chars().any(|c| c.is_whitespace() || c.is_control())
-        }) else {
-            return Err(EvidenceRefusal::new(
-                "invalid deployed-verification deferral: expected `deferred: deployed-verification owner=<registered supervisor>`",
-                command,
-            ));
-        };
-        let row_id = cells[0];
-        if row_id.is_empty() {
-            return Err(EvidenceRefusal::new(
-                "invalid deployed-verification deferral: row id is empty",
-                command,
-            ));
-        }
-        deferred.push(DeferredDeployedVerification {
-            row_id: row_id.into(),
-            owner: owner.into(),
-            ledger: ledger.clone(),
-        });
+    let report = crate::qa_ledger::check(&ledger, 1);
+    if !report.ok {
+        return Err(EvidenceRefusal::new(report.refusal(), format!("cas qa ledger check {}", ledger.display())));
     }
+    let has_pass = report.rows.iter().any(|row| row.verdict == crate::qa_ledger::Verdict::Pass && row.label == "real-build");
+    let deferred: Vec<_> = report.rows.iter().filter_map(|row| {
+        row.deferred_owner().map(|owner| DeferredDeployedVerification {
+            row_id: row.id.clone(), owner: owner.into(), ledger: ledger.clone(),
+        })
+    }).collect();
     if !has_pass && deferred.is_empty() {
         return Err(EvidenceRefusal::new(
             format!(

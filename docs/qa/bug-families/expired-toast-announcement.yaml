@@ -1,0 +1,4 @@
+title: Expired connection notices must leave an empty live region while subsequent notices still announce
+tasks: [cas-326e8]
+invariants: [HUB-J9-GOAL]
+journeys: [HUB-J9]

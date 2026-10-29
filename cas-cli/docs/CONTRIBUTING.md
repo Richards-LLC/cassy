@@ -150,12 +150,16 @@ conclusion produces one notice per running factory; unrelated integration
 commits do not create another. A red conclusion asks for a supervisor decision
 instead of instructing an unconditional merge.
 
-Projects that review a batch once on staging can select `qa.mode=batch`.
+Batch QA (`qa.mode=batch`) is the built-in default for fresh projects and machines.
+Set `qa.mode=per_task` explicitly to require per-delivery gates. QA keys resolve
+from project `.cas/config.toml`, then user `~/.cas/config.toml`, then built-in defaults.
 Unmerged user-facing deliveries park with evidence deferred and no automatic
 per-task QA pass. A registered supervisor records the shared published ledger
 with `verification action=batch_receipt`; each listed delivery must be contained
 in that task's configured target. See [batch QA](../../docs/qa/batch-qa.md).
-Unset or `per_task` keeps the existing per-delivery gates.
+Every hour with new deliveries, build an exact epic-tip candidate, walk its batch
+matrix and publish the PASS ledger. Record `verification action=batch_receipt`
+with the included task IDs and delivery anchors, then close those deliveries.
 
 Message bodies default to 1,200 characters, or 2,500 for blocker and merge
 requests; task note bodies default to 1,500. These limits are configurable via
@@ -1208,6 +1212,21 @@ override global policy; Commander uses global policy. `accounts.disabled` retain
 the absolute folder list managed by `cas accounts disable` / `enable` in
 `global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
+The shared account registry reads Claude email/account/organization metadata
+only from non-secret `.claude.json` `oauthAccount` fields. It never opens
+provider credential files for catalog metadata. Codex email, account and
+workspace identity stay absent: `auth.json` and its `id_token` are not metadata
+sources. Codex plan and capacity come from native rollout `rate_limits` fields;
+without those observations the plan stays unknown. Login state still comes
+from the official CLI status command.
+
+Codex folder aliases remain launch keys. Without a non-secret identity source,
+email-based lookup, automatic email renaming/retirement, login duplicate
+prompts and identity-based sharing of observations across distinct Codex
+folders are unavailable. Explicit aliases and physical symlink deduplication
+still work. Claude's non-secret identity behavior is preserved. The registry's
+optional fields and interface remain unchanged for Commander consumers.
+
 ### Operator credential stores are masked from workers
 
 Workers share the operator's uid and `$HOME`, so removing environment tokens
@@ -1607,6 +1626,16 @@ without an unambiguous link stay explicitly unlinked. `--side before` or
 A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
+
+## QA ledger preflight
+
+`cas qa ledger init --task <id>` writes an honest scaffold in the project's task
+artifact directory, with predicted live journeys and no-code route exclusions.
+It preserves existing evidence. Edit rows after exercising the named build,
+then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
+parser checks structure, counts, labels, defect ownership and readable PASS
+captures; it does not judge what a capture proves. Close applies its diagnostics
+before either verification dispatch path mutates state.
 
 ## Build, assembly and CI policy
 
@@ -3291,7 +3320,10 @@ as a START CONTEXT task note before budgeting. An unchanged latest context reuse
 its note and cursor; transient claim/lease text stays in the start response.
 Warnings take precedence over scope, notes and recall; an oversized warning block
 is replaced by an explicit instruction to read its saved note before acting.
-The start response gives a byte cursor into `task notes` and a full-notes path.
+The start response gives a `task notes offset=0` paging path (follow `next=` to
+`end` and read the latest `START CONTEXT`) and a full-notes path. It never gives a tail cursor from the
+start snapshot: Cloud reconciliation can reorder note blocks before the next
+read, making that cursor invalid or hiding the saved instructions.
 Default show retains Type and Demo for builtin gates, and names full-only sections
 (including dependencies, design, deliverables and terminal outcomes) explicitly.
 

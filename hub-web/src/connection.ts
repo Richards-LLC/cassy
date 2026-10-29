@@ -1,3 +1,5 @@
+import type { CommandReceipt } from "./supervisor-commands";
+import type { AccountChange, AccountsCatalog } from "./accounts-model";
 import { installationLock, notifyInstallation } from "./installation-access";
 import { catalog, installationStore } from "./storage";
 import { credentialFence, type CredentialFence } from "./commander-journal";
@@ -78,6 +80,8 @@ export function messageRejection(error: unknown, envelope?: Record<string, unkno
 }
 
 export interface HubCallbacks {
+  onSupervisorCommandSupport?(session: string, supported: boolean): void;
+  onSupervisorCommandReceipt?(session: string, receipt: CommandReceipt): void;
   onState(state: ConnectionState): void;
   onAttachState?(session: string, state: AttachSnapshot): void;
   onLatency?(latencyMs: number): void;
@@ -805,6 +809,15 @@ export class HubConnectionSupervisor {
   /** The machine's main project folders and launch roots (cas-41b9). */
   async projects(signal?: AbortSignal): Promise<ProjectCatalog> {
     return this.request("GET", "/v1/projects", undefined, signal);
+  }
+
+  /** Registry-backed machine accounts; management uses the hub's allowlist. */
+  async accounts(signal?: AbortSignal): Promise<AccountsCatalog> {
+    return this.request("GET", "/v1/accounts", undefined, signal);
+  }
+
+  async changeAccount(change: AccountChange): Promise<void> {
+    await this.request("POST", "/v1/accounts/operations", change);
   }
 
   /** Each launch CLI's account profiles on the machine (cas-7b52). */
@@ -2078,6 +2091,7 @@ export class HubConnectionSupervisor {
     if (message.Welcome) {
       // Before the attach turns live: its listeners read what the daemon offers.
       this.workEventSupport.set(session, workEventSupport(message.Welcome.capabilities));
+      this.callbacks.onSupervisorCommandSupport?.(session, Array.isArray(message.Welcome.capabilities) && message.Welcome.capabilities.includes("supervisor_commands"));
       const socket = this.sockets.get(session);
       if (socket) {
         this.readySockets.add(socket);
@@ -2116,6 +2130,8 @@ export class HubConnectionSupervisor {
       const bootstrap = Array.isArray(welcome.pane_bootstrap) ? welcome.pane_bootstrap as PaneBootstrap[] : [];
       if (bootstrap.length > 0) this.paneBootstraps.set(session, bootstrap); else this.paneBootstraps.delete(session);
       this.callbacks.onSessionState(session, welcome.state, bootstrap.length > 0 || authoritative ? undefined : welcome.scrollback);
+    } else if (message.SupervisorCommandReceipt) {
+      this.callbacks.onSupervisorCommandReceipt?.(session, message.SupervisorCommandReceipt.receipt as CommandReceipt);
     } else if (message.ScrollbackPage) {
       this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage as ScrollbackPage);
     } else if (message.PaneKeyframe || message.PaneSize) {

@@ -1729,3 +1729,88 @@ fn qa_capture_intent_and_runtime_pointer_findings_cas_db23() {
     config.set("qa.capture.serve", "").unwrap();
     assert!(!config.qa().capture.unwrap().is_configured().unwrap());
 }
+
+#[test]
+fn qa_batch_default_preserves_explicit_per_task_round_trip() {
+    let env = TestEnvGuard::temp_home();
+    let project = env.home().join("project/.cas");
+    std::fs::create_dir_all(&project).unwrap();
+    assert_eq!(Config::default().qa().mode, QaMode::Batch);
+    let mut config = Config::load(&project).unwrap();
+    assert_eq!(config.get("qa.mode").as_deref(), Some("batch"));
+    config.set("qa.mode", "per_task").unwrap();
+    config.save(&project).unwrap();
+    assert_eq!(Config::load(&project).unwrap().get("qa.mode").as_deref(), Some("per_task"));
+}
+
+#[test]
+fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
+    let env = TestEnvGuard::temp_home();
+    let host = env.home().join(".cas");
+    let project = env.home().join("project/.cas");
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(host.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = false\nevidence_gate = false\n[hooks]\ncapture_enabled = false\n").unwrap();
+    let mut loaded = Config::load(&project).unwrap();
+    assert_eq!(loaded.get("qa.mode").as_deref(), Some("batch"));
+    assert!(!loaded.qa().independent_pass);
+    assert!(!loaded.qa().evidence_gate);
+    assert!(loaded.hooks.is_none(), "only qa defaults are inherited");
+    loaded.set("tasks.commit_nudge_on_close", "true").unwrap();
+    loaded.save(&project).unwrap();
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(project.join("config.toml")).unwrap()).unwrap();
+    assert!(saved.get("qa").is_none(), "saving another section must not pin inherited QA defaults");
+    std::fs::write(host.join("config.toml"), "[qa]\nmode = \"per_task\"\nindependent_pass = false\nevidence_gate = false\n").unwrap();
+    let inherited = Config::load(&project).unwrap();
+    assert_eq!(inherited.get("qa.mode").as_deref(), Some("per_task"));
+    assert!(inherited.list().contains(&("qa.mode".into(), "per_task".into())));
+    std::fs::write(project.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = true\n").unwrap();
+    let overridden = Config::load(&project).unwrap();
+    assert_eq!(overridden.get("qa.mode").as_deref(), Some("batch"));
+    assert!(overridden.qa().independent_pass);
+    assert!(!overridden.qa().evidence_gate, "a project key does not mask other user defaults");
+    let mut overridden = overridden;
+    overridden.save(&project).unwrap();
+    assert!(!Config::load(&project).unwrap().qa().evidence_gate);
+    overridden.set("qa.evidence_gate", "true").unwrap();
+    overridden.save(&project).unwrap();
+    assert!(Config::load(&project).unwrap().qa().evidence_gate,
+        "an explicit built-in value overrides a different user value");
+    std::fs::write(host.join("config.toml"), "[qa]\nmode='per_task'\n[qa.capture]\nbase_url='http://localhost:3000'\n").unwrap();
+    let nested = env.home().join("nested/.cas");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("config.yaml"), "qa:\n  independent_pass: false\n").unwrap();
+    let mut loaded = Config::load(&nested).unwrap();
+    loaded.set("qa.capture.ready_path", "/ready").unwrap();
+    loaded.save(&nested).unwrap();
+    let reloaded = Config::load(&nested).unwrap();
+    assert_eq!(reloaded.qa().mode, QaMode::PerTask, "YAML migration must not pin the mode");
+    let capture = reloaded.qa().capture.unwrap();
+    assert_eq!(capture.base_url, "http://localhost:3000");
+    assert_eq!(capture.ready_path, "/ready");
+    assert!(!reloaded.qa().independent_pass);
+    std::fs::write(host.join("config.toml"), "[qa]\ntelemetry_sweep='scripts/sweep.sh'\npreflight_env_files=['USER_ENV']\n[qa.post_release]\ncommand='echo healthy'\n").unwrap();
+    let mut loaded = Config::load(&nested).unwrap();
+    loaded.set("qa.telemetry_sweep", "").unwrap();
+    loaded.set("qa.preflight_env_files", "").unwrap();
+    loaded.save(&nested).unwrap();
+    let reloaded = Config::load(&nested).unwrap();
+    assert!(reloaded.qa().telemetry_sweep.is_none());
+    assert!(reloaded.qa().preflight_env_files.is_empty());
+    assert_eq!(crate::qa_post_release::configured(&nested).unwrap().command, "echo healthy");
+    let fallback = env.home().join("bad-user-policy/.cas");
+    std::fs::create_dir_all(&fallback).unwrap();
+    for broken in ["[qa\nmode=", "[qa]\nmode='invalid'\nevidence_gate=false\n"] {
+        std::fs::write(host.join("config.toml"), broken).unwrap();
+        let loaded = Config::load(&fallback).expect("a broken user layer must not break project loading");
+        assert_eq!(loaded.qa().mode, QaMode::Batch);
+        assert!(loaded.qa().evidence_gate);
+        std::fs::write(fallback.join("config.toml"), "[qa]\nmode='per_task'\nmax_rounds=5\n").unwrap();
+        let loaded = Config::load(&fallback).unwrap();
+        assert_eq!(loaded.qa().mode, QaMode::PerTask);
+        assert_eq!(loaded.qa().max_rounds, 5);
+        std::fs::remove_file(fallback.join("config.toml")).unwrap();
+    }
+    std::fs::write(fallback.join("config.toml"), "[qa]\nmode='invalid-project'\n").unwrap();
+    assert!(Config::load(&fallback).is_err(), "invalid project policy must still be reported");
+}

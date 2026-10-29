@@ -118,6 +118,17 @@ fn run_cli_claimed(
     gate: &dyn Fn(&Value) -> Option<String>,
     claim: Option<Value>,
 ) -> (String, Result<(), VioletError>) {
+    run_cli_at(argv, hub, json, gate, claim, None)
+}
+
+fn run_cli_at(
+    argv: &[&str],
+    hub: &ScriptedHub,
+    json: bool,
+    gate: &dyn Fn(&Value) -> Option<String>,
+    claim: Option<Value>,
+    cas_root: Option<&Path>,
+) -> (String, Result<(), VioletError>) {
     #[derive(clap::Parser)]
     struct Harness {
         #[command(subcommand)]
@@ -134,7 +145,7 @@ fn run_cli_claimed(
     };
     let reply_claim = |reply_to: &str| claim.clone().filter(|block| block["reply_to"] == reply_to);
     let mut context = RunContext {
-        cas_root: None,
+        cas_root,
         json,
         raw_args: &raw,
         gate,
@@ -1301,4 +1312,99 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     assert_eq!(result.unwrap_err().code, "managed_reply_required");
     let args = &hub.calls()[0].1;
     assert!(args.get("coordination_operation_id").is_none() && args.get("request_id").is_none(), "{args}");
+}
+
+
+#[test]
+fn release_report_pdf_upload_uses_released_epic_before_session_focus_cas_0327() {
+    use cas_types::{Task, TaskStatus, TaskType};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[issues]\nrepo = \"example/project\"\n").unwrap();
+    env.set_current_dir(dir.path());
+    env.set("CAS_FACTORY_SESSION", "report-upload");
+    let metadata = crate::ui::factory::create_metadata(
+        "report-upload", 1, "supervisor", &[], Some("cas-focused"),
+        dir.path().to_str(), None,
+    );
+    let metadata_path = crate::ui::factory::metadata_path("report-upload");
+    std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert_eq!(crate::ui::factory::preferred_epic_id_from_session_metadata().as_deref(), Some("cas-focused"));
+    let store = crate::store::open_task_store_local(&root).unwrap();
+    store.init().unwrap();
+    for (id, pending) in [("cas-focused", true), ("cas-released", false)] {
+        let mut epic = Task::new(id.into(), id.into());
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::Closed;
+        epic.branch = Some(format!("epic/release-{id}"));
+        epic.pending_verification = pending;
+        store.add(&epic).unwrap();
+    }
+    let gh = dir.path().join("fake-gh");
+    crate::test_paths::warm_stub(&gh, r##"#!/bin/sh
+printf '%s' '[{"number":85,"title":"Release v3.85.0","headRefName":"epic/release-cas-released","mergedAt":"2026-10-27T00:00:00Z"}]'
+"##);
+    env.set("GH_BIN", &gh);
+    let reports = dir.path().join("docs/release-reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let pdf = reports.join("v3.85.0.pdf");
+    let bytes = b"%PDF-1.4\nfixture release report\n";
+    std::fs::write(&pdf, bytes).unwrap();
+    let seen = RefCell::new(Vec::new());
+    let gate = |post: &Value| {
+        seen.borrow_mut().push(post.clone());
+        crate::hooks::handlers::handlers_events::violet_publication_denial(
+            "violet_post", Some(post), Some(&root),
+        )
+    };
+    let hub = ScriptedHub::with(vec![file_receipt("F85", "v3.85.0.pdf", bytes)]);
+    let (_, result) = run_cli_at(
+        &["post", "--channel", "cas-internal", "--file", pdf.to_str().unwrap()],
+        &hub, false, &gate, None, Some(&root),
+    );
+    result.expect("released report must not inherit unrelated focused-epic verification");
+    assert_eq!(seen.borrow()[0]["epic_id"], "cas-released");
+    assert_eq!(hub.calls().len(), 1);
+    // Explicit context wins; unrecognized/mixed files retain the session gate.
+    let unrelated = write_file(&dir, "v3.85.0.pdf", bytes);
+    for extra in [
+        vec!["--epic", "cas-focused"],
+        vec!["--file", unrelated.to_str().unwrap()],
+    ] {
+        let mut argv = vec!["post", "--channel", "cas-internal", "--file", pdf.to_str().unwrap()];
+        argv.extend(extra);
+        let blocked = ScriptedHub::default();
+        let (_, result) = run_cli_at(&argv, &blocked, false, &gate, None, Some(&root));
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "publication_blocked");
+        assert!(error.message.contains("cas-focused"), "{error:?}");
+        assert_eq!(blocked.connects(), 0);
+    }
+    let custom = dir.path().join("custom");
+    std::fs::create_dir_all(&custom).unwrap();
+    let custom_pdf = custom.join("v3.85.0.pdf");
+    std::fs::write(&custom_pdf, bytes).unwrap();
+    std::fs::write(custom_pdf.with_extension("md"), "# Project v3.85.0\n\n## Evidence and scope\n").unwrap();
+    let custom_hub = ScriptedHub::with(vec![file_receipt("F86", "v3.85.0.pdf", bytes)]);
+    let (_, result) = run_cli_at(
+        &["post", "--channel", "cas-internal", "--file", custom_pdf.to_str().unwrap()],
+        &custom_hub, false, &gate, None, Some(&root),
+    );
+    result.expect("generated custom output retains the release identity");
+    // The released epic's own pending verification remains a hard gate.
+    let mut released = store.get("cas-released").unwrap();
+    released.pending_verification = true;
+    store.update(&released).unwrap();
+    let blocked = ScriptedHub::default();
+    let (_, result) = run_cli_at(
+        &["post", "--channel", "cas-internal", "--file", pdf.to_str().unwrap()],
+        &blocked, false, &gate, None, Some(&root),
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "publication_blocked");
+    assert!(error.message.contains("cas-released"), "{error:?}");
+    assert_eq!(blocked.connects(), 0);
 }

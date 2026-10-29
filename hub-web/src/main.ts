@@ -1,15 +1,17 @@
+import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
 import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
-import { statusClass, statusLabel, workerProgress, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
+import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
+import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -90,6 +92,7 @@ import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
 import { countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
+import { livePhase } from "./live-phase";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -142,6 +145,55 @@ const pairingOperations = new PairingOperationCoordinator();
 // Which cancellation, if any, owns the "could not finish cancelling" step.
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const supervisorCommands = new Map<string, SupervisorCommandSession>();
+let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
+function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
+  const key = sessionKey(machineId, session);
+  let commands = supervisorCommands.get(key);
+  if (!commands) {
+    commands = new SupervisorCommandSession({
+      unavailable: () => supervisorCommandUnavailable(machineId, session),
+      control: async () => {
+        const reason = supervisorCommandUnavailable(machineId, session); if (reason) throw new Error(reason);
+        if (!leases.get(key)?.held_by_me) {
+          const lease = await requestPaneControl(machineId, session);
+          if (!lease.held_by_me) throw new Error(lease.controller_label ? `${lease.controller_label} controls this session. Wait until it releases control.` : "Could not take control of this session.");
+        }
+      },
+      send: message => connections.get(machineId)?.send(session, message) ?? false,
+      changed: () => updateConversationViews(),
+    });
+    supervisorCommands.set(key, commands);
+  }
+  return commands;
+}
+function supervisorCommandUnavailable(machineId: string, session: string): string | undefined {
+  const machine = machines.get(machineId);
+  if (!machine || selectedMachineId !== machineId || selectedSession !== session) return "Open this conversation to run a command.";
+  if (sessions.get(machineId)?.find(item => item.name === session)?.ended) return "This session ended. Start or resume a supervisor from New session.";
+  if (!hubSupports(machineId, "supervisor_commands") || !supervisorCommands.get(sessionKey(machineId, session))?.supported) return "Commands need an updated hub and supervisor session.";
+  if (!machine.scopes.includes("pane-input")) return "This browser was paired without command control. Pair again with pane:input.";
+  if (conversationConnection(machineId, session)?.phase !== "live") return "Commands work once the conversation is connected.";
+  return undefined;
+}
+function bindSlashCommands(input: HTMLTextAreaElement): void {
+  const machineId = selectedMachineId; const session = selectedSession;
+  if (!machineId || !session) return;
+  const thread = sessionKey(machineId, session);
+  if (slashCommands?.input === input && slashCommands.thread === thread) return;
+  slashCommands?.palette.dispose();
+  const palette = new SlashCommands(input, {
+    harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
+    unavailable: () => supervisorCommandUnavailable(machineId, session),
+    label: () => supervisorPhrase(machineId, session),
+    run: async (command, confirmed) => {
+      await supervisorCommandSession(machineId, session).run(command, confirmed);
+      countUsage("supervisor.command");
+    },
+  });
+  slashCommands = { input, thread, palette };
+}
+
 bindKeyboardViewport(window);
 // The keyboard coming up or going away resizes the window: the pinned question folds or opens with it (cas-16eed).
 window.addEventListener("resize", () => syncComposing());
@@ -164,8 +216,10 @@ const sessionsEverLive = new Set<string>();
 const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING, BROWSER_BLOCKED, BROWSER_UNSUPPORTED]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
+const statusReceivedAt = new Map<string, number>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
 const statusPending = new Set<string>();
+const statusFailures = new Set<string>();
 const leases = new Map<string, LeaseState>();
 /** Conversation views mounted for a session's supervisor pane, by pane key (cas-f285). */
 const mountedThreads = new Set<string>();
@@ -214,6 +268,7 @@ let conversationRows: ConversationRow[] = [];
 /** The list search's text (journey F8); rows render filtered by it. */
 let conversationSearchQuery = "";
 const conversationList = new ProjectNavigation();
+const latestRelease = new LatestRelease();
 const pendingSubmissions = new Set<string>();
 /**
  * The thread for machine:session. With `session`, the thread learns which
@@ -454,19 +509,26 @@ function mountConversation(key: string, mount: HTMLElement): void {
     const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
     const target = supervisorTarget(hubSession) || "Supervisor";
     const history = conversationHistory(threadKey, threadSession);
+    const working = (): boolean => supervisorWorking(
+      history,
+      connectionStates.get(threadMachineId),
+      [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+    );
     conversation = new ConversationView(document, history, {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
       sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
-      // Only recent pane activity drives the working line. A queued or
-      // transported message alone never proves the supervisor took a turn.
-      working: () => supervisorWorking(
-        history,
-        connectionStates.get(threadMachineId),
-        [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
-      ),
+      // Older daemons can establish activity but cannot name its phase/time.
+      working,
+      phase: () => livePhase(statuses.get(threadKey)?.supervisor_phase, {
+        connected: conversationConnection(threadMachineId, threadSession)?.phase === "live" && !conversationConnection(threadMachineId, threadSession)?.authFailure,
+        stale: statusFailures.has(threadKey) || conversationConnection(threadMachineId, threadSession)?.degraded === true,
+        waiting: waitingOnOperator(history) > 0,
+        working: working(),
+        now: performance.now(), receivedAt: statusReceivedAt.get(threadKey),
+      }),
       editMessage: (text, send) => {
         const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
         if (!composer || composer.dataset.threadKey !== threadKey) return;
@@ -489,6 +551,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The header's own state: a send that expired waiting for the session
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
+      commandReceipts: () => [...supervisorCommandSession(threadMachineId, threadSession).receipts.values()],
+      commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
       // and says to take control once it is released, as the composer does.
@@ -654,6 +718,9 @@ function commitSelection(next: SessionSelection): void {
 }
 
 async function boot(): Promise<void> {
+  const checkRelease = async () => { await latestRelease.check(); renderConversationList(); };
+  void checkRelease();
+  window.setInterval(() => { void checkRelease(); }, RELEASE_CHECK_INTERVAL);
   const remotePending = await installationAccess.recover(window.fetch.bind(window));
   const stored = remotePending ? await catalog.snapshot() : await catalog.recoverPending();
   const pendingHubs = new Set((await installationStore.list()).filter((r) => r.pending).map((r) => r.id.split("@")[0]));
@@ -757,6 +824,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // machine is a recovery.
       if (state.phase === "live" && !wasLive && lastLiveAt.has(machine.id) && machine.id === selectedMachineId) countUsage("connection.recovered");
       connectionStates.set(machine.id, state);
+      // Native lifecycle changes need no fleet mutation or Show work reader.
+      // The existing health heartbeat refreshes the open session's status,
+      // independently of a slow catalog read and without subscribing to output.
+      if (state.phase === "live" && selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       // A refused pairing is terminal truth, even between animation frames.
       // Clear stale working ink with the same state change as Needs pairing.
       if (state.authFailure) {
@@ -908,7 +979,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
-      for (const item of items) connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
+      for (const item of items) {
+        connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
+        if (item.ended) supervisorCommands.get(sessionKey(machine.id, item.name))?.ended(item.ended.reason);
+      }
       retireEndedSessionNotices(machine.id, items);
       // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
@@ -923,8 +997,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
         void upsertMachineEventAttention(machine, event);
       }
-      if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
-      if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
+      // A retained peer-session burst does not change this conversation's
+      // controls. Reading them for each peer event floods the signed HTTP lane
+      // (cas-c971). Events without a session still invalidate machine-wide state.
+      if (selectedMachineId === machine.id && selectedSession &&
+          (typeof event.session !== "string" || event.session === selectedSession)) {
+        void loadStatus(machine.id, selectedSession);
+        void loadLease(machine.id, selectedSession);
+      }
     },
     onSessionState: (session, state, scrollback) => {
       void renderSessionState(machine.id, session, state, scrollback);
@@ -957,6 +1037,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onMessageRejected: async (session, clientRef, detail, rejection) => {
+      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail)) return;
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the
       // message never arrived there. It waits in the thread and goes out once
@@ -995,6 +1076,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       }
       updateConversationViews(); renderConversationList();
     },
+    onSupervisorCommandSupport: (session, supported) => { supervisorCommandSession(machine.id, session).supported = supported; slashCommands?.palette.sync(); },
+    onSupervisorCommandReceipt: (session, receipt) => supervisorCommandSession(machine.id, session).receive(receipt),
     onOperatorReply: (session, reply, frameFence) => {
       // A notice belongs only to attention, including its durable resolution.
       if (isOperatorNotice(reply)) { void applyOperatorNotice(machine, session, reply, frameFence); return; }
@@ -1190,6 +1273,22 @@ const launchSheet = new LaunchSheet({
   copy: (text) => navigator.clipboard.writeText(text),
   returnFocus: () => document.querySelector<HTMLButtonElement>("#new-session-toggle")?.focus(),
 });
+
+let accountsSheet: Promise<import("./accounts-panel").AccountsSheet> | undefined;
+function openAccounts(): void {
+  accountsSheet ??= import("./accounts-panel").then(({ AccountsSheet }) => new AccountsSheet({
+    machines: () => [...machines.values()].map(machine => ({ id: machine.id, label: machine.label, scopes: machine.scopes })),
+    list: (machineId, signal) => launchConnection(machineId).accounts(signal),
+    change: (machineId, change) => launchConnection(machineId).changeAccount(change),
+    changed: machineId => launchSheet.accountsChanged(machineId),
+    copy: text => navigator.clipboard.writeText(text),
+    returnFocus: () => document.querySelector<HTMLButtonElement>("#accounts-toggle")?.focus(),
+  }));
+  void accountsSheet.then(sheet => sheet.open()).catch(() => {
+    accountsSheet = undefined;
+    toast("Could not open Accounts. Try again or reload Commander.");
+  });
+}
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
@@ -1919,9 +2018,11 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) { clearDisconnectedState(grid); return; }
-  // A fatal machine verdict wins over a session's last retry snapshot.
+  // A stopped machine verdict wins over a session's cached attach, including
+  // pairing revoked before the first Welcome (cas-3286).
   const machineState = connectionStates.get(machineId);
-  if (machineState?.fatal === true) snapshot = machineState;
+  if (machineState?.fatal === true || machineState?.authFailure) snapshot = machineState;
+  const where = machines.get(machineId)?.label ?? "the machine";
   // The session's thread is up (cas-f285: it is the stage's last frame now
   // that no pane card stands behind it): keep it, under a banner.
   const hasLastFrame = grid.querySelector(":scope > .conversation-thread-slot") !== null;
@@ -1935,7 +2036,6 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
     // Plain words in the body font (cas-a447): who was lost and what happens next.
-    const where = machines.get(machineId)?.label ?? "the machine";
     // cas-d15c: with the machine still connected, only this session's daemon
     // link dropped; the banner names the conversation, not the machine.
     const sessionOnly = sessionOnlyDrop(machineId, session);
@@ -2008,6 +2108,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     repair: () => openRepairDialog(machineId),
   }, now, {
     openingTitle: CONVERSATION_OPENING,
+    repairLabel: `Re-pair ${where}`,
     quietOpening: true,
     quietRetry: "session" in snapshot && firstAttachRetry(snapshot as AttachSnapshot, sessionsEverLive.has(sessionKey(machineId, session))),
   });
@@ -2066,13 +2167,17 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     // cas-0546: a task waiting to merge, or blocked, is progress, not
     // something waiting on the operator. Tasks & progress shows its state;
     // only the supervisor's own asks and blockers wait on the operator.
+    statusFailures.delete(key);
     statuses.set(sessionKey(machineId, session), status);
+    statusReceivedAt.set(key, performance.now());
     statusPending.delete(key);
     render();
   } catch {
     // The connection supervisor owns transport/auth reporting; the rail stops
     // holding a place for a status that is not coming.
-    if (statusPending.delete(key)) render();
+    statusFailures.add(key);
+    statusPending.delete(key);
+    render();
   }
 }
 
@@ -3143,7 +3248,7 @@ function bindSpeechComposer(): void {
   // nothing: the keypress only added a newline, in observe and control mode
   // alike.
   composer.onkeydown = (event) => {
-    if (!sendsOnEnter(event)) return;
+    if (event.defaultPrevented || !sendsOnEnter(event)) return;
     event.preventDefault();
     void submitSupervisorMessage();
   };
@@ -3157,6 +3262,7 @@ function bindSpeechComposer(): void {
   // Deferred: focus passing to Send or the mic and straight back must not flicker the question open.
   composer.onblur = () => { window.setTimeout(syncComposing, COMPOSING_BLUR_MS); };
   mic.onclick = () => speechController?.toggle();
+  bindSlashCommands(composer);
   syncSpeechComposer();
   if (speechDetectionStarted) return;
   speechDetectionStarted = true;
@@ -3939,6 +4045,7 @@ async function loadComposerUploads(): Promise<typeof import("./composer-uploads"
 async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
+  if (!quick && composer.value.startsWith("/")) { bindSlashCommands(composer); slashCommands?.palette.submit(); return; }
   const renderedThread = composer.dataset.threadKey;
   if (renderedThread) await acceptingUploads.get(renderedThread);
   const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
@@ -4331,6 +4438,7 @@ function renderRegions(context: RegionContext): void {
   renderStatus(context.status);
   syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
+  syncTeamView(context.status, context.liveRegions.staleNotice);
   if (context.selected && context.session && context.connectionSnapshot) {
     renderConnectionSurface(context.selected.id, context.session, context.connectionSnapshot);
   }
@@ -4551,7 +4659,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live" })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -5098,6 +5206,70 @@ function fleetOpsSignature(): string {
   return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, writeGrant.stage, writeGrant.result?.text, [...fleetAskedFor(selectedMachineId, selectedSession)].map(([id, at]) => [id, relativeTimestamp(at)])]);
 }
 
+// Team owns presentation only. Existing status/event invalidation remains the
+// single remote-data owner; the only clock here updates elapsed text locally.
+let teamOpenKey: string | undefined;
+let teamModule: typeof import("./team-view") | undefined;
+let teamLoading: Promise<void> | undefined;
+let teamLoadFailed = false;
+let teamClock: number | undefined;
+function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
+  const panel = document.querySelector<HTMLElement>("#team-panel");
+  const conversation = document.querySelector<HTMLButtonElement>("#conversation-tab");
+  const team = document.querySelector<HTMLButtonElement>("#team-tab");
+  const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  if (teamOpenKey !== key) teamOpenKey = undefined;
+  const opened = Boolean(key && teamOpenKey === key);
+  window.clearInterval(teamClock); teamClock = undefined;
+  if (!panel || !conversation || !team) return;
+  panel.hidden = !opened;
+  const select = (wantTeam: boolean): void => {
+    if (wantTeam && teamOpenKey !== key) countUsage("team.open");
+    teamOpenKey = wantTeam ? key : undefined;
+    syncTeamView(status, stale);
+    (wantTeam ? team : conversation).focus();
+    scheduleConversationLayout();
+  };
+  for (const [button, selected] of [[conversation, !opened], [team, opened]] as const) {
+    button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1;
+    button.onclick = () => { if (button === team) teamLoadFailed = false; select(button === team); };
+    button.onkeydown = event => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault(); select(event.key === "End" || (event.key !== "Home" && button === conversation));
+    };
+  }
+  document.querySelector(".conversation-main")?.classList.toggle("team-open", opened);
+  if (!opened) return;
+  if (!teamModule) {
+    panel.textContent = teamLoadFailed ? "Couldn’t open Team. Select Team to retry." : "Loading Team…";
+    if (!teamLoading && !teamLoadFailed) {
+      teamLoading = import("./team-view").then(module => { teamModule = module; }).catch(() => { teamLoadFailed = true; }).finally(() => {
+        teamLoading = undefined;
+        // Load completion reads current selection/data, never its old closure.
+        render();
+      });
+    }
+    return;
+  }
+  const session = selectedMachineId ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
+  const agents = (status?.agents as FleetAgent[]) ?? [];
+  const tasks = [...new Map([...((status?.tasks_in_progress as ProgressTask[]) ?? []), ...((status?.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
+  teamModule.renderTeam(panel, {
+    roster: session?.workers, supervisor: session?.supervisor, agents, tasks,
+    epics: (status?.epics as ReleaseEpic[]) ?? [], focused: typeof status?.focused_epic === "string" ? status.focused_epic : null,
+    supervisors: [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name)),
+    asks: key ? waitingOnOperator(conversationHistories.get(key)) : 0,
+    stale: statusFailures.has(key!) ? "Staffing update failed. Showing the last state received." : stale,
+    unavailable: session?.ended ? "This session has ended." : !status ? statusFailures.has(key!) ? "Couldn’t load staffing." : "Waiting for project status…" : undefined,
+  }, () => select(false), openProgressSheet);
+  if (statusFailures.has(key!)) {
+    const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry staffing";
+    retry.onclick = () => { if (selectedMachineId && selectedSession) void loadStatus(selectedMachineId, selectedSession); };
+    if (!panel.querySelector("[data-team-retry]")) { retry.dataset.teamRetry = ""; panel.append(retry); }
+  }
+  teamClock = window.setInterval(() => { if (panel.isConnected && !panel.hidden) teamModule?.updateTeamElapsed(panel); }, 30_000);
+}
+
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
@@ -5258,7 +5430,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
-    line.append(identifier(worker.name), chip(metadata?.liveness ?? worker.agent?.status));
+    line.append(identifier(worker.name), chip(workerState(worker, tasks)));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
@@ -5378,6 +5550,11 @@ function bindEvents(): void {
     if (selectedMachineId) commitSelection({ machineId: selectedMachineId });
     render();
     queueMicrotask(() => returnToConversationRow(opened));
+  };
+  const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
+  if (commands) commands.onclick = () => {
+    const input = document.querySelector<HTMLTextAreaElement>("#message-text");
+    if (input) { bindSlashCommands(input); slashCommands?.palette.show(); }
   };
   const interrupt = document.querySelector<HTMLButtonElement>("#conversation-interrupt");
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };
@@ -5577,6 +5754,8 @@ function bindEvents(): void {
   if (paletteDormant) paletteDormant.onclick = () => { closePalette(); setDormantRevealed(!revealDormant); };
   const paletteLaunch = palette.querySelector<HTMLButtonElement>("[data-palette-action='new-session']");
   if (paletteLaunch) paletteLaunch.onclick = () => { closePalette(); launchSheet.open(); };
+  const accountsToggle = document.querySelector<HTMLButtonElement>("#accounts-toggle");
+  if (accountsToggle) accountsToggle.onclick = openAccounts;
   const newSession = document.querySelector<HTMLButtonElement>("#new-session-toggle");
   if (newSession) newSession.onclick = () => launchSheet.open();
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
@@ -5858,6 +6037,7 @@ function pairedMachineRows(): PairedMachineRow[] {
         : state?.phase === "failed" && state.fatal === true ? { cause: `This browser can't connect. ${fatalConnectionRecovery(state.reason)}` } : {}),
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version,
+      latestRelease: latestRelease.version,
       // cas-d382: what this pairing may do to the fleet, and how to get the rest.
       fleet: { operate: fleetControlGate(machine.scopes, "add-workers", location.origin), manage: fleetControlGate(machine.scopes, "stop-worker", location.origin) } };
   }));
@@ -5893,7 +6073,7 @@ function renderMachineRegister(): void {
     const total = counts.reduce((sum, listed) => sum + listed.length, 0);
     const stale = counts.reduce((sum, listed) => sum + listed.filter((session) => session.stale).length, 0);
     const lastKnown = (!counted && cachedCatalogs.size > 0) || stale;
-    const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, __HUB_BUILD__, !machineCatalogLoaded, lastKnown);
+    const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, `${__HUB_VERSION__} · ${__HUB_BUILD__}`, !machineCatalogLoaded, lastKnown);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
     if (!button) footer.innerHTML = markup;

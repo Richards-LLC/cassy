@@ -1,0 +1,4 @@
+title: Null live labels normalize before durable receipt; queued browser writes survive load and batch without losing receipt fences, draining pending replay across attaches
+tasks: [cas-c641]
+invariants: [HUB-J3-GOAL, HUB-J12-GOAL]
+journeys: [HUB-J3, HUB-J12]

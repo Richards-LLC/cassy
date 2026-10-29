@@ -157,6 +157,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Recent turns appear without any action, grouped by speaker and day.
 - Loading earlier keeps the reading position; the button shows progress.
+- Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting. Clipboard refusal offers a visible retry; long paths wrap at phone width without widening the page.
 - The end of history is stated, not implied.
 
 #### Edge paths
@@ -425,6 +426,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Goal:** the conversation reconnects by itself and every message I send is delivered exactly once
 - **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/main.ts`
 - **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`: one main test and several part tests marked `journeyPart`. Each part writes its receipts under `journeys/HUB-J12/parts/<part>/`, and `scripts/journey-bundles.py` folds every part's stages, cells and verdict into the HUB-J12 bundle and its JOURNEYS.md total (cas-1f7e)
+- **Revoked before first Welcome (cas-3286):** the code re-pairing part holds the initial session attach until pairing is revoked; the conversation immediately replaces Opening with its pairing failure and a named Re-pair action, then completes re-pairing through that control. A stale attach cannot override the machine's authentication verdict.
 - **Gaps:** the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by its visibility events
 
 #### Steps
@@ -739,7 +741,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/`, a paired machine and its supervisor conversation, at 1280×800 and 390×844 in light and dark
 - **Goal:** inspect a Mermaid diagram, a collapsible unified diff, an image, a PDF first page and playable video/audio without leaving the conversation, with source and original files reachable
-- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
+- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-syntax.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
 - **Suite:** `hub-web/e2e/journeys/rich-content.journey.ts`
 - **Gaps:** hub tickets and proxy responses are doubled; actual PNG, PDF, WebM and WAV bytes are decoded by the production browser build under a self-only media CSP. Ticket binding, revocation and proxy authorization are proven by the hub handler tests. Hosted Commander cross-origin media remains outside this hub-served proof.
 
@@ -757,6 +759,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Expected experience
 
+- Tagged JS/TS, JSON, Python, Rust and shell source colors lazily in light/dark; forced colors use system ink. Delayed coloring and message repaint retain selection. Failed or oversized coloring keeps exact source and a visible Plain text note.
 - Copy retains literal source; clipboard refusal is visible. Wrap is per block and long lines fit 390px without page overflow; unknown languages stay readable.
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
@@ -819,6 +822,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
 7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
 8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
 
 #### Expected experience
 
@@ -831,3 +835,59 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
 - A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
 - A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.
+
+### HUB-J26 · See live staffing beside a conversation
+
+- **Entry:** `/commander/` at desktop 1280 and phone 390, a supervisor conversation with three live worker registrations
+- **Goal:** see the selected supervisor's workers, tasks, authoritative state and receipt trail alongside epic merge progress without opening raw output
+- **Touches:** `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/bridge/server/session.rs`, `cas-cli/src/bridge/server/types.rs`
+- **Suite:** `hub-web/e2e/journeys/team.journey.ts`
+- **Gaps:** the protocol double supplies lifecycle events; acceptance additionally compares a read-only real hub with simultaneous factory worker and epic readbacks
+
+#### Steps
+
+1. Open Team beside the supervisor conversation — keyboard-select the lazy tab; read epic progress, worker tasks and reported model, with no output requests.
+2. A lifecycle event updates staffing without reloading — change a worker state and read it within five seconds while Team stays selected.
+3. Read Team with forced colors and reduced motion — keep lanes readable without animation or phone overflow, then return to the conversation and composer.
+
+#### Expected experience
+
+- Team loads only when selected, with the same session roster, task titles and epic progress as Tasks & progress.
+- Every receipt mark names actual lifecycle evidence; missing model, start time and evidence remain explicitly unreported.
+- Needs you opens the existing conversation or fleet controls, and the conversation draft stays intact while viewing Team.
+
+#### Edge paths
+
+- An empty session roster stays empty; unrelated project workers never enter the view.
+- Unavailable or stale status remains labeled and a failed status request offers Retry staffing.
+- Forced colors and reduced motion preserve textual state and evidence without decorative animation or phone overflow.
+
+### HUB-J27 · Run a supervisor command and read what the harness did
+
+- **Entry:** `/commander/`, paired Claude or Codex conversation, desktop and 390 px
+- **Goal:** choose a curated command from `/` or the header, confirm destructive actions, and distinguish requested input from observed harness execution
+- **Touches:** `hub-web/src/supervisor-commands.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs`, `cas-cli/src/hub/server.rs`, `cas-cli/src/hub/auth.rs`
+- **Suite:** `hub-web/e2e/journeys/supervisor-commands.journey.ts`
+- **Gaps:** browser outcomes use protocol doubles. Rust tests enforce the allowlist, lease, confirmation and private receipts; disposable real Claude and Codex probes verify native mappings.
+
+#### Steps
+
+1. Choose Usage from the slash palette with the keyboard
+2. Read the observed native result without resending the command
+3. Cancel Clear, then confirm Exit for the named supervisor
+4. Settle Exit from the ended catalog after its status request loses the daemon
+5. Open the quick controls and read the permission explanation
+6. Read adjacent Raw output and return by keyboard
+
+#### Expected experience
+
+- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
+- Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
+- After a disconnect refusal followed by an authenticated ended catalog, Exit is observed without a not-sent/retry claim or mutation replay; an earlier Usage keeps its own observed result (cas-7f2a).
+- Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.
+
+#### Edge paths
+
+- An unsupported harness offers no choices, and a pairing without input rights sees its permission reason.
+- Busy panes and operator drafts refuse injection; uncertain outcomes never automatically replay mutations.
+- A destructive confirmation can be cancelled without a command frame, and Raw output keeps its existing keyboard route.

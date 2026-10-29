@@ -458,13 +458,9 @@ impl Default for TasksConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QaMode {
-    #[default]
     PerTask,
+    #[default]
     Batch,
-}
-
-impl QaMode {
-    pub fn is_per_task(&self) -> bool { *self == Self::PerTask }
 }
 
 impl std::fmt::Display for QaMode {
@@ -541,7 +537,7 @@ pub struct QaConfig {
     pub post_release: Option<crate::qa_post_release::PostReleaseConfig>,
 
     /// Batch mode defers evidence until one staging ledger covers the deliveries.
-    #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
+    #[serde(default)]
     pub mode: QaMode,
     /// Labels that opt a task into the non-empty `demo_statement` creation gate.
     #[serde(default = "default_user_facing_labels")]
@@ -583,7 +579,7 @@ pub struct QaConfig {
     pub user_facing_paths: Vec<String>,
 
     /// Non-rendered API/server paths; HTTP transcript and contract diff QA.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub api_paths: Vec<String>,
 
     /// cas-619f: minutes one independent QA round may take before it times
@@ -611,7 +607,7 @@ pub struct QaConfig {
 
     /// cas-d5c1: environment variable names that must point at a readable
     /// file in the reviewer's environment (the path only; never read).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub preflight_env_files: Vec<String>,
 
     /// cas-d5c1: project-relative command that checks, and may replenish,
@@ -624,7 +620,7 @@ pub struct QaConfig {
     /// authenticated runs may stand in for a local build in a QA evidence
     /// bundle when local auth is impossible. The bundle must still record
     /// the reason and prove the deployment served the delivered commit.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub deployed_origins: Vec<String>,
 
     /// cas-d5c1: seconds the preflight hook may run.
@@ -706,7 +702,7 @@ impl Default for QaConfig {
         Self {
             capture: None,
             post_release: None,
-            mode: QaMode::PerTask,
+            mode: QaMode::default(),
             registry: QaRegistryConfig::default(),
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,

@@ -173,8 +173,9 @@ fn apply_recommendation(profiles: &mut [Profile], accounts: &[crate::account_reg
     for profile in profiles {
         if let Some(account) = accounts.iter().find(|a| a.folder == profile.directory) {
             profile.login_state = account.login_state;
-            profile.usage = crate::cli::limits::summarize_windows_at(&account.windows, now);
-            profile.weekly = weekly_line(&account.windows, now);
+            profile.usage = crate::cli::limits::summarize_account_at(account, now);
+            profile.weekly = weekly_line(&account.windows, now,
+                account.usage_observed_at.filter(|_| provider == crate::accounts::Provider::Claude));
             profile.duplicate_of = account.flags.duplicate_of.clone();
         }
         profile.recommendation = selection.recommended.as_ref()
@@ -331,6 +332,7 @@ fn limit_tag(profile: &Profile) -> Option<&str> {
 fn weekly_line(
     windows: &[crate::account_registry::UsageWindow],
     now: chrono::DateTime<chrono::Utc>,
+    observed_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Option<String> {
     if windows.is_empty() {
         return None;
@@ -342,10 +344,11 @@ fn weekly_line(
     if weekly.resets_at.is_some_and(|at| at <= now) {
         return Some(format!("weekly {reset}"));
     }
+    let observation = crate::cli::limits::observation_label_at(observed_at, now);
     Some(match weekly.used_percent {
-        Some(used) if used.is_finite() && used >= 100.0 => format!("weekly limit hit, {reset}"),
+        Some(used) if used.is_finite() && used >= 100.0 => format!("weekly limit hit{observation}, {reset}"),
         Some(used) if used.is_finite() && used >= 0.0 => {
-            format!("weekly {:.0}% left, {reset}", 100.0 - used)
+            format!("weekly {:.0}% left{observation}, {reset}", 100.0 - used)
         }
         // No percentage and no reset is not evidence of an unused window.
         None if weekly.resets_at.is_none() => "weekly usage unknown (not reported)".to_string(),
@@ -891,11 +894,11 @@ mod tests {
         .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["main", "grok", "operator@example.com", "alt", "work"]);
-        assert!(profiles[3].active);
+        assert_eq!(names, vec!["main", "alt", "grok", "operator@example.com", "work"]);
+        assert!(profiles[1].active);
         assert!(!profiles[0].active);
-        // The chooser offers each identity once and hides the never-used
-        // folder; the active duplicate's cursor moves to its canonical row.
+        // Token-only emails cannot establish identity: keep explicit aliases
+        // distinct and hide only the never-used folder.
         let rows: Vec<String> =
             profile_choices(&profiles, PickerStyle { glyphs: false, styled: false })
                 .iter()
@@ -905,7 +908,9 @@ mod tests {
             rows,
             [
                 "main  login unknown\n    weekly usage unknown (login unknown)",
+                "alt  active\n    weekly usage unknown (no recent report)",
                 "operator@example.com  login unknown\n    weekly usage unknown (login unknown)",
+                "work  login unknown\n    weekly usage unknown (login unknown)",
                 "+ Log in a new account",
             ]
         );
@@ -1028,6 +1033,14 @@ mod tests {
             assert_eq!(active_choice_index(&profiles), 1);
             assert!(rows.iter().all(|row| !row.contains("5h") && !row.contains("extra usage")));
             assert!(rows.iter().all(|row| row.lines().all(|line| text_width(&strip_sgr(line)) <= ROW_WIDTH)));
+            if provider == crate::accounts::Provider::Claude {
+                accounts[1].usage_observed_at = Some("2026-10-27T09:10:00Z".parse().unwrap());
+                apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
+                let rows = text(&profiles, PLAIN);
+                assert!(rows[1].contains("weekly 41% left as of 5:10 AM ET"), "{}", rows[1]);
+                assert!(rows.iter().all(|row| row.lines().all(|line| text_width(line) <= ROW_WIDTH)));
+                accounts[1].usage_observed_at = None;
+            }
             // A 5-hour window appears only as the limit that excluded a row.
             accounts[1].windows[0].used_percent = Some(95.0);
             accounts[1].windows[1].used_percent = None;

@@ -32,6 +32,7 @@ mod known_repos;
 mod peers;
 mod project_overview_cmd;
 mod qa;
+pub(crate) mod qa_ledger;
 mod qa_impact;
 pub(crate) mod qa_post_release;
 mod provider_default;

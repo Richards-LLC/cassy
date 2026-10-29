@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::store::{find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::{DaemonMessage, SessionInfo, SessionManager};
 
+mod accounts;
 mod attention;
 mod auth;
 mod connector;

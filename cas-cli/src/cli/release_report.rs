@@ -967,37 +967,11 @@ fn acquire_sources(
             }
         }
 
-        for search in [tag, version] {
-            match gh_json(
-                project_root,
-                &[
-                    "pr",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--state",
-                    "merged",
-                    "--search",
-                    search,
-                    "--limit",
-                    "30",
-                    "--json",
-                    "number,title,body,url,closingIssuesReferences,createdAt,mergedAt",
-                ],
-            ) {
-                Ok(value) => {
-                    release_pr = select_release_pr(&value, version);
-                    if release_pr.is_some() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    warnings.push(format!(
-                        "GitHub release PRs: {error}; remedy `gh pr list --repo {repo} --state merged`"
-                    ));
-                    break;
-                }
-            }
+        match fetch_release_pr(project_root, repo, version) {
+            Ok(pr) => release_pr = pr,
+            Err(error) => warnings.push(format!(
+                "GitHub release PRs: {error}; remedy `gh pr list --repo {repo} --state merged`"
+            )),
         }
         match &release_pr {
             Some(pr) => referenced.extend(pr.referenced.iter().copied()),
@@ -1295,18 +1269,20 @@ fn plain_change_title(title: &str) -> String {
 }
 
 /// The shipped changes in one CHANGELOG section. A titled heading
-/// (`### Fixed — what changed (refs)`) is one change; under an untitled
-/// heading each bullet is one change, titled by its bold lead-in.
+/// (`### Fixed — what changed (refs)`) is one change unless top-level
+/// bold-titled entries starting with the first entry identify it as a group.
+/// Under a group or an untitled heading each bullet is one change, titled
+/// by its bold lead-in.
 fn changelog_changes(body: &str) -> Vec<ShippedChange> {
     let mut changes = Vec::new();
     let mut kind = "Changes".to_string();
     let mut titled: Option<(String, String)> = None;
+    let mut titled_has_entry = false;
     let mut bullet: Option<String> = None;
+    let bold_title = Regex::new(r"^\*\*([^*]+)\*\*").expect("bold change title regex");
     let flush_bullet = |bullet: &mut Option<String>, kind: &str, changes: &mut Vec<ShippedChange>| {
         if let Some(text) = bullet.take() {
-            let title = Regex::new(r"^\*\*([^*]+)\*\*")
-                .ok()
-                .and_then(|regex| regex.captures(&text))
+            let title = bold_title.captures(&text)
                 .and_then(|capture| capture.get(1))
                 .map(|lead| lead.as_str().to_string())
                 .unwrap_or_else(|| heading_from_entry(&clean_markdown_text(&text)));
@@ -1328,6 +1304,15 @@ fn changelog_changes(body: &str) -> Vec<ShippedChange> {
     };
     for line in body.lines() {
         let trimmed = line.trim();
+        // A group's title is context, not an extra shipped change. Only the
+        // first top-level entry can switch modes; a later bold detail retains
+        // the legacy single-change heading and its earlier plain entries.
+        if titled.is_some()
+            && !titled_has_entry
+            && line.strip_prefix("- ").is_some_and(|entry| bold_title.is_match(entry))
+        {
+            titled = None;
+        }
         if let Some(heading) = trimmed.strip_prefix("### ") {
             flush_bullet(&mut bullet, &kind, &mut changes);
             flush_titled(&mut titled, &kind, &mut changes);
@@ -1340,9 +1325,11 @@ fn changelog_changes(body: &str) -> Vec<ShippedChange> {
                 continue;
             }
             titled = title.map(|title| (title.to_string(), String::new()));
+            titled_has_entry = false;
         } else if is_test_or_docs_category(&kind) {
             continue;
         } else if let Some((_, text)) = titled.as_mut() {
+            titled_has_entry |= line.starts_with("- ");
             text.push(' ');
             text.push_str(trimmed);
         } else if let Some(value) = line.trim_start().strip_prefix("- ") {
@@ -1525,6 +1512,7 @@ fn collect_pr_issue_references(value: &Value, referenced: &mut BTreeSet<u64>) {
 #[derive(Debug, Clone)]
 struct ReleasePr {
     number: u64,
+    head_ref: Option<String>,
     url: Option<String>,
     created_at: Option<DateTime<Utc>>,
     merged_at: DateTime<Utc>,
@@ -1576,6 +1564,7 @@ fn select_release_pr(value: &Value, version: &str) -> Option<ReleasePr> {
             collect_pr_issue_references(&Value::Array(vec![pr.clone()]), &mut referenced);
             Some(ReleasePr {
                 number: pr.get("number").and_then(Value::as_u64)?,
+                head_ref: pr.get("headRefName").and_then(Value::as_str).map(ToOwned::to_owned),
                 url: pr.get("url").and_then(Value::as_str).map(ToOwned::to_owned),
                 created_at: parse_utc(pr.get("createdAt").and_then(Value::as_str)),
                 merged_at,
@@ -1583,6 +1572,61 @@ fn select_release_pr(value: &Value, version: &str) -> Option<ReleasePr> {
             })
         })
         .min_by_key(|pr| pr.merged_at)
+}
+
+/// The same version-bound merged PR drives report evidence and upload ownership.
+fn fetch_release_pr(project_root: &Path, repo: &str, version: &str) -> anyhow::Result<Option<ReleasePr>> {
+    let tag = format!("v{version}");
+    for search in [tag.as_str(), version] {
+        let value = gh_json(project_root, &[
+            "pr", "list", "--repo", repo, "--state", "merged", "--search", search,
+            "--limit", "30", "--json",
+            "number,title,body,url,closingIssuesReferences,createdAt,mergedAt,headRefName",
+        ])?;
+        if let Some(pr) = select_release_pr(&value, version) {
+            return Ok(Some(pr));
+        }
+    }
+    Ok(None)
+}
+
+/// Recognize generated report PDFs, including custom output directories with
+/// their generated Markdown companion. Other files keep normal publication
+/// context; a version-looking filename alone does not confer release identity.
+fn report_pdf_version(path: &Path) -> Option<String> {
+    let path = fs::canonicalize(path).ok()?;
+    if path.extension()?.to_str()? != "pdf" {
+        return None;
+    }
+    let version = normalize_version(path.file_stem()?.to_str()?.strip_prefix('v')?).ok()?;
+    let report_directory = path.parent()?.file_name()?.to_str()? == "release-reports";
+    let generated_source = || fs::read_to_string(path.with_extension("md")).ok().is_some_and(|source| {
+        source.lines().next().is_some_and(|title| title.starts_with("# ") && title.ends_with(&format!(" v{version}")))
+            && source.contains("\n## Evidence and scope\n")
+    });
+    (report_directory || generated_source()).then_some(version)
+}
+
+/// File uploads of one release use its PR's durable epic lane, independently
+/// of session focus. Missing/ambiguous evidence preserves the ordinary gate;
+/// callers can explicitly name --epic. Mixed attachments never borrow a PDF's
+/// release identity for an unrelated deliverable.
+pub(crate) fn publication_epic_for_reports(cas_root: &Path, files: &[PathBuf]) -> Option<String> {
+    let first = report_pdf_version(files.first()?)?;
+    if files.iter().skip(1).any(|path| report_pdf_version(path).as_deref() != Some(&first)) {
+        return None;
+    }
+    let project = cas_root.parent()?;
+    let config = Config::load(cas_root).ok()?;
+    let repo = config.issue_repo_registry_for_project(project).project?;
+    let branch = fetch_release_pr(project, &repo, &first).ok()??.head_ref?;
+    let store = crate::store::open_task_store(cas_root).ok()?;
+    let mut epics = store.list(None).ok()?.into_iter().filter(|task| {
+        task.task_type == cas_types::TaskType::Epic
+            && task.effective_epic_branch() == Some(branch.as_str())
+    });
+    let epic = epics.next()?;
+    epics.next().is_none().then_some(epic.id)
 }
 
 /// Split one snapshot of issue states into this release's closures.
@@ -2908,7 +2952,7 @@ fn date_from_timestamp(value: &str) -> Option<String> {
 /// 2:00 AM EST (07:00 UTC) to the first Sunday in November at 2:00 AM EDT
 /// (06:00 UTC); standard time (UTC-5) covers the rest of the year. Machine
 /// fields (front matter, JSON, receipts) stay in UTC ISO-8601.
-fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
+pub(crate) fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
     let year = instant.year();
     let nth_sunday = |month: u32, nth: i64| {
         let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month start");
@@ -2926,7 +2970,7 @@ fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
 }
 
 /// `1:04 AM ET`
-fn eastern_time(instant: DateTime<Utc>) -> String {
+pub(crate) fn eastern_time(instant: DateTime<Utc>) -> String {
     eastern(instant).format("%-I:%M %p ET").to_string()
 }
 
@@ -2991,7 +3035,11 @@ fn heading_from_entry(text: &str) -> String {
     let text = text.split_once(" — ").map(|(head, _)| head).unwrap_or(text);
     let mut heading = text.trim().to_string();
     if heading.len() > 100 {
-        heading.truncate(97);
+        let mut end = 97;
+        while !heading.is_char_boundary(end) {
+            end -= 1;
+        }
+        heading.truncate(end);
         heading.push_str("...");
     }
     if heading.is_empty() {
@@ -3414,6 +3462,19 @@ mod tests {
             "The report reports supervisor delivery evidence without truncation."
         );
         assert!(heading_from_entry(&section.entries[0].text).starts_with('`'));
+    }
+
+    #[test]
+    fn long_unicode_entry_heading_keeps_complete_chars_and_ellipsis_cas_8007() {
+        let prefix = "a".repeat(96);
+        for character in ["é", "—", "🌟"] {
+            // Byte offset 97 lies inside this character, beyond the ASCII prefix.
+            let entry = format!("{prefix}{character}{}", "z".repeat(12));
+            assert_eq!(heading_from_entry(&entry), format!("{prefix}..."));
+        }
+        let short = "é".repeat(50);
+        assert_eq!(heading_from_entry(&short), short);
+        assert_eq!(heading_from_entry(&"a".repeat(101)), format!("{}...", "a".repeat(97)));
     }
 
     #[test]

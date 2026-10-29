@@ -301,9 +301,10 @@ impl UpkeepReport {
             .filter(|path| !path.is_empty())
             .map(str::to_owned)
             .collect();
-        let registry = measurement
-            .read(&qa.registry.path)
-            .map(|text| crate::qa_registry::parse(&text));
+        let registry = crate::qa_registry::load_with(&qa.registry.path, &tracked, |path| {
+            Ok(measurement.read(path))
+        })
+        .transpose();
         let status = crate::qa_seed::status_with_registry(qa, registry, &tracked);
         if status.present {
             report

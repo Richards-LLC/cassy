@@ -77,6 +77,7 @@ pub(crate) mod orphan_gc;
 pub(crate) mod phoenix;
 pub(crate) mod process_groups;
 mod protocol;
+pub mod supervisor_commands;
 pub(crate) mod relay_token;
 pub mod renderer;
 /// cas-7c93 (GH #87): sanctioned lifecycle for servers that outlive a task.

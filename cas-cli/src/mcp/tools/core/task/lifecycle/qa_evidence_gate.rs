@@ -182,6 +182,27 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     }
 }
 
+/// Format preflight before either verification-dispatch path mutates state.
+/// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
+pub(crate) fn ledger_preflight(cas_root: &Path, task: &Task, require_missing: bool) -> Result<(), String> {
+    let config = crate::config::Config::load(cas_root).map_err(|e| format!("QA LEDGER REJECTED: {e}"))?;
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
+    let dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
+    let ledger = dir.join("LEDGER.md");
+    // Batch proof is owned by the existing shared-receipt gate, not an
+    // individual ledger. Existing ledgers still undergo the same format check.
+    if !ledger.exists() && (!require_missing || !config.qa().evidence_gate
+        || config.qa().mode == crate::config::QaMode::Batch
+        || task.demo_statement.trim().is_empty()) { return Ok(()); }
+    if dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none() {
+        return Err("QA LEDGER REJECTED: task artifact directory escapes its project namespace".into());
+    }
+    let report = crate::qa_ledger::check(&ledger, crate::qa_ledger::minimum_rows(task));
+    if report.ok { Ok(()) } else {
+        Err(format!("QA LEDGER REJECTED before verification dispatch:\n{}\nRun cas qa ledger check {} --task {}", report.refusal(), ledger.display(), task.id))
+    }
+}
+
 /// A missing flat citation can outlive the namespace migration in a running
 /// service. Read its corresponding scoped file without rewriting task history.
 /// Existing historical files, unsafe relative paths and unrelated citations
@@ -501,6 +522,20 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
+    let needs_bundle = tier == EvidenceTier::Bundle && batch_receipt.is_none()
+        && !batch_defer && covering_pass.is_none() && carried_bundle.is_none();
+    let restored = if waiver.is_none() && (needs_bundle || pair_coverage.is_err()) {
+        crate::artifacts::qa::restore(cas_root, task, &notes, &artifacts_dir)
+            .map_err(|error| format!("QA EVIDENCE REJECTED: cannot restore published bundle: {error}"))?
+    } else { None };
+    let resolved_notes = match restored {
+        Some(bundle) => format!("{notes}\nqa-bundle: {}", bundle.display()),
+        None => notes.to_string(),
+    };
+    let ctx = EvidenceContext { notes: &resolved_notes, ..ctx };
+    let pair_coverage = if tier != EvidenceTier::Bundle || batch_receipt.is_some() || batch_defer || covering_pass.is_some() || carried_bundle.is_some() {
+        crate::qa_evidence::validate_cited_pair_coverage(&ctx)
+    } else { pair_coverage };
     // Batch deferral/approval can replace full proof, but cannot silently drop
     // cells from a declared comparison. Only the authenticated exact-tip waiver
     // above (or the close handler's recorded supervisor override) waives it.
@@ -585,6 +620,31 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledger_preflight_preserves_batch_evidence_ownership() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        env.set_current_dir(dir.path());
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let mut config = crate::config::Config::default();
+        config.set("factory.artifacts_root", artifacts.to_str().unwrap()).unwrap();
+        let mut task = Task::new("cas-ledger-batch".into(), "Batch delivery".into());
+        task.demo_statement = "Walk the assembled staging build".into();
+        for (mode, allowed_missing) in [("batch", true), ("per_task", false)] {
+            config.set("qa.mode", mode).unwrap();
+            config.save(&root).unwrap();
+            assert_eq!(ledger_preflight(&root, &task, true).is_ok(), allowed_missing, "{mode}: shared batch evidence must not become a missing individual ledger");
+        }
+        config.set("qa.mode", "batch").unwrap();
+        config.save(&root).unwrap();
+        let task_dir = crate::config::project_factory_artifacts_root(&root, &artifacts).join(&task.id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("LEDGER.md"), "malformed evidence").unwrap();
+        assert!(ledger_preflight(&root, &task, true).unwrap_err().contains("canonical evidence matrix header"), "existing malformed batch evidence still refuses locally");
+    }
+
 
     #[test]
     fn interaction_classification_is_conservative_and_configurable_cas_266e() {
@@ -747,6 +807,7 @@ mod tests {
         let hub_web = commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\n").unwrap();
 
         let mut task = Task::new("cas-e4d2-regression".to_string(), "Rust fix".to_string());
         task.assignee = Some("worker".to_string());
@@ -934,6 +995,7 @@ mod tests {
         commit_file(&repo, "src/lib.rs", "pub fn backend() {}\n");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\n").unwrap();
         let mut task = Task::new("cas-bde8-squash".to_string(), "Backend fix".to_string());
         task.assignee = Some("worker".to_string());
 
@@ -1019,7 +1081,9 @@ mod tests {
         std::fs::create_dir_all(&artifacts).unwrap();
         let transcript = format!(
             "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
-             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n\
+             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | LEDGER.md | - |\n\
              request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
         );
         std::fs::write(artifacts.join("LEDGER.md"), &transcript).unwrap();

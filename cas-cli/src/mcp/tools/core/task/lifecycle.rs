@@ -3444,9 +3444,7 @@ impl CasCore {
                         .is_some_and(|rest| rest.is_empty() || rest.starts_with("\n\n["))
                 })
                 .map(|(offset, _)| offset);
-            let note_offset = if let Some(offset) = existing {
-                offset
-            } else {
+            if existing.is_none() {
                 let note = format!(
                     "[{}] START CONTEXT{context}",
                     chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -3456,15 +3454,17 @@ impl CasCore {
                     format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
                 ))?;
                 saved = read_saved()?;
-                saved.notes.rfind(&note).ok_or_else(|| Self::error(
+                saved.notes.find(&note).ok_or_else(|| Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     "Task started, but its saved start instructions are unavailable; read task notes full=true before acting",
-                ))?
-            };
-            let offset = format!("Notes for task {}\n{}\n\n", task.id, "=".repeat(task.id.len() + 15)).len()
-                + note_offset;
+                ))?;
+            }
+            // Cloud reconciliation can reorder timestamped notes ahead of
+            // undated history between start and notes. A tail offset from this
+            // snapshot may then split UTF-8 or skip the instructions entirely.
+            // Begin recovery at the stable document boundary instead.
             let navigation = format!(
-                "\nStart advisories: task notes id={} offset={offset} limit=1600 (follow next=)\nAll start advisories: task notes id={} full=true",
+                "\nStart advisories: task notes id={} offset=0 limit=1600 (follow next= to end; read latest START CONTEXT)\nAll start advisories: task notes id={} full=true",
                 task.id, task.id
             );
             let cited_pointer =

@@ -55,3 +55,17 @@ it("scopes server-shaped project epics to the supervisor and keeps the full boar
   expect(releaseProgress(epics.filter(epic => ["other", "closed", "cancelled"].includes(epic.id)), null, tasks, supervisors)).toBeUndefined();
   expect(taskGroups(tasks, [], [], false, supervisors).flatMap(group => group.tasks)).toEqual([]);
 });
+
+
+it("keeps worker delivery states shared with the rail and never guesses milestone receipts", async () => {
+  const { workerState } = await import("./progress-model");
+  const task = { id: "t", status: "AwaitingMerge" };
+  for (const [agent, expected] of [
+    [{ name: "a", current_task: "t", liveness: "executing" }, "Parked for merge"],
+    [{ name: "a", liveness: "waiting_for_input" }, "Waiting"],
+    [{ name: "a", liveness: "stalled" }, "Stalled"],
+    [{ name: "a", liveness: "dead", current_task: "t" }, "Offline"],
+    [{ name: "a" }, "Not reported"],
+  ] as const) expect(workerState(workerProgress(["a"], [agent], [task])[0], [task])).toBe(expected);
+  expect(workerState(workerProgress(["a"], [{ name: "a", current_task: "t" }], [{ ...task, delivery_state: "merged" }])[0], [{ ...task, delivery_state: "merged" }])).toBe("Merged");
+});

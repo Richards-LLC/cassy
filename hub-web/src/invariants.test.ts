@@ -209,7 +209,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Enter was never wired: it inserted a newline and sent nothing, in observe
     // mode and in control mode alike (measured against the live hub, cas-0d61).
     expect(source).toContain("composer.onkeydown = (event) => {");
-    expect(source).toContain("if (!sendsOnEnter(event)) return;");
+    // pin: composer Enter must yield to the command palette before semantic message submission.
+    expect(source).toContain("if (event.defaultPrevented || !sendsOnEnter(event)) return;");
     expect(source).toContain("void submitSupervisorMessage();");
     expect(source).toContain('document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };');
     expect(source).toContain("async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {");
@@ -828,15 +829,14 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
       "/v1/health", "/v1/machine",
     ]);
-    const [main, connectionView] = await Promise.all([
-      readSource("main.ts"),
-      readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
-    ]);
+    const main = await readSource("main.ts");
     // cas-a6f0 (journey F8): every refused pairing, revoked included, is headed
     // as the header names it.
     expect(main).toContain('headline: "Machine needs pairing",');
     expect(main).not.toContain('"Authentication blocked"');
-    expect(connectionView).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
+    // Recovery actions are exercised through the DOM for every auth failure
+    // by connection-state-view.test.ts, rather than pinning an enumeration
+    // that omitted expired credentials (cas-8e01).
     supervisor.stop();
   });
 

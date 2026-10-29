@@ -155,6 +155,16 @@ pub fn runtime_fixture_parent() -> PathBuf {
         .clone()
 }
 
+/// A socket-only fixture whose pathname fits Unix socket ABIs even when the
+/// archive checkout and TMPDIR are deep. Real projects must still use
+/// [`runtime_fixture_parent`]; this directory holds only sockets or their HOME.
+#[cfg(unix)]
+pub fn short_socket_tempdir() -> tempfile::TempDir {
+    // Unix socket paths must fit the host ABI; neither the archive's remapped
+    // package directory nor its configured TMPDIR can guarantee that bound.
+    tempfile::Builder::new().prefix("cas-sock-").tempdir_in("/tmp").expect("short socket fixture")
+}
+
 /// Finds the `cas` executable supplied alongside an archived test binary.
 ///
 /// Unlike `assert_cmd::cargo::cargo_bin!`, this never embeds Cargo's producer
@@ -227,6 +237,20 @@ fn find_workspace_root(base: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{find_workspace_root, runtime_workspace_root};
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn short_socket_fixture_binds_with_a_deep_runtime_tmpdir() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let parent = tempfile::tempdir_in(super::runtime_fixture_parent()).unwrap();
+        let deep = parent.path().join("deep-temporary-root-".repeat(8));
+        std::fs::create_dir_all(&deep).unwrap();
+        env.set("TMPDIR", &deep);
+        let socket_dir = super::short_socket_tempdir();
+        let socket = socket_dir.path().join("probe.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket)
+            .unwrap_or_else(|error| panic!("{}: {error}", socket.display()));
+    }
 
     #[test]
     fn finds_workspace_from_a_runtime_child_path() {

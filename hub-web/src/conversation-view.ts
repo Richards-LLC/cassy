@@ -1,3 +1,4 @@
+import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
 import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
@@ -13,6 +14,7 @@ import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./co
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind, SessionEndOutcome } from "./types";
 import type { WorkEvent } from "./work-events";
+import type { PhaseLine } from "./live-phase";
 import { renderWork, workSignature, type WorkRowsContext } from "./work-rows-view";
 import {
   cellTone,
@@ -20,6 +22,7 @@ import {
   dayLabel,
   stampLabel,
   messageBlocks,
+  tableCsv,
   threadModel,
   type ThreadCoalesce,
   type ThreadGroup,
@@ -107,6 +110,8 @@ export interface ConversationViewOptions {
   accentClass?: string;
   /** True while the supervisor is executing: paints the working line. */
   working?: () => boolean;
+  /** Daemon-owned phase facts; a clock here only changes their display. */
+  phase?: () => PhaseLine | undefined;
   /**
    * Render the thread's own header. Inside the conversation shell the shell
    * supplies the single Pebble header (conversationHeaderMarkup), so main.ts
@@ -144,6 +149,8 @@ export interface ConversationViewOptions {
    * "once the session is live again" under a header that reads Live.
    */
   sessionLive?: () => boolean;
+  commandReceipts?: () => readonly CommandReceipt[];
+  commandStep?: (clientRef: string, key: CommandKey) => void;
   /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
@@ -422,6 +429,8 @@ export class ConversationView {
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
   private readonly endReceipt: HTMLElement;
+  private readonly commands: HTMLElement;
+  private commandSignature = "";
   private readonly empty: HTMLElement;
   /** Other sessions' turns, collapsed and labelled (cas-55a4); never part of the log. */
   private readonly earlier: HTMLElement;
@@ -502,6 +511,8 @@ export class ConversationView {
   private disposed = false;
   private updateRequest?: object;
   private resize?: ResizeObserver;
+  private phase?: PhaseLine;
+  private phaseClock?: ReturnType<typeof setInterval>;
 
   constructor(document: Document, private history: ConversationHistory, options: ConversationViewOptions | string, editMessage?: (text: string) => void) {
     this.options = typeof options === "string" ? { supervisor: options, editMessage } : options;
@@ -545,6 +556,11 @@ export class ConversationView {
       if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
+    this.commands = document.createElement("section");
+    this.commands.className = "supervisor-command-receipts";
+    this.commands.setAttribute("aria-label", "Supervisor command receipts");
+    this.commands.setAttribute("aria-live", "polite");
+    this.commands.hidden = true;
     this.endReceipt = document.createElement("section");
     this.endReceipt.className = "session-end-receipt";
     this.endReceipt.setAttribute("role", "status");
@@ -565,7 +581,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.endReceipt, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.commands, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -691,7 +707,15 @@ export class ConversationView {
   }
 
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
-  update(): void { this.render(false); }
+  update(): void {
+    this.render(false);
+    const receipts = this.options.commandReceipts?.() ?? [];
+    const signature = JSON.stringify(receipts);
+    if (signature === this.commandSignature) return;
+    this.commandSignature = signature;
+    this.commands.hidden = !receipts.length;
+    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key));
+  }
 
   /** Scroll-only window changes reuse the last data/state presentation. */
   private render(reuseModel: boolean): void {
@@ -710,7 +734,9 @@ export class ConversationView {
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
     const ended = this.options.sessionEnd?.();
-    const working = !ended && this.options.working?.() === true;
+    this.phase = ended ? undefined : this.options.phase?.();
+    const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
+    if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -1283,14 +1309,27 @@ export class ConversationView {
     // (threadModel), so it is not a flip to repaint for.
     const newest = this.history.visibleEvents().at(-1);
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
-    const working = this.options.working?.() === true && !sending;
-    if (working !== this.nodes.has("working")) this.update();
+    const phase = this.options.phase?.();
+    const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
+    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
+    if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
+    else {
+      const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+      if (clock && phase?.elapsed !== undefined) clock.textContent = phase.elapsed;
+    }
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
     const rows = this.options.workRows;
-    const signature = item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
-    if (node.dataset.signature === signature) return;
+    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined])
+      : item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
+    if (node.dataset.signature === signature) {
+      if (item.type === "working") {
+        const clock = node.querySelector(".phase-clock");
+        if (clock && this.phase?.elapsed !== undefined) clock.textContent = this.phase.elapsed;
+      }
+      return;
+    }
     node.dataset.signature = signature;
     switch (item.type) {
       case "day": node.className = "day"; node.textContent = item.label; return;
@@ -1322,11 +1361,24 @@ export class ConversationView {
   private renderWorking(node: HTMLElement): void {
     const document = node.ownerDocument;
     node.className = "turn working-turn";
-    const line = document.createElement("div"); line.className = "working"; line.setAttribute("role", "status");
+    const phase = this.phase;
+    const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
+    if (phase) line.dataset.active = String(phase.active);
     const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-    line.append(dots, document.createTextNode("working"));
+    line.append(dots, document.createTextNode(phase?.label ?? "working"));
+    if (phase?.elapsed !== undefined) {
+      const clock = document.createElement("span"); clock.className = "phase-clock"; clock.setAttribute("role", "timer"); clock.setAttribute("aria-live", "off"); clock.textContent = phase.elapsed;
+      line.append(document.createTextNode(" · "), clock);
+    }
     node.replaceChildren(line);
+    if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
+      this.phaseClock = setInterval(() => {
+        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+        const current = this.options.phase?.();
+        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
+      }, 1000);
+    }
   }
 
   /**
@@ -1800,7 +1852,7 @@ export class ConversationView {
     });
   }
 
-  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
+  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */
@@ -1865,21 +1917,25 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
     if (block.type === "text") { nodes.push(...renderMarkdown(document, block.text)); continue; }
-    const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
+    const table = document.createElement("div"); table.className = "evi";
+    const actions = document.createElement("div"); actions.className = "evi-actions";
+    const status = document.createElement("span"); status.className = "evi-status"; status.setAttribute("role", "status"); status.setAttribute("aria-atomic", "true");
+    const scroll = document.createElement("div"); scroll.className = "evi-scroll"; scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Scrollable evidence table");
+    const native = document.createElement("table"); native.className = "evi-body"; native.setAttribute("aria-label", "Evidence");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
     table.dataset.columns = String(columns);
     // Intrinsic table layout shares column widths across rows, preserving each
     // word's minimum width. The outer sheet owns overflow on narrow screens.
-    const body = document.createElement("div"); body.className = "evi-body"; body.setAttribute("role", "rowgroup");
+    const body = document.createElement("tbody");
     const evidence = (text: string): boolean => /^(?:[+-]?\d[\d,.]*(?:\s*(?:%|ms|s|x))?|(?:\d+\s+)?(?:pass(?:ed)?|ok|green|✓|flakes?|flaky|warn(?:ing)?|skipped|fail(?:ed)?|error|red))$/i.test(plainTextMarkdown(text).trim());
     const evidenceColumns = Array.from({ length: columns }, (_, index) => {
       const values = block.table.rows.map(row => row[index] ?? "").filter(value => value.trim());
       return values.length > 0 && values.every(evidence);
     });
     const row = (cells: string[], head: boolean): HTMLElement => {
-      const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
+      const line = document.createElement("tr"); line.className = head ? "evi-row evi-head" : "evi-row";
       for (let index = 0; index < columns; index += 1) {
-        const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
+        const cell = document.createElement(head ? "th" : "td"); if (head) cell.setAttribute("scope", "col");
         const text = cells[index] ?? ""; appendInline(document, cell, text);
         if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
         const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
@@ -1887,9 +1943,29 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
       }
       return line;
     };
-    if (block.table.header) body.append(row(block.table.header, true));
+    if (block.table.header) {
+      const head = document.createElement("thead"); head.append(row(block.table.header, true)); native.append(head);
+    }
     for (const cells of block.table.rows) body.append(row(cells, false));
-    table.append(body);
+    native.append(body); scroll.append(native);
+    for (const format of ["Markdown", "CSV"] as const) {
+      const copy = document.createElement("button"); copy.type = "button"; copy.textContent = `Copy ${format}`;
+      copy.addEventListener("click", () => {
+        void (async () => {
+          copy.disabled = true; status.textContent = "Copying…";
+          try {
+            const clipboard = document.defaultView?.navigator.clipboard;
+            if (!clipboard?.writeText) throw new Error("Clipboard unavailable");
+            const text = format === "Markdown" ? block.source : tableCsv([...native.rows].map(row => [...row.cells].map(cell => cell.textContent ?? "")));
+            await clipboard.writeText(text);
+            status.textContent = `${format} copied`;
+          } catch { status.textContent = "Copy failed. Select the table and copy manually, or try again."; }
+          finally { copy.disabled = false; }
+        })();
+      });
+      actions.append(copy);
+    }
+    table.append(actions, scroll, status);
     nodes.push(table);
   }
   if (options.attachments === "none") return nodes;

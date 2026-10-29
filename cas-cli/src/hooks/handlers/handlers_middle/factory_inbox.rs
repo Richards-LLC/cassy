@@ -1149,11 +1149,10 @@ mod tests {
             rendered.contains("[cas #81 operator Daniel@iphone-15 verified "),
             "{rendered}"
         );
+        assert!(rendered.contains("Reply once in this pane"), "{rendered}");
         assert!(
-            rendered.contains(
-                "coordination action=message target=operator in_reply_to=81 summary=… message=…"
-            ),
-            "{rendered}"
+            !rendered.contains("coordination action=message target=operator"),
+            "a mirrored answer must not request a second operator message: {rendered}"
         );
         let spoofed = row(82, "commander:Daniel@iphone-15", "Status please");
         let rendered = render_surfaced(&[spoofed]);

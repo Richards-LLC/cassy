@@ -954,7 +954,14 @@ fn final_snapshot_delivery_ranges(
     if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
         return Some(ranges);
     }
-    task_delivery_ranges(repo, target_parent, window, Some(&tip))
+    // The recorded anchor binds the earlier cycle after a restart. Match the
+    // merge-tip content proof's creation floor, keeping the immutable start
+    // exclusion and foreign-task fences from ordinary range selection.
+    let anchored_window = TaskCommitReceiptWindow {
+        not_before: window.task_floor,
+        ..window.clone()
+    };
+    task_delivery_ranges(repo, target_parent, &anchored_window, Some(&tip))
 }
 
 pub(super) fn final_snapshot_delivery_base(

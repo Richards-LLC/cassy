@@ -519,7 +519,7 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             assert!(matches!(result, MergeStateGateOutcome::Reject(_)), "{mode}: {result:?}");
         } else {
             assert!(matches!(result, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
-                "identical final blobs survive missing attribution base: {result:?}");
+                "{mode}: identical final blobs survive missing attribution base: {result:?}");
         }
     }
 }

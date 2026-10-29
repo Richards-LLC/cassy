@@ -31,12 +31,27 @@ it("lists state and capacity for read-only pairings and copies only a valid logi
 });
 
 it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOperation[])("performs %s with required confirmation and invalidates New session", async operation => {
-  const { host } = setup(true, operation === "enable" ? { ...row, disabled: true, capabilities: { ...row.capabilities, enable: null, disable: "Already disabled" } } : row);
+  const { host, sheet } = setup(true, operation === "enable" ? { ...row, disabled: true, capabilities: { ...row.capabilities, enable: null, disable: "Already disabled" } } : row);
   await settle();
   click(`[data-operation="${operation}"]`);
   if (["remove", "disable", "rename"].includes(operation)) {
     expect(host.change).not.toHaveBeenCalled();
     const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+    if (operation === "remove") {
+      input.value = "cancelled confirmation";
+      click("[data-accounts-cancel]");
+      expect(input.value).toBe("");
+      expect(document.querySelector(".accounts-editor h3")!.textContent).toBe("");
+      expect(document.querySelector(".accounts-explanation")!.textContent).toBe("");
+      expect(document.activeElement).toBe(document.querySelector('[data-operation="remove"]'));
+      expect(host.change).not.toHaveBeenCalled();
+      click('[data-operation="remove"]');
+      input.value = "closed confirmation";
+      click("[data-accounts-close]");
+      expect(input.value).toBe("");
+      sheet.open(); await settle();
+      click('[data-operation="remove"]');
+    }
     if (operation !== "rename") {
       input.value = "other";
       document.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -49,8 +64,11 @@ it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOpera
   await settle();
   expect(host.change).toHaveBeenCalledWith("linux", expect.objectContaining({ operation, account: row.key }));
   expect(host.changed).toHaveBeenCalledWith("linux");
-  expect(host.list).toHaveBeenCalledTimes(2);
+  expect(host.list).toHaveBeenCalledTimes(operation === "remove" ? 3 : 2);
   expect(document.body.textContent).toContain("Account updated");
+  expect(document.querySelector<HTMLInputElement>(".accounts-editor input")!.value).toBe("");
+  expect(document.querySelector(".accounts-editor h3")!.textContent).toBe("");
+  expect(document.querySelector(".accounts-explanation")!.textContent).toBe("");
 });
 
 it("keeps other machines readable, retries failures, and refreshes after an uncertain mutation", async () => {

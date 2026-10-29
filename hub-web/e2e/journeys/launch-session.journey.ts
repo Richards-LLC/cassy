@@ -396,7 +396,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     { key: "grok:default", provider: "grok", name: "default", display_name: "Grok", login_state: "unknown", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Unsupported", disable: "Unsupported", enable: "Unsupported", rename: "Unsupported", set_default: "Unsupported" } },
   ];
   launch.profiles!.claude!.profiles = [{ name: "spare", logged_in: true, is_default: true }, { name: "main", logged_in: true, is_default: false }];
-  await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage", "session-launch"] }, launch: { atlas: launch } });
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage", "session-launch"] }, launch: { atlas: launch } });
   await page.route(/^https:\/\/atlas\.test\/v1\/accounts(?:\/operations)?$/, async route => {
     const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
     if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
@@ -419,6 +419,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await page.reload();
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".accounts-editor")).toBeHidden();
       await expect(dialog.getByText(/weekly 62% left/)).toContainText(/AM|PM/);
       await expect(dialog.getByText("Stale login", { exact: true })).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
@@ -436,10 +437,21 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await row.getByRole("button", { name: "Remove", exact: true }).focus();
     await page.keyboard.press("Enter");
     await expect(dialog.getByRole("textbox", { name: "Type claude:spare to confirm" })).toBeFocused();
+    await dialog.getByRole("textbox").fill("cancelled confirmation");
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog.locator(".accounts-editor")).toBeHidden();
+    await expect(dialog.locator(".accounts-editor input")).toHaveValue("");
+    await expect(dialog.locator(".accounts-editor h3")).toBeEmpty();
+    await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeFocused();
+    expect(removed).toEqual([]);
+    await page.keyboard.press("Enter");
     await dialog.getByRole("textbox").fill("claude:spare");
     await page.keyboard.press("Enter");
     await expect(dialog.getByText("Account updated.", { exact: true })).toBeVisible();
     await expect(dialog.getByText("hello@example.test", { exact: true })).toHaveCount(0);
+    await expect(dialog.locator(".accounts-editor")).toBeHidden();
+    await expect(dialog.locator(".accounts-editor input")).toHaveValue("");
+    await expect(dialog.locator(".accounts-editor h3")).toBeEmpty();
     expect(removed).toEqual(["claude:spare"]);
     await dialog.getByRole("button", { name: "Close accounts" }).click();
     await expect(page.getByRole("button", { name: "Accounts", exact: true })).toBeFocused();
@@ -447,5 +459,15 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     const start = page.getByRole("dialog", { name: "New session", exact: true });
     await expect(start.locator('input[name="launch-account"][value="main"]')).toBeVisible();
     await expect(start.locator('input[name="launch-account"][value="spare"]')).toHaveCount(0);
+  });
+  await journey.stage("Read-only accounts have no rendered confirmation editor", async () => {
+    hub.setScopes("atlas", ["machine-read", "session-read"]);
+    await hub.seedPaired();
+    await page.reload();
+    await page.getByRole("button", { name: "Accounts", exact: true }).click();
+    await expect(dialog.getByText(/Read-only · Managing accounts/)).toBeVisible();
+    await expect(dialog.locator("[data-operation]")).toHaveCount(0);
+    await expect(dialog.locator(".accounts-editor")).toBeHidden();
+    expect(await dialog.locator(".accounts-editor").evaluate(node => node.getClientRects().length)).toBe(0);
   });
 });

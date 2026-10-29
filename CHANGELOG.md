@@ -71,9 +71,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   prioritized and batched ancestry reads provide the display's merge progress.
   Full close-time delivery proofs retain their own checks.
 - **Re-pair before the first reply opens** — Was: revoked access during the
-  first conversation attach could leave Opening on screen and hide recovery.
+  first attach could leave Opening on screen, while expired credentials left
+  phones with only Diagnose.
   → Now: the pairing failure immediately replaces it with a named Re-pair
-  action, and a late attach cannot override the authentication result.
+  action for every authentication failure, including expired credentials on a
+  phone, and a late attach cannot override the authentication result.
 - **Replay stays with its own conversation** — Was: replay from an unselected
   session could trigger command-control reads for the selected conversation.
   → Now: peer replay does not make those unrelated reads. The separate

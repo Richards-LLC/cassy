@@ -12,9 +12,9 @@ seeded_from:
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
   pairing-revoked-before-welcome:
-    title: A revoked pairing must replace a pending conversation attach with immediate named Re-pair recovery
+    title: Every authentication failure must replace a pending conversation attach with immediate named Re-pair recovery, including expired credentials on a phone
     found: '2026-10-29'
-    tasks: [cas-3286]
+    tasks: [cas-3286, cas-8e01]
     invariants: [HUB-J12-GOAL]
     journeys: [HUB-J12]
 ignore:

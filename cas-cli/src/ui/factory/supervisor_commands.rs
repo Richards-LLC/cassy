@@ -56,6 +56,7 @@ pub enum SupervisorCommandPhase { Submitted, Observed, Refused, Unconfirmed }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorCommandReceipt {
+    pub device_id: String,
     pub client_ref: String,
     pub command: SupervisorCommand,
     pub phase: SupervisorCommandPhase,
@@ -63,4 +64,11 @@ pub struct SupervisorCommandReceipt {
     /// Native harness output, redacted and bounded. A chooser is not a model change.
     pub output: String,
     pub interactive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorCommandRequest {
+    Run { command: SupervisorCommand, confirmed: bool },
+    Status,
+    Step { key: SupervisorCommandKey },
 }

@@ -813,7 +813,11 @@ fn provenance_writer() -> &'static ProvenanceWriter {
 /// semantic-message implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CommanderControl {
-    SupervisorCommand { message: crate::ui::factory::protocol::ClientMessage },
+    SupervisorCommand {
+        request: crate::ui::factory::supervisor_commands::SupervisorCommandRequest,
+        client_ref: String,
+        attribution: crate::ui::factory::protocol::MessageAttribution,
+    },
     InterruptPane {
         pane_id: String,
     },
@@ -844,12 +848,7 @@ impl CommanderControl {
         match self {
             Self::SendMessage { client_ref, .. } => client_ref.as_deref(),
             Self::InterruptPane { .. } => None,
-            Self::SupervisorCommand { message } => match message {
-                crate::ui::factory::ClientMessage::SupervisorCommand { client_ref, .. }
-                | crate::ui::factory::ClientMessage::SupervisorCommandStatus { client_ref, .. }
-                | crate::ui::factory::ClientMessage::SupervisorCommandStep { client_ref, .. } => Some(client_ref),
-                _ => None,
-            },
+            Self::SupervisorCommand { client_ref, .. } => Some(client_ref),
         }
     }
 }
@@ -868,15 +867,18 @@ pub(super) fn commander_control_from_message(
     use crate::ui::factory::protocol::ClientMessage;
 
     match message {
-        ClientMessage::SupervisorCommand { .. }
-        | ClientMessage::SupervisorCommandStatus { .. }
-        | ClientMessage::SupervisorCommandStep { .. } => {
-            let mut message = message.clone();
-            let (ClientMessage::SupervisorCommand { attribution, .. }
-                | ClientMessage::SupervisorCommandStatus { attribution, .. }
-                | ClientMessage::SupervisorCommandStep { attribution, .. }) = &mut message else { unreachable!() };
+        ClientMessage::SupervisorCommand { client_ref, attribution, .. }
+        | ClientMessage::SupervisorCommandStatus { client_ref, attribution }
+        | ClientMessage::SupervisorCommandStep { client_ref, attribution, .. } => {
+            use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
+            let request = match message {
+                ClientMessage::SupervisorCommand { command, confirmed, .. } => Request::Run { command: *command, confirmed: *confirmed },
+                ClientMessage::SupervisorCommandStep { key, .. } => Request::Step { key: *key },
+                _ => Request::Status,
+            };
+            let mut attribution = attribution.clone();
             attribution.operator_verified &= relay_trusted;
-            Some(CommanderControl::SupervisorCommand { message })
+            Some(CommanderControl::SupervisorCommand { request, client_ref: client_ref.clone(), attribution })
         }
         ClientMessage::InterruptPane { pane_id } => Some(CommanderControl::InterruptPane {
             pane_id: pane_id.clone(),
@@ -962,7 +964,7 @@ impl FactoryDaemon {
         control: CommanderControl,
     ) -> anyhow::Result<Option<crate::ui::factory::DaemonMessage>> {
         match control {
-            CommanderControl::SupervisorCommand { message } => self.dispatch_supervisor_command(message).await.map(Some),
+            CommanderControl::SupervisorCommand { request, client_ref, attribution } => self.dispatch_supervisor_command(request, client_ref, attribution).await.map(Some),
             CommanderControl::InterruptPane { pane_id } => {
                 self.interrupt_pane_turn(&pane_id).await?;
                 Ok(None)

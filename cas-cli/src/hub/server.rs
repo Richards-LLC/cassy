@@ -3613,6 +3613,7 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PendingRefKind {
     Send,
+    SupervisorCommand,
     History,
     /// Not a pending answer: this socket has read a work-events page, so the
     /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
@@ -3632,6 +3633,12 @@ pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRef
     client_message_ref(bytes)
         .map(|client_ref| (client_ref, PendingRefKind::Send))
         .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
+        .or_else(|| match serde_json::from_slice::<ClientMessage>(bytes).ok()? {
+            ClientMessage::SupervisorCommand { client_ref, .. }
+            | ClientMessage::SupervisorCommandStatus { client_ref, .. }
+            | ClientMessage::SupervisorCommandStep { client_ref, .. } => Some((client_ref, PendingRefKind::SupervisorCommand)),
+            _ => None,
+        })
 }
 
 /// What the browser is told when the session's daemon upstream could not take
@@ -3737,6 +3744,13 @@ pub(crate) fn admit_correlated_daemon_frame(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> bool {
+    if let Ok(DaemonMessage::SupervisorCommandReceipt { receipt }) = serde_json::from_slice::<DaemonMessage>(bytes) {
+        let Some((store, context)) = auth else { return false };
+        if context.device_id != receipt.device_id { return false; }
+        if pending.get(&(session.to_owned(), receipt.client_ref.clone())) != Some(&PendingRefKind::SupervisorCommand) { return false; }
+        let detail = serde_json::json!({"client_ref": receipt.client_ref, "command": receipt.command, "phase": receipt.phase}).to_string();
+        if store.audit_operation(context, "observed", "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
+    }
     match correlate_daemon_frame(pending, session, bytes) {
         Correlation::Refused => false,
         Correlation::Uncorrelated | Correlation::Consumed(None) => true,
@@ -3770,11 +3784,12 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             Some(PendingRefKind::Send) => {
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
-            Some(PendingRefKind::History) => Correlation::Consumed(None),
+            Some(PendingRefKind::History | PendingRefKind::SupervisorCommand) => Correlation::Consumed(None),
             Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
+        Ok(DaemonMessage::SupervisorCommandReceipt { receipt }) => consume(receipt.client_ref, None),
         Ok(DaemonMessage::MessageQueued {
             client_ref,
             notification_id,

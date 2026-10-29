@@ -2,7 +2,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
-use crate::ui::factory::{ClientMessage, DaemonMessage};
+use crate::ui::factory::{MessageAttribution, DaemonMessage};
+use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
 use crate::ui::factory::daemon::FactoryDaemon;
 use crate::ui::factory::supervisor_commands::{SupervisorCommand as Command, SupervisorCommandKey as Key, SupervisorCommandPhase as Phase, SupervisorCommandReceipt as Receipt};
 
@@ -70,18 +71,12 @@ fn hook_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, 
 }
 
 impl FactoryDaemon {
-    pub(super) async fn dispatch_supervisor_command(&mut self, message: ClientMessage) -> anyhow::Result<DaemonMessage> {
-        let (client_ref, attribution) = match &message {
-            ClientMessage::SupervisorCommand { client_ref, attribution, .. }
-            | ClientMessage::SupervisorCommandStatus { client_ref, attribution }
-            | ClientMessage::SupervisorCommandStep { client_ref, attribution, .. } => (client_ref, attribution),
-            _ => anyhow::bail!("not a supervisor command"),
-        };
+    pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
         let device = attribution.device_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("missing command owner"))?;
         anyhow::ensure!(!client_ref.is_empty() && client_ref.len() <= 128 && client_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "Invalid command reference.");
         let owner = (device.to_owned(), client_ref.clone());
-        if let ClientMessage::SupervisorCommand { command, confirmed, .. } = &message {
+        if let Request::Run { command, confirmed } = &request {
             if let Some(record) = self.supervisor_commands.records.get(&owner) {
                 anyhow::ensure!(record.receipt.command == *command, "Command reference already belongs to another command.");
                 return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
@@ -96,14 +91,14 @@ impl FactoryDaemon {
                 && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before),
                 "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
             let write = pane.inject_prompt_tracked(text)?;
-            let receipt = Receipt { client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
+            let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
             self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before, write: Box::new(move || write.result()), hook: None });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         let record = self.supervisor_commands.records.get_mut(&owner).ok_or_else(|| anyhow::anyhow!("The original command receipt is unavailable. Do not resend an uncertain command."))?;
         let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor is unavailable; use the session-ended receipt."))?;
-        if let ClientMessage::SupervisorCommandStep { key, .. } = message {
+        if let Request::Step { key } = request {
             anyhow::ensure!(record.receipt.interactive && matches!(record.receipt.command, Command::Model | Command::Usage), "No native command chooser is open.");
             anyhow::ensure!(record.receipt.command == Command::Model || key == Key::Cancel, "Usage only supports Close.");
             // Navigation remains scoped to the observed native dialog. A stale
@@ -147,5 +142,27 @@ impl FactoryDaemon {
             }
         }
         Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
+        assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯").is_none());
+        let opened = native_observation(Command::Model, "❯", "Select model\nOpus\nSonnet").unwrap();
+        assert!(opened.1);
+        assert!(opened.0.contains("chooser opened"));
+        assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet").is_none());
+        let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯").unwrap();
+        assert!(!confirmed.1);
+    }
+    #[test]
+    fn prompt_readiness_refuses_busy_and_modal_screens() {
+        assert!(idle_prompt("A reply\n❯\n? for shortcuts"));
+        assert!(!idle_prompt("Working · esc to interrupt\n❯"));
+        assert!(!idle_prompt("Select model\n❯"));
+        assert!(!idle_prompt("Still booting"));
     }
 }

@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  staffed-epic-delivery-budget:
+    title: Staffed release delivery reads precede idle history even after the last active worker parks
+    tasks: [cas-9d2a, cas-c5fa]
+    invariants: [HUB-J26-ACTIVE-EPIC-BUDGET]
+    journeys: [HUB-J26]
   live-phase-status-freshness:
     title: Older status responses cannot replace a newer phase and unmatched compaction starts expire without reviving older work
     found: '2026-10-29'
@@ -338,8 +343,8 @@ invariants:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
   HUB-J26-ACTIVE-EPIC-BUDGET:
-    statement: An unpinned conversation measures its selected supervisor's staffed active epic before unrelated project history within the existing bounded status budget.
-    check: Run focused_epic_tests::cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics through the real status builder with 297 epics, 35 distinct delivery anchors and no focus; require the current epic's first Git read, one batched ancestry pass, and merged/total, merges/hour and last merge on the first refresh. Compare the native Team header with status and task-store/Git evidence on the same candidate. This ancestry-based display never substitutes for close-gate content and lost-work proofs.
+    statement: An unpinned conversation measures its selected supervisor's staffed active epic before unrelated project history within the existing bounded status budget, including after the last active worker parks.
+    check: Run focused_epic_tests::cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics through the native HTTP status endpoint with 297 epics, 35 current delivery anchors and no focus; require the current epic's first Git read and merged verdicts both during active work and after parking (cas-c5fa), one batched ancestry pass per release, and merged/total, merges/hour and last merge on the first refresh. Compare the native Team header with status and task-store/Git evidence on the same candidate. This ancestry-based display never substitutes for close-gate content and lost-work proofs.
     bug: {task: cas-9d2a}
   HUB-J25-GOAL:
     statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and

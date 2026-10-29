@@ -862,6 +862,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 - An empty session roster stays empty; unrelated project workers never enter the view.
 - Unavailable or stale status remains labeled and a failed status request offers Retry staffing.
+- When the last active worker parks, its staffed release keeps priority over idle historical epics for bounded delivery reads; Git-proven merged tasks retain their merged state.
 - Forced colors and reduced motion preserve textual state and evidence without decorative animation or phone overflow.
 
 ### HUB-J27 · Run a supervisor command and read what the harness did

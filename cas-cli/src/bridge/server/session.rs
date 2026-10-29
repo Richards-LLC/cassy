@@ -429,17 +429,17 @@ fn project_deliveries(
             .any(|owner| supervisors.contains(owner))
         })
         .min_by_key(|epic| {
-            std::cmp::Reverse(
-                status
-                    .tasks_in_progress
-                    .iter()
-                    .filter(|task| {
-                        task.status == "inprogress"
-                            && task.epic_id.as_deref() == Some(epic.id.as_str())
-                            && staffed_tasks.contains(task.id.as_str())
-                    })
-                    .count(),
-            )
+            let staffed: Vec<_> = status.tasks_in_progress.iter()
+                .filter(|task| task.epic_id.as_deref() == Some(epic.id.as_str())
+                    && staffed_tasks.contains(task.id.as_str()))
+                .collect();
+            // Keep ongoing work first, then parked staffing. The
+            // last worker parking cannot demote its release behind idle
+            // history and starve the bounded delivery evidence read.
+            std::cmp::Reverse((
+                staffed.iter().filter(|task| task.status == "inprogress").count(),
+                staffed.len(),
+            ))
         })
         .map(|epic| epic.id.as_str());
     let mut order: Vec<_> = (0..status.epics.len()).collect();
@@ -1016,6 +1016,25 @@ mod focused_epic_tests {
         };
         let mut home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (project, root, session) = fixture();
+        crate::ui::factory::SessionManager::new().save_metadata(&session.metadata).unwrap();
+        // Exercise the native /status route, including session resolution and
+        // serialization, with real project stores and Git rather than hub doubles.
+        let fetch_status = || {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let path = format!("/v1/sessions/{}/status", session.name);
+            let url = format!("http://{}{}", server.server_addr(), path);
+            let client = std::thread::spawn(move || {
+                ureq::get(&url).timeout(std::time::Duration::from_secs(10))
+                    .call().unwrap().into_json::<serde_json::Value>().unwrap()
+            });
+            let mut request = server.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+            let response = crate::bridge::server::routes::handle_session_routes(
+                &mut request, &path, "", None, Some(&root),
+                &std::sync::Mutex::new(std::collections::HashMap::new()), 0,
+            ).unwrap();
+            request.respond(response).unwrap();
+            client.join().unwrap()
+        };
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)
@@ -1078,6 +1097,16 @@ mod focused_epic_tests {
                 historical.epic_verification_owner = Some("supervisor-id".into());
             }
             store.add(&historical).unwrap();
+            if index == 0 {
+                let mut old_delivery = Task::new("cas-history-delivery".into(), "Old delivery".into());
+                old_delivery.status = TaskStatus::AwaitingMerge;
+                old_delivery.deliverables.factory_branch_anchor = Some(base.clone());
+                store.add(&old_delivery).unwrap();
+                store.add_dependency(&Dependency {
+                    from_id: old_delivery.id.clone(), to_id: historical.id.clone(),
+                    dep_type: DependencyType::ParentChild, created_at: chrono::Utc::now(), created_by: None,
+                }).unwrap();
+            }
         }
         let mut epic = Task::new("cas-epic".into(), "Epic".into());
         epic.task_type = TaskType::Epic;
@@ -1126,10 +1155,10 @@ mod focused_epic_tests {
         home.set("GIT_TRACE", &trace);
         // Like the native snapshot: 297 epics, 35 distinct delivery anchors,
         // and no focus. The first refresh must contain the current header.
-        let status = serde_json::to_value(build_status_json(&session, &root, 100).unwrap()).unwrap();
+        let status = fetch_status();
         assert!(status["focused_epic"].is_null());
         assert_eq!(status["epics"].as_array().unwrap().len(), 297);
-        let reads = std::fs::read_to_string(trace).unwrap();
+        let reads = std::fs::read_to_string(&trace).unwrap();
         let first_epic_read = reads
             .lines()
             .find(|line| line.contains("for-each-ref") && line.contains("committerdate:unix"))
@@ -1140,8 +1169,8 @@ mod focused_epic_tests {
         );
         assert_eq!(
             reads.lines().filter(|line| line.contains("git rev-list") && line.contains("--not")).count(),
-            1,
-            "all 35 anchors must share one ancestry pass"
+            2,
+            "the current release's 35 anchors share one pass, then history gets its own"
         );
         let landed = status["tasks_in_progress"]
             .as_array()
@@ -1170,6 +1199,23 @@ mod focused_epic_tests {
                 .iter()
                 .all(|task| task.get("delivery_state").is_none())
         );
+        // cas-c5fa: in the native dogfood snapshot every staffed worker had
+        // parked. That release must retain priority after the last active
+        // task parks, rather than lose its delivery verdicts behind history.
+        let mut active = store.get("cas-active").unwrap();
+        active.status = TaskStatus::AwaitingMerge;
+        store.update(&active).unwrap();
+        std::fs::write(&trace, "").unwrap();
+        let parked = fetch_status();
+        let reads = std::fs::read_to_string(&trace).unwrap();
+        let first_epic_read = reads.lines()
+            .find(|line| line.contains("for-each-ref") && line.contains("committerdate:unix"))
+            .expect("status must collect parked workers' delivery evidence");
+        assert!(first_epic_read.contains("refs/heads/main"),
+            "parked staffing must retain the bounded read ahead of history: {first_epic_read}");
+        let landed = parked["tasks_in_progress"].as_array().unwrap().iter()
+            .find(|task| task["id"] == "cas-landed").unwrap();
+        assert_eq!(landed["delivery_state"], "merged", "{parked:#}");
         // Read-only live verdicts cannot authorize a close-gate decision.
         let gate = collect_epic_branch_statuses_with_options(
             &store.get_subtasks(&epic.id).unwrap(),

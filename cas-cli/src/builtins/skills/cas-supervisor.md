@@ -54,20 +54,17 @@ Own the next action from the highest true rung each turn:
 
 ## Operating flow
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.
+Successful `task action=start` accepts the assignment; no prose ACK is required.
+Before routing updates or waiting on a wake, read
+[message delivery](references/reference.md#message-delivery-and-wake-authority).
 
 Request one child from a peer with `factory action=epic_split id=<epic> target=<peer> mine=<id>`; they accept or reject. For grants and shared epics, read [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 
 Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. After the closure pass, dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update` (not `transfer`), then end the turn.
 
-Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-delivery
-reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
-Every hour with new deliveries, build a candidate at the exact epic tip, walk the
-combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
-with `task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`; every listed
-delivery anchor must be contained in that reviewed target commit. Then close those
-deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
-remain available.
+`qa.mode=batch` is the built-in default; `per_task` is the explicit opt-in.
+For the hourly candidate, shared PASS ledger and pending close obligations,
+read [Batch QA](references/workflow.md#batch-qa).
 
 Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 

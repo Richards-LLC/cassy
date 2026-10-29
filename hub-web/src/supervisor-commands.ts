@@ -200,6 +200,7 @@ export class SupervisorCommandSession {
   receive(receipt: CommandReceipt): void {
     const current = this.receipts.get(receipt.client_ref);
     if (!current || current.command !== receipt.command) return;
+    if (current.phase === "refused" && receipt.phase !== "refused") return;
     this.receipts.set(receipt.client_ref, receipt);
     const ended = this.endedCommands.get(receipt.client_ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);

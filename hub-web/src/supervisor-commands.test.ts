@@ -100,6 +100,7 @@ describe("supervisor command receipts", () => {
       expect(ended.receipts.get(ref)?.phase).toBe("submitted");
       ended.receive(refused);
       ended.ended("prompt_input_exit");
+      ended.receive({ ...refused, phase: "submitted", detail: "Late pending status" });
       expect(ended.receipts.get(ref)).toEqual(refused);
       expect([...other.receipts.values()][0].phase).toBe("submitted");
       const unsent = new SupervisorCommandSession({ ...options, send: () => false });

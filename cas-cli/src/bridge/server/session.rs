@@ -899,11 +899,17 @@ mod focused_epic_tests {
         let row = status.tasks_in_progress.iter().find(|task| Some(task.id.as_str()) == current.current_task.as_deref()).unwrap();
         assert_eq!(row.title, "Latest parked work", "lane task identity and title agree");
         let mut active = Task::new("cas-still-active".into(), "In-progress work".into());
+        // Older ongoing work still outranks a newer parked delivery.
+        active.created_at = now - chrono::Duration::hours(3);
         active.assignee = Some(worker.name.clone());
         active.status = TaskStatus::InProgress;
         tasks.add(&active).unwrap();
         let status = build_status_json(&session, &root, 20).unwrap();
         assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some(active.id.as_str()));
+        active.status = TaskStatus::Closed;
+        tasks.update(&active).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some("cas-new-parked"));
     }
 
     #[test]

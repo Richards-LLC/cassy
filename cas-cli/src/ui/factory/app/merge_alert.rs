@@ -116,6 +116,10 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
     let declined = tip.as_ref().is_some_and(|tip| task.deliverables.declined_factory_anchors().contains(tip));
     let marked_ready = tip.as_deref().is_some_and(|tip| {
         crate::ui::factory::director::delivery_marked_ready(&task, tip)
+            && (task.status == cas_types::TaskStatus::AwaitingMerge
+                || crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(
+                    repo, &task, &branch, tip,
+                ))
     });
     let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined, marked_ready));
     Some((task.id, tip.unwrap_or_default(), refs, marked_ready))

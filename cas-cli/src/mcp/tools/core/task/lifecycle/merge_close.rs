@@ -19,6 +19,30 @@ pub(crate) struct MergedLane<'a> {
     pub tip: &'a str,
 }
 
+/// A reused worker lane is not task identity. The recorded start excludes
+/// preceding work, including a prior task's tip at exactly that boundary.
+/// Legacy tasks need a durable task anchor or an explicitly named commit.
+pub(crate) fn delivery_tip_belongs_to_task(
+    repo: &std::path::Path,
+    task: &Task,
+    branch: &str,
+    tip: &str,
+) -> bool {
+    let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+    if let Some(start) = task.deliverables.factory_branch_start.as_ref() {
+        return task.assignee.as_deref() == Some(start.assignee.as_str())
+            && task.deliverables.work_target.as_ref() == Some(&start.work_target)
+            && branch == start.branch
+            && tip != start.base_sha
+            && super::close_ops::git_commit_is_ancestor(repo, &start.base_sha, tip);
+    }
+    let identity = super::close_ops::task_commit_identity(task, None);
+    super::close_ops::commit_is_task_attributable(repo, tip, &identity)
+        || identity.known_commits.iter().any(|anchor| {
+            super::close_ops::git_commit_is_ancestor(repo, anchor, tip)
+        })
+}
+
 /// cas-46ea: the one definition of a pushed delivery tip, shared with
 /// merge-on-green (cas-20d3). `tip` qualifies when it is on the assignee's own
 /// delivery branch for this task and origin already holds it, so the merge
@@ -58,6 +82,9 @@ pub(crate) fn pushed_delivery_tip(
         return Err(format!(
             "{tip} is on origin/{branch} but not on {worker}'s own {branch}; a commit pushed by someone else is not the worker's delivery"
         ));
+    }
+    if !delivery_tip_belongs_to_task(repo, task, branch, tip) {
+        return Err(format!("{tip} on {branch} has no delivery work attributable to {}", task.id));
     }
     Ok(())
 }
@@ -607,6 +634,7 @@ mod tests {
         let mut task = Task::new("cas-e9d6".into(), "lane".into());
         task.assignee = Some("w".into());
         let worker_tip = git(repo, &["rev-parse", "HEAD"]);
+        task.deliverables.factory_branch_anchor = Some(worker_tip.clone());
         assert_eq!(pushed_delivery_tip(repo, &task, "factory/w", &worker_tip), Ok(()));
 
         let other = tempfile::tempdir().unwrap();

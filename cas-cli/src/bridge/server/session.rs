@@ -829,7 +829,23 @@ mod focused_epic_tests {
         }
         let trace = project.path().join("status-git.trace");
         home.set("GIT_TRACE", &trace);
-        let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        // Native release children remain AwaitingMerge while their proofs cost
+        // more than one refresh's soft budget. Repeated real status builds
+        // must finish those live proofs, rather than restarting at child zero.
+        let load = crate::git_evidence::measurement::test_load::Guard::new(
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(20),
+        );
+        let mut status = serde_json::Value::Null;
+        for _ in 0..4 {
+            status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+            if status["epics"].as_array().unwrap().iter().any(|item| {
+                item["id"] == epic.id && item["progress"]["total"] == 3
+            }) {
+                break;
+            }
+        }
+        drop(load);
         assert!(status["focused_epic"].is_null());
         assert_eq!(status["epics"].as_array().unwrap().len(), 301);
         let reads = std::fs::read_to_string(trace).unwrap();
@@ -868,6 +884,15 @@ mod focused_epic_tests {
                 .iter()
                 .all(|task| task.get("delivery_state").is_none())
         );
+        // A moved delivery target must invalidate completed live proofs.
+        let base = git(&["rev-parse", "HEAD^"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let changed = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        let progress = &changed["epics"].as_array().unwrap().iter()
+            .find(|item| item["id"] == epic.id).unwrap()["progress"];
+        assert_eq!(progress["total"], 3);
+        assert_eq!(progress["merged"], 0, "moved refs must not reuse a live merge verdict");
+        assert!(progress["last_merged_at"].is_null());
     }
 
     /// cas-9b08: status names the session's pinned epic (null when

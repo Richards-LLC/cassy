@@ -7,29 +7,16 @@ metadata:
 
 # Delivery QA evidence
 
-Prove the delivery against its named build. Triggers: `demo_statement`, `qa.user_facing_paths`,
-`qa.api_paths`, or a journey the delivery's impact names. API globs declare non-rendered server code,
-including server-only TSX; other rendered paths still need visual evidence. This is an evidence
-pass, not a fixture test and not a substitute for unit or integration tests. Time-box the whole pass
-to **30 minutes**; an honest incomplete ledger beats a late, invented result. For an epic with child
-demos, use the supervisor's [epic flow walk](../cas-supervisor/references/epic-flow-walk.md): one
-combined matrix with a **60-minute** box overrides the task defaults below. If you started a
-`qa-pass` task, you are the independent reviewer of someone else's delivery: use the API path below
-for API-only reasons; otherwise follow
-[references/independent-pass.md](references/independent-pass.md). Record its verdict with
-`verification action=qa_record`, naming the round's `LEDGER.md`.
-
-## Batch default
-
-`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery
-reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
-For batch work, capture before/after evidence during implementation. The supervisor
-builds an hourly candidate at the exact epic tip and walks one combined matrix.
-Publish the PASS ledger, then record `verification action=batch_receipt` with the
-listed task IDs, their delivery anchors, `staging_sha`, `ledger_artifact_id` and
-`ledger_path`. Close only after the receipt covers those anchors. A deferred close
-reports "waiting for batch receipt" until then. An explicit `qa_request` still uses
-the independent-pass procedure below.
+`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery reviews.
+Start with the [batch flow](references/independent-pass.md#batch-default).
+Prove the named build's demo, `qa.user_facing_paths`, `qa.api_paths` and impacted journeys.
+API globs declare non-rendered server code, including server-only TSX; rendered paths need visual evidence.
+This evidence pass does not replace fixture, unit or integration tests. Time-box it to **30 minutes**;
+an honest incomplete ledger beats a late, invented result. For an epic with child demos, use the
+supervisor's [epic flow walk](../cas-supervisor/references/epic-flow-walk.md): one combined matrix
+with a **60-minute** box. On a `qa-pass` task you review someone else's delivery: use the API path
+below for API-only reasons; otherwise use [the independent pass](references/independent-pass.md).
+Record its verdict with `verification action=qa_record`, naming the round's `LEDGER.md`.
 
 ## Procedure
 

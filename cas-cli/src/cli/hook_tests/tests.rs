@@ -981,11 +981,11 @@ fn every_emitted_hook_object_has_command_and_no_args() {
         }
     }
 
-    // 14 events x 1 hook object (including sealed-handoff terminal cleanup),
-    // plus the extra SessionStart staleness entry = 15.
+    // 15 events x 1 hook object (including native model observations),
+    // plus the extra SessionStart staleness entry = 16.
     assert_eq!(
-        hook_objects, 15,
-        "expected exactly 15 hook objects (14 events + factory check-staleness)"
+        hook_objects, 16,
+        "expected exactly 16 hook objects (15 events + factory check-staleness)"
     );
 }
 

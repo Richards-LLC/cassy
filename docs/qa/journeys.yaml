@@ -2180,6 +2180,7 @@ journeys:
   - hub-web/src/conversation-shell.ts
   - hub-web/src/main.ts
   - hub-web/src/styles.css
+  - cas-cli/src/agent_model.rs
   - cas-cli/src/bridge/server/session.rs
   - cas-cli/src/bridge/server/types.rs
   - hub-web/e2e/journeys/team.journey.ts

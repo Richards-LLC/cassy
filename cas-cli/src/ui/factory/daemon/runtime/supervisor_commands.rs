@@ -320,11 +320,14 @@ mod tests {
         agent.metadata.insert("supervisor_model".into(), "old-model".into());
         store.update(&agent).unwrap();
         codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-select".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while codex.app.mux.pane_inject_busy(&name) { tokio::task::yield_now().await; }
+        }).await.unwrap();
         codex.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\ngpt-6.1-sol").unwrap();
         codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
         assert_eq!(store.get("single-sup").unwrap().metadata.get("supervisor_model").map(String::as_str), Some("old-model"));
         codex.dispatch_supervisor_command(Request::Step { key: Key::Select }, "cmd-select".into(), owner.clone()).await.unwrap();
-        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc• Model changed to gpt-6.1-sol xhigh for this conversation\r\n›".as_bytes()).unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H• Model changed to gpt-6.1-sol xhigh for this conversation\r\n›".as_bytes()).unwrap();
         codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
         let observed = store.get("single-sup").unwrap();
         assert_eq!(observed.metadata.get("supervisor_model").map(String::as_str), Some("gpt-6.1-sol"));

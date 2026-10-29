@@ -53,7 +53,7 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    outcome. If the capture does not show that outcome, downgrade that row to
    `FAIL` in the verification summary and state the capture path and reason;
    never silently leave it as `PASS` and do not edit the worker's ledger.
-   Treat any evidence label weaker than the cell requires as `NOT EXERCISED`,
+   Treat any evidence label weaker than the cell requires as `NOT EXERCISED: <reason>`,
    never as `PASS`.
 5. `NOT EXERCISED` rows are owed work, not failures. List each such row in the
    verification summary with every row's final verdict, label, capture

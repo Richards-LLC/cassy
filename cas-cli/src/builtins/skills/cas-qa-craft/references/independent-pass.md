@@ -12,7 +12,7 @@ invariant that covers it. Do not fix anything.
 The task description names the delivery, its branch and exact tip, the base
 branch, the reasons the pass applies, the ledger directory, and the deadline.
 The time box is `qa.pass_timeout_mins`, 45 minutes by default. An honest
-incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED`.
+incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED: <reason>`.
 
 ## Batch default
 
@@ -42,7 +42,7 @@ command, the URL, and `npx playwright --version` in the ledger header. Where
 the build guard refuses you a compile (a factory agent cannot build Rust), run
 the immutable candidate the supervisor provides for `<bound_head>` instead, named as
 [evidence-ledger](evidence-ledger.md) requires. A missing binary is not the
-delivery's defect: ask the supervisor for one and mark its cells `NOT EXERCISED`.
+delivery's defect: ask the supervisor for one and mark its cells `NOT EXERCISED: <reason>`.
 Reuse an existing candidate with verified identity before requesting another
 build. On a correction, run affected independent cells and cite unaffected
 prior rows with their actual executed revision; current-round bundle and
@@ -237,7 +237,7 @@ states the same bar, so decide by it, not by impression:
 - a required mode that was not proven: forced colors, reduced motion and more
   contrast count only when the capture shows `matchMedia(...)` matching, and
   keyboard-only must reach and complete the demo's primary action. An unrun
-  mode is `NOT EXERCISED`, never PASS.
+  mode is `NOT EXERCISED: <reason>`, never PASS.
 
 Record each finding classified as pre-existing under §3 in the ledger and pass
 it to `qa_record` with `"scope": "pre-existing"`. Cassy files each one as a

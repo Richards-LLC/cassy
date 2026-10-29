@@ -160,7 +160,9 @@ pub fn runtime_fixture_parent() -> PathBuf {
 /// [`runtime_fixture_parent`]; this directory holds only sockets or their HOME.
 #[cfg(unix)]
 pub fn short_socket_tempdir() -> tempfile::TempDir {
-    tempfile::Builder::new().prefix("cas-sock-").tempdir().expect("short socket fixture")
+    // Unix socket paths must fit the host ABI; neither the archive's remapped
+    // package directory nor its configured TMPDIR can guarantee that bound.
+    tempfile::Builder::new().prefix("cas-sock-").tempdir_in("/tmp").expect("short socket fixture")
 }
 
 /// Finds the `cas` executable supplied alongside an archived test binary.

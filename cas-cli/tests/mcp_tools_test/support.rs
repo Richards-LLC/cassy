@@ -46,9 +46,7 @@ pub(crate) fn setup_cas_as(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir,
     }
 
     let temp = TempDir::new().expect("temp dir should be created");
-    let cas_dir = temp.path().join(".cas");
-    std::fs::create_dir_all(&cas_dir).expect(".cas dir should be created");
-    env.set("CAS_ROOT", &cas_dir);
+    let cas_dir = env.bind_store_root(temp.path().join(".cas"));
 
     let store = open_store(&cas_dir).expect("entry store should open");
     store.init().expect("entry store should initialize");

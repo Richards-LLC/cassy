@@ -229,10 +229,26 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
     seen = set()
     for fn, begin, end in scopes:
         function_pin = fn >= 0 and pinned(source, ts[fn - 1].start if fn > 0 and ts[fn - 1].value == "async" else ts[fn].start)
+        random_ids = set()
+        def random_id(expression):
+            code = ''.join(t.value for t in expression if not t.string)
+            return bool(re.search(r'(?:\bUuid::new_v4|\brand::random(?:::<[^>]+>)?)\(', code)) or any(
+                not t.string and t.value in random_ids for t in expression)
         for i in range(begin + 1, end):
             t = ts[i]
             if t.string:
                 continue
+            if t.value == 'let':
+                start = i + 1 + (ts[i+1].value == 'mut')
+                stop = start
+                while stop < end and (ts[stop].string or ts[stop].value != ';'):
+                    stop = ps[stop] + 1 if stop in ps else stop + 1
+                assignment = next((j for j in range(start+1, stop) if ts[j].value == '=' and not ts[j].string), None)
+                if assignment is not None and re.fullmatch(r'[A-Za-z_]\w*', ts[start].value):
+                    if random_id(ts[assignment+1:stop]):
+                        random_ids.add(ts[start].value)
+                    else:
+                        random_ids.discard(ts[start].value)
             kind = None
             if t.value == 'assert_eq' and [x.value for x in ts[i+1:i+3]] == ['!', '(']:
                 close = ps[i + 2]
@@ -254,6 +270,8 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
                     return (len(a) == 1 and (a[0].string or re.fullmatch(r'[0-9][\w.]*|true|false', a[0].value) is not None)) or (len(a) == 2 and a[0].value == '-' and re.fullmatch(r'[0-9][\w.]*', a[1].value) is not None) or re.fullmatch(r'(?:std::time::)?Duration::from_(?:secs|millis|micros|nanos)\([0-9_]+\)', ''.join(x.value for x in a)) is not None
                 if len(args) >= 2 and ((const(args[0]) and literal(args[1])) or (literal(args[0]) and const(args[1]))):
                     kind = 'constant-literal equality'
+                if len(args) >= 2 and ((random_id(args[0]) and literal(args[1])) or (literal(args[0]) and random_id(args[1]))):
+                    kind = 'random ID compared with assertion literal'
             if t.value == 'include_str' and [x.value for x in ts[i+1:i+3]] == ['!', '(']:
                 if any(x.string and '.rs' in x.value for x in ts[i+3:ps[i+2]]):
                     kind = 'Rust source as text'

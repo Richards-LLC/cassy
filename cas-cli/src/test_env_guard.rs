@@ -232,8 +232,25 @@ impl TestEnvGuard {
     /// tests assume — a project store with nothing configured in it.
     fn pin_cas_root_under_home(&mut self) {
         let root = self.home().join(".cas");
-        std::fs::create_dir_all(&root).expect("temp CAS_ROOT");
+        self.bind_store_root(&root);
+    }
+
+    /// Build a hermetic home around the store the fixture will actually use.
+    /// Keep this owner alive through every root-sensitive reader and await.
+    pub(crate) fn for_store(root: impl AsRef<Path>) -> Self {
+        let mut guard = Self::temp_home();
+        guard.bind_store_root(root);
+        guard
+    }
+
+    /// Store builders borrow their caller's existing guard; never acquire a
+    /// second lock just to bind a registry or task store.
+    pub(crate) fn bind_store_root(&mut self, root: impl AsRef<Path>) -> std::path::PathBuf {
+        let root = root.as_ref();
+        std::fs::create_dir_all(root).expect("fixture store root");
+        let root = root.canonicalize().expect("canonical fixture store root");
         self.set("CAS_ROOT", &root);
+        root
     }
 
     pub(crate) fn with_vars(vars: &[(&str, &str)]) -> Self {
@@ -377,6 +394,27 @@ impl Drop for TestEnvGuard {
             let _ = std::env::set_current_dir(cwd);
         }
     }
+}
+
+/// Real Git fixtures inherit neither a wall-clock identity/date nor host Git
+/// configuration. Overrides stay on this child Command, never process env.
+pub(crate) fn git_fixture(repo: impl AsRef<Path>) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(repo)
+        .args(["-c", "user.name=Test", "-c", "user.email=test@test.com",
+               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .env("GIT_AUTHOR_NAME", "Test").env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com").env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .env("GIT_AUTHOR_DATE", "1700000192 +0000")
+        .env("GIT_COMMITTER_DATE", "1700000192 +0000")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" });
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_COUNT", "GIT_COMMON_DIR", "GIT_SHALLOW_FILE", "GIT_PREFIX"] {
+        command.env_remove(key);
+    }
+    command
 }
 
 #[cfg(test)]

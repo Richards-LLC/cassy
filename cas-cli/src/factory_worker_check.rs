@@ -14,6 +14,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod stability;
+
 #[cfg(unix)]
 static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
 #[cfg(unix)]
@@ -129,6 +131,8 @@ struct TestReceipt {
     host_path_opt_out: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     supervisor_recorded: Option<SupervisorRecordedProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stability: Option<stability::Proof>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -166,6 +170,9 @@ impl TestReceipt {
                 " [supervisor-recorded by {} for {}; log sha256={}]",
                 proof.supervisor_id, proof.task_id, proof.log_sha256
             ));
+        }
+        if let Some(proof) = &self.stability {
+            note.push_str(&format!(" [stability: {} touched tests, runs=5 parallelism=5 retries=0]", proof.tests.len()));
         }
         note
     }
@@ -453,6 +460,7 @@ pub(crate) fn record_supervisor_test(
             count,
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
+            stability: None,
         }),
     };
     let proof = record.test.as_ref().expect("test receipt");
@@ -871,6 +879,10 @@ impl<'a> PassingTests<'a> {
         packages.sort();
         packages.dedup();
         packages
+    }
+
+    pub(crate) fn missing_stability(&self, target: &str) -> Result<Vec<String>> {
+        stability::missing(self.repo, target, self.head, self.records())
     }
 }
 
@@ -1309,7 +1321,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             host_path_opt_out: None,
-            supervisor_recorded: None,
+            supervisor_recorded: None, stability: None,
         }),
     };
     std::fs::write(
@@ -1317,6 +1329,23 @@ pub(crate) fn record_passing_test_for_tests(
         serde_json::to_vec(&record).expect("serialize receipt"),
     )
     .expect("write receipt");
+}
+
+#[cfg(test)]
+pub(crate) fn record_stability_for_tests(cas_root: &Path, repo: &Path, head: &str, base: &str, id: &str) {
+    let repo = repo.canonicalize().unwrap();
+    let test = TargetedTest { package: "cas".into(), harness: None, filter: "test(worker)".into() };
+    let path = test_receipt_path(cas_root, &repo, head, &test);
+    let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let proof = serde_json::json!({
+        "version": 1, "base": base, "head": head, "tests": [id], "names": ["new_test"],
+        "runs": 5, "parallelism": 5, "retries": 0,
+        "trials": (0..5).map(|_| serde_json::json!({
+            "exit_code": 0, "count": 1, "started": 0.0, "ended": 1.0, "log": "fixture"
+        })).collect::<Vec<_>>()
+    });
+    receipt.test.as_mut().unwrap().stability = Some(serde_json::from_value(proof).unwrap());
+    std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
 }
 
 // Shared with parked-cache eviction: a cache cannot be evicted while its
@@ -1884,11 +1913,17 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 .arg("--verified-script").arg(verified)
                 .arg("--cargo").arg(cargo)
                 .arg("--count-file").arg(&count_file)
+                .arg("--stability-script").arg(stability::SCRIPT)
                 .arg("--");
             guarded
         } else {
-            let mut plain = Command::new("bash");
-            plain.arg("-c").arg(verified).arg("worker-verified-tests");
+            let mut plain = Command::new("python3");
+            plain.arg("-c").arg(stability::SCRIPT)
+                .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
+                .arg("--verified-script").arg(verified)
+                .arg("--cargo").arg(cargo)
+                .arg("--count-file").arg(&count_file)
+                .arg("--");
             plain
         };
         command
@@ -1932,7 +1967,15 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         .env("CARGO_TARGET_DIR", &target_dir)
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "");
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
+        .env_remove("CAS_WORKER_STABILITY_TARGET");
+    if let Some(test) = &test
+        && let Some(metadata) = stability::target_metadata(&repo, test)?
+    {
+        // Private per-child target metadata keeps the embedded planner
+        // independent of Python's optional TOML support on older hosts.
+        command.env("CAS_WORKER_STABILITY_TARGET", metadata);
+    }
     // Bootstrap/admission keep their inherited identity and credentials. Only
     // the final Cargo/test child receives this fixed isolation profile.
     if let Some(directory) = isolated_test_env {
@@ -1999,12 +2042,23 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             if count == 0 {
                 bail!("Worker test executed zero tests; no PASS receipt recorded");
             }
+            let stability_path = count_file.with_extension("stability.json");
+            let stability = match std::fs::read(&stability_path) {
+                Ok(bytes) => {
+                    let proof = serde_json::from_slice(&bytes).context("invalid touched-test stability receipt")?;
+                    std::fs::remove_file(stability_path)?;
+                    Some(proof)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
             Some(TestReceipt {
                 filter: test.filter,
                 harness: test.harness,
                 count,
                 host_path_opt_out,
                 supervisor_recorded: None,
+                stability,
             })
         }
         None => None,
@@ -3229,7 +3283,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         );
         let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
-        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None, supervisor_recorded: None })));
+        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None, supervisor_recorded: None, stability: None })));
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
     }
 

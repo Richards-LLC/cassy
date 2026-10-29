@@ -122,6 +122,21 @@ pub(super) fn park_refusal(
             crates = untested.join(", "),
         ));
     }
+    if proof_repo.join("Cargo.toml").is_file() {
+        let evidence = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head);
+        match evidence.missing_stability(target) {
+            Ok(missing) if missing.is_empty() => {}
+            result => {
+                let reason = match result {
+                    Ok(missing) => format!("missing five-run evidence for {}", missing.join(", ")),
+                    Err(error) => format!("selection could not be resolved: {error:#}"),
+                };
+                return Some(format!(
+                    "TOUCHED TEST STABILITY REQUIRED: task {} at {short}: {reason}. Run the touched Rust tests through the capped worker lane; it runs only those tests five times concurrently with zero retries and records commit-bound evidence. A single failed copy prevents park. Park only reads receipts and starts no test or CI stage.", task.id
+                ));
+            }
+        }
+    }
     // cas-d6eb: a blast-radius module neither declared nor covered by a
     // receipt, while proof_targets can still be widened (parking locks them).
     if !task.risk.contains(&TaskRisk::BlastRadius) {
@@ -587,8 +602,16 @@ mod tests {
     #[test]
     fn park_requires_a_receipt_in_every_changed_crate_cas_eac2() {
         let repo = workspace();
+        let git = |args: &[&str]| {
+            let output = crate::test_env_guard::git_fixture(repo.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
         let cas_root = tempfile::tempdir().unwrap();
-        let head = "e".repeat(40);
+        let head = git(&["rev-parse", "HEAD"]);
         let mut task = blast_radius_task(&["close_ops"]);
         let changed = delivered();
         crate::factory_worker_check::record_passing_test_for_tests(
@@ -609,6 +632,25 @@ mod tests {
             cas_root.path(), repo.path(), &head, "cas-store", "test(worker)",
         );
         assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+
+        git(&["switch", "-qc", "factory/touched"]);
+        std::fs::create_dir_all(repo.path().join("cas-cli/src")).unwrap();
+        std::fs::write(repo.path().join("cas-cli/src/lib.rs"), "#[test] fn new_test() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "new test"]);
+        let delivery = git(&["rev-parse", "HEAD"]);
+        for package in ["cas", "cas-store"] {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                cas_root.path(), repo.path(), &delivery, package, "test(worker)",
+            );
+        }
+        let refusal = park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").unwrap();
+        assert!(refusal.contains("TOUCHED TEST STABILITY REQUIRED"), "{refusal}");
+        assert!(refusal.contains("cas-cli/src/lib.rs::new_test"), "{refusal}");
+        crate::factory_worker_check::record_stability_for_tests(
+            cas_root.path(), repo.path(), &delivery, &head, "cas-cli/src/lib.rs::new_test",
+        );
+        assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").is_none());
 
         let bare = tempfile::tempdir().unwrap();
         let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head, "main")

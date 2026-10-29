@@ -1354,9 +1354,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
     const NEW: &str = REPLACEMENT_STARTUP;
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    // Status honors CAS_ROOT; read this fixture's registry rather than temp_home's.
-    env.set("CAS_ROOT", &cas_dir);
+    let cas_dir = env.bind_store_root(crate::store::init_cas_dir(dir.path()).unwrap());
     env.set_current_dir(dir.path());
 
     let mut daemon = daemon(&cas_dir);

@@ -139,7 +139,6 @@ else:
                     self.assertEqual(proof['tests'], ['src/lib.rs::touched'])
                     self.assertEqual(proof['runs'], 5)
                     self.assertEqual(proof['parallelism'], 5)
-                    receipt.unlink()
 
 
 if __name__ == '__main__':

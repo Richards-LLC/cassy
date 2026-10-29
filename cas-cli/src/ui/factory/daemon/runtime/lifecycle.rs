@@ -4231,7 +4231,7 @@ impl FactoryDaemon {
         ).await;
         drop(director_refresh);
         // Keep warning writes alive while exit waits for owned filesystem jobs.
-        // No cleanup is abandoned or allowed to outlive the daemon's teardown.
+        // At the deadline, unfinished jobs detach with durable recovery intents.
         self.finish_worker_cleanup_jobs_for_exit(WORKER_CLEANUP_EXIT_BUDGET).await;
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
@@ -4299,6 +4299,7 @@ impl FactoryDaemon {
         Vec::new()
     }
 
+    /// Release daemon-owned resources and end this factory session.
     async fn cleanup(&mut self) -> anyhow::Result<()> {
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.

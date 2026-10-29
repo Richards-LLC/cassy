@@ -4364,7 +4364,7 @@ mod tests {
         git(&["checkout", "-q", "main"]);
         std::fs::write(repo.join("target.txt"), "target update\n").unwrap();
         git(&["add", "target.txt"]);
-        git(&["commit", "-q", "-m", "feat(cas-b0b0): target update"]);
+        git(&["commit", "--no-verify", "-q", "-m", "feat(cas-b0b0): target update"]);
         git(&["push", "-q", "origin", "main"]);
         git(&["checkout", "-q", "factory/w"]);
         (repo_tmp, remote_tmp, cas_root)

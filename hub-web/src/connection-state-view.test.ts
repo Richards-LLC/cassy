@@ -198,7 +198,7 @@ describe("the attach surface opens calmly (journey F3)", () => {
   });
 
   it("offers named repair immediately when pairing fails before the conversation opens (cas-3286)", () => {
-    for (const authFailure of ["revoked", "scope-mismatch", "needs-pairing"] as const) {
+    for (const authFailure of ["revoked", "scope-mismatch", "needs-pairing", "expired"] as const) {
       const target = card();
       let repairs = 0;
       renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "failed", stage: "auth", authFailure }), {

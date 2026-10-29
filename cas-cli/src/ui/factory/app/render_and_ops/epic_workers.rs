@@ -3525,6 +3525,96 @@ impl FactoryApp {
         }
     }
 
+    /// Resolve the same relaunch directory before recycle stops the old pane.
+    fn worker_respawn_cwd(&mut self, name: &str) -> anyhow::Result<PathBuf> {
+        // Check if worktree exists. If it has to be created, use the same base
+        // selection as normal worker spawn.
+        let cwd = if let Some(manager) = &mut self.worktree_manager {
+            let worker_base = worker_base_for_spawn(self.epic_branch.as_deref(), manager);
+            let worktree = match manager.ensure_worker_worktree_from(name, &worker_base) {
+                Ok(worktree) => worktree,
+                Err(e) => {
+                    crate::telemetry::track(
+                        "factory_worker_respawn_result",
+                        vec![("success", "false"), ("reason", "ensure_worktree_failed")],
+                    );
+                    return Err(e.into());
+                }
+            };
+            worktree.path.clone()
+        } else {
+            // Daemon cwd need not be the project root. Shared-directory
+            // workers still require explicit Cassy MCP isolation.
+            self.project_path().to_path_buf()
+        };
+
+        anyhow::ensure!(
+            cwd.is_dir(),
+            "Worker launch directory is unavailable: {}",
+            cwd.display()
+        );
+        Ok(cwd)
+    }
+
+    /// Refuse known backend launch failures while the old worker still runs.
+    /// OS/process failures can still race the later spawn; this checks the
+    /// actual workspace trust and isolation configuration, not only routing.
+    pub(crate) fn preflight_worker_recycle(
+        &mut self,
+        name: &str,
+        teams: Option<&cas_mux::TeamsSpawnConfig>,
+        spec: &cas_mux::WorkerSpec,
+    ) -> anyhow::Result<()> {
+        let cwd = self.worker_respawn_cwd(name)?;
+        let config_dir = spec
+            .config_dir
+            .as_deref()
+            .or(spec.requester_config_dir.as_deref());
+        spec.cli.backend().prepare_workdir(&cwd, config_dir)?;
+        let source = if spec.config_dir.is_some() {
+            Some("explicit")
+        } else if spec.requester_config_dir.is_some() || spec.requester_secure_storage_dir.is_some()
+        {
+            Some("supervisor")
+        } else {
+            None
+        };
+        let secure_storage = if spec.config_dir.is_some() {
+            None
+        } else if spec.requester_config_dir.is_some() || spec.requester_secure_storage_dir.is_some()
+        {
+            Some(spec.requester_secure_storage_dir.as_deref())
+        } else {
+            None
+        };
+        let effort = spec
+            .effort
+            .map(|effort| spec.cli.backend().effort_arg(effort).to_string());
+        let config = cas_mux::Pane::build_worker_config(
+            name,
+            cwd,
+            Some(&self.cas_dir),
+            &self.supervisor_name,
+            self.supervisor_cli,
+            spec.cli,
+            spec.model.as_deref(),
+            effort.as_deref(),
+            config_dir,
+            source,
+            secure_storage,
+            teams,
+            Some(self.mux.worker_count()),
+        );
+        if let Some((_, reason)) = config
+            .env
+            .iter()
+            .find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR")
+        {
+            anyhow::bail!("{reason}");
+        }
+        Ok(())
+    }
+
     /// Respawn a crashed worker
     ///
     /// Re-creates a worker with the same name, reusing its existing worktree if available.
@@ -3584,32 +3674,13 @@ impl FactoryApp {
             anyhow::bail!("Worker '{name}' is already active");
         }
 
-        // Check if worktree exists. If it has to be created, use the same base
-        // selection as normal worker spawn.
-        let (cwd, cas_root) = if let Some(manager) = &mut self.worktree_manager {
-            let worker_base = worker_base_for_spawn(self.epic_branch.as_deref(), manager);
-            let worktree = match manager.ensure_worker_worktree_from(name, &worker_base) {
-                Ok(worktree) => worktree,
-                Err(e) => {
-                    crate::telemetry::track(
-                        "factory_worker_respawn_result",
-                        vec![("success", "false"), ("reason", "ensure_worktree_failed")],
-                    );
-                    return Err(e.into());
-                }
-            };
-            (worktree.path.clone(), Some(self.cas_dir.clone()))
-        } else {
-            // No worktrees - use main cwd
-            let cwd = std::env::current_dir()?;
-            (cwd, None)
-        };
+        let cwd = self.worker_respawn_cwd(name)?;
 
         // Add pane to mux (spawns new Claude process)
         if let Err(e) = self.mux.add_worker(
             name,
             cwd,
-            cas_root.as_ref(),
+            Some(&self.cas_dir),
             &self.supervisor_name,
             teams.as_ref(),
             requested_spec,

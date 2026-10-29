@@ -11884,8 +11884,6 @@ impl FactoryDaemon {
                 // and pane buffers are keyed by name and append-only. Without
                 // this, its register-timeout detail quoted the previous
                 // session's transcript and hid what the new Codex printed.
-                self.pane_buffers.remove(&name);
-                self.forget_probe_pane(&name);
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
                     let color_idx = self.app.worker_names().len();
@@ -11916,6 +11914,12 @@ impl FactoryDaemon {
                             "recipe refused before stopping {name}; the worker keeps running: {error}"
                         )
                     })?;
+                    self.app.preflight_worker_recycle(&name, teams_config.as_ref(), &spec)
+                        .map_err(|error| anyhow::anyhow!(
+                            "launch refused before stopping {name}; the worker keeps running: {error}"
+                        ))?;
+                    self.pane_buffers.remove(&name);
+                    self.forget_probe_pane(&name);
                     self.app.shutdown_worker_for_recycle(&name).await?;
                     // cas-981e: the relaunch queues the worker's intro and
                     // tracks its process group; give it the same bounded

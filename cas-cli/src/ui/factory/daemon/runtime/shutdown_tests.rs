@@ -837,11 +837,10 @@ async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
 /// under a spent pass budget it used to abort before stopping the worker and
 /// reported nothing: the worker kept its old context and the supervisor never
 /// heard back. The old process must stop, and an outcome must reach both the
-/// queue row and the supervisor. The recipe here passes routing policy, so
-/// the stop runs (cas-033a refuses a policy-rejected recipe before it), but
-/// its Claude account holds a malformed `.claude.json`: the relaunch refuses
-/// to record workspace trust after the old worker stops, which exercises the
-/// failure report without launching a real harness.
+/// queue row and the supervisor. The recipe here passes routing policy, but
+/// its Claude account holds a malformed `.claude.json`. Relaunch preflight
+/// must catch that failure while the old worker still runs (cas-08e6), even
+/// when this pass's store-wait budget is spent.
 #[tokio::test(flavor = "current_thread")]
 async fn recycle_under_a_spent_budget_keeps_an_unlaunchable_worker_running_cas_08e6() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();

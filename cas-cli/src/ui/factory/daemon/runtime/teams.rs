@@ -1987,6 +1987,7 @@ fi
 # permit publishing an explicitly named preservation ref to that same name;
 # HEAD:<another-task> must never turn this into a cross-task push.
 refs=\"\"
+zero_sha=0000000000000000000000000000000000000000
 while read local_ref local_sha remote_ref remote_sha; do
   if [ \"$remote_ref\" != \"refs/heads/$branch\" ] && ! {
     [ \"$branch\" = \"$expected\" ] &&
@@ -1995,6 +1996,17 @@ while read local_ref local_sha remote_ref remote_sha; do
   }; then
     record_push_rejection \"$remote_ref\"
     echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch.\" >&2
+    exit 1
+  fi
+  # A pushed factory tip is the delivery boundary recorded when work is
+  # parked. Preserve its ancestry so a later target sync is merged in rather
+  # than rebasing reviewed work out of the branch history.
+  if [ \"$remote_sha\" != \"$zero_sha\" ] && {
+    [ \"$local_sha\" = \"$zero_sha\" ] || ! git merge-base --is-ancestor \"$remote_sha\" \"$local_sha\";
+  }; then
+    record_push_rejection \"$remote_ref\"
+    echo \"Cassy PUSH GUARD: refused non-fast-forward update to '$remote_ref'; the published tip is a delivery anchor.\" >&2
+    echo \"Cassy PUSH GUARD: merge the target in, don't rebase; preserve the published delivery history.\" >&2
     exit 1
   fi
   refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha

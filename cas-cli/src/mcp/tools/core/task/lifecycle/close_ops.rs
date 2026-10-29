@@ -6613,13 +6613,17 @@ impl CasCore {
         ) {
             let branch = task.assignee.as_deref()
                 .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
+            let foreign_since = self.sibling_lease_boundary(task_store, task);
             if self.tip_is_own_task_lineage(
                 task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
-            ) && parked_anchor_advance_with_target_is_attributable(
-                repo_path, &rebased, &candidate, &task.id,
-                self.sibling_lease_boundary(task_store, task), &target,
             ) {
-                return Some(candidate);
+                if parked_anchor_advance_with_target_is_attributable(
+                    repo_path, &rebased, &candidate, &task.id, foreign_since, &target,
+                ) || restored_anchor_merge_is_attributable(
+                    repo_path, recorded, &rebased, &candidate, &task.id, foreign_since,
+                ) {
+                    return Some(candidate);
+                }
             }
         }
         if self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &candidate, &target) {
@@ -24493,6 +24497,74 @@ fn parked_anchor_advance_with_target_is_attributable(
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })
+}
+
+/// Accept the recovery merge used after a worker has already rebased away a
+/// parked anchor: the first parent must be the equivalent rewritten delivery,
+/// the second must restore the exact recorded anchor, and the merge must add
+/// no tree changes of its own. Callers still prove patch equivalence and task
+/// branch ownership before using this narrow exception.
+fn restored_anchor_merge_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    rebased: &str,
+    candidate: &str,
+    task_id: &str,
+    foreign_since: Option<i64>,
+) -> bool {
+    if [recorded, rebased, candidate]
+        .iter()
+        .any(|reference| !is_safe_git_refname(reference))
+    {
+        return false;
+    }
+    let Some(parents) = git_stdout_lines(
+        repo_path,
+        &["rev-list", "--parents", "-n", "1", candidate],
+    )
+    .ok()
+    .and_then(|lines| lines.into_iter().next())
+    else {
+        return false;
+    };
+    let parents = parents.split_whitespace().collect::<Vec<_>>();
+    if parents.len() != 3
+        || !commit_ids_match(parents[0], candidate)
+        || !commit_ids_match(parents[1], rebased)
+        || !commit_ids_match(parents[2], recorded)
+    {
+        return false;
+    }
+    let tree = |commit: &str| {
+        git_stdout_lines(repo_path, &["rev-parse", &format!("{commit}^{{tree}}")])
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+    };
+    let (Some(candidate_tree), Some(rebased_tree)) = (tree(candidate), tree(rebased)) else {
+        return false;
+    };
+    if candidate_tree != rebased_tree {
+        return false;
+    }
+    let Some(epoch) = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", candidate])
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .and_then(|value| value.parse::<i64>().ok())
+    else {
+        return false;
+    };
+    if foreign_since.is_some_and(|since| {
+        epoch >= since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
+    }) {
+        return false;
+    }
+    let Some(message) = git_stdout_lines(repo_path, &["show", "-s", "--format=%B", candidate])
+        .ok()
+        .map(|lines| lines.join("\n"))
+    else {
+        return false;
+    };
+    !message_claims_other_task(&message, Some(task_id))
 }
 
 /// Content-level delivery proof for one immutable commit against one exact

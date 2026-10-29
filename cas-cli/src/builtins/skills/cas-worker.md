@@ -28,8 +28,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    message the supervisor once that you are ready, then wait.
 2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
    Successful start accepts the assignment; no prose ACK. Follow task criteria,
-   depth, execution note and project instructions. Checkpoint dirt before
-   `git rebase <target>` in a reused checkout.
+   depth, execution note and project instructions. Checkpoint dirty work before
+   changing history. If a task branch has a recorded parked delivery anchor,
+   merge the target into it; never rebase it.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
 3. Commit scoped work; push once before parking, once per review round, unless
    `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs

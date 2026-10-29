@@ -3652,12 +3652,7 @@ impl FactoryDaemon {
 
             // Process pending spawns (non-blocking: git ops run on background thread)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);
-            if self.spawn_task.is_some()
-                || !self.pending_spawns.is_empty()
-                || self.app.worker_worktree_cleanups_pending()
-            {
-                self.process_pending_spawns().await;
-            }
+            self.process_worker_control_tick().await;
 
             // Periodic Cassy data refresh
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
@@ -4282,6 +4277,16 @@ impl FactoryDaemon {
         cleanup_result?;
 
         Ok(())
+    }
+
+    /// Run the worker-action phase of one real control-loop pass.
+    async fn process_worker_control_tick(&mut self) {
+        if self.spawn_task.is_some()
+            || !self.pending_spawns.is_empty()
+            || self.app.worker_worktree_cleanups_pending()
+        {
+            self.process_pending_spawns().await;
+        }
     }
 
     /// Drain owned cleanup without letting a hung job prevent daemon teardown.
@@ -5154,6 +5159,30 @@ async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, sess
 
 #[cfg(test)]
 mod communication_summary_tests {
+    #[tokio::test]
+    async fn idle_control_ticks_adopt_staged_cleanup_cas_70a2() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut agent = cas_types::Agent::new("idle-cleanup-id".into(), "idle-cleanup".into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.status = cas_types::AgentStatus::Shutdown;
+        agent.pid = Some(i32::MAX as u32);
+        agent.metadata.insert("clone_path".into(), root.join("worktrees/idle-cleanup").display().to_string());
+        agents.register(&agent).unwrap();
+        crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, &agent.name, None).unwrap();
+        let incoming = root.join("worker-cleanups/incoming");
+        assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 1);
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        assert!(daemon.pending_spawns.is_empty() && daemon.spawn_task.is_none());
+        assert!(!daemon.app.worker_worktree_cleanups_pending());
+        for _ in 0..3 { daemon.process_worker_control_tick().await; }
+        let remaining = std::fs::read_dir(incoming).unwrap().count();
+        daemon.app.join_worker_worktree_cleanups();
+        assert_eq!(remaining, 0, "an idle daemon must adopt the intent within three control ticks");
+    }
+
     #[tokio::test]
     async fn held_cleanup_cannot_hold_daemon_exit_past_budget_cas_af63() {
         use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome};

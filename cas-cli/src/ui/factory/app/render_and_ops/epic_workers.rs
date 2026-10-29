@@ -6750,7 +6750,7 @@ mod tests {
             cleanup_on_close: false, promote_entries_on_merge: false,
         }).unwrap();
         for (name, disposition) in [
-            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"),
+            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"), ("stage-retry", "retry"),
             ("interrupted-worker", "interrupted"), ("failed-worker", "error"),
         ] {
             manager.create_for_worker(name).unwrap();
@@ -6769,6 +6769,42 @@ mod tests {
                 let target = crate::factory_scratch::worker_target_dir(&worker);
                 std::fs::create_dir_all(&target).unwrap();
                 std::fs::write(target.join("unverified.log"), "preserve").unwrap();
+            }
+            if disposition == "retry" {
+                let agents = open_agent_store(&root).unwrap();
+                agent.role = cas_types::AgentRole::Worker;
+                agent.status = cas_types::AgentStatus::Stale;
+                agent.pid = Some(i32::MAX as u32);
+                agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
+                agents.register(&agent).unwrap();
+                let mut sibling = agent.clone();
+                sibling.id = format!("{name}-other-id");
+                sibling.metadata.insert("clone_path".into(), root.join("worktrees/other-checkout").display().to_string());
+                agents.register(&sibling).unwrap();
+                let mut task = Task::new(format!("{name}-task"), "Still working".into());
+                task.assignee = Some(agent.id.clone());
+                task.status = TaskStatus::InProgress;
+                let tasks = crate::store::open_task_store_cached(&root).unwrap();
+                tasks.add(&task).unwrap();
+                // Reconstruct a partial batch through the actual staging API.
+                FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).unwrap();
+                let incoming = root.join("worker-cleanups/incoming");
+                let original = std::fs::read_dir(&incoming).unwrap().next().unwrap().unwrap().path();
+                let captured = std::fs::read(&original).unwrap();
+                let saved = root.join("worker-cleanups/saved");
+                std::fs::rename(&incoming, &saved).unwrap();
+                std::fs::write(&incoming, "not a directory").unwrap();
+                let failed = crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None);
+                std::fs::remove_file(&incoming).unwrap();
+                std::fs::rename(saved, &incoming).unwrap();
+                assert!(failed.is_err(), "an undurable snapshot must fail shutdown");
+                assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee, "failed staging retains WIP bindings");
+                crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None).unwrap();
+                assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 2, "partial retry stages each registration once");
+                assert_eq!(std::fs::read(original).unwrap(), captured, "retry must not overwrite original task facts");
+                let mut app = FactoryApp::for_test_at(root.clone());
+                for _ in 0..2 { app.resume_deferred_worker_cleanups(); app.join_worker_worktree_cleanups(); }
+                continue;
             }
             if disposition == "duplicates" || disposition == "staged" {
                 let agents = open_agent_store(&root).unwrap();

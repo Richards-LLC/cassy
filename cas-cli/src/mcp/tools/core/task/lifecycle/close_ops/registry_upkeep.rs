@@ -270,6 +270,14 @@ pub(super) fn read(
     }
     git(repo, &["show", &format!("{revision}:{path}")]).map(Some)
 }
+pub(super) fn read_registry(
+    repo: &Path,
+    revision: &str,
+    path: &str,
+    paths: &[String],
+) -> anyhow::Result<Option<Registry>> {
+    crate::qa_registry::load_with(path, paths, |path| read(repo, revision, path, paths))
+}
 fn problem_lines(problems: &[Problem]) -> String {
     problems
         .iter()
@@ -380,17 +388,17 @@ fn inspect(
             paths.contains(&c.file) || c.old_file.as_ref().is_some_and(|old| paths.contains(old))
         });
     }
-    let registry_touched = changes
-        .iter()
-        .any(|c| c.file == qa.registry.path || c.old_file.as_deref() == Some(&qa.registry.path));
+    let registry_touched = changes.iter().any(|c| {
+        crate::qa_registry::is_registry_input(&qa.registry.path, &c.file)
+            || c.old_file
+                .as_deref()
+                .is_some_and(|old| crate::qa_registry::is_registry_input(&qa.registry.path, old))
+    });
     let after_paths = tracked(repo, head)?;
-    let after = match read(repo, head, &qa.registry.path, &after_paths) {
-        Ok(None) => return Ok((vec![], vec![])), // no input file: gate off
-        Ok(Some(contents)) => crate::qa_registry::parse(&contents),
-        Err(error) => Err(error),
-    };
+    let after = read_registry(repo, head, &qa.registry.path, &after_paths);
     let registry = match after {
-        Ok(registry) => registry,
+        Ok(None) => return Ok((vec![], vec![])), // no input file: gate off
+        Ok(Some(registry)) => registry,
         Err(error) if registry_touched => {
             return Ok((
                 vec![Finding::broken(format!(
@@ -411,8 +419,9 @@ fn inspect(
         }
     };
     let before_paths = tracked(repo, base)?;
-    let before = read(repo, base, &qa.registry.path, &before_paths)?
-        .and_then(|s| crate::qa_registry::parse(&s).ok());
+    let before = read_registry(repo, base, &qa.registry.path, &before_paths)
+        .ok()
+        .flatten();
     let old_problems = before
         .as_ref()
         .map(|r| r.validate(&before_paths).problems)
@@ -489,10 +498,10 @@ fn inspect(
     let ownership_impact = if ownership_head != head {
         let current = (|| -> anyhow::Result<Option<crate::qa_impact::Impact>> {
             let paths = tracked(repo, ownership_head)?;
-            let Some(text) = read(repo, ownership_head, &qa.registry.path, &paths)? else {
+            let Some(registry) = read_registry(repo, ownership_head, &qa.registry.path, &paths)?
+            else {
                 return Ok(None);
             };
-            let registry = crate::qa_registry::parse(&text)?;
             let codemap = read(repo, head, ".claude/CODEMAP.md", &after_paths)?.unwrap_or_default();
             Ok(Some(crate::qa_impact::impact_for_changes(
                 Some(&registry),
@@ -553,7 +562,7 @@ fn inspect(
         && !(registry_touched && has_changed_case(&registry, before.as_ref(), &task.id))
     {
         findings.push(Finding {gate: "G3", token: "no case:", title: "BUG FIX WITHOUT A CASE",
-            detail: format!("Task {} is a bug and touches live journeys {}. Add or extend a bug_families entry whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)});
+            detail: format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)});
     }
     Ok((findings, warnings))
 }

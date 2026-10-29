@@ -1798,4 +1798,19 @@ fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
     assert!(reloaded.qa().telemetry_sweep.is_none());
     assert!(reloaded.qa().preflight_env_files.is_empty());
     assert_eq!(crate::qa_post_release::configured(&nested).unwrap().command, "echo healthy");
+    let fallback = env.home().join("bad-user-policy/.cas");
+    std::fs::create_dir_all(&fallback).unwrap();
+    for broken in ["[qa\nmode=", "[qa]\nmode='invalid'\nevidence_gate=false\n"] {
+        std::fs::write(host.join("config.toml"), broken).unwrap();
+        let loaded = Config::load(&fallback).expect("a broken user layer must not break project loading");
+        assert_eq!(loaded.qa().mode, QaMode::Batch);
+        assert!(loaded.qa().evidence_gate);
+        std::fs::write(fallback.join("config.toml"), "[qa]\nmode='per_task'\nmax_rounds=5\n").unwrap();
+        let loaded = Config::load(&fallback).unwrap();
+        assert_eq!(loaded.qa().mode, QaMode::PerTask);
+        assert_eq!(loaded.qa().max_rounds, 5);
+        std::fs::remove_file(fallback.join("config.toml")).unwrap();
+    }
+    std::fs::write(fallback.join("config.toml"), "[qa]\nmode='invalid-project'\n").unwrap();
+    assert!(Config::load(&fallback).is_err(), "invalid project policy must still be reported");
 }

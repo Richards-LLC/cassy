@@ -501,6 +501,20 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
+    let needs_bundle = tier == EvidenceTier::Bundle && batch_receipt.is_none()
+        && !batch_defer && covering_pass.is_none() && carried_bundle.is_none();
+    let restored = if waiver.is_none() && (needs_bundle || pair_coverage.is_err()) {
+        crate::artifacts::qa::restore(cas_root, task, &notes, &artifacts_dir)
+            .map_err(|error| format!("QA EVIDENCE REJECTED: cannot restore published bundle: {error}"))?
+    } else { None };
+    let resolved_notes = match restored {
+        Some(bundle) => format!("{notes}\nqa-bundle: {}", bundle.display()),
+        None => notes.to_string(),
+    };
+    let ctx = EvidenceContext { notes: &resolved_notes, ..ctx };
+    let pair_coverage = if tier != EvidenceTier::Bundle || batch_receipt.is_some() || batch_defer || covering_pass.is_some() || carried_bundle.is_some() {
+        crate::qa_evidence::validate_cited_pair_coverage(&ctx)
+    } else { pair_coverage };
     // Batch deferral/approval can replace full proof, but cannot silently drop
     // cells from a declared comparison. Only the authenticated exact-tip waiver
     // above (or the close handler's recorded supervisor override) waives it.

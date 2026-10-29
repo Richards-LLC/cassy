@@ -721,10 +721,16 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
     let fx = fixture(&mut env);
     fx.unmerge();
     let root = fx.repo.join(".cas");
-    // A historical per-task waiver must not restart automatic QA in batch mode.
-    cas_store::waive_qa_pass(&root, "cas-bq01", "batch-supervisor", "test-agent",
-        "factory/test-agent", &git(&fx.repo, &["rev-parse", "main"]),
-        "previous per-task policy", chrono::Utc::now()).unwrap();
+    // Waiving a pending review preserves both records with the same round
+    // ordinal (it counts rejections, not generations). Only the waiver is live.
+    let now = chrono::Utc::now();
+    let prior_head = git(&fx.repo, &["rev-parse", "main"]);
+    cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+        task_id: "cas-bq01", implementer_agent_id: "test-agent", branch: "factory/test-agent",
+        bound_head: &prior_head, deadline_at: now + chrono::Duration::hours(1), max_rounds: 3,
+    }, now - chrono::Duration::minutes(1)).unwrap();
+    let waiver = cas_store::waive_qa_pass(&root, "cas-bq01", "batch-supervisor", "test-agent",
+        "factory/test-agent", &prior_head, "previous per-task policy", now).unwrap();
     let park = fx.close("cas-bq01").await;
     let tasks = open_task_store(&root).unwrap();
     assert_eq!(
@@ -733,12 +739,10 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
         "{park}"
     );
     assert!(cas_store::has_qa_batch_deferral(&root, "cas-bq01").unwrap());
-    assert!(
-        cas_store::list_qa_passes(&root, "cas-bq01")
-            .unwrap()
-            .iter().all(|pass| pass.state == cas_types::QaPassState::Waived),
-        "batch park must not open another per-task round"
-    );
+    let passes = cas_store::list_qa_passes(&root, "cas-bq01").unwrap();
+    assert_eq!(passes.len(), 2, "batch park must not open another per-task round: {park}");
+    assert!(passes.iter().any(|pass| pass.id == waiver.id && pass.state == cas_types::QaPassState::Waived));
+    assert!(!passes.iter().any(|pass| pass.state.is_active()));
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     // The debt survives a later change to the user-facing classification.
     let mut task = tasks.get("cas-bq01").unwrap();
@@ -938,6 +942,38 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
         )
         .is_err()
     );
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    // Moving a pending explicit review, and correcting a rejection, both owe
+    // the next round even though ordinary batch parks open none.
+    for (index, rejected) in [false, true].into_iter().enumerate() {
+        if rejected {
+            cas_store::claim_qa_pass(&root, "cas-bq03", "independent-reviewer", chrono::Utc::now()).unwrap();
+            cas_store::resolve_qa_pass(&root, "cas-bq03", "independent-reviewer",
+                cas::types::QaVerdict::Rejected, "Spacing still needs correction", None,
+                fx.ledger.to_str().unwrap(), chrono::Utc::now()).unwrap();
+        }
+        let mut task = tasks.get("cas-bq03").unwrap();
+        task.status = TaskStatus::InProgress;
+        tasks.update(&task).unwrap();
+        std::fs::write(fx.repo.join("cas-bq03.css"), format!("body{{gap:{}px}}\n", 9 + index)).unwrap();
+        git(&fx.repo, &["add", "cas-bq03.css"]);
+        git(&fx.repo, &["commit", "-qm", "fix(cas-bq03): correct spacing"]);
+        let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+        // Fx::close sends the stored delivery anchor as commit_receipt.
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        tasks.update(&task).unwrap();
+        let parked = fx.close("cas-bq03").await;
+        let passes = cas_store::list_qa_passes(&root, "cas-bq03").unwrap();
+        assert_eq!(passes.len(), index + 2, "rejected={rejected}: {parked}");
+        // A moved pending review keeps its rejection-based round number;
+        // the active pass, not the largest ordinal, identifies the successor.
+        let latest = passes.iter().find(|pass| pass.state == cas_types::QaPassState::Pending)
+            .expect("re-park must leave a pending review");
+        assert_eq!(latest.bound_head, head, "rejected={rejected}: {parked}");
+        assert_eq!(latest.state, cas_types::QaPassState::Pending, "rejected={rejected}: {parked}");
+    }
+
 }
 
 #[tokio::test]

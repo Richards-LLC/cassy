@@ -45,6 +45,24 @@ reviewer's QA record retains its own ledger and bundle regardless of which
 task artifacts root holds them. Historical independent-round notes using the
 older marker remain reviewer evidence and cannot shadow a producer citation.
 
+## Portable published bundles
+
+`artifact action=publish task_id=<task> path=<...>/bundle.json` preserves the
+manifest artifact and publishes a companion archive containing the files it
+references, including comparison captures. A reserved `QA_EVIDENCE_PROOF:`
+receipt binds the original citation, manifest digest and closure artifact.
+When the cited host path is missing, close fetches the closure by artifact id
+into the receiving host's task directory. No manual fetch is required.
+
+Restoration checks the published size/digest, rejects escaping paths, links,
+special files and duplicate entries, caps expanded bytes and file count, and
+preserves original file mtimes. The existing task/head, producer, freshness,
+trace, visual and journey checks then run against the restored files.
+A pre-existing manifest-only publication needs republishing while its source
+files are available to create the closure; a manifest alone cannot recover
+unpublished evidence. The closure has the same 25 MiB expanded-byte ceiling as
+an individual artifact, and at most 2048 files.
+
 ## Loaded-proof receipt grammar (risk=concurrency)
 
 When the existing risk close gate requires loaded execution, submit

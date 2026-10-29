@@ -172,6 +172,10 @@ invariants:
     statement: A send whose live ACK is lost across reconnect is matched to its durable history by client_ref and reaches its confirmed state once, without another Retry or merging a different send with identical text.
     check: Run the cas-d17f pending-sends client regression and cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history Rust regression; batch real-hub proof drops the live ACK, reconnects, and reads back one queue row and one supervisor inbox delivery for that client_ref.
     bug: {task: cas-d17f}
+  HUB-J12-CATALOG-FOOTER:
+    statement: During total or partial machine outages, the footer reports the exact conversation count and last-known share independently of the Web client version label; recovery and an empty catalog remove stale last-known claims.
+    check: Run the outage-past-catalog-freshness case in network-switch.journey.ts against committed dist and assert the count and titled Web version segments separately in total outage, partial outage, recovery and empty states.
+    bug: {task: cas-3100}
   HUB-J13-GOAL:
     statement: I start a supervisor on a project from my phone, without SSH, and land in its conversation
     check: 'Walk HUB-J13 in hub-web/e2e/journeys/launch-session.journey.ts; verify the expected experience and edge
@@ -293,6 +297,9 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the work-event stream is
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
+  HUB-J25-TYPED-TOOL-EVIDENCE:
+    statement: A work row names its read, search, command or edit scope, makes failures explicit, and opens operation-specific metadata with exact readable raw evidence; unknown tools remain raw and live updates preserve focus and expansion.
+    check: Run the typed work renderer case in work-picture.test.ts and the Read typed work scope stage of HUB-J25 against the production bundle; open each operation and an unknown tool by keyboard and verify metadata, exact output, named failure and stable focus through a same-ID update.
   HUB-J22-GOAL:
     statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
@@ -314,140 +321,7 @@ invariants:
     statement: Project-list accessibility labels remain inside the scrolling navigation and never extend the viewport-sized conversation shell.
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
     bug: {task: cas-2a07}
-bug_families:
-  missing-native-claude-capacity:
-    title: Generated statuslines must record native usage and account choices must retain unreset observations with their age
-    tasks: [cas-7045, cas-d739]
-    invariants: [HUB-J13-NATIVE-CLAUDE-CAPACITY]
-    journeys: [HUB-J13]
-  lost-ack-history-correlation:
-    title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
-    tasks: [cas-d17f]
-    invariants: [HUB-J12-DURABLE-SEND-REF, HUB-J5-RECEIPT-STAGES]
-    journeys: [HUB-J5, HUB-J12]
-  fenced-status-folding:
-    title: Short status replies containing fenced source must keep their code frame and exact Copy instead of folding into plain progress
-    tasks: [cas-5a76]
-    invariants: [HUB-J22-GOAL]
-    journeys: [HUB-J22]
-  hidden-cached-preview-retry:
-    title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
-    tasks: [cas-abb7]
-    invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
-    journeys: [HUB-J22]
-  missing-terminal-operator-input:
-    title: Genuine supervisor terminal input appears live before the answer, persists across devices, and excludes injected traffic
-    tasks: [cas-69b3f]
-    invariants: [HUB-J4-GOAL, HUB-J12-GOAL]
-    journeys: [HUB-J4, HUB-J12]
-  stale-worker-and-delivery-projection:
-    title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
-    tasks: [cas-0a75]
-    invariants: [HUB-J17-STATUS-TRUTH]
-    journeys: [HUB-J17]
-  prose-table-column-collapse:
-    title: A prose column must never consume its siblings' word widths or render inline markdown literally
-    tasks: [cas-8bb3]
-    invariants: [HUB-J4-READABLE-PROSE-TABLES]
-    journeys: [HUB-J4]
-  restored-card-gesture-suppression:
-    title: A cached refused card must accept a fresh Edit gesture immediately after swipe dismissal and restoration
-    tasks: [cas-f722]
-    invariants: [HUB-J5-GOAL]
-    journeys: [HUB-J5]
-  real-launch-teardown:
-    title: Real disposable launch teardown waits for the daemon and its children and retains state after deletion failure
-    tasks: [cas-bb86]
-    invariants: [HUB-J13-GOAL]
-    journeys: [HUB-J13]
-  disposable-hub-config-table:
-    title: Disposable hub fixtures must write parseable AI enrichment config so real composer uploads can store files
-    tasks: [cas-6217, cas-de58]
-    invariants: [HUB-J24-GOAL]
-    journeys: [HUB-J24]
-  slow-phone-composer-upload:
-    title: Generic request deadlines and generic refusals prevent large phone attachments from reaching the supervisor
-    tasks: [cas-fed8]
-    invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD]
-    journeys: [HUB-J24]
-  expired-toast-announcement:
-    title: Expired connection notices must leave an empty live region while subsequent notices still announce
-    tasks: [cas-326e8]
-    invariants: [HUB-J9-GOAL]
-    journeys: [HUB-J9]
-  deferred-session-startup:
-    title: A deferred startup wake must retry after pane readiness instead of remaining hidden by its transport claim
-    tasks: [cas-dd2e]
-    invariants: [HUB-J13-GOAL, HUB-J13-STARTUP-WAKE]
-    journeys: [HUB-J13]
-  cross-project-session-launch:
-    title: A machine hub's originating store must not override the project selected for New session
-    tasks: [cas-dd2e]
-    invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
-    journeys: [HUB-J13]
-  null-label-reply-receipt:
-    title: Null live labels normalize before durable receipt; queued browser writes survive load and batch without losing receipt fences, draining pending replay across attaches
-    tasks: [cas-c641]
-    invariants: [HUB-J3-GOAL, HUB-J12-GOAL]
-    journeys: [HUB-J3, HUB-J12]
-  clean-home-launch-remedies:
-    title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
-    tasks: [cas-a1bc]
-    invariants: [HUB-J13-GOAL]
-    journeys: [HUB-J13]
-  recovered_session_attention:
-    title: Dead daemon viewers close, catalog-gap retries re-subscribe, and fresh replacement sessions retire outage attention while retaining history
-    found: '2026-10-27'
-    fixed_by: [b8b8d0d234daa7f6ce565138ff5a61ae45288f95]
-    tasks: [cas-d53c, cas-9e46]
-    invariants: [HUB-J11-GOAL, HUB-J11-DEVICE-ATTACHMENT]
-    journeys: [HUB-J11]
-  read-only-pairing-dead-end:
-    title: A read-only pairing told the person holding the phone to run a CLI command, and its composer looked writable
-    tasks: [cas-b7c0]
-    invariants: [HUB-J2-GOAL]
-    journeys: [HUB-J2]
-  second-person-pairing-code:
-    title: The pairing-code dialog assumed the phone's owner was at the machine; a second person had no way to send the code on
-    tasks: [cas-a56c]
-    invariants: [HUB-J1-GOAL]
-    journeys: [HUB-J1]
-  pairing-code-rate-limit-refusal:
-    title: When the relay rate-limited code creation, the dialog said only that the service refused, with no cause or next step
-    tasks: [cas-310f]
-    invariants: [HUB-J1-GOAL]
-    journeys: [HUB-J1]
-  pairing-code-landscape-clipping:
-    title: Sharing controls made the pairing-code dialog overflow its clipping edge on a sideways phone
-    tasks: [cas-f300]
-    invariants: [HUB-J1-LANDSCAPE-CODE-ACCESS]
-    journeys: [HUB-J1]
-  relay-double-deadline-drift:
-    title: The relay double restamped a pairing request's deadline on every poll, so each poll looked like a new pairing step and reset the code view
-    found: '2026-10-27'
-    tasks: [cas-fa56]
-    invariants: [HUB-J1-RELAY-DEADLINE-STABLE]
-    journeys: [HUB-J1]
-  revoked-working-indicator:
-    title: An authenticated pairing refusal clears working before the next animation frame
-    tasks: [cas-ef7a]
-    invariants: [HUB-J12-TRUTHFUL-WORKING]
-    journeys: [HUB-J12]
-  history-journey-fixture-races:
-    title: History controls select conversation rows and distinguish settled host layout and storage from hostile-frame effects
-    tasks: [cas-e155, cas-b255, cas-c3ac]
-    invariants: [HUB-J4-GOAL, HUB-J4-VISUAL-SANDBOX, HUB-J4-MESSAGE-HIERARCHY]
-    journeys: [HUB-J4]
-  scrolling-list-absolute-label-overflow:
-    title: Absolute accessibility labels in long project lists must use the scrolling navigation as their containing block
-    tasks: [cas-2a07]
-    invariants: [HUB-J3-LIST-SCROLL-BOUNDS]
-    journeys: [HUB-J1, HUB-J3]
-  opaque-auth-transient-state:
-    title: Opaque authenticated HTTP failures retain pairing while independent transport recovery may already be Live
-    tasks: [cas-ee74]
-    invariants: [HUB-J12-GOAL]
-    journeys: [HUB-J12]
+# Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code
@@ -1376,6 +1250,7 @@ journeys:
   - HUB-J12-DURABLE-SEND-REF
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS
+  - HUB-J12-CATALOG-FOOTER
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null
@@ -2161,6 +2036,7 @@ journeys:
     and markup in it reads as text
   - New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the
     earlier reply keeps its node
+  - Read typed work scope — read, search, command and edit rows name their v2 scope; failures remain explicit, exact output stays readable, and live metadata updates preserve focus and expansion
   - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
     only
   - Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the
@@ -2174,6 +2050,7 @@ journeys:
   - hub-web/src/work-events.ts
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
+  - hub-web/src/work-rows.brief.md
   - hub-web/src/worker-timeline.ts
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-view.ts
@@ -2184,6 +2061,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-J25-TYPED-TOOL-EVIDENCE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

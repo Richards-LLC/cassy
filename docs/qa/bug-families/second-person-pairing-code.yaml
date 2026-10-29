@@ -1,0 +1,4 @@
+title: The pairing-code dialog assumed the phone's owner was at the machine; a second person had no way to send the code on
+tasks: [cas-a56c]
+invariants: [HUB-J1-GOAL]
+journeys: [HUB-J1]

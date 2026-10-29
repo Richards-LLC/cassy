@@ -23,6 +23,7 @@
 pub mod cloud;
 pub mod paths;
 pub mod proof;
+pub(crate) mod qa;
 pub mod retention;
 pub mod slack;
 
@@ -338,6 +339,8 @@ pub fn publish(
         });
     }
 
+    let closure = qa::prepare(context, &source).map_err(|error| PublishError::Read(error.to_string()))?;
+
     let name = source
         .file_name()
         .and_then(|value| value.to_str())
@@ -385,11 +388,13 @@ pub fn publish(
         }
     }
 
-    Ok(PublishOutcome {
-        artifact,
-        disposition,
-        source,
-    })
+    let mut outcome = PublishOutcome { artifact, disposition, source };
+    if outcome.disposition.is_committed() && let Some((_temp, archive)) = closure {
+        if let Err(error) = qa::record(context, &outcome, &archive) {
+            outcome.disposition = PublishDisposition::CommittedMetadataUnavailable { reason: error.to_string() };
+        }
+    }
+    Ok(outcome)
 }
 
 /// The three cloud steps, advancing the row as each one lands.
@@ -576,6 +581,24 @@ mod tests {
         fs::write(&file, b"").unwrap();
         let error = publish(&f.context(), &file).unwrap_err();
         assert!(error.to_string().contains("nothing to publish"), "{error}");
+    }
+
+    #[test]
+    fn producer_publication_refuses_escaping_evidence_before_recording() {
+        let f = fixture();
+        let manifest = f.task_dir.join("bundle.json");
+        let private = f.project_root.join("private.txt");
+        fs::write(&private, "private sentinel").unwrap();
+        let private_bytes = fs::read(&private).unwrap();
+        for path in ["../private.txt".to_string(), private.display().to_string()] {
+            fs::write(&manifest, serde_json::json!({
+                "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
+                "files": {"trace": path}
+            }).to_string()).unwrap();
+            assert!(publish(&f.context(), &manifest).is_err());
+            assert!(f.store.list_for_task("cas-b72a").unwrap().is_empty());
+        }
+        assert_eq!(fs::read(private).unwrap(), private_bytes);
     }
 
     #[test]

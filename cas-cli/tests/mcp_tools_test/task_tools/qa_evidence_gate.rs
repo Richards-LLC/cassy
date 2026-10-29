@@ -224,6 +224,11 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let producer = fx.write_bundle(&head);
     let producer_bytes = std::fs::read(&producer).unwrap();
+    // Pin a distinct source timestamp so fetch-time mtimes cannot masquerade
+    // as the capture's freshness when restoring the archive.
+    let captured_at = git(&fx.repo, &["show", "-s", "--format=%ct", &head]).parse::<u64>().unwrap() + 3600;
+    std::fs::File::options().write(true).open(producer.parent().unwrap().join("trace.zip")).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(captured_at))).unwrap();
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now()).unwrap().unwrap();
@@ -239,12 +244,137 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     let service = CasService::new(reviewer, None);
     let request: VerificationRequest = serde_json::from_value(serde_json::json!({
         "action": "qa_record", "task_id": TASK, "status": "approved",
-        "summary": "Independent review of the unchanged delivery",
+        "summary": format!("Independent review; qa-bundle: {}", reviewer_bundle.display()),
         "ledger_path": ledger.display().to_string(),
     })).unwrap();
     let recorded = extract_text(service.verification(Parameters(request)).await.unwrap());
     assert!(recorded.contains("APPROVAL"), "{recorded}");
 
+    // cas-2850: the canonical qa_record verdict must travel with the task,
+    // rather than making a second host dispatch the same review again.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let blobs = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::BTreeMap::<String, (serde_json::Value, Vec<u8>)>::new()));
+    let storage = blobs.clone();
+    let endpoint = server.uri();
+    Mock::given(wiremock::matchers::path_regex("^/(api/artifacts|objects)"))
+        .respond_with(move |request: &wiremock::Request| {
+            let route = request.url.path();
+            let mut blobs = storage.lock().unwrap();
+            if route == "/api/artifacts/begin" {
+                let metadata: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let id = format!("blob-{}", blobs.len());
+                blobs.insert(id.clone(), (metadata, Vec::new()));
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": id, "upload_url": format!("{endpoint}/objects/{id}"),
+                    "required_headers": {}
+                }));
+            }
+            if let Some(id) = route.strip_prefix("/objects/") {
+                let (_, bytes) = blobs.get_mut(id).unwrap();
+                if request.method == "PUT" { *bytes = request.body.clone(); }
+                return ResponseTemplate::new(200).set_body_bytes(bytes.clone());
+            }
+            let id = route.split('/').nth(3).unwrap();
+            let (metadata, _) = blobs.get(id).unwrap();
+            if route.ends_with("/url") {
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": id, "url": format!("{endpoint}/objects/{id}"),
+                    "name": metadata["name"], "mime": metadata["mime"],
+                    "size_bytes": metadata["size_bytes"]
+                }));
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null}))
+        }).mount(&server).await;
+    let artifact_store = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let published_bundle = cas::artifacts::publish(&cas::artifacts::PublishContext {
+        store: &artifact_store,
+        roots: cas::artifacts::paths::PublishRoots::new(&cas_dir, &fx.artifacts, TASK),
+        task_id: TASK.into(),
+        cloud: Some(cas::artifacts::cloud::ArtifactUploadClient::new(&server.uri(), "test-token")),
+    }, &producer).unwrap();
+    assert!(matches!(published_bundle.disposition, cas::artifacts::PublishDisposition::Committed { .. }), "{:?}", published_bundle.disposition);
+    // A peer cannot see any producer files. Merely fetching bundle.json is
+    // insufficient: its trace and all relative evidence must travel too.
+    let hidden = producer.parent().unwrap().with_extension("source-only");
+    std::fs::rename(producer.parent().unwrap(), &hidden).unwrap();
+    let mut published = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
+    assert!(published.notes.lines().any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")), "closure receipt missing: {}", published.notes);
+    published.origin_project = Some("qa-peer-project".into());
+    published.updated_at += chrono::Duration::hours(1);
+    for endpoint in ["/api/sync/pull", "/api/teams/qa-peer-team/sync/pull"] {
+        Mock::given(method("GET")).and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [published], "pulled_at": "2026-10-28T12:00:00Z",
+                "team_id": "qa-peer-team", "status": "ok"
+            }))).mount(&server).await;
+    }
+    for (team, newer_local) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (peer, peer_core) = setup_cas(&mut env);
+        let root = peer.path().join(".cas");
+        std::fs::write(root.join("config.toml"), format!(
+            "[project]\ncanonical_id = \"qa-peer-project\"\n[verification]\nenabled = false\n[factory]\nartifacts_root = {:?}\n[qa]\nindependent_pass = true\n",
+            peer.path().join("artifacts").display().to_string()
+        )).unwrap();
+        std::fs::write(root.join("cloud.json"), serde_json::json!({
+            "endpoint": server.uri(), "token": "test-token"
+        }).to_string()).unwrap();
+        git(peer.path(), &["init", "-q", "-b", "main"]);
+        git(peer.path(), &["fetch", "-q", fx.repo.to_str().unwrap(), "main"]);
+        git(peer.path(), &["reset", "-q", "--hard", "FETCH_HEAD"]);
+        git(peer.path(), &["fetch", "-q", fx.repo.to_str().unwrap(), "factory/test-agent"]);
+        git(peer.path(), &["branch", "factory/test-agent", "FETCH_HEAD"]);
+        git(peer.path(), &["merge", "-q", "--ff-only", "factory/test-agent"]);
+        std::fs::write(peer.path().join(".git/info/exclude"), "/.cas/\n").unwrap();
+        let tasks = cas::store::open_task_store_local(&root).unwrap();
+        if newer_local {
+            let mut local = published.clone();
+            local.notes.clear();
+            local.title = "Newer peer merge metadata".into();
+            local.deliverables.green_merge_commit = Some(head.clone());
+            local.updated_at += chrono::Duration::hours(2);
+            tasks.add(&local).unwrap();
+        }
+        let queue = std::sync::Arc::new(cas::cloud::SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let syncer = cas::cloud::CloudSyncer::new_for_project(queue, cas::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+        }, cas::cloud::CloudSyncerConfig::default(), "qa-peer-project".into(), &root);
+        let entries = cas::store::open_store_local(&root).unwrap();
+        let rules = cas::store::open_rule_store_local(&root).unwrap();
+        let skills = cas::store::open_skill_store_local(&root).unwrap();
+        let result = if team {
+            syncer.pull_team("qa-peer-team", "qa-peer-project", &*entries, &*tasks, &*rules, &*skills)
+        } else {
+            syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                &*cas::store::open_spec_store(&root).unwrap(),
+                &*cas::store::open_event_store(&root).unwrap(),
+                &*cas::store::open_prompt_store(&root).unwrap(),
+                &*cas::store::open_file_change_store(&root).unwrap(),
+                &*cas::store::open_commit_link_store(&root).unwrap())
+        }.unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        if newer_local { assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata"); }
+        assert!(tasks.get(TASK).unwrap().notes.lines().any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")),
+            "peer lost closure receipt: {}", tasks.get(TASK).unwrap().notes);
+        let closed = close_text(&peer_core, TASK).await;
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed,
+            "team={team}: the real close gate lost the peer verdict: {closed}");
+        let notes = tasks.get(TASK).unwrap().notes;
+        let restored = notes.lines().rev().find_map(|line| line.split_once("QA evidence bundle accepted: "))
+            .unwrap().1.split(" (head ").next().unwrap();
+        let restored_trace = Path::new(restored).parent().unwrap().join("trace.zip");
+        assert_eq!(std::fs::metadata(restored_trace).unwrap().modified().unwrap()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), captured_at);
+        let rounds = cas_store::list_qa_passes(&root, TASK).unwrap();
+        assert_eq!(rounds.len(), 1, "the peer must retain the existing round");
+        assert_eq!(rounds[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
+    }
+
+    std::fs::rename(&hidden, producer.parent().unwrap()).unwrap();
+    env.set("CAS_ROOT", &cas_dir);
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);

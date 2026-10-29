@@ -374,6 +374,8 @@ impl CasCore {
         }
         let claimed = cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
             .map_err(reject)?;
+        crate::qa_pass::sync::record(&self.cas_root, &pass.task_id)
+            .map_err(|error| reject(cas_store::StoreError::Other(error.to_string())))?;
         let preflight_note = preflight
             .map(|report| format!("\nQA preflight:\n{}", report.render()))
             .unwrap_or_default();
@@ -695,15 +697,16 @@ impl CasCore {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         if qa.mode == crate::config::QaMode::Batch && requested.is_none() {
-            // Historical rounds (including waivers) do not opt batch deliveries
-            // back into automatic per-task review. Explicit requests still enter below.
-            if let Some(head) = head {
-                let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-                if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+            let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            // Batch parks do not start QA, but an explicitly recorded review
+            // still owes its successor after a moved tip or rejection (GH #1001).
+            // gate_applies excludes the latest logged waiver in batch mode.
+            if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+                if let Some(head) = head {
                     crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
                 }
+                return None;
             }
-            return None;
         }
         let implementer = task.assignee.as_deref()?;
         // cas-7877: the close backstop reaches here for a delivery that is not
@@ -969,6 +972,9 @@ impl CasCore {
         {
             crate::qa_pass::github_gate::publish_pass_status(&self.cas_root, &current);
         }
+        if let Err(error) = crate::qa_pass::sync::record(&self.cas_root, &task.id) {
+            return Some(QaDispatchStatus::required(format!("QA snapshot could not be recorded: {error}")));
+        }
         Some(QaDispatchStatus {
             text: status,
             satisfied,
@@ -1006,13 +1012,18 @@ impl CasCore {
             &format!("QA task {qa_task_id} cancelled: {reason}"),
             now,
         ) {
-            Ok(Some(pass)) => format!(
+            Ok(Some(pass)) => {
+                if let Err(error) = crate::qa_pass::sync::record(&self.cas_root, &pass.task_id) {
+                    return format!(" QA withdrawal sync receipt failed: {error}");
+                }
+                format!(
                 " Independent QA round {} (pass {}) for {} @{} withdrawn.",
                 pass.round,
                 pass.id,
                 pass.task_id,
                 pass.head8()
-            ),
+            )
+            },
             Ok(None) => String::new(),
             Err(error) => format!(
                 " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
@@ -1774,6 +1785,8 @@ impl CasCore {
                 ));
             }
         }
+        crate::qa_pass::sync::record(&self.cas_root, task_id)
+            .map_err(|error| cas_store::StoreError::Other(error.to_string()))?;
         Ok((waived, status))
     }
 
@@ -1805,6 +1818,9 @@ impl CasCore {
     /// Cancel the QA work item of a withdrawn round (cas-5c38) so no
     /// reviewer is spawned for a pass that no longer binds the delivery.
     pub(crate) fn cancel_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
+        if let Err(error) = crate::qa_pass::sync::record(&self.cas_root, &pass.task_id) {
+            return format!("QA withdrawal sync receipt failed: {error}");
+        }
         let close_reason = format!(
             "Independent QA round {} for {} @{} withdrawn: {}",
             pass.round,

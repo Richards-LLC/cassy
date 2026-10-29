@@ -43,6 +43,20 @@ merge. The pass has to live there.
 | Failure | A rejected QA verdict fires `request_changes` automatically, citing the ledger. The implementer keeps the task. |
 | Cost cap | 45 min per round, 1 active pass per task, 3 rounds before escalation. Journeys are limited to those the diff touches. |
 
+## Cross-machine review receipts
+
+QA lifecycle writes carry reserved `QA_PASS_PROOF:` snapshots in the delivery's
+synced task notes. Authenticated owner rows restore them into `qa_passes` on a
+peer, retaining the round, reviewer, implementer and exact reviewed head. QA
+records remain separate from task-verifier approvals. Caller notes cannot mint
+these receipts; stale open snapshots cannot revive a completed round. A verdict
+recorded before its deadline also survives a peer's local timeout.
+
+Publishing the implementer's `bundle.json` also publishes its bounded evidence
+closure. On another host, close restores a missing cited bundle through the
+published artifact records, validates its bytes and reruns the evidence gate.
+The reviewer citation remains separate from the implementer's citation.
+
 ## 1. Which deliveries are user-facing
 
 Decided at the park, from the delivery diff (`merge-base..factory tip`):

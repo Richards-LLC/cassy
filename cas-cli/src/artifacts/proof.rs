@@ -163,6 +163,7 @@ pub(crate) fn take_published_proof_notes(notes: &mut String, task_id: &str) -> V
                 line.strip_prefix(MARKER)
                     .and_then(|json| serde_json::from_str::<PublishedArtifact>(json).ok())
                     .is_some_and(|record| validate(&record, task_id).is_ok())
+                    || super::qa::valid_proof(line, task_id)
             })
             .collect::<Vec<_>>();
         if !proofs.is_empty() {

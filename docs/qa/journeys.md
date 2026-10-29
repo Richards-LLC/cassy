@@ -874,8 +874,8 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 1. Choose Usage from the slash palette with the keyboard
 2. Read the observed native result without resending the command
-3. Send pasted paths and unknown slash text as messages, with Enter and Send (cas-62ea)
-4. Submit an exact Usage token from the composer without a message send
+3. Send pasted paths and unknown slash text as messages (cas-62ea)
+4. Submit an exact Usage token from the composer (cas-62ea)
 5. Cancel Clear, then confirm Exit for the named supervisor
 6. Settle Exit from the ended catalog after its status request loses the daemon
 7. Open the quick controls and read the permission explanation

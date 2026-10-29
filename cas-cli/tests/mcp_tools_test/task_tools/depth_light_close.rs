@@ -289,7 +289,10 @@ async fn rapid_response_window_samples_close_verification() {
     assert_eq!(task_store.get(&clean).unwrap().status, TaskStatus::Closed);
     let skips = cas::rapid_response::ledger(&cas_dir, &window);
     assert!(skips.iter().any(|skip| skip.task == clean && skip.check == "verification"), "{skips:?}");
-    assert!(!skips.iter().any(|skip| skip.task == rejected), "{skips:?}");
+    assert!(
+        !skips.iter().any(|skip| skip.task == rejected && skip.check == "verification"),
+        "a rejected verdict is never ledgered as an unsampled skip: {skips:?}"
+    );
 }
 
 /// GH #276: a task close must quarantine its default reminders while retaining

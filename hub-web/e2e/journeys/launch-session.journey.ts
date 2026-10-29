@@ -393,6 +393,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
   let accounts = [
     { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: "Soonest weekly reset", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }], usage_observed_at: "2026-10-28T18:10:00Z", capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
     { key: "codex:old", provider: "codex", name: "old", display_name: "old@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
+    { key: "grok:default", provider: "grok", name: "default", display_name: "Grok", login_state: "unknown", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Unsupported", disable: "Unsupported", enable: "Unsupported", rename: "Unsupported", set_default: "Unsupported" } },
   ];
   launch.profiles!.claude!.profiles = [{ name: "spare", logged_in: true, is_default: true }, { name: "main", logged_in: true, is_default: false }];
   await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage", "session-launch"] }, launch: { atlas: launch } });
@@ -421,6 +422,13 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await expect(dialog.getByText(/weekly 62% left/)).toContainText(/AM|PM/);
       await expect(dialog.getByText("Stale login", { exact: true })).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+      if (width === 390) {
+        await page.mouse.move(200, 600);
+        await page.mouse.wheel(0, 1800);
+        await expect(dialog.getByText("Grok uses one account. Named account management and login status are unavailable.", { exact: true })).toBeInViewport();
+        await page.mouse.wheel(0, -1800);
+        await expect(dialog.getByText("hello@example.test", { exact: true })).toBeInViewport();
+      }
     });
   }
   await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {

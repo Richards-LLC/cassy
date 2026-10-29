@@ -290,12 +290,13 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         task_id: TASK.into(),
         cloud: Some(cas::artifacts::cloud::ArtifactUploadClient::new(&server.uri(), "test-token")),
     }, &producer).unwrap();
-    assert!(published_bundle.disposition.is_committed(), "{:?}", published_bundle.disposition);
+    assert!(matches!(published_bundle.disposition, cas::artifacts::PublishDisposition::Committed { .. }), "{:?}", published_bundle.disposition);
     // A peer cannot see any producer files. Merely fetching bundle.json is
     // insufficient: its trace and all relative evidence must travel too.
     let hidden = producer.parent().unwrap().with_extension("source-only");
     std::fs::rename(producer.parent().unwrap(), &hidden).unwrap();
     let mut published = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
+    assert!(published.notes.lines().any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")), "closure receipt missing: {}", published.notes);
     published.origin_project = Some("qa-peer-project".into());
     published.updated_at += chrono::Duration::hours(1);
     for endpoint in ["/api/sync/pull", "/api/teams/qa-peer-team/sync/pull"] {
@@ -342,6 +343,8 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
                 &*cas::store::open_commit_link_store(&root).unwrap())
         }.unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(tasks.get(TASK).unwrap().notes.lines().any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")),
+            "peer lost closure receipt: {}", tasks.get(TASK).unwrap().notes);
         let closed = close_text(&peer_core, TASK).await;
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed,
             "team={team}: the real close gate lost the peer verdict: {closed}");

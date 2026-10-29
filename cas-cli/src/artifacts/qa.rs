@@ -161,9 +161,12 @@ pub(crate) fn restore(cas_root: &Path, task: &Task, notes: &str, destination: &P
         let file = temp.path().join(path);
         std::fs::create_dir_all(file.parent().unwrap())?;
         let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(file)?;
+        let modified = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(entry.header().mtime()?))
+            .ok_or_else(|| anyhow::anyhow!("QA evidence timestamp is out of range"))?;
         let copied = std::io::copy(&mut entry, &mut output)?;
         anyhow::ensure!(copied == entry.size(), "QA closure file is truncated");
         output.flush()?;
+        output.set_times(std::fs::FileTimes::new().set_modified(modified))?;
     }
     let manifest = temp.path().join("bundle.json");
     let (sha, size) = super::digest_file(&manifest)?;

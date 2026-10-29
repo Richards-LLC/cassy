@@ -290,6 +290,7 @@ One card pattern serves the project register, Needs you, Tasks & progress worker
 - **Card header.** One row: title (15px semibold, or mono for a codename), then status pills, then trailing actions pushed to the end with `margin-inline-start: auto`. The row wraps as a whole; an action never drops below the body text.
 - **Card body.** At most three text lines at `--fs-meta`: the work, then evidence (`--ink-mid`), then time. Identifiers stay mono inside prose.
 - **Row inside a card.** `--radius-control`, transparent until hover (`--bg-hover`) or open (`--look-row-open` plus the action edge), at least `--rail-item-min` 44px tall on a phone.
+- **Stable order.** Rows never reorder on activity: sibling sessions sort by start (oldest first), then codename. Activity moves only the quiet "Most recent" label, so the selection and every row stay where they are (WCAG 2.3.1/2.2.2; cas-4f42).
 - ❌ Never box a box: a card inside a card becomes rows; a list of cards inside a dialog has no extra frame around the list.
 
 ### Pills

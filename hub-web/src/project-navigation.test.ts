@@ -39,6 +39,25 @@ describe("project-first navigation", () => {
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);
   });
 
+  it("keeps two active supervisors of one project in place and the selection pinned while they trade turns (cas-4f42)", () => {
+    const nav = setup();
+    const navigation = new ProjectNavigation();
+    const tick = (calm: number, kestrel: number) => navigation.render(nav, [
+      row("calm-swan-15", { project: "cas-src", startedAt: 1, activityAt: calm, selected: true }),
+      row("ready-kestrel-84", { project: "cas-src", machineId: "prowl", host: "prowl · macOS", startedAt: 2, activityAt: kestrel }),
+    ], vi.fn());
+    tick(10, 5);
+    const nodes = [...nav.querySelectorAll<HTMLElement>(".conversation-row")];
+    const marked = () => [...nav.querySelectorAll(".conversation-row")].map((node) => node.querySelector(".conversation-session-mark") !== null);
+    expect(marked()).toEqual([true, false]);
+    for (const [calm, kestrel] of [[10, 20], [30, 20], [30, 40]]) {
+      tick(calm, kestrel);
+      // Same nodes, same order: nothing moves, so nothing flashes.
+      expect([...nav.querySelectorAll<HTMLElement>(".conversation-row")]).toEqual(nodes);
+      expect(nodes[0]!.getAttribute("aria-current")).toBe("true");
+      expect(marked()).toEqual([calm > kestrel, kestrel > calm]);
+    }
+  });
   it("keeps a collapsed project on this device and retains its keyed toggle through a catalog tick and search", () => {
     const nav = setup(); const list = new ProjectNavigation(); const rows = [row("one")];
     list.render(nav, rows, vi.fn());

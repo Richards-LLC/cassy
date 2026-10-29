@@ -1,6 +1,6 @@
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineVersionMarkup } from "./machine-version";
-import { ConversationList, machineName, type ConversationRow } from "./conversation-list";
+import { ConversationList, machineName, mostRecentKey, stableSessionOrder, type ConversationRow } from "./conversation-list";
 
 export interface NavigationMachine { id: string; label: string; online?: boolean; runtime?: string; latestRelease?: string }
 type Filter = "all" | "needs-you" | `machine:${string}`;
@@ -149,12 +149,12 @@ export class ProjectNavigation {
       const summary = [live.length ? `${workerCount} live ${workerCount === 1 ? "worker" : "workers"}` : "", rate === undefined ? "" : `${rate} merges/h`].filter(Boolean).join(" · ");
       if (card.summary.textContent !== summary) card.summary.textContent = summary;
       card.summary.hidden = !summary;
-      const anyActivity = visible.some((row) => row.activityAt !== undefined);
-      const rank = (row: ConversationRow) => (anyActivity ? row.activityAt : row.startedAt) ?? -Infinity;
-      const sorted = [...visible].sort((a, b) => rank(b) - rank(a));
+      // cas-4f42: stable order; only the "Most recent" label follows activity.
+      const sorted = [...visible].sort(stableSessionOrder);
+      const recent = mostRecentKey(visible);
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
-      const nested = sorted.map((row, index) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && index === 0 && rank(row) !== -Infinity } }));
+      const nested = sorted.map((row, index) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: row.key === recent } }));
       card.rows.render(card.body, nested, open, end);
       ordered.push(card.node);
     }

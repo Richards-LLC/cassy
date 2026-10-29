@@ -68,9 +68,30 @@ export interface ConversationRow {
 }
 
 /**
- * Put the rows of one project's live sessions on one machine together, most
- * recently active first, at the place of the group's first row; mark the most
- * recent one (cas-55a4). Rows of a project with one session are unchanged.
+ * cas-4f42: sibling sessions keep one place. Activity never orders rows: two
+ * supervisors trading messages swapped rows and the selection highlight on
+ * every turn, a flashing layout (WCAG 2.3.1/2.2.2). Oldest start first, so a
+ * new session joins at the end; then codename, then key.
+ */
+export function stableSessionOrder(a: ConversationRow, b: ConversationRow): number {
+  const start = (row: ConversationRow) => row.startedAt ?? Infinity;
+  const byStart = start(a) === start(b) ? 0 : start(a) - start(b);
+  return byStart || a.supervisor.localeCompare(b.supervisor) || a.key.localeCompare(b.key);
+}
+
+/** The most recently active of several sessions: only its "Most recent" label changes. */
+export function mostRecentKey(rows: readonly ConversationRow[]): string | undefined {
+  if (rows.length < 2) return undefined;
+  const anyActivity = rows.some((row) => row.activityAt !== undefined);
+  const rank = (row: ConversationRow) => (anyActivity ? row.activityAt : row.startedAt) ?? -Infinity;
+  const best = rows.reduce((top, row) => (rank(row) > rank(top) ? row : top));
+  return rank(best) === -Infinity ? undefined : best.key;
+}
+
+/**
+ * Put the rows of one project's live sessions on one machine together in
+ * stable order at the place of the group's first row, and mark the most
+ * recent one (cas-55a4) without moving it. One-session projects are unchanged.
  */
 export function groupConversationRows<T extends ConversationRow>(rows: readonly T[]): T[] {
   const groupKey = (row: T): string => `${row.machineId}\u0000${row.projectDir ?? `session:${row.session}`}`;
@@ -87,13 +108,11 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     placed.add(key);
     const group = members.get(key)!;
     if (group.length < 2) { out.push({ ...row, group: undefined }); continue; }
-    // cas-6acf: the newest activity leads; with none in the group, the newest start does.
-    const anyActivity = group.some((member) => member.activityAt !== undefined);
-    const rank = (member: T): number => (anyActivity ? member.activityAt : member.startedAt) ?? -Infinity;
-    const ordered = [...group].sort((a, b) => rank(b) - rank(a));
+    const ordered = [...group].sort(stableSessionOrder);
+    const recent = mostRecentKey(group);
     // cas-5d2c: the same noun as the footer's "3 conversations".
     const label = `${projectTitle(row.projectDir) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
-    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && rank(member) !== -Infinity } }));
+    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: member.key === recent } }));
   }
   return out;
 }

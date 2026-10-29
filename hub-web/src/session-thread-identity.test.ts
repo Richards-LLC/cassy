@@ -181,25 +181,30 @@ describe("grouped project sessions (cas-55a4)", () => {
   const base = { machineId: "atlas", host: "Atlas · Linux", projectDir: "/projects/gabber-studio", freshness: "", connection: "Live", attention: 0, selected: false } satisfies Partial<ConversationRow>;
   const row = (session: string, activityAt?: number, extra: Partial<ConversationRow> = {}): ConversationRow => ({ ...base, key: `atlas:${session}`, session, supervisor: session, ...(activityAt === undefined ? {} : { activityAt }), ...extra });
 
-  it("puts one project's sessions together, most recent first and marked", () => {
-    const rows = groupConversationRows([
-      row("noble-cheetah-84", 100),
+  it("puts one project's sessions together in a stable order and only moves the Most recent mark (cas-4f42)", () => {
+    const tick = (calm: number, wild: number) => groupConversationRows([
+      row("noble-cheetah-84", 100, { startedAt: 30 }),
       row("solo", 50, { projectDir: "/projects/cas-src" }),
-      row("calm-puma-34", 300),
-      row("wild-shark-68", 200),
+      row("calm-puma-34", calm, { startedAt: 10 }),
+      row("wild-shark-68", wild, { startedAt: 20 }),
     ]);
+    const rows = tick(300, 200);
     expect(rows.map((item) => item.session)).toEqual(["calm-puma-34", "wild-shark-68", "noble-cheetah-84", "solo"]);
     expect(rows.map((item) => item.group?.active ?? null)).toEqual([true, false, false, null]);
     expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 conversations on Atlas" });
     expect(conversationRowMarkup(rows[0]!)).toContain('<span class="conversation-session-mark">Most recent</span>');
     expect(conversationRowMarkup(rows[1]!)).not.toContain("Most recent");
+    // Two supervisors trading turns: the rows never swap, only the mark moves.
+    const next = tick(300, 400);
+    expect(next.map((item) => item.session)).toEqual(["calm-puma-34", "wild-shark-68", "noble-cheetah-84", "solo"]);
+    expect(next.map((item) => item.group?.active ?? null)).toEqual([false, true, false, null]);
   });
 
   it("tells grouped rows apart before any is opened: what each session last did, in plain words (cas-5d2c)", () => {
     const rows = groupConversationRows([
-      row("calm-puma-34", 300, { activityLine: "Messaged bright-robin-85" }),
-      row("wild-shark-68", 200, { activityLine: "You wrote to it", preview: "Stem export is at 60%." }),
-      row("noble-cheetah-84", 100),
+      row("calm-puma-34", 300, { startedAt: 1, activityLine: "Messaged bright-robin-85" }),
+      row("wild-shark-68", 200, { startedAt: 2, activityLine: "You wrote to it", preview: "Stem export is at 60%." }),
+      row("noble-cheetah-84", 100, { startedAt: 3 }),
     ]);
     const preview = (index: number) => new DOMParser().parseFromString(conversationRowMarkup(rows[index]!), "text/html").querySelector(".conversation-preview")?.textContent;
     // The catalog's activity until the thread has a turn; the turn once it has; the state when neither.
@@ -430,7 +435,7 @@ describe("grouped project sessions (cas-55a4)", () => {
       sidebar.append(container, Object.assign(document.createElement("footer"), { textContent: "2 paired machines" }));
       document.body.replaceChildren(sidebar);
       const list = new ConversationList();
-      let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
+      let live = [row("calm-puma-34", 300, { canEnd: true, startedAt: 1 }), row("wild-shark-68", 200, { canEnd: true, startedAt: 2 }), row("noble-cheetah-84", 100, { canEnd: true, startedAt: 3 })];
       const open = vi.fn();
       const end = vi.fn(async (ended: ConversationRow) => {
         live = live.filter((item) => item.key !== ended.key);
@@ -478,9 +483,9 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(conversationRowMarkup(row("idle-otter-1"))).not.toContain("conversation-when");
   });
 
-  it("marks the newest-started session Most recent when none has activity (cas-6acf)", () => {
+  it("marks the newest-started session Most recent when none has activity, in start order (cas-6acf, cas-4f42)", () => {
     const rows = groupConversationRows([row("old-owl-1", undefined, { startedAt: 100 }), row("new-newt-2", undefined, { startedAt: 300 }), row("mid-mole-3", undefined, { startedAt: 200 })]);
-    expect(rows.map((item) => [item.session, item.group?.active])).toEqual([["new-newt-2", true], ["mid-mole-3", false], ["old-owl-1", false]]);
+    expect(rows.map((item) => [item.session, item.group?.active])).toEqual([["old-owl-1", false], ["mid-mole-3", false], ["new-newt-2", true]]);
     // Any activity outranks start times.
     const active = groupConversationRows([row("old-owl-1", 50, { startedAt: 100 }), row("new-newt-2", undefined, { startedAt: 300 })]);
     expect(active[0]).toMatchObject({ session: "old-owl-1", group: { active: true } });

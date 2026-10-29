@@ -412,3 +412,42 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();
   });
 });
+
+// cas-4f42: two supervisors of one project trading turns once swapped rows and
+// the selection highlight on every message, a flashing layout (WCAG 2.3.1).
+test("HUB-J14 two active supervisors of one project keep their places and the selection for 60 s (cas-4f42)", journeyPart, async ({ page, journey }) => {
+  test.setTimeout(150_000);
+  const swan: Machine["sessions"][number] = { name: "cas-src-calm-swan-15", supervisor: "calm-swan-15", project_dir: "/projects/cas-src", project: "cas-src", workers: [], liveness: "live", harness: "claude", machine_online: true, last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-5_000) };
+  const kestrel: Machine["sessions"][number] = { ...swan, name: "cas-src-ready-kestrel-84", supervisor: "ready-kestrel-84", project_dir: "/other/cas-src", harness: "codex", last_activity_at: journeyStamp(-10_000) };
+  const hub = await journey.hub({ machines: [{ id: "atlas", label: "Atlas · Linux", sessions: [swan] }, { id: "borealis", label: "Borealis · macOS", sessions: [kestrel] }], paired: ["atlas", "borealis"] });
+  const card = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("group", { name: /^cas-src ·/ });
+  const rows = card.locator(".conversation-row");
+  const names = () => rows.locator(".conversation-supervisor").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent));
+  await journey.stage("Rows, selection and layout hold still while both supervisors talk for 60 s", async () => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await journey.open();
+    await expect(rows).toHaveCount(2);
+    await rows.first().click();
+    await expect(rows.first()).toHaveAttribute("aria-current", "true");
+    const order = await names();
+    const boxes = await rows.evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)));
+    const started = performance.now();
+    let turn = 0;
+    while (performance.now() - started < 60_000) {
+      const [speaker, machine] = turn % 2 ? [kestrel, "borealis"] : [swan, "atlas"];
+      speaker.last_activity_at = journeyStamp(0);
+      hub.supervisorSays(speaker.name, `Turn ${turn} from ${speaker.supervisor}`);
+      await hub.announceCatalog(machine);
+      expect(await names()).toEqual(order);
+      await expect(rows.first()).toHaveAttribute("aria-current", "true");
+      expect(await rows.evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)))).toEqual(boxes);
+      await expect(card.locator(".conversation-session-mark")).toHaveCount(1);
+      turn += 1;
+      await page.waitForTimeout(2_500);
+    }
+    expect(turn).toBeGreaterThan(10);
+    // The quiet part that does change: "Most recent" sits on the last speaker.
+    const last = (turn - 1) % 2 ? kestrel : swan;
+    await expect(rows.filter({ hasText: last.supervisor }).locator(".conversation-session-mark")).toHaveText("Most recent");
+  });
+});

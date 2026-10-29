@@ -706,10 +706,11 @@ mod focused_epic_tests {
         // A real exited PID yields the same deterministic verdict in the hub
         // and worker_status. A fresh registry heartbeat cannot hide death.
         worker.pid = Some(i32::MAX as u32);
-        worker.metadata.insert("worker_cli".into(), "codex".into());
-        worker
-            .metadata
-            .insert("worker_model".into(), "gpt-6.1".into());
+        // Exercise the same registration consumer as the restricted Codex MCP
+        // subprocess, then read the durable row through the status producer.
+        home.set("CAS_FACTORY_WORKER_CLI", "codex");
+        home.set("CAS_FACTORY_WORKER_MODEL", "gpt-6.1");
+        crate::mcp::daemon::apply_factory_worker_metadata(&mut worker, None);
         crate::store::open_agent_store(&root)
             .unwrap()
             .register(&worker)
@@ -754,6 +755,13 @@ mod focused_epic_tests {
         );
         assert_eq!(projected["liveness"], expected.state.as_str());
         assert_eq!(projected["liveness"], "dead");
+        home.remove("CAS_FACTORY_WORKER_MODEL");
+        worker.metadata.remove("worker_model");
+        crate::mcp::daemon::apply_factory_worker_metadata(&mut worker, None);
+        crate::store::open_agent_store(&root).unwrap().update(&worker).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let projected = status.agents.iter().find(|agent| agent.id == worker.id).unwrap();
+        assert!(projected.model.is_none(), "an absent recipe must remain unreported");
     }
 
     #[test]

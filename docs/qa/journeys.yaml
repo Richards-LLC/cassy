@@ -2182,6 +2182,7 @@ journeys:
   - hub-web/src/styles.css
   - cas-cli/src/bridge/server/session.rs
   - cas-cli/src/bridge/server/types.rs
+  - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
   invariants: [HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET]
   traffic:

@@ -1064,12 +1064,16 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
-    /// Mirror non-secret paths into Codex's curated CAS MCP environment after
-    /// launch policy. The effective account home must reach spawn_workers;
+    /// Mirror non-secret paths and the recorded recipe into Codex's curated CAS
+    /// MCP environment after launch policy. The effective account home must reach spawn_workers;
     /// otherwise its availability check falls back to the default account.
     /// Literal overrides preserve operator `cs.env_vars` and late pane overrides.
     fn forward_codex_mcp_environment(&mut self) {
-        for name in std::iter::once("CODEX_HOME").chain(TOOL_CACHE_ENV.iter().copied()) {
+        let recipe_fields = ["CAS_FACTORY_WORKER_MODEL", "CAS_FACTORY_WORKER_EFFORT"];
+        for name in std::iter::once("CODEX_HOME")
+            .chain(TOOL_CACHE_ENV.iter().copied())
+            .chain(recipe_fields)
+        {
             if self.env_remove.iter().any(|removed| removed == name) {
                 continue;
             }
@@ -1079,10 +1083,17 @@ impl PtyConfig {
                 .rev()
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
-                .or_else(|| std::env::var(name).ok());
+                // Recipe fields belong to this resolved spawn. Inheriting a
+                // supervisor's model would fabricate evidence for an omitted
+                // worker selector and persist it through future recycles.
+                .or_else(|| {
+                    (!recipe_fields.contains(&name))
+                        .then(|| std::env::var(name).ok())
+                        .flatten()
+                });
             if let Some(value) = value.filter(|value| name != "CODEX_HOME" || !value.is_empty()) {
                 let value = serde_json::to_string(&value)
-                    .expect("serializing an MCP environment path string cannot fail");
+                    .expect("serializing an MCP environment string cannot fail");
                 self.args.extend([
                     "-c".to_string(),
                     format!("mcp_servers.cs.env.{name}={value}"),
@@ -4578,6 +4589,14 @@ echo SMOKE_DONE
             for (key, value) in keys.iter().zip(&values) {
                 env.set(key, value);
             }
+            // A supervisor's inherited recipe must never fill an omitted
+            // worker model. Only this spawn's resolved recipe is evidence.
+            env.set("CAS_FACTORY_WORKER_MODEL", "inherited-wrong-model");
+            env.set("CAS_FACTORY_WORKER_EFFORT", "inherited-wrong-effort");
+            let recipe = [
+                ("CAS_FACTORY_WORKER_MODEL", "gpt-6.1-terra"),
+                ("CAS_FACTORY_WORKER_EFFORT", "high"),
+            ];
             for control in ["present", "removed", "unset"] {
                 let mut config = PtyConfig::codex(
                     "cache-probe",
@@ -4586,8 +4605,8 @@ echo SMOKE_DONE
                     None,
                     None,
                     None,
-                    None,
-                    None,
+                    (control != "unset").then_some(recipe[0].1),
+                    (control != "unset").then_some(recipe[1].1),
                     None,
                 );
                 config
@@ -4604,6 +4623,7 @@ echo SMOKE_DONE
                 if control == "removed" {
                     // A late removal must beat both inherited and explicitly granted values.
                     config.env_remove.extend([keys[0].into(), keys[2].into()]);
+                    config.env_remove.extend(recipe.map(|(key, _)| key.into()));
                 }
                 if control == "unset" {
                     // Remove after constructing the config: do not snapshot the parent early.
@@ -4630,6 +4650,18 @@ echo SMOKE_DONE
                     .map(|arg| std::str::from_utf8(arg).unwrap())
                     .collect();
                 assert!(args.contains(&"mcp_servers.cs.env_vars=[\"OPERATOR_EXTRA\"]"));
+                for (key, expected) in recipe {
+                    let prefix = format!("mcp_servers.cs.env.{key}=");
+                    let forwarded = args.iter().find(|arg| arg.starts_with(&prefix));
+                    if control == "present" {
+                        let parsed: toml::Value = toml::from_str(
+                            forwarded.unwrap_or_else(|| panic!("{control}: missing spawn recipe {key}")),
+                        ).unwrap();
+                        assert_eq!(parsed["mcp_servers"]["cs"]["env"][key].as_str(), Some(expected));
+                    } else {
+                        assert!(forwarded.is_none(), "{control}: inherited or removed recipe {key} was guessed");
+                    }
+                }
                 for (index, key) in keys.iter().enumerate() {
                     let prefix = format!("mcp_servers.cs.env.{key}=");
                     let forwarded = args.iter().find(|arg| arg.starts_with(&prefix));

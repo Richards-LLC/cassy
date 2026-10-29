@@ -777,6 +777,7 @@ mod tests {
         let cas_root = tempfile::tempdir().unwrap();
         let head = "e".repeat(40);
         let mut task = blast_radius_task(&["close_ops"]);
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only receipt-gate coverage".into();
         let changed = delivered();
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas", "test(worker)",
@@ -835,7 +836,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
         git(&["add", "."]);
-        git(&["commit", "-qm", subject]);
+        git(&["commit", "--allow-empty", "-qm", subject]);
         git(&["rev-parse", "HEAD"])
     }
 
@@ -881,7 +882,8 @@ mod tests {
         )
         .unwrap();
         let titled = commit_changelog_fixture(repo.path(), "add release note");
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main").is_none());
+        let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main");
+        assert!(accepted.is_none(), "{accepted:?}");
 
         std::fs::write(
             repo.path().join("CHANGELOG.md"),

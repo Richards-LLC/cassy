@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.90.0] - 2026-10-29
+
 ### Added — Commander
 
 - **Supervisor model and effort appear** — Was: Commander could not say which model or

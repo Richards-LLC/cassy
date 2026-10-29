@@ -1094,7 +1094,26 @@ pub(super) fn final_path_snapshot_proven(
     if imported_baselines.contains(&snapshot) {
         return Some(false);
     }
-    for commit in attributed_content_commits(repo, tip, window, &window.identity, &ranges)? {
+    let mut commits = attributed_content_commits(repo, tip, window, &window.identity, &ranges)?;
+    // A recorded sync can regenerate a bundle itself. Credit that new merge
+    // output only for a task-authored artifact, never a parent/imported blob.
+    // The normal ownership walk below must still prove it survives on target;
+    // equality after an unrelated deletion/recreation cannot revive delivery.
+    if snapshot.is_some()
+        && !authored_blobs.is_empty()
+        && super::regenerable_build_artifact(repo, path)
+        && window.identity.matches_known_commit(tip)
+    {
+        let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", tip])?;
+        let parents: Vec<_> = parents.split_whitespace().collect();
+        if let [_, first, second] = parents.as_slice()
+            && tree_path_blob(repo, first, path)? != snapshot
+            && tree_path_blob(repo, second, path)? != snapshot
+        {
+            commits.push(tip.to_string());
+        }
+    }
+    for commit in commits {
         let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
         if delivery_evolution::is_revert_message(&message)
             || !super::commit_changes_path(repo, &commit, path).ok()? {

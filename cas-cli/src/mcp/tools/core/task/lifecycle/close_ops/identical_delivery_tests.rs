@@ -65,7 +65,11 @@ fn fixture_with_subjects(
         repo,
         delivery_path,
         "(()=>draft())();\n",
-        if named { "build(cas-test1): draft bundle" } else { "build: draft bundle" },
+        if named {
+            "build(cas-test1): draft bundle"
+        } else {
+            "build: draft bundle"
+        },
     );
     git(repo, &["checkout", "-q", "main"]);
     commit(
@@ -85,13 +89,21 @@ fn fixture_with_subjects(
         repo,
         delivery_path,
         "(()=>epicBuild())();\n",
-        if named { "merge(cas-test1): recover onto epic" } else { "merge: recover onto epic" },
+        if named {
+            "merge(cas-test1): recover onto epic"
+        } else {
+            "merge: recover onto epic"
+        },
     );
     commit(
         repo,
         delivery_path,
         "(()=>finalBuild())();\n",
-        if named { "build(cas-test1): final bundle" } else { "build: final bundle" },
+        if named {
+            "build(cas-test1): final bundle"
+        } else {
+            "build: final bundle"
+        },
     );
     if let Some((contents, subject)) = return_to {
         commit(repo, delivery_path, contents, subject);
@@ -106,7 +118,17 @@ fn fixture_with_subjects(
     git(repo, &["checkout", "-q", "factory/worker"]);
     git(
         repo,
-        &["merge", "--no-ff", "main", "-m", if named { "sync epic (cas-test1)" } else { "sync epic" }],
+        &[
+            "merge",
+            "--no-ff",
+            "main",
+            "-m",
+            if named {
+                "sync epic (cas-test1)"
+            } else {
+                "sync epic"
+            },
+        ],
     );
     if rebuild_on_sync {
         // A generated merge driver can produce output unlike either parent.
@@ -477,18 +499,48 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
 
 #[test]
 fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474() {
-    for mode in ["present", "source present", "restarted", "rebuilt", "dropped", "missing", "reverted", "imported baseline"] {
+    for mode in [
+        "present",
+        "source present",
+        "restarted",
+        "rebuilt",
+        "rebuilt recreated",
+        "dropped",
+        "missing",
+        "reverted",
+        "imported baseline",
+    ] {
         let return_to = match mode {
             "reverted" => Some(("(()=>base())();\n", "revert: abandon bundle")),
-            "imported baseline" => Some(("(()=>epicBuild())();\n", "build: restore imported bundle")),
+            "imported baseline" => {
+                Some(("(()=>epicBuild())();\n", "build: restore imported bundle"))
+            }
             _ => None,
         };
-        let path = if mode == "source present" { "docs/design/brief.md" } else { DIST };
-        let (dir, task, _) = fixture_with_subjects(mode == "dropped", return_to, false, path, mode == "rebuilt");
+        let path = if mode == "source present" {
+            "docs/design/brief.md"
+        } else {
+            DIST
+        };
+        let (dir, task, _) = fixture_with_subjects(
+            mode == "dropped",
+            return_to,
+            false,
+            path,
+            mode.starts_with("rebuilt"),
+        );
         let repo = dir.path();
-        if mode == "missing" {
+        if matches!(mode, "missing" | "rebuilt recreated") {
             git(repo, &["rm", path]);
             git(repo, &["commit", "-qm", "remove integrated bundle"]);
+            if mode == "rebuilt recreated" {
+                commit(
+                    repo,
+                    path,
+                    "(()=>syncBuild())();\n",
+                    "build: unrelated recreation",
+                );
+            }
         }
         let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
         let window = TaskCommitReceiptWindow {
@@ -502,24 +554,50 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             basis: "unnamed delivery before integrated sync anchor",
             identity: task_commit_identity(&task, None),
         };
-        assert!(task_attribution::delivery_base(repo, "main", &window, Some(anchor)).is_none(),
-            "fixture must reproduce unavailable attributed delivery base");
+        assert!(
+            task_attribution::delivery_base(repo, "main", &window, Some(anchor)).is_none(),
+            "fixture must reproduce unavailable attributed delivery base"
+        );
         assert_eq!(
-            tree_path_blob(repo, anchor, path).unwrap() == tree_path_blob(repo, "main", path).unwrap(),
+            tree_path_blob(repo, anchor, path).unwrap()
+                == tree_path_blob(repo, "main", path).unwrap(),
             !matches!(mode, "dropped" | "missing"),
         );
         let result = run_factory_branch_merge_gate_with_attribution(
             &task,
-            &TaskCloseRequest { id: task.id.clone(), no_delivery: None, reason: None,
-                supervisor_override: None, legacy_bypass_code_review: None,
-                search_manifest: None, commit_receipt: None, stranded_branch_override: None },
-            "main", repo, TaskCommitAttribution { receipt: None, window: Some(&window) },
+            &TaskCloseRequest {
+                id: task.id.clone(),
+                no_delivery: None,
+                reason: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+                commit_receipt: None,
+                stranded_branch_override: None,
+            },
+            "main",
+            repo,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
         );
-        if matches!(mode, "dropped" | "missing" | "reverted" | "imported baseline") {
-            assert!(matches!(result, MergeStateGateOutcome::Reject(_)), "{mode}: {result:?}");
+        if matches!(
+            mode,
+            "dropped" | "missing" | "reverted" | "imported baseline" | "rebuilt recreated"
+        ) {
+            assert!(
+                matches!(result, MergeStateGateOutcome::Reject(_)),
+                "{mode}: {result:?}"
+            );
         } else {
-            assert!(matches!(result, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
-                "{mode}: identical final blobs survive missing attribution base: {result:?}");
+            assert!(
+                matches!(
+                    result,
+                    MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)
+                ),
+                "{mode}: identical final blobs survive missing attribution base: {result:?}"
+            );
         }
     }
 }

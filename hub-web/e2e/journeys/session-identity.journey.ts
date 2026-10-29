@@ -322,9 +322,13 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
 
 test("HUB-J14 project navigation spans machines, decisions and device collapse (cas-6024)", journeyPart, async ({ page, journey }) => {
   const machine = atlas();
+  const ended = (name: string, offset: number) => {
+    const at = journeyStamp(offset);
+    return { name, supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
+  };
   machine.sessions = [{ ...machine.sessions[1]!, project: "studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
-    name: "pulse-card-solo", supervisor: "solo-otter-12", project_dir: "/projects/pulse-card", workers: [], liveness: "live",
-  }];
+    name: "golden-jaguar-44", supervisor: "golden-jaguar-44", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
+  }, ended("watchful-heron-16", -3_600_000), ended("solid-parrot-40", -2 * 3_600_000), ended("patient-heron-27", -3 * 3_600_000)];
   const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "studio", harness: "claude", machine_online: true }] };
   const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
     [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
@@ -349,6 +353,47 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     await expect(old.locator(".conversation-account")).toHaveCount(0);
     await expect(old.locator("[data-harness]")).toHaveCount(0);
+    await expect(old.locator(".project-card-summary")).toBeHidden();
+    const pulseMachine = old.getByRole("button", { name: "Filter conversations on Atlas, online", exact: true });
+    await expect(pulseMachine).toBeVisible();
+    expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    await expect(liveSupervisor.locator(".supervisor-state")).not.toHaveClass(/offline/);
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
+    await expect(ended.locator(".conversation-when")).toBeVisible();
+    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
+    const clearEnded = old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true });
+    await clearEnded.scrollIntoViewIfNeeded();
+    await expect(clearEnded).toBeInViewport();
+  });
+
+  await journey.stage("An ended row offers Dismiss, while the live row stays protected", async () => {
+    const old = list.getByRole("group", { name: /^pulse-card ·/ });
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await ended.scrollIntoViewIfNeeded();
+    await expect(old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true })).toBeVisible();
+    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
+    await expect(liveSupervisor).toBeVisible();
+  });
+
+  await journey.stage("Dismiss and clear ended sessions without deleting their history", async () => {
+    const old = list.getByRole("group", { name: /^pulse-card ·/ });
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
+    await expect(ended).toHaveCount(0);
+    await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(1);
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    await old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true }).click();
+    await expect(old.locator(".conversation-row")).toHaveCount(1);
+    await expect(old.locator(".conversation-topline .conversation-action")).toBeHidden();
+    await expect(liveSupervisor).toBeVisible();
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    await page.reload();
+    await expect(old.locator(".conversation-row")).toHaveCount(1);
+    await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(0);
     await expect(list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toContainText("calm-puma-34");
     const capture = process.env.FULL_NAV_CAPTURE_DIR;
     const widths = capture ? [1280, 390] : [390];

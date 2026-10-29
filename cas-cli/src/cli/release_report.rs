@@ -3461,6 +3461,19 @@ mod tests {
     }
 
     #[test]
+    fn long_unicode_entry_heading_keeps_complete_chars_and_ellipsis_cas_8007() {
+        let prefix = "a".repeat(96);
+        for character in ["é", "—", "🌟"] {
+            // Byte offset 97 lies inside this character, beyond the ASCII prefix.
+            let entry = format!("{prefix}{character}{}", "z".repeat(12));
+            assert_eq!(heading_from_entry(&entry), format!("{prefix}..."));
+        }
+        let short = "é".repeat(50);
+        assert_eq!(heading_from_entry(&short), short);
+        assert_eq!(heading_from_entry(&"a".repeat(101)), format!("{}...", "a".repeat(97)));
+    }
+
+    #[test]
     fn release_note_articles_are_partitioned_into_user_and_developer_sections() {
         let draft = r#"User top-level
 

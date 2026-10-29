@@ -7,10 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Fixed
+### Fixed — Release reports
 
-- Release-report shipped totals exclude Known limits sections while keeping
-  their entries, tests and documentation in the report prose.
+- **Known limits stay out of shipped totals** — Release-report shipped totals
+  exclude Known limits sections while keeping their entries, tests and
+  documentation in the report prose.
+
+### Added — Delivery process
+
+- **Park requires a titled changelog entry** — Product-source deliveries need
+  a task-scoped Unreleased entry or a reasoned decision note before they park.
 
 ## [3.89.0] - 2026-10-29
 

@@ -1638,6 +1638,19 @@ check_changelog_and_versions() {
         printf 'changelog: section [%s] has no bullet\n' "$version"
         return 1
     fi
+    if ! awk '
+        $0 == "## [Unreleased]" { in_unreleased=1; next }
+        in_unreleased && /^## \[/ { exit }
+        in_unreleased && /^### / {
+            area = ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security) — .+$/)
+            next
+        }
+        in_unreleased && area && /^- \*\*[^*][^*]*\*\* — .+$/ { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' CHANGELOG.md; then
+        printf 'changelog: [Unreleased] needs a titled entry under a category and area heading\n'
+        return 1
+    fi
 
     for file in "${release_crates[@]}"; do
         [[ -f "$file" ]] || {
@@ -2312,7 +2325,7 @@ gate_row builtin-projections \
     "$cargo_bin nextest run -p cas --test builtin_flavor_drift_test root_managed_projections...; regenerate ledger; git diff --quiet" \
     check_builtin_projections cpu mem=4 excl=host-tests writes-tree
 gate_row changelog-and-versions \
-    'CHANGELOG [Unreleased]/[version] bullet plus six release-train Cargo.toml versions' \
+    'titled CHANGELOG [Unreleased] entry, [version] bullet and six release-train Cargo.toml versions' \
     check_changelog_and_versions
 gate_row release-script \
     'scripts/release.sh parses and answers --help (one-command release)' \
@@ -2368,7 +2381,7 @@ fi
 fast_row_fix() {
     case "$1" in
         failure-log) printf 'give every entry in %s a **<gate-row-id>** that exists in release-gate.sh, or a manual: marker' "$failure_log_rel" ;;
-        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section (with a bullet) in CHANGELOG.md; put new bullets under [Unreleased]' ;;
+        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section in CHANGELOG.md; group each delivery as ### Added — <area> or ### Fixed — <area>, with a per-delivery - **Title** — description line under [Unreleased]' ;;
         release-script) printf 'make scripts/release.sh pass bash -n and exit 0 on --help' ;;
         release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
         procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;

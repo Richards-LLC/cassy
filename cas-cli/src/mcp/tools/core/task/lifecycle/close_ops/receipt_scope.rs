@@ -109,6 +109,9 @@ pub(super) fn park_refusal(
     target: &str,
 ) -> Option<String> {
     let short = &head[..head.len().min(12)];
+    if let Some(refusal) = changelog_refusal(proof_repo, task, changed_paths, head, target) {
+        return Some(refusal);
+    }
     if let Some(refusal) = fast_rows_refusal(cas_root, proof_repo, task, head, target) {
         return Some(refusal);
     }
@@ -169,6 +172,163 @@ fn product_source_path(path: &str) -> bool {
     [".sh", ".py", ".js", ".mjs", ".ts", ".ps1"]
         .iter()
         .any(|extension| file.ends_with(extension))
+}
+
+fn changelog_refusal(
+    repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+) -> Option<String> {
+    if !changed_paths.iter().any(|path| product_source_path(path))
+        || has_no_changelog_decision(&task.notes)
+    {
+        return None;
+    }
+    let changelog_changed = changed_paths.iter().any(|path| path == "CHANGELOG.md");
+    if changelog_changed && has_titled_unreleased_delta(repo, head, target) {
+        return None;
+    }
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    Some(format!(
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading, then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        task.id, task.id, task.id,
+    ))
+}
+
+fn has_no_changelog_decision(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        let Some((stamp, body)) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once("] ✅ DECISION "))
+        else {
+            return false;
+        };
+        if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
+            return false;
+        }
+        body.strip_prefix("no changelog:")
+            .is_some_and(|reason| !reason.trim().is_empty())
+    })
+}
+
+fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let Some(base) = git(&["merge-base", head, target]) else {
+        return false;
+    };
+    let range = format!("{}..{head}", base.trim());
+    let Some(commits) = git(&["rev-list", "--first-parent", "--reverse", &range]) else {
+        return false;
+    };
+    let Some(final_text) = git(&["show", &format!("{head}:CHANGELOG.md")]) else {
+        return false;
+    };
+    let Some(final_entries) = titled_unreleased_entries(&final_text) else {
+        return false;
+    };
+
+    for commit in commits.lines().filter(|commit| !commit.is_empty()) {
+        let Some(parents) = git(&["rev-list", "--parents", "-n", "1", commit]) else {
+            continue;
+        };
+        let parents: Vec<_> = parents.split_whitespace().collect();
+        let [_, parent] = parents.as_slice() else {
+            continue;
+        };
+        let Some(changed) = git(&["diff", "--name-only", parent, commit, "--", "CHANGELOG.md"])
+        else {
+            continue;
+        };
+        if !changed.lines().any(|path| path == "CHANGELOG.md") {
+            continue;
+        }
+        let Some(previous) = git(&["show", &format!("{parent}:CHANGELOG.md")]) else {
+            continue;
+        };
+        let Some(current) = git(&["show", &format!("{commit}:CHANGELOG.md")]) else {
+            continue;
+        };
+        let old_entries = titled_unreleased_entries(&previous).unwrap_or_default();
+        let Some(new_entries) = titled_unreleased_entries(&current) else {
+            continue;
+        };
+        if new_entries.iter().any(|(key, entry)| {
+            old_entries.get(key) != Some(entry) && final_entries.get(key) == Some(entry)
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), String>> {
+    let lines: Vec<_> = text.lines().collect();
+    let start = lines.iter().position(|line| *line == "## [Unreleased]")? + 1;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.starts_with("## ["))
+        .map_or(lines.len(), |offset| start + offset);
+    let mut entries = BTreeMap::new();
+    let mut area = None::<String>;
+    let mut index = start;
+    while index < end {
+        let line = lines[index];
+        if let Some(heading) = line.strip_prefix("### ") {
+            area = changelog_area(heading);
+            index += 1;
+            continue;
+        }
+        if let Some(bullet) = line.strip_prefix("- **")
+            && let Some((title, description)) = bullet.split_once("** — ")
+            && !title.trim().is_empty()
+            && !description.trim().is_empty()
+        {
+            let mut block = vec![line];
+            index += 1;
+            while index < end
+                && !lines[index].trim().is_empty()
+                && !lines[index].starts_with("- ")
+                && !lines[index].starts_with("### ")
+            {
+                block.push(lines[index]);
+                index += 1;
+            }
+            if let Some(area) = area.as_ref() {
+                entries.insert((area.clone(), title.trim().to_string()), block.join("\n"));
+            }
+            continue;
+        }
+        index += 1;
+    }
+    Some(entries)
+}
+
+fn changelog_area(heading: &str) -> Option<String> {
+    let (kind, area) = heading.split_once(" — ")?;
+    if ![
+        "Added",
+        "Changed",
+        "Deprecated",
+        "Removed",
+        "Fixed",
+        "Security",
+    ]
+    .contains(&kind)
+        || area.trim().is_empty()
+    {
+        return None;
+    }
+    Some(heading.to_string())
 }
 
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
@@ -706,11 +866,21 @@ mod tests {
 
         std::fs::write(
             repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- Generic status entry.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let untitled = commit_changelog_fixture(repo.path(), "add an untitled note");
+        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &untitled, "main")
+            .expect("an untitled Unreleased bullet is not release evidence");
+        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
             "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Status updates stay current** — Status now reflects the latest response.\n\n## [1.0.0] - 2026-01-01\n",
         )
         .unwrap();
         let titled = commit_changelog_fixture(repo.path(), "add release note");
-        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
         assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main").is_none());
 
         std::fs::write(
@@ -729,6 +899,15 @@ mod tests {
         std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
         let head = commit_changelog_fixture(repo.path(), "internal test-only adjustment");
         let mut task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog:".into();
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &head,
+            "main",
+        )
+        .is_some(), "an empty reason must not exempt the delivery");
         task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: internal QA-only fixture correction".into();
         let refusal = park_refusal(
             cas_root.path(), repo.path(), &task, &["hub-web/src/app.ts".into()], &head, "main",

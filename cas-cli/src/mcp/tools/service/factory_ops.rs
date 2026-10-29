@@ -9135,7 +9135,7 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     // the later daemon call must not replace them with an empty snapshot.
     const CLEANUP_STAGED: &str = "shutdown_target_cleanup_staged";
     if matching.iter().any(|agent| !agent.metadata.contains_key(CLEANUP_STAGED)) {
-        crate::ui::factory::app::render_and_ops::epic_workers::stage_dead_worker_cleanup(cas_root, &matching)?;
+        crate::ui::factory::FactoryApp::stage_dead_worker_cleanup(cas_root, &matching)?;
         for agent in &matching {
             let mut staged = agent.clone();
             staged.metadata.insert(CLEANUP_STAGED.into(), "true".into());

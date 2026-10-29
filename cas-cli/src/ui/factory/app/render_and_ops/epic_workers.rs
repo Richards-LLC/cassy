@@ -1619,30 +1619,6 @@ impl DeferredWorkerCleanup {
     }
 }
 
-/// Stage only metadata on the caller's lane; the daemon reserves each name
-/// before starting these jobs. Capture every ID before shutdown parks bindings.
-pub(crate) fn stage_dead_worker_cleanup(root: &std::path::Path, agents: &[cas_types::Agent]) -> std::io::Result<()> {
-    let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?;
-    let active = root.join("worker-cleanups");
-    std::fs::create_dir_all(&active)?;
-    if !std::fs::symlink_metadata(&active)?.file_type().is_dir() {
-        return Err(std::io::Error::other("cleanup intent directory is not a real directory"));
-    }
-    let mut paths = std::collections::HashSet::new();
-    for agent in agents {
-        let Some(path) = agent.metadata.get("clone_path") else { continue; };
-        if !paths.insert(path) { continue; }
-        let request = DeferredWorkerCleanup {
-            occurrence: uuid::Uuid::new_v4().to_string(), agent: agent.clone(),
-            additional_agents: agents.iter().filter(|other| other.id != agent.id).cloned().collect(),
-            tasks: tasks.clone(), worktree: None,
-        };
-        let incoming = root.join("worker-cleanups/incoming").join(format!("{}.json", request.occurrence));
-        request.persist_at(&incoming).map_err(std::io::Error::other)?;
-    }
-    Ok(())
-}
-
 /// cas-58a3: the I/O half of [`FactoryApp::mark_worker_crashed`], for a job
 /// lane. The interactive leader may have exited while a long-lived child
 /// remains in its process group: reap the durable group before the lane is
@@ -2759,6 +2735,30 @@ impl WorkerSpawnContext {
 }
 
 impl FactoryApp {
+    /// Stage only metadata on the caller's lane; the daemon reserves each name
+    /// before starting these jobs. Capture every ID before shutdown parks bindings.
+    pub(crate) fn stage_dead_worker_cleanup(root: &std::path::Path, agents: &[cas_types::Agent]) -> std::io::Result<()> {
+        let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?;
+        let active = root.join("worker-cleanups");
+        std::fs::create_dir_all(&active)?;
+        if !std::fs::symlink_metadata(&active)?.file_type().is_dir() {
+            return Err(std::io::Error::other("cleanup intent directory is not a real directory"));
+        }
+        let mut paths = std::collections::HashSet::new();
+        for agent in agents {
+            let Some(path) = agent.metadata.get("clone_path") else { continue; };
+            if !paths.insert(path) { continue; }
+            let request = DeferredWorkerCleanup {
+                occurrence: uuid::Uuid::new_v4().to_string(), agent: agent.clone(),
+                additional_agents: agents.iter().filter(|other| other.id != agent.id).cloned().collect(),
+                tasks: tasks.clone(), worktree: None,
+            };
+            let incoming = root.join("worker-cleanups/incoming").join(format!("{}.json", request.occurrence));
+            request.persist_at(&incoming).map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+
     /// Get the current epic state
     pub fn epic_state(&self) -> &EpicState {
         &self.epic_state
@@ -3606,15 +3606,15 @@ impl FactoryApp {
 
     /// Apply finished removals without waiting for Git or filesystem work.
     pub(crate) fn poll_worker_worktree_cleanups(&mut self) {
-        // Called before pending spawn processing, so every launched cleanup
-        // takes the existing name fence before any replacement can start.
-        self.adopt_worker_cleanup_intents(true);
         let mut pending = Vec::new();
         for job in std::mem::take(&mut self.worktree_cleanup_jobs) {
             if job.handle.is_finished() { self.apply_worker_cleanup(job); }
             else { pending.push(job); }
         }
         self.worktree_cleanup_jobs = pending;
+        // Apply completion before adopting the next same-name queue entry, so
+        // the fence transfers in this pass before any pending spawn runs.
+        self.adopt_worker_cleanup_intents(true);
     }
 
     fn apply_worker_cleanup(&mut self, job: WorkerCleanupJob) {
@@ -6964,6 +6964,16 @@ mod tests {
         assert!(lane_free, "dead={dead}: target retirement blocked the store write lane");
         assert!(intent_durable, "cleanup intent must be durable before retirement I/O");
         let recovery_path = recovery_path.unwrap();
+        if dead {
+            FactoryApp::stage_dead_worker_cleanup(&cas, std::slice::from_ref(&agent)).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !app.worktree_cleanup_jobs[0].handle.is_finished() {
+                assert!(std::time::Instant::now() < deadline, "released cleanup finishes before handoff");
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            app.poll_worker_worktree_cleanups();
+            assert!(app.crash_cleanup_pending(name), "the next queued cleanup inherits the name fence in the same pass");
+        }
         assert!(reserved, "a late cleanup must not remove a same-name replacement");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while app.worker_worktree_cleanups_pending() && std::time::Instant::now() < deadline {

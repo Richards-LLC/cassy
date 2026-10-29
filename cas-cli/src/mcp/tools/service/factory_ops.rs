@@ -18835,7 +18835,7 @@ effort = "high"
     }
 
     #[tokio::test]
-    async fn worker_liveness_summary_five_workers_under_one_second() {
+    async fn cas_070a_recycled_worker_with_fresh_transcript_and_stale_heartbeat_executes() {
         let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
         use cas_store::{AgentStore, SqliteAgentStore};
         use cas_types::{Agent, AgentRole};
@@ -18903,7 +18903,26 @@ effort = "high"
                 "worker_account_dir".into(),
                 temp.path().join("account").to_string_lossy().into(),
             );
+            if index == 2 {
+                agent.last_heartbeat = now - chrono::Duration::minutes(30);
+                agent.cc_session_id = Some("pre-recycle-session".into());
+            }
             store.register(&agent).unwrap();
+            if index == 2 {
+                // A confirmed recycle replaces the transcript identity but
+                // must not need an MCP heartbeat before work is visible.
+                assert_eq!(
+                    record_reset_registration(&store, &agent, &agent.id),
+                    ResetRegistration::Recorded,
+                );
+                assert_eq!(store.get(&agent.id).unwrap().last_heartbeat, agent.last_heartbeat);
+                let tool = serde_json::json!({
+                    "timestamp": now.to_rfc3339(), "type": "response_item",
+                    "payload": {"type": "function_call_output", "call_id": "after-recycle", "output": "ok"},
+                });
+                use std::io::Write;
+                writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{tool}").unwrap();
+            }
         }
         drop(store);
         let core = CasCore::with_daemon(root, None, None);
@@ -18954,7 +18973,7 @@ effort = "high"
             "five-worker poll: {elapsed:?}"
         );
         if let Ok(dir) = proof_dir {
-            std::fs::write(std::path::Path::new(&dir).join("five-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n5 workers; 4 MiB rollout each; fresh heartbeat each; local process lookup\n{output}\n")).unwrap();
+            std::fs::write(std::path::Path::new(&dir).join("five-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n5 workers; 4 MiB rollout each; worker 2 recycled with stale heartbeat and fresh tool activity; local process lookup\n{output}\n")).unwrap();
         }
     }
 

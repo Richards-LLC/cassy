@@ -39,7 +39,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 4. Scaffold with `cas qa ledger init --task <id>`; run
    `cas qa ledger check <path> --task <id>` before close. Follow
    [verify-before-claim](../verify-before-claim/SKILL.md) and
-   [close-gate.md](references/close-gate.md) for clean-tip delivery and refusals.
+   [close-gate.md](references/close-gate.md) for delivery and refusals.
    Close with `task action=close reason="PASS <sha>: <proof>"`.
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and send one `merge_request=true` message;

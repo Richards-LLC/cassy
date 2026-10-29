@@ -9508,10 +9508,6 @@ impl CasCore {
                     }
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
-                        if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, true) {
-                            return Ok(Self::tool_error(message));
-                        }
-
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
@@ -9787,6 +9783,10 @@ impl CasCore {
                         } else {
                             None
                         };
+                        if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, true) {
+                            return Ok(Self::tool_error(message));
+                        }
+
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {

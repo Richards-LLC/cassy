@@ -3035,7 +3035,11 @@ fn heading_from_entry(text: &str) -> String {
     let text = text.split_once(" — ").map(|(head, _)| head).unwrap_or(text);
     let mut heading = text.trim().to_string();
     if heading.len() > 100 {
-        heading.truncate(97);
+        let mut end = 97;
+        while !heading.is_char_boundary(end) {
+            end -= 1;
+        }
+        heading.truncate(end);
         heading.push_str("...");
     }
     if heading.is_empty() {
@@ -3458,6 +3462,19 @@ mod tests {
             "The report reports supervisor delivery evidence without truncation."
         );
         assert!(heading_from_entry(&section.entries[0].text).starts_with('`'));
+    }
+
+    #[test]
+    fn long_unicode_entry_heading_keeps_complete_chars_and_ellipsis_cas_8007() {
+        let prefix = "a".repeat(96);
+        for character in ["é", "—", "🌟"] {
+            // Byte offset 97 lies inside this character, beyond the ASCII prefix.
+            let entry = format!("{prefix}{character}{}", "z".repeat(12));
+            assert_eq!(heading_from_entry(&entry), format!("{prefix}..."));
+        }
+        let short = "é".repeat(50);
+        assert_eq!(heading_from_entry(&short), short);
+        assert_eq!(heading_from_entry(&"a".repeat(101)), format!("{}...", "a".repeat(97)));
     }
 
     #[test]

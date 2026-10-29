@@ -1182,7 +1182,14 @@ pub(crate) fn supervisor_phase_for_session(
         )
     };
     let mut indexes = INDEXES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    indexes.entry((cas_dir.to_owned(), session.to_owned())).or_default().supervisor_phase(&scope, &resolve)
+    let key = (cas_dir.to_owned(), session.to_owned());
+    // Browsing ended conversations must not retain an index per historical
+    // factory forever. Eviction changes performance, never phase evidence.
+    if indexes.len() >= 16 && !indexes.contains_key(&key) {
+        let oldest = indexes.iter().min_by_key(|(_, index)| index.phase_observed_at.clone()).map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest { indexes.remove(&oldest); }
+    }
+    indexes.entry(key).or_default().supervisor_phase(&scope, &resolve)
 }
 
 /// Per-daemon transcript indexes, kept across requests so paging and

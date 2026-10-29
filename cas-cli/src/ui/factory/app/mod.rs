@@ -1205,6 +1205,8 @@ pub struct FactoryApp {
     /// focused epic or None to clear)`. A later change replaces an earlier
     /// one, so the last focus wins.
     pending_epic_focus_write: Option<(PathBuf, Option<String>)>,
+    /// Actual pane roster last handed to the off-loop session writer.
+    last_worker_roster_write: Option<Vec<(String, Option<u32>)>>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -2328,6 +2330,25 @@ impl FactoryApp {
     /// off the loop.
     pub(crate) fn take_epic_focus_write(&mut self) -> Option<(PathBuf, Option<String>)> {
         self.pending_epic_focus_write.take()
+    }
+
+    /// Publish changed pane identities, including a same-name replacement's
+    /// new PID. This never performs filesystem work on the daemon loop.
+    pub(crate) fn take_worker_roster_write(&mut self) -> Option<(PathBuf, Vec<crate::ui::factory::protocol::AgentInfo>)> {
+        let session = self.factory_session.as_deref()?;
+        let roster: Vec<_> = self.worker_names.iter()
+            .map(|name| (name.clone(), self.mux.pane_process_group_id(name)))
+            .collect();
+        if self.last_worker_roster_write.as_ref() == Some(&roster) {
+            return None;
+        }
+        self.last_worker_roster_write = Some(roster.clone());
+        let workers = roster.into_iter().map(|(name, pid)| {
+            let worktree_path = self.worktree_manager.as_ref()
+                .map(|manager| manager.worktree_path_for_worker(&name).to_string_lossy().into_owned());
+            crate::ui::factory::protocol::AgentInfo { name, pid, worktree_path }
+        }).collect();
+        Some((crate::ui::factory::session::metadata_path(session), workers))
     }
 
     #[cfg(test)]

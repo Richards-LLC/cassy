@@ -182,7 +182,7 @@ fn session_agents(
         dedupe_authoritative_agents, worker_liveness_for_agent,
     };
     use cas_types::{AgentRole, TaskStatus};
-    let agents = crate::store::open_agent_store(root)?
+    let registrations: Vec<_> = crate::store::open_agent_store(root)?
         .list(None)?
         .into_iter()
         .filter(|agent| {
@@ -192,8 +192,8 @@ fn session_agents(
             ) && agent.visible_to_factory_session(Some(&session.name))
         })
         .collect();
-    let (agents, _) = dedupe_authoritative_agents(agents);
-    // As in worker_status, an active task wins over a parked/blocked task.
+    let (agents, _) = dedupe_authoritative_agents(registrations.clone());
+    // Work in progress or newly assigned work wins over a prior delivery.
     // A registration ID and the friendly name are both valid assignees.
     let held: Vec<_> = [
         TaskStatus::InProgress,
@@ -217,11 +217,25 @@ fn session_agents(
         .into_iter()
         .map(|agent| {
             let latest = events.latest_worker_activity(&agent.id, &agent.name)?;
-            let task = held.iter().find(|task| {
-                task.assignee
-                    .as_deref()
-                    .is_some_and(|assignee| assignee == agent.name || assignee == agent.id)
-            });
+            // Task ownership survives a harness recycle. Keep retired IDs
+            // only for this logical worker in the selected session; a same-
+            // name registration in another session is not an alias.
+            let aliases: std::collections::HashSet<_> = registrations.iter()
+                .filter(|registration| registration.name == agent.name && registration.role == agent.role)
+                .map(|registration| registration.id.as_str())
+                .chain(std::iter::once(agent.name.as_str()))
+                .collect();
+            let task = held.iter()
+                .filter(|task| task.assignee.as_deref().is_some_and(|owner| aliases.contains(owner)))
+                .min_by_key(|task| (
+                    match task.status {
+                        TaskStatus::InProgress => 0,
+                        TaskStatus::Open => 1,
+                        TaskStatus::Blocked => 2,
+                        _ => 3,
+                    },
+                    std::cmp::Reverse(task.updated_at),
+                ));
             let (task_started_at, recent_trail) = worker_task_facts(root, &events, task)?;
             Ok(AgentSummaryJson {
                 role: agent.role.to_string(),

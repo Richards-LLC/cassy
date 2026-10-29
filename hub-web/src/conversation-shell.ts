@@ -2,7 +2,7 @@ import type { SessionEndOutcome } from "./types";
 import { appSwitcherMarkup, projectExplorerLinkMarkup } from "./app-switcher";
 import { cloudBrand, cloudBrandSwitcher, escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
-import { HARNESS_NAME, isHarness, providerAvatarMarkup } from "./provider-mark";
+import { modelLabel, providerAvatarMarkup } from "./provider-mark";
 
 export interface ConversationShellModel {
   ended?: SessionEndOutcome;
@@ -11,6 +11,9 @@ export interface ConversationShellModel {
   host?: string;
   /** The supervisor's harness (hub catalog): its provider mark leads the heading. */
   harness?: string;
+  /** The supervisor's model and effort (cas-2dcc), when the hub reports them. */
+  model?: string;
+  effort?: string;
   /** Selected machine; its accent class goes on the shell root so the thread inherits it. */
   machineId?: string;
   selected: boolean;
@@ -163,7 +166,7 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity">${providerAvatarMarkup({ harness: model.harness, fallback: machineMonogram(host || model.supervisor || "?"), className: "conversation-avatar" })}<div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host">${isHarness(model.harness) ? `<span class="conversation-model">${HARNESS_NAME[model.harness]}</span>` : ""}<span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status">${model.ended ? " · Ended" : ""}</span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity">${providerAvatarMarkup({ harness: model.harness, fallback: machineMonogram(host || model.supervisor || "?"), className: "conversation-avatar" })}<div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host">${modelLabel(model.harness, model.model, model.effort) ? `<span class="conversation-model">${escapeHtml(modelLabel(model.harness, model.model, model.effort)!)}</span>` : ""}<span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status">${model.ended ? " · Ended" : ""}</span></span></div></div></header>`;
 }
 
 /** Attachments use the authenticated hub upload API before the durable message send. */

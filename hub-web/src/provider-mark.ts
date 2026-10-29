@@ -27,6 +27,21 @@ const MARKS: Readonly<Partial<Record<Harness, string>>> = {
   grok: `<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M17.6 6.9A8 8 0 1 0 18.9 15"/><path d="M4.5 20.5L20.5 3.5"/></g>`,
 };
 
+/**
+ * The header's model label: "Claude Opus 5.5 · high" from a model ID such as
+ * claude-opus-5-5, or the harness name when no model is reported (DESIGN.md
+ * Conversation header).
+ */
+export function modelLabel(harness: string | undefined, model?: string | null, effort?: string | null): string | undefined {
+  const known = isHarness(harness) ? harness : undefined;
+  const id = model?.trim();
+  if (!id) return known ? HARNESS_NAME[known] : undefined;
+  const words = id.replace(/(\d+)[-_](?=\d)/g, "$1.").split(/[-_\s]+/).filter(Boolean).map(word => /^gpt$/i.test(word) ? "GPT" : word[0]!.toUpperCase() + word.slice(1));
+  let name = words.join(" ").replace(/^GPT (\d)/, "GPT-$1");
+  if (known === "claude" && !/^claude\b/i.test(name)) name = `Claude ${name}`;
+  return effort?.trim() ? `${name} · ${effort.trim()}` : name;
+}
+
 export function isHarness(value: unknown): value is Harness {
   return typeof value === "string" && Object.hasOwn(HARNESS_PROVIDER, value);
 }
@@ -45,6 +60,8 @@ export function avatarLetters(name: string): string {
  */
 export function providerAvatarMarkup(options: { harness?: string | null; fallback: string; state?: AvatarState; size?: "row" | "lane"; className?: string }): string {
   const harness = isHarness(options.harness) ? options.harness : undefined;
+  // No harness on a surface with its own avatar class: that avatar, unchanged.
+  if (!harness && options.className) return `<span class="${options.className}" aria-hidden="true">${escapeHtml(options.fallback)}${options.state ? `<span class="supervisor-state ${options.state}" title="${options.state === "needs-you" ? "Needs you" : options.state}" aria-hidden="true"></span>` : ""}</span>`;
   const mark = harness ? MARKS[harness] : undefined;
   const face = mark
     ? `<svg class="provider-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${mark}</svg>`

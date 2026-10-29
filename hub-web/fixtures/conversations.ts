@@ -125,7 +125,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       : state === 'conversation-sessions' || state === 'conversation-earlier'
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, harness: "claude", host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, harness: "claude", model: "claude-opus-5-5", effort: "high", host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
   // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
   const needsPairing = state === 'conversation-needs-pairing';
   const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()

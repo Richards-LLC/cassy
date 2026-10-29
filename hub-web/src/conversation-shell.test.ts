@@ -137,11 +137,13 @@ describe("cloudBrand", () => {
 });
 
 describe("conversation header identity (DESIGN.md Conversation header)", () => {
-  it("leads with the provider's mark and names the harness until a model is reported", () => {
+  it("leads with the provider mark and shows model and effort, or the harness until they are reported", () => {
     const header = document.createElement("div");
     header.innerHTML = conversationHeaderMarkup({ selected: true, loaded: true, paired: true, supervisor: "calm-swan-15", projectDir: "/home/me/cassy", host: "soundwave", harness: "claude" });
     expect(header.querySelector('.conversation-avatar[data-harness="claude"] svg.provider-mark')).not.toBeNull();
     expect(header.querySelector(".conversation-host")!.textContent).toMatch(/^Claude Code/);
+    header.innerHTML = conversationHeaderMarkup({ selected: true, loaded: true, paired: true, supervisor: "calm-swan-15", projectDir: "/home/me/cassy", host: "soundwave", harness: "claude", model: "claude-opus-5-5", effort: "high" });
+    expect(header.querySelector(".conversation-model")!.textContent).toBe("Claude Opus 5.5 · high");
     header.innerHTML = conversationHeaderMarkup({ selected: true, loaded: true, paired: true, supervisor: "calm-swan-15", host: "soundwave" });
     expect(header.querySelector(".conversation-avatar")!.textContent).toBe("S");
     expect(header.querySelector(".conversation-model")).toBeNull();

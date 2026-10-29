@@ -360,7 +360,9 @@ for (const width of [1280, 390]) {
               `tap ${tap}: the catalog rendered the session start/end`).toHaveCount(soundwave.sessions.includes(PASSING) ? 1 : 0);
             // Compare this press's node, not a sticky flag on reused rows that
             // may have been pressed in an earlier iteration.
-            await expect.poll(() => pressed.evaluate((node, { x, y }) => node.ownerDocument.elementFromPoint(x, y)?.closest(".conversation-row") !== node, point),
+            // cas-4f42: activity no longer moves prowl rows; only the soundwave
+            // start/end still moves a row out from under the finger.
+            if (owner === soundwave) await expect.poll(() => pressed.evaluate((node, { x, y }) => node.ownerDocument.elementFromPoint(x, y)?.closest(".conversation-row") !== node, point),
               { message: `tap ${tap}: the row under the finger was replaced or moved` }).toBe(true);
           } finally {
             await release();

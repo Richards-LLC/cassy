@@ -65,14 +65,14 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "noble-cheetah-84", "wild-shark-68"]);
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
-    await expect(rows.locator(".conversation-when")).toHaveText(["2m", "40m", /^\d+h$/]);
+    await expect(rows.locator(".conversation-when")).toHaveText(["2m", /^\d+h$/, "40m"]);
     await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · Messaged bright-robin-85");
     // cas-5d2c: under a heading that names the project and machine once, each
     // row leads with its codename and says what its session last did, before
     // any of them is opened; the heading and footer count the same noun.
     await expect(rows.locator(".conversation-title")).toHaveCount(3);
     for (const title of await rows.locator(".conversation-title").all()) await expect(title).toBeHidden();
-    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Mixdown preview rendered: 3 stems."]);
+    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "Mixdown preview rendered: 3 stems.", "You wrote to it"]);
     await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
     await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
     // A useful incoming preview can grow the last row beyond the list's
@@ -220,7 +220,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
 
   await journey.stage("End a stale session", async () => {
     await backToList();
-    const end = list.locator(".conversation-end").nth(2);
+    const end = list.locator(".conversation-end").filter({ has: page.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" }) });
     // cas-f60a: a double-click on End session opens the confirmation and
     // nothing more. Its destructive button is never where the pointer was.
     const ask = end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" });

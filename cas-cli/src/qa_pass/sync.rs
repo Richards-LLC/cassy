@@ -72,11 +72,21 @@ pub(crate) fn take(notes: &mut String, task_id: &str) -> Vec<String> {
 
 pub(crate) fn import(cas_root: &Path, task: &Task, receipts: &[String]) -> anyhow::Result<()> {
     let store = crate::store::open_task_store_local(cas_root)?;
+    let mut errors = Vec::new();
     for receipt in receipts {
+        let mut accepted = true;
         for snapshot in snapshots(receipt, &task.id) {
-            cas_store::import_qa_pass(cas_root, &snapshot.pass, snapshot.changed_at)?;
+            if let Err(error) =
+                cas_store::import_qa_pass(cas_root, &snapshot.pass, snapshot.changed_at)
+            {
+                errors.push(format!("{}: {error}", snapshot.pass.id));
+                accepted = false;
+            }
         }
-        store.append_trusted_note(&task.id, receipt)?;
+        if accepted {
+            store.append_trusted_note(&task.id, receipt)?;
+        }
     }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(())
 }

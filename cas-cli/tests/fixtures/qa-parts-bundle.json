@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "task_id": "cas-abb7",
+  "producer": "cas-qa-craft",
+  "journey_id": "HUB-J24",
+  "journey_receipt": "../journey-receipt.json",
+  "verdict": "PASS",
+  "label": "real production bundle with protocol double; real uploaded-image backend proof pending",
+  "head_sha": "46c0eb7d46878c5c5b5699fbdb7fccd40f8ef4c2",
+  "hub_web_dist": "49459a244bedf5901d9ca28cbdf2eb72734129ad",
+  "build_url": "hub-web/dist at /commander/; transport: protocol-double, real-bundle",
+  "playwright_version": "1.64.1",
+  "created_at": "2026-10-28T15:10:33.025994+00:00",
+  "visual_change": true,
+  "visual_qa_status": "pass",
+  "files": {
+    "cells": [
+      "J01.png",
+      "J02.png",
+      "J03.png",
+      "J04.png",
+      "J05.png",
+      "J06.png",
+      "parts/paste-content-1280-dark-25733e27cebdfa06/J01.png",
+      "parts/paste-content-1280-dark-25733e27cebdfa06/J02.png",
+      "parts/paste-content-1280-dark-25733e27cebdfa06/J03.png",
+      "parts/paste-content-1280-dark-25733e27cebdfa06/J04.png",
+      "parts/paste-content-1280-dark-25733e27cebdfa06/J05.png",
+      "parts/paste-content-1280-dark-25733e27cebdfa06/J06.png",
+      "parts/paste-content-390-dark-04eda936cd96b5e5/J01.png",
+      "parts/paste-content-390-dark-04eda936cd96b5e5/J02.png",
+      "parts/paste-content-390-dark-04eda936cd96b5e5/J03.png",
+      "parts/paste-content-390-dark-04eda936cd96b5e5/J04.png",
+      "parts/paste-content-390-dark-04eda936cd96b5e5/J05.png",
+      "parts/paste-content-390-dark-04eda936cd96b5e5/J06.png",
+      "parts/paste-content-390-light-85c87e4bc54df090/J01.png",
+      "parts/paste-content-390-light-85c87e4bc54df090/J02.png",
+      "parts/paste-content-390-light-85c87e4bc54df090/J03.png",
+      "parts/paste-content-390-light-85c87e4bc54df090/J04.png",
+      "parts/paste-content-390-light-85c87e4bc54df090/J05.png",
+      "parts/paste-content-390-light-85c87e4bc54df090/J06.png"
+    ],
+    "receipt": "receipt.webm",
+    "aria_yaml": "final.aria.yml",
+    "aria_json": "final.aria.json",
+    "trace": "trace.zip",
+    "trace_actions": "trace-actions.txt",
+    "parts": [
+      {
+        "title": "paste content 1280 dark",
+        "project": "journeys",
+        "title_path": [
+          "journeys/paste-content.journey.ts",
+          "composer paste 1280 dark",
+          "HUB-J24 paste content 1280 dark"
+        ],
+        "verdict": "PASS",
+        "label": "real-bundle, protocol-double",
+        "receipt": "parts/paste-content-1280-dark-25733e27cebdfa06/receipt.webm",
+        "aria_yaml": "parts/paste-content-1280-dark-25733e27cebdfa06/final.aria.yml",
+        "aria_json": "parts/paste-content-1280-dark-25733e27cebdfa06/final.aria.json"
+      },
+      {
+        "title": "paste content 390 dark",
+        "project": "journeys",
+        "title_path": [
+          "journeys/paste-content.journey.ts",
+          "composer paste 390 dark",
+          "HUB-J24 paste content 390 dark"
+        ],
+        "verdict": "PASS",
+        "label": "real-bundle, protocol-double",
+        "receipt": "parts/paste-content-390-dark-04eda936cd96b5e5/receipt.webm",
+        "aria_yaml": "parts/paste-content-390-dark-04eda936cd96b5e5/final.aria.yml",
+        "aria_json": "parts/paste-content-390-dark-04eda936cd96b5e5/final.aria.json"
+      },
+      {
+        "title": "paste content 390 light",
+        "project": "journeys",
+        "title_path": [
+          "journeys/paste-content.journey.ts",
+          "composer paste 390 light",
+          "HUB-J24 paste content 390 light"
+        ],
+        "verdict": "PASS",
+        "label": "real-bundle, protocol-double",
+        "receipt": "parts/paste-content-390-light-85c87e4bc54df090/receipt.webm",
+        "aria_yaml": "parts/paste-content-390-light-85c87e4bc54df090/final.aria.yml",
+        "aria_json": "parts/paste-content-390-light-85c87e4bc54df090/final.aria.json"
+      }
+    ],
+    "visual_qa": "visual-qa/visual-qa.md",
+    "visual_qa_json": "visual-qa/visual-qa.json",
+    "visual_qa_stdout": "visual-qa.stdout",
+    "critique": "critique.md",
+    "polish_screenshots": [
+      "visual-qa/127-0-0-1-24126-fixture-conversation-attachment-failure-dark-desktop.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-attachment-failure-dark-phone.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-attachment-failure-light-desktop.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-attachment-failure-light-phone.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-sent-attachment-dark-desktop.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-sent-attachment-dark-phone.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-sent-attachment-light-desktop.png",
+      "visual-qa/127-0-0-1-24126-fixture-conversation-sent-attachment-light-phone.png"
+    ],
+    "a11y": [
+      "a11y-forced-colors.png",
+      "a11y-reduced-motion.png",
+      "a11y-contrast-more.png"
+    ]
+  },
+  "incomplete_stages": [],
+  "critique_score": {
+    "distinctiveness": 4,
+    "fit": 5,
+    "hierarchy": 5,
+    "craft": 4,
+    "accessibility": 4
+  },
+  "pairs_status": "unavailable",
+  "pairs_reason": "Native capture returned capture-unavailable: selected journeys exceed max_shots; four base and eight treatment screenshots are retained separately."
+}

@@ -10927,7 +10927,7 @@ mod worker_commit_guard_tests {
                     .as_str()
                     .unwrap_or_default();
                 assert!(
-                    reason.contains("supervisor-approved") && reason.contains("plain git push"),
+                    reason.contains("supervisor-approved") && reason.contains("plain `git push`"),
                     "the refusal must point to the exception route: {reason}"
                 );
             }

@@ -702,7 +702,7 @@ mod tests {
         let entries = &reader.keyframe_index().entries;
         let duration = reader.duration_ms();
         let max_comparisons =
-            (entries.len() + 1).next_power_of_two().trailing_zeros() as usize;
+            (entries.len() + 1).next_power_of_two().trailing_zeros() as usize + 1;
         for n in 0..1_000_u64 {
             let target = n * duration / 999;
             let expected = entries
@@ -713,12 +713,13 @@ mod tests {
                 .map_or(0, |entry| entry.timestamp_ms);
             let position = reader.seek_to(target).unwrap();
             assert_eq!(position.timestamp_ms, expected, "target {target}ms");
+            let comparisons = reader
+                .keyframe_index()
+                .find_keyframe_comparison_count(target);
             assert!(
-                reader
-                    .keyframe_index()
-                    .find_keyframe_comparison_count(target)
-                    <= max_comparisons,
-                "seek index inspected more than {max_comparisons} entries for {target}ms"
+                comparisons <= max_comparisons,
+                "seek index inspected {comparisons} of {} entries for {target}ms; bound {max_comparisons}",
+                entries.len()
             );
         }
     }

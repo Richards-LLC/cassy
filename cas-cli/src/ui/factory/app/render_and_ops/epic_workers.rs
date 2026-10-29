@@ -6671,8 +6671,8 @@ mod tests {
         assert!(!app.crash_cleanup_pending("held-worker"));
     }
 
-    #[test]
-    fn restart_replays_deferred_cleanup_intent_cas_af63() {
+    #[tokio::test]
+    async fn restart_replays_deferred_cleanup_intent_cas_af63() {
         use std::process::Command;
         let env = crate::test_support::TestEnvGuard::temp_home();
         let repo = env.home().join("project");
@@ -6691,7 +6691,7 @@ mod tests {
             cleanup_on_close: false, promote_entries_on_merge: false,
         }).unwrap();
         for (name, disposition) in [
-            ("held-wip", "wip"), ("held-unowned", "unowned"),
+            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"),
             ("interrupted-worker", "interrupted"), ("failed-worker", "error"),
         ] {
             manager.create_for_worker(name).unwrap();
@@ -6710,6 +6710,29 @@ mod tests {
                 let target = crate::factory_scratch::worker_target_dir(&worker);
                 std::fs::create_dir_all(&target).unwrap();
                 std::fs::write(target.join("unverified.log"), "preserve").unwrap();
+            }
+            if disposition == "duplicates" {
+                let agents = open_agent_store(&root).unwrap();
+                agent.role = cas_types::AgentRole::Worker;
+                agent.pid = Some(i32::MAX as u32);
+                agents.register(&agent).unwrap();
+                let mut sibling = agent.clone();
+                sibling.id = "sibling-registration".into();
+                agents.register(&sibling).unwrap();
+                let matching: Vec<_> = agents.list(None).unwrap().into_iter().filter(|row| row.name == name).collect();
+                let mut task = Task::new("duplicate-task".into(), "Still working".into());
+                task.assignee = Some(matching[1].id.clone());
+                task.status = TaskStatus::InProgress;
+                crate::store::open_task_store_cached(&root).unwrap().add(&task).unwrap();
+                drop(crate::factory_target_cache::owner::acquire(&root, &worker).unwrap().unwrap());
+                let target = crate::factory_scratch::worker_target_dir(&worker);
+                let proof = target.join("worker-check.log");
+                std::fs::write(&proof, "preserve").unwrap();
+                let mut app = FactoryApp::for_test_at(root.clone());
+                app.shutdown_worker_for_recycle(name).await.unwrap();
+                app.join_worker_worktree_cleanups();
+                assert!(proof.is_file(), "a task owned by a later duplicate identity must protect recycled output");
+                continue;
             }
             let request = DeferredWorkerCleanup {
                 occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks,
@@ -6734,6 +6757,7 @@ mod tests {
                 }
                 assert!(worker.exists(), "{name}: deliberate holds preserve output");
                 if disposition == "unowned" {
+                    // pin: ownership refusal must preserve the fixture evidence bytes exactly.
                     assert_eq!(std::fs::read_to_string(crate::factory_scratch::worker_target_dir(&worker).join("unverified.log")).unwrap(), "preserve");
                 }
                 assert!(!path.exists(), "{name}: a deliberate hold must complete its intent");

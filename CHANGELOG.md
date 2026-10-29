@@ -7,14 +7,138 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Fixed
+### Added — Installation
 
-- Post-merge Commander builds install the merged lockfile's dependencies before
-  regenerating output. Failed regeneration receipts include a retained build log.
-- macOS hosts can now install published releases automatically through the
-  existing `scripts/install-on-publish.sh --install` command. A per-user
-  LaunchAgent checks every minute with native macOS locking and timestamps;
-  release notes record installation only after the version check succeeds.
+- **Automatic updates on macOS** — Was: The published-update watcher depended on Linux
+  service and time utilities. → Now: The existing `scripts/install-on-publish.sh
+  --install` command registers a per-user macOS LaunchAgent that checks every minute
+  with native locking and timestamps. Success is recorded only after the installed
+  version check passes.
+
+### Fixed — Commander
+
+- **Team stays visible** — Was: Periodic status reads and replacements could drop the
+  live roster. → Now: Status retains live membership through polling and replacement,
+  refreshes reassigned work, and removes actual shutdowns.
+- **Current assignments agree** — Was: Current-task selection could disagree with the
+  tasks in the same response. → Now: The status projection joins active assignments from
+  its own task snapshot instead of a separate stale lookup.
+- **Latest waiting work wins** — Was: Historical waiting deliveries could displace the
+  latest assignment. → Now: Selection follows task starts, preserves active precedence,
+  and excludes already-integrated historical deliveries.
+- **Reported models appear** — Was: Codex launch choices could be lost before reaching
+  the status projection. → Now: The chosen model is retained through launch and recorded
+  status, while absent choices remain unknown.
+- **Delivery progress stays visible** — Was: Historical work could consume the bounded
+  delivery lookup after the last active assignment ended. → Now: Staffed release work
+  retains lookup priority after review starts, preserving focus and active precedence
+  and Git-backed merged state.
+- **Paths send as messages** — Was: Every leading slash was claimed by the command
+  palette. → Now: Only an exact supported first command token is routed to the palette;
+  paths and unknown slash text remain ordinary messages.
+- **CSV copy protects cells** — Was: CSV preserved formula-leading cells without
+  neutralization. → Now: CSV prefixes formula-capable cells for safe text import while
+  leaving Markdown copy unchanged.
+- **Copy feedback clears** — Was: Successful table-copy feedback had no expiry. → Now:
+  The copy confirmation expires without changing the copied content or retry feedback.
+- **Current activity wins** — Was: Overlapping slow status reads could regress or starve
+  the phase line. → Now: Status publication keeps response ordering and continues
+  updating during reads that exceed the refresh interval.
+- **Cancelled shortening expires** — Was: A compaction start without a matching end
+  could remain active indefinitely. → Now: Later lifecycle evidence or the expiry bound
+  retires unmatched compaction without inventing a completion time.
+- **Accounts is easy to find** — Was: The Accounts entry lacked a visible icon and
+  header actions could crowd the narrow rail. → Now: Labelled Accounts access and inset
+  header actions fit the narrow navigation rail as well as the desktop header.
+- **Codex Clear confirms** — Was: The command observer missed the native Codex welcome
+  screen after Clear. → Now: Fresh welcome-screen evidence settles the Clear receipt;
+  the receipt does not claim deeper memory state than the observation proves.
+- **Questions get one reply** — Was: Verified questions and takeover notices still
+  requested an extra explicit answer. → Now: Prompt and takeover guidance requests one
+  mirrored pane reply, reserving explicit routing for unprompted or disabled/unmirrored
+  delivery.
+
+### Fixed — Accounts
+
+- **Reset times use Eastern hours** — Was: Reset labels used inconsistent local or
+  24-hour formatting. → Now: Human-readable reset times use Eastern 12-hour formatting
+  across account choices and usage output; machine-readable timestamps remain unchanged.
+
+### Fixed — Session recovery
+
+- **Recent work is recognized** — Was: An unresolved saved transcript could hide fresh
+  authored activity after replacement. → Now: Fresh own activity is used only while
+  transcript evidence is unresolved, with stale, foreign, terminal and dead-process
+  guards retained.
+- **Ready means finished** — Was: A green pushed checkpoint could trigger readiness
+  before completion. → Now: Readiness requires explicit completion evidence as well as
+  checks; explicit acceptance of unfinished work retains its warning and existing review
+  gates.
+- **Restart notes survive** — Was: Retiring an old process could cancel mail addressed
+  to its pending replacement. → Now: Pending replacement intent preserves the original
+  resume row until the new process registers, without reviving terminal replacements.
+- **Claude restarts keep the project** — Was: A no-checkout restart could lose the
+  project root after stopping the current process. → Now: Launch preflight runs before
+  stop and preserves the project root for a replacement without a separate checkout.
+- **Check lookup explains failures** — Was: Check lookup could collapse Git and GitHub
+  discovery failures into repository unresolved. → Now: Git discovery and GitHub lookup
+  failures have distinct causes. The original intermittent incident is not claimed fully
+  resolved.
+- **Reviewed work recovers after restart** — Was: Restarted review could lose its
+  delivery anchor and deadlock receipt or close checks. → Now: Recovery resolves the
+  retained reviewed anchor while refusing an integrated but unreviewed correction and
+  preserving independent review requirements.
+
+### Fixed — Releases
+
+- **Release and browser versions agree** — Was: A version bump could leave the embedded
+  Commander output stale. → Now: The release command regenerates Commander after the
+  version change and refuses failed generation before recording a release.
+- **Removed browser files stay removed** — Was: A generated file deleted by the updated
+  base could abort conflict recovery. → Now: Generated-output recovery removes absent
+  base files before rebuilding; ordinary source conflicts still stop safely.
+- **Rebuilds use matching dependencies** — Was: Post-merge generation could use a stale
+  or shared dependency installation. → Now: Regeneration installs the merged lockfile
+  first, detaches shared installation links and retains the build log on failure.
+- **Generated reports upload correctly** — Was: Custom-output recognition assumed the
+  version title was the first line. → Now: Report recognition accepts closed YAML front
+  matter before the title and avoids an unnecessary release lookup when no focused
+  release exists.
+
+### Fixed — Evidence
+
+- **Evidence grammar agrees** — Was: The checker and its copied examples disagreed on
+  zero labels and unrun verdicts. → Now: Zero-count labels are accepted and bare NOT
+  EXERCISED is refused with a reason remedy through the shared evidence parser.
+- **Evidence setup stays in its project** — Was: Ledger initialization could create
+  output before rejecting an aliased project namespace. → Now: Initialization checks the
+  project storage identity before creating an evidence directory.
+- **Large uploads report their limits** — Was: A saved publication record could be
+  mistaken for a portable evidence archive. → Now: Oversized evidence publication
+  preserves its manifest but explicitly reports unavailable portability and recovery
+  guidance.
+- **Shared evidence includes its parts** — Was: Archive selection could omit files read
+  by the evidence gate or top-level part references. → Now: Portable archives include
+  gate-read files and recognized top-level part aliases within the declared evidence
+  boundary.
+- **First restores can run together** — Was: Concurrent first restores could race when
+  creating the local cache. → Now: Synchronized first-restore requests both succeed and
+  existing cache-integrity checks still reject tampering.
+
+### Changed — Evidence
+
+- **Instructions match the checks** — Was: Shared guidance still instructed a bare unrun
+  verdict after the grammar changed. → Now: The shared examples and write instructions
+  require NOT EXERCISED with a reason, matching the checker.
+
+### Known limits — Access recovery and the next visual refresh
+
+- **Revoked sends can offer the wrong action** — Was: Revoking access during a pending
+  send could leave a misleading recovery action. → Now: This can still offer Take
+  control instead of Re-pair. The failed message remains editable.
+- **The larger refresh is still ahead** — Was: The wider visual refresh and
+  conversation-header model and effort display were planned separately. → Now: They
+  remain planned for 3.90.
 
 ## [3.88.0] - 2026-10-29
 

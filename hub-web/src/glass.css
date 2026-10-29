@@ -29,6 +29,25 @@
   --glass-radius: 22px;
   --glass-inset: 8px;
   --look-blur: blur(16px) saturate(160%); /* 26px measurably slowed timing-sensitive journeys (HUB-J5) */
+  /* Shape (DESIGN.md "Shapes"): Glass has no square-cornered rectangles.
+     Every bounded thing takes one step of this scale; the house 4px/8px
+     corners are re-shaped here so existing consumers inherit it. */
+  --radius-inline: 4px;    /* inline code, key hints, focus-outline rounding */
+  --radius-control: 12px;  /* fields, menu items, rows and wells nested in a card */
+  --radius-surface: 16px;  /* cards, list rows, search, code frames */
+  --radius-sheet: 24px;    /* dialogs and sheets */
+  --radius-card: 12px;     /* house alias of --radius-control */
+  --radius-pane: 16px;     /* house alias of --radius-surface */
+  /* Cards, pills and avatars (DESIGN.md "Components"). */
+  --card-padding: 12px;
+  --card-gap: 8px;
+  --pill-status-height: 24px;
+  --pill-action-height: 32px;
+  --avatar-size: 42px;
+  --avatar-mark: 24px;
+  --avatar-lane-size: 32px;
+  --avatar-lane-mark: 18px;
+  --status-dot: 10px;
 }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root, html[data-scheme] { --conversation-rail-width: 374px; }

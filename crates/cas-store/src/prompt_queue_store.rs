@@ -14261,6 +14261,42 @@ mod tests {
     }
 
     #[test]
+    fn cas_9c38_transport_receipts_upgrade_to_recipient_evidence_without_downgrading() {
+        let (_temp, store) = create_test_store();
+        for transport in [SurfacingSource::TransportClaimed, SurfacingSource::TransportDelivered] {
+            for surfaced in [SurfacingSource::HookSurfaced, SurfacingSource::ObservedWake, SurfacingSource::InboxPoll] {
+                let id = store.enqueue("supervisor", "worker", "please review").unwrap();
+                if transport == SurfacingSource::TransportClaimed {
+                    assert!(store.claim_recipient_transport(id, "worker").unwrap());
+                    store.record_recipient_transport_delivered(id, "worker").unwrap();
+                } else {
+                    store.record_recipient_surfaced(id, "worker", transport).unwrap();
+                }
+                store.mark_transport_delivered(id).unwrap();
+                let pending = store.message_delivery_report(id).unwrap().unwrap();
+                assert_eq!(pending.recipient_receipt, Some(transport));
+                assert!(pending.confirmed_at.is_none());
+
+                store.record_recipient_surfaced(id, "worker", surfaced).unwrap();
+                let received = store.message_delivery_report(id).unwrap().unwrap();
+                assert_eq!(received.recipient_receipt, Some(surfaced), "{transport:?} -> {surfaced:?}");
+                assert!(received.confirmed_at.is_none(), "surfacing alone must not fabricate an ack");
+                assert_eq!(store.recipient_receipt(id, "other-worker").unwrap(), None);
+
+                // Re-observation and late transport events preserve the first
+                // actual recipient evidence and its reply-ordering timestamp.
+                for later in [SurfacingSource::TransportClaimed, SurfacingSource::TransportDelivered,
+                    SurfacingSource::HookSurfaced, SurfacingSource::ObservedWake, SurfacingSource::InboxPoll] {
+                    store.record_recipient_surfaced(id, "worker", later).unwrap();
+                    let retained = store.message_delivery_report(id).unwrap().unwrap();
+                    assert_eq!(retained.recipient_receipt, Some(surfaced), "{surfaced:?} followed by {later:?}");
+                    assert_eq!(retained.recipient_transport_at, received.recipient_transport_at);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn deferred_inbox_handoff_and_wake_budget_survive_store_reopen() {
         let (temp, store) = create_test_store();
         let id = store

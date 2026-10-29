@@ -1179,6 +1179,12 @@ async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
     let f = fixture(&mut env, "main");
     let repo = f.cas_dir().join("worktrees").join(WORKER);
     let file = "docs/release-notes/history-slack.md";
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("receipt-factory".into());
+        agents.update(&agent).unwrap();
+    }
     std::fs::create_dir_all(repo.join("scripts")).unwrap();
     std::fs::create_dir_all(repo.join("docs/release-notes")).unwrap();
     std::fs::write(repo.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
@@ -1193,7 +1199,7 @@ async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
     let receipts = PathBuf::from(git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]))
         .join("cas/fast-rows");
     std::fs::create_dir_all(&receipts).unwrap();
-    let failed = format!("fast-rows: FAIL {tip} rows=release-notes-draft base=main\nSCOPE release-notes-draft {file}\nFIX release-notes-draft: historical wording\n");
+    let failed = format!("fast-rows: FAIL {tip} rows=release-notes-draft base=main\nSCOPE release-notes-draft {file}\nFIX release-notes-draft: historical wording\nscope complete count=1\n");
     let receipt = receipts.join(format!("{tip}.pass"));
     std::fs::write(&receipt, &failed).unwrap();
     std::fs::write(receipts.join("overrides.log"), format!("{tip} skipped fast rows: approved\n")).unwrap();
@@ -1231,12 +1237,38 @@ async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
     foreign["task_id"] = "cas-other-task".into();
     std::fs::write(&issued_path, foreign.to_string()).unwrap();
     assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    // A forged file must not turn arbitrary identity text into authority.
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let supervisor = agents.get("nocode-supervisor-session").unwrap();
+    for (approver, role, status, session) in [
+        ("invented-supervisor", AgentRole::Supervisor, cas_types::AgentStatus::Active, supervisor.factory_session.clone()),
+        ("nocode-worker-session", AgentRole::Supervisor, cas_types::AgentStatus::Active, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Worker, cas_types::AgentStatus::Active, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Supervisor, cas_types::AgentStatus::Shutdown, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Supervisor, cas_types::AgentStatus::Stale, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Supervisor, cas_types::AgentStatus::Active, Some("other-factory".into())),
+    ] {
+        let mut changed = supervisor.clone();
+        changed.role = role;
+        changed.status = status;
+        changed.factory_session = session;
+        agents.update(&changed).unwrap();
+        let mut forged: serde_json::Value = serde_json::from_str(&issued).unwrap();
+        forged["approver"] = approver.into();
+        std::fs::write(&issued_path, forged.to_string()).unwrap();
+        let refused = call(&f.worker, close.clone()).await;
+        assert!(refused.contains("FAST ROWS REQUIRED"), "{approver} {role:?} {status:?}: {refused}");
+    }
+    agents.update(&supervisor).unwrap();
     std::fs::write(&issued_path, issued).unwrap();
 
     // A changed failure set on the same SHA invalidates the approval too.
     for changed in [
         failed.replace("rows=release-notes-draft", "rows=release-notes-draft,test-env"),
         format!("{failed}UNSCOPED release-notes-draft docs/release-notes/unreadable-slack.md\n"),
+        failed.replace("scope complete count=1\n", ""),
+        failed.replace("scope complete count=1", "scope complete count=2"),
+        format!("{failed}SCOPE release-notes-draft docs/release-notes/later-slack.md\n"),
     ] {
         std::fs::write(&receipt, changed).unwrap();
         assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));

@@ -1859,7 +1859,7 @@ check_release_notes_draft() {
         printf 'release-notes-draft: no release-notes draft change\n'
         return 0
     fi
-    local output code failed=0
+    local output code failed=0 scope_count=0
     for path in "${diary_drafts[@]}"; do
         if output="$(python3 scripts/release-diary-thread.py --lint "$path" 2>&1)"; then
             printf '%s\n' "$output"
@@ -1868,6 +1868,7 @@ check_release_notes_draft() {
             printf '%s\n' "$output"
             printf 'FIX: harness-diary drafts need one parent and exactly three replies ordered Grok, Claude, Codex, with no ticket IDs\n'
             draft_failure_scope "$path" "$code" "$output"
+            scope_count=$((scope_count + 1))
             failed=1
         fi
     done
@@ -1880,9 +1881,13 @@ check_release_notes_draft() {
             printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
                 "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
             draft_failure_scope "$path" "$code" "$output"
+            scope_count=$((scope_count + 1))
             failed=1
         fi
     done
+    # Written only after every draft has been checked. A killed row cannot
+    # authorize an exception for the partial scope it happened to emit.
+    printf 'scope complete count=%s\n' "$scope_count"
     return "$failed"
 }
 
@@ -2417,7 +2422,7 @@ record_fast_rows_receipt() {
             # Complete file scope, independent of the bounded human FIX list.
             # Only the draft row supports a file-scoped exception.
             if [[ "$(IFS=,; printf '%s' "${failures[*]}")" == release-notes-draft ]]; then
-                grep -E '^(SCOPE|UNSCOPED) release-notes-draft ' "$row_log_dir/release-notes-draft.log" || true
+                grep -E '^((SCOPE|UNSCOPED) release-notes-draft |scope complete count=)' "$row_log_dir/release-notes-draft.log" || true
             fi
         } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
     fi

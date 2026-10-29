@@ -55,7 +55,8 @@ Own the next action from the highest true rung each turn:
 ## Operating flow
 
 Successful `task action=start` accepts the assignment; no prose ACK is required.
-Before routing updates or waiting on a wake, read
+Use `blocker=true` for blockers and `merge_request=true` for merges. Before
+routing updates or waiting on a wake, read
 [message delivery](references/reference.md#message-delivery-and-wake-authority).
 
 Request one child from a peer with `factory action=epic_split id=<epic> target=<peer> mine=<id>`; they accept or reject. For grants and shared epics, read [peers](references/reference.md#peer-supervisors-on-the-same-repo).

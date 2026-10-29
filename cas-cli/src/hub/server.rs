@@ -4887,6 +4887,54 @@ mod upstream_unavailable_tests {
     use crate::hub::SessionMultiplexer;
 
     #[tokio::test]
+    async fn send_refusal_preserves_pairing_scope_and_lease_causes_cas_5e60() {
+        for (cause, scopes, expected_code, required_scope) in [
+            ("revoked", vec![Scope::MessageSend], "pairing_required", None),
+            ("message-scope", vec![Scope::PaneRead], "message_send_required", Some("message:send")),
+            ("lease", vec![Scope::PaneInput], "forbidden", None),
+        ] {
+            let temp = crate::test_support::private_hub_tempdir();
+            let auth = AuthStore::open(temp.path().join("hub"), "refusal-machine").unwrap();
+            let now = chrono::Utc::now();
+            let scopes = scopes.into_iter().collect();
+            let invitation = auth.mint_pairing("https://controller.example", scopes, now).unwrap();
+            let credential = auth.exchange_pairing(PairingExchange::test_fixture(
+                invitation.token, "refusal-machine", "https://controller.example", invitation.scopes.clone(),
+            ), now).unwrap();
+            let context = AuthContext {
+                device_id: credential.device_id, credential_id: credential.credential_id,
+                device_label: "phone".into(), operator_label: "Operator".into(),
+                controller_origin: "https://controller.example".into(), scopes: invitation.scopes,
+                request_id: "refusal-request".into(),
+            };
+            let frame = if cause == "lease" {
+                serde_json::json!({"SupervisorCommand": {"command": "compact", "confirmed": false, "client_ref": "refused-send"}})
+            } else {
+                serde_json::json!({"SendMessage": {"target": "supervisor", "text": "Keep this message", "summary": "Test", "urgent": false, "client_ref": "refused-send"}})
+            };
+            if cause == "revoked" {
+                auth.revoke_device(&context.device_id, now).unwrap();
+            }
+            let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+            let failure = handle_client_message(&connector, "factory-a", &Some((auth, context)), &serde_json::to_vec(&frame).unwrap())
+                .await.expect_err("refusal must happen before the daemon boundary");
+            assert!(!is_upstream_unavailable(&failure), "{cause}: {failure:#}");
+            let legacy = legacy_send_error(&failure, Some("refused-send"));
+            let multiplex = multiplex_send_error(&failure, "factory-a", Some("refused-send"));
+            // pin: both socket protocols must preserve the refused operation's identity and actionable cause.
+            assert_eq!(legacy["error"], expected_code, "{cause}: {failure:#}");
+            assert_eq!(multiplex["error"]["code"], legacy["error"], "{cause}");
+            assert_eq!(legacy["client_ref"], frame[if cause == "lease" { "SupervisorCommand" } else { "SendMessage" }]["client_ref"]);
+            assert_eq!(multiplex["error"]["client_ref"], legacy["client_ref"]);
+            assert_eq!(legacy["required_scope"].as_str(), required_scope, "{cause}");
+            if cause != "lease" {
+                assert!(legacy["message"].as_str().unwrap().contains("Pair this device again"), "{cause}");
+                assert_eq!(multiplex["error"]["message"], legacy["message"]);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn supervisor_commands_require_control_confirmation_and_private_audited_receipts() {
         use crate::ui::factory::supervisor_commands::{SupervisorCommand, SupervisorCommandPhase, SupervisorCommandReceipt};
         let temp = crate::test_support::private_hub_tempdir();

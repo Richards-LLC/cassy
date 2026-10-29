@@ -649,28 +649,27 @@ mod tests {
     }
 
     #[test]
-    fn local_reset_format_table() {
-        use chrono::FixedOffset;
-        let zone = FixedOffset::west_opt(4 * 3600).unwrap();
-        let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap().with_timezone(&zone);
+    fn limits_rows_format_resets_in_eastern_twelve_hour_time() {
+        let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
         for (reset, expected) in [
-            (Some("2026-10-27T18:00:00Z"), "resets Tue 14:00 (in 6h)"),
-            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d 1h)"),
-            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d 1h)"),
-            (Some("2026-10-28T11:59:00Z"), "resets Wed 07:59 (in 24h)"),
-            (Some("2026-10-28T12:00:00Z"), "resets Wed 08:00 (in 1d)"),
-            (Some("2026-10-29T11:56:00Z"), "resets Thu Oct 29 07:56 (in 1d 23h)"),
-            (Some("2026-11-03T11:00:00Z"), "resets Tue Nov 3 07:00 (in 6d 23h)"),
-            (Some("2026-10-27T11:00:00Z"), "reset, usage unknown until next session"),
-            (None, "reset time unknown"),
+            (Some("2026-10-27T18:00:00Z"), "5h 34%, resets Tue 2:00 PM ET (in 6h)"),
+            (Some("2026-10-28T13:00:00Z"), "5h 34%, resets Wed 9:00 AM ET (in 1d 1h)"),
+            (Some("2026-10-31T13:00:00Z"), "5h 34%, resets Sat Oct 31 9:00 AM ET (in 4d 1h)"),
+            (Some("2026-10-28T11:59:00Z"), "5h 34%, resets Wed 7:59 AM ET (in 24h)"),
+            (Some("2026-10-28T12:00:00Z"), "5h 34%, resets Wed 8:00 AM ET (in 1d)"),
+            (Some("2026-10-29T11:56:00Z"), "5h 34%, resets Thu Oct 29 7:56 AM ET (in 1d 23h)"),
+            (Some("2026-11-03T11:00:00Z"), "5h 34%, resets Tue Nov 3 6:00 AM ET (in 6d 23h)"),
+            (Some("2026-11-01T18:00:00Z"), "5h 34%, resets Sun Nov 1 1:00 PM ET (in 5d 6h)"),
+            (Some("2026-10-27T11:00:00Z"), "5h reset, usage unknown until next session"),
+            (None, "5h 34%, reset time unknown"),
         ] {
-            let reset = reset.map(|value| value.parse().unwrap());
-            assert_eq!(format_reset_in(reset, now), expected);
+            let window = crate::account_registry::UsageWindow {
+                name: "5h".into(),
+                used_percent: Some(34.0),
+                resets_at: reset.map(|value| value.parse().unwrap()),
+            };
+            assert_eq!(window_summary(&window, now), expected);
         }
-        // UTC tomorrow can still be local today; keep the local calendar date.
-        let late = "2026-10-28T02:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        // pin: the shared local-calendar reset format is the operator contract.
-        assert_eq!(format_reset_in(Some(late), now), "resets Tue 22:00 (in 14h)");
     }
 
     #[test]

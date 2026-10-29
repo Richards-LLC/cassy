@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { CONFIRM_CUE_MS, ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
-import { ConversationView, registerTurnRenderer } from "./conversation-view";
+import { ConversationView, registerTurnRenderer, renderBody } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import { livePhase } from "./live-phase";
@@ -459,6 +459,32 @@ describe("ConversationView (Pebble thread)", () => {
     csv.click();
     await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
     view.dispose();
+  });
+  it("clears copy success after its own timeout while preserving a later clipboard refusal (cas-4800)", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { vi.useRealTimers(); Reflect.deleteProperty(navigator, "clipboard"); });
+    const [table] = renderBody(document, reply(1, "answer", "| item | result |\n| value | pass |"));
+    document.body.replaceChildren(table!);
+    const [markdown, csv] = [...table!.querySelectorAll<HTMLButtonElement>("button")];
+    const status = table!.querySelector('[role="status"]')!;
+    markdown!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toBe("Markdown copied");
+    await vi.advanceTimersByTimeAsync(1000);
+    csv!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toBe("CSV copied");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(status.textContent).toBe("CSV copied");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(status.textContent).toBe("");
+    csv!.click(); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    writeText.mockRejectedValueOnce(new Error("Permission denied"));
+    csv!.click(); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(status.textContent).toContain("Copy failed");
+    expect(csv!.disabled).toBe(false);
   });
   it("renders markdown bodies in the thread and a plain-text waiting bookmark", () => {
     const unregister = registerTurnRenderer("ask", (_reply, context) => {

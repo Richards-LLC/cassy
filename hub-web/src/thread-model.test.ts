@@ -226,6 +226,13 @@ describe("messageBlocks", () => {
     expect(tableCsv([["name", "note"], ['雪, report', 'said "ready"\nnext line'], ["", "pass"]]))
       .toBe('name,note\r\n"雪, report","said ""ready""\nnext line"\r\n,pass');
   });
+  it("neutralizes formula-leading CSV cells while keeping Markdown and displayed values (cas-4800)", () => {
+    const rows = [["=cmd", "@x", "+1", "-1", "\t=cmd", "\r=cmd", "plain", 'a,"b"']];
+    expect(tableCsv(rows)).toBe("'=cmd,'@x,'+1,'-1,'\t=cmd,\"'\r=cmd\",plain,\"a,\"\"b\"\"\"");
+    expect(rows).toEqual([["=cmd", "@x", "+1", "-1", "\t=cmd", "\r=cmd", "plain", 'a,"b"']]);
+    const markdown = "| =cmd | @x | +1 | -1 |";
+    expect(messageBlocks(markdown)).toEqual([{ type: "table", source: markdown, table: { rows: [["=cmd", "@x", "+1", "-1"]] } }]);
+  });
   it("tones result cells", () => {
     expect(cellTone("pass")).toBe("pass"); expect(cellTone("1 flake")).toBe("flake"); expect(cellTone("failed")).toBe("fail"); expect(cellTone("412")).toBeUndefined();
   });

@@ -114,6 +114,10 @@ invariants:
     check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts, including its short status and headerless status stages; read back both clipboard formats, verify quiet adjacent plain progress, commas and quotes, long paths at desktop/phone in both schemes, and empty cells. Run the answer/status clipboard regression in conversation-view.test.ts. Native proof queues a short kind=status table through a candidate hub and verifies live and reloaded headers/cells and copied contents.'
     task: cas-0952
     bug: {task: cas-2656}
+  HUB-J4-SAFE-CSV-COPY:
+    statement: Copy CSV prefixes formula-leading cells with an apostrophe while visible and Markdown text stay exact; successful copy feedback clears and a retry failure stays actionable.
+    check: 'Run the cas-4800 stage of the HUB-J4 table-copy journey and its two named Vitest cases; read back CSV and Markdown, verify all six leaders (=,+,-,@,tab,CR), and advance the fake clock across overlapping copy attempts and clipboard refusal.'
+    bug: {task: cas-4800}
   HUB-J4-MESSAGE-HIERARCHY:
     statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
@@ -699,6 +703,7 @@ journeys:
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-READABLE-PROSE-TABLES
   - HUB-J4-TABLE-COPY
+  - HUB-J4-SAFE-CSV-COPY
   - HUB-J4-MESSAGE-HIERARCHY
   traffic:
     share_pct: null

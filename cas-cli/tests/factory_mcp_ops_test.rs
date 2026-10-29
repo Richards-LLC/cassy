@@ -9579,6 +9579,15 @@ async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() 
             assert!(text.contains("held inbox:"), "{text}");
             assert!(text.contains("next tool call or turn start"), "{text}");
             assert!(!text.contains("retry budget"), "{text}");
+            queue
+                .record_recipient_surfaced(id, "swift-fox", cas_store::SurfacingSource::HookSurfaced)
+                .unwrap();
+            let mut req = coord_msg("message_status", "swift-fox", "unused", None);
+            req.notification_id = Some(id);
+            let received = get_text(&env.service.coordination(Parameters(req)).await.unwrap());
+            assert!(received.contains("recipient: RECEIVED by swift-fox"), "{received}");
+            assert!(queue.message_delivery_report(id).unwrap().unwrap().confirmed_at.is_none(),
+                "recipient evidence must be visible without an explicit ack");
         } else {
             assert!(text.contains("delivery retry:"), "{text}");
             assert!(text.contains("900s retry budget"), "{text}");

@@ -1856,7 +1856,7 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
     let mut request = serde_json::json!({"action":"worker_queue", "id":WORKER});
     if let Some(ids) = ids { request["task_ids"] = serde_json::json!(ids); }
     let request = serde_json::from_value(request).unwrap();
-    let result = f.supervisor.factory_request(Parameters(request)).await.unwrap();
+    let result = f.supervisor.factory(Parameters(request)).await.unwrap();
     result.content.iter().filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n")
 }
@@ -1873,7 +1873,7 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     let reordered = queue_control(&f, Some(vec!["cas-8488-two","cas-8488-one"])).await;
     assert!(reordered.contains("cas-8488-two -> cas-8488-one"), "{reordered}");
     let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "summary":true})).unwrap();
-    let status = f.supervisor.factory_request(Parameters(request)).await.unwrap();
+    let status = f.supervisor.factory(Parameters(request)).await.unwrap();
     let status = format!("{status:?}");
     assert!(status.contains("cas-8488-two -> cas-8488-one"), "{status}");
     let worker_request = serde_json::from_value(serde_json::json!({

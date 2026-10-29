@@ -158,7 +158,7 @@ impl CasCore {
             let paths = crate::qa_pass::changed_paths_for_delivery(repo, target, head)
                 .map_err(|error| format!("Cannot measure reviewed correction: {error}"))?;
             if let Some(refusal) =
-                receipt_scope::park_refusal(&self.cas_root, repo, task, &paths, head, target)
+                receipt_scope::park_refusal(&self.cas_root, repo, task, &paths, head)
             {
                 return Err(refusal);
             }

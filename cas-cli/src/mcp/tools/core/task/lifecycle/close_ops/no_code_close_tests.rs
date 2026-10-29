@@ -1131,13 +1131,10 @@ async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
 }
 
-/// cas-eac2 (D2): the fast rows run once, in the worker's pre-push hook, and
-/// lane CI no longer repeats them for factory pushes. A tip that ships the
-/// hook but has no PASS receipt (an override or `--no-verify` push) is refused
-/// at park, which only reads the receipt; with it, the delivery parks and the
-/// core merge gate still refuses to close it before the merge.
+/// Park accepts a pushed delivery without local fast-row receipts; CI owns
+/// those checks. The normal merge requirement still applies.
 #[tokio::test]
-async fn park_reads_the_pre_push_fast_rows_receipt_cas_eac2() {
+async fn park_accepts_delivery_without_fast_rows_receipt_cas_51ff() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env, "main");
     let worker_path = f.cas_dir().join("worktrees").join(WORKER);
@@ -1152,16 +1149,6 @@ async fn park_reads_the_pre_push_fast_rows_receipt_cas_eac2() {
     claim(&f, id);
     let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
 
-    let refused = call(&f.worker, close.clone()).await;
-    assert!(refused.contains("FAST ROWS REQUIRED"), "{refused}");
-    assert!(refused.contains("--fast-rows --base origin/main"), "{refused}");
-    assert_ne!(f.task(id).status, TaskStatus::AwaitingMerge, "{refused}");
-
-    let tip = git(&worker_path, &["rev-parse", "HEAD"]);
-    let receipts = std::path::PathBuf::from(git(&worker_path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]))
-        .join("cas/fast-rows");
-    std::fs::create_dir_all(&receipts).unwrap();
-    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=main\n")).unwrap();
     let parked = call(&f.worker, close.clone()).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");

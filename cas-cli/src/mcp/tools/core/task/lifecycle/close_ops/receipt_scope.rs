@@ -93,25 +93,17 @@ pub(super) fn for_tested_packages(
 
 /// The refusal a delivery gets at park, while its worker can still fix it.
 ///
-/// cas-eac2 (operator D1, D2): lane CI no longer runs the no-build fast rows
-/// or broad Rust tests for factory pushes. The worker's pre-push hook runs the
-/// rows, and the worker's capped targeted tests prove each changed crate. Park
-/// only READS those receipts for this exact tip. It never executes a row, test
-/// or build, because operator decision Q6 (2026-10-15) removed park re-runs.
-/// A missing receipt is refused with its fix, never passed silently. The
-/// merge queue still runs the full suite on the final tree.
+/// Capped targeted tests prove each changed crate at this exact tip. Park
+/// only reads those receipts; it never runs checks. Fast-row proof belongs
+/// to CI because local receipts and exception files are worker-writable.
 pub(super) fn park_refusal(
     cas_root: &Path,
     proof_repo: &Path,
     task: &Task,
     changed_paths: &[String],
     head: &str,
-    target: &str,
 ) -> Option<String> {
     let short = &head[..head.len().min(12)];
-    if let Some(refusal) = fast_rows_refusal(proof_repo, &task.id, head, target) {
-        return Some(refusal);
-    }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
@@ -144,42 +136,6 @@ pub(super) fn park_refusal(
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
-    ))
-}
-
-/// cas-eac2 (D2): the refusal for a tip of a repository that ships
-/// `scripts/fast-rows-pre-push.sh` when no `fast-rows: PASS <tip>` receipt
-/// exists. That happens when the push skipped the hook through
-/// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed.
-fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Option<String> {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-    };
-    git(&["cat-file", "-e", &format!("{head}:scripts/fast-rows-pre-push.sh")])?;
-    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-    let receipt = Path::new(String::from_utf8_lossy(&common.stdout).trim())
-        .join("cas/fast-rows")
-        .join(format!("{head}.pass"));
-    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
-    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
-        return None;
-    }
-    let fixes: String = text
-        .lines()
-        .filter(|line| line.starts_with("FIX "))
-        .take(10)
-        .map(|line| format!("\n- {line}"))
-        .collect();
-    Some(format!(
-        "⚠️ FAST ROWS REQUIRED (cas-eac2): task {task_id}'s tip {short} has no fast-rows PASS receipt ({path}). Lane CI no longer runs these no-build rows for factory pushes; your pre-push hook runs them (scripts/fast-rows-pre-push.sh), and park only reads the receipt.{fixes}\nWith everything committed at {short}, run `./scripts/release-gate.sh --fast-rows --base origin/{target}` (the hook's command), apply each FIX, push, then retry close.",
-        short = &head[..head.len().min(12)],
-        path = receipt.display(),
-        target = target.strip_prefix("origin/").unwrap_or(target),
     ))
 }
 
@@ -594,7 +550,7 @@ mod tests {
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas", "test(worker)",
         );
-        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main")
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head)
             .expect("an untested crate is refused at park");
         assert!(refusal.contains("FOCUSED PROOF REQUIRED"), "{refusal}");
         assert!(refusal.contains(&format!("at {}: cas-store.", &head[..12])), "{refusal}");
@@ -603,15 +559,15 @@ mod tests {
         let mut plain = task.clone();
         plain.risk = vec![TaskRisk::None];
         for task in [&task, &plain] {
-            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head, "main").is_some());
+            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head).is_some());
         }
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas-store", "test(worker)",
         );
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head).is_none());
 
         let bare = tempfile::tempdir().unwrap();
-        let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head, "main")
+        let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head)
             .expect("undeclared modules outside a workspace");
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }

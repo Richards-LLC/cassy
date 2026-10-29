@@ -9053,7 +9053,7 @@ impl CasCore {
                             }
                         }
                     }
-                    // cas-eac2: fast-rows and focused-test receipts at this
+                    // Focused-test receipts at this
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
                     // parking locks the proof scope.
@@ -9069,7 +9069,6 @@ impl CasCore {
                             &task,
                             &paths,
                             tip,
-                            &resolved_parent_branch,
                         )
                     {
                         return Ok(Self::tool_error(refusal));

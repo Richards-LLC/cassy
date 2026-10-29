@@ -312,21 +312,15 @@ async fn close_classifies_delivery_after_start_boundary_gh1382() {
 }
 
 /// cas-2bec: spawn assigns a plain lane. The commit hook records the RED
-/// commit, but only the pushed GREEN tip has a passing fast-rows receipt.
+/// commit; close must bind the pushed GREEN tip.
 #[tokio::test]
 async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture_with_surface(&mut env, "note.txt", false);
     let repo = f.dir.path();
     git(&f.worker_path, &["reset", "--hard", "main"]);
-    std::fs::create_dir_all(f.worker_path.join("scripts")).unwrap();
-    std::fs::write(
-        f.worker_path.join("scripts/fast-rows-pre-push.sh"),
-        "#!/bin/sh\n",
-    )
-    .unwrap();
     std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
-    git(&f.worker_path, &["add", "scripts", "regression.txt"]);
+    git(&f.worker_path, &["add", "regression.txt"]);
     git(
         &f.worker_path,
         &["commit", "-qm", &format!("test({TASK}): RED regression")],
@@ -352,17 +346,6 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
         ],
     );
 
-    let common = git(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    );
-    let receipts = Path::new(&common).join("cas/fast-rows");
-    std::fs::create_dir_all(&receipts).unwrap();
-    std::fs::write(
-        receipts.join(format!("{green}.pass")),
-        format!("fast-rows: PASS {green} fixture\n"),
-    )
-    .unwrap();
     let tasks = open_task_store(&repo.join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();
     task.demo_statement.clear();

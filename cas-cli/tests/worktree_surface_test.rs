@@ -2866,14 +2866,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
     let fixture_cwd = std::env::current_dir().unwrap();
     for corrected_after_rebase in [false, true] {
         let repo = GitRepo::new();
-        std::fs::create_dir(repo.root.join("scripts")).unwrap();
-        std::fs::write(
-            repo.root.join("scripts/fast-rows-pre-push.sh"),
-            "#!/bin/sh\n",
-        )
-        .unwrap();
-        run_git(&["add", "scripts"], &repo.root);
-        run_git(&["commit", "-m", "fixture fast rows contract"], &repo.root);
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
         run_git(
             &["init", "--bare", remote.path().to_str().unwrap()],
@@ -2924,16 +2916,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
         run_git(&["commit", "-m", "fix: task delivery"], &worker);
         let old_anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
         run_git(&["push", "origin", &branch], &worker);
-        let fast_rows = repo.root.join(".git/cas/fast-rows");
-        std::fs::create_dir_all(&fast_rows).unwrap();
-        let receipt_at = |head: &str| {
-            std::fs::write(
-                fast_rows.join(format!("{head}.pass")),
-                format!("fast-rows: PASS {head} fixture\n"),
-            )
-            .unwrap();
-        };
-        receipt_at(&old_anchor);
         env.set_current_dir(&worker);
         let service = delivery_service(&cas_root, "repark-worker");
         let close_request = || {
@@ -3026,23 +3008,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
             sibling.status = TaskStatus::Closed;
             tasks.update(&sibling).unwrap();
         }
-        // The old anchor's receipt cannot authorize the rewritten tip.
-        let missing = service.task(Parameters(close_request())).await.unwrap();
-        assert!(
-            get_text(&missing).contains("FAST ROWS REQUIRED"),
-            "{}",
-            get_text(&missing)
-        );
-        assert_eq!(
-            tasks
-                .get(task_id)
-                .unwrap()
-                .deliverables
-                .factory_branch_anchor
-                .as_deref(),
-            Some(old_anchor.as_str())
-        );
-        receipt_at(&tip);
         let retry = service.task(Parameters(close_request())).await.unwrap();
         assert!(
             get_text(&retry).contains("MERGE REQUIRED"),

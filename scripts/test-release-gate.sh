@@ -2646,6 +2646,8 @@ if [[ "${1:-}" == --release-binary-isa-only ]]; then
     run_sections section_release_binary_isa
 elif [[ "${1:-}" == --concurrency-only ]]; then
     run_sections section_concurrency
+elif [[ "${1:-}" == --failure-scenarios-only ]]; then
+    run_sections section_failure_scenarios
 else
     run_sections section_release_binary_isa \
         section_admission_and_script_tier \

@@ -3584,13 +3584,22 @@ for line in sys.stdin:
         assert_eq!(config.call_timeout(), Duration::from_secs(1), "zero is clamped up");
     }
 
-    fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {
+    fn gated_http_upstream(
+        name: &'static str,
+        started: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    ) -> (
+        ServerConfig,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
         install_test_crypto_provider();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             if let Ok((_stream, _peer)) = listener.accept() {
-                std::thread::sleep(hold);
+                started.send(name).unwrap();
+                release_rx.recv().unwrap();
             }
         });
         (
@@ -3600,6 +3609,7 @@ for line in sys.stdin:
                 headers: HashMap::new(),
                 oauth: false,
             },
+            release_tx,
             server,
         )
     }
@@ -4414,42 +4424,51 @@ for line in sys.stdin:
 
     #[tokio::test(flavor = "current_thread")]
     async fn concurrent_optional_upstreams_share_one_bounded_startup_window() {
-        // Wide margins on purpose: with a 400ms per-upstream timeout, serial
-        // startup would take >=800ms while concurrent startup finishes near
-        // 400ms, so the 700ms assertion below keeps ~300ms of scheduler slack
-        // on both sides. The previous 75ms/130ms constants left only ~55ms of
-        // slack and flaked on saturated CI runners (runs 32070409371 and
-        // 32075974620, 2026-08-17).
-        let hold = Duration::from_millis(1_000);
-        let timeout = Duration::from_millis(400);
-        let (first, first_server) = hanging_http_upstream(hold);
-        let (second, second_server) = hanging_http_upstream(hold);
-        let started = std::time::Instant::now();
+        // Each upstream stays open until the test releases it. Seeing both
+        // accepts first proves startup overlaps; no host-speed deadline is
+        // needed to distinguish concurrent startup from serial startup.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (first, first_release, first_server) =
+            gated_http_upstream("first", started_tx.clone());
+        let (second, second_release, second_server) =
+            gated_http_upstream("second", started_tx.clone());
+        drop(started_tx);
+        let engine_task = tokio::spawn(async move {
+            ProxyEngine::from_configs_with_timeout(
+                HashMap::from([("first".to_string(), first), ("second".to_string(), second)]),
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+        });
 
-        let engine = ProxyEngine::from_configs_with_timeout(
-            HashMap::from([("first".to_string(), first), ("second".to_string(), second)]),
-            timeout,
-            None,
-        )
+        let mut started = std::collections::HashSet::new();
+        let both_started_before_release = tokio::time::timeout(Duration::from_secs(10), async {
+            while started.len() < 2 {
+                started.insert(started_rx.recv().await.expect("upstream accept event"));
+            }
+        })
         .await
-        .unwrap();
-        let elapsed = started.elapsed();
+        .is_ok();
+
+        // Always release both handlers, including on the regression path, so
+        // the spawned startup and server threads cannot leak into other tests.
+        first_release.send(()).unwrap();
+        second_release.send(()).unwrap();
+        let engine = tokio::time::timeout(Duration::from_secs(10), engine_task)
+            .await
+            .expect("optional startup completes after the upstreams are released")
+            .unwrap()
+            .unwrap();
+        first_server.join().unwrap();
+        second_server.join().unwrap();
         let snapshot = engine.health_snapshot().await;
 
         assert!(
-            elapsed < Duration::from_millis(700),
-            "two optional upstreams must time out concurrently, not serially: {elapsed:?}"
+            both_started_before_release,
+            "both optional upstreams must start before either handler is released"
         );
         assert_eq!(snapshot.degraded, 2);
-        assert!(
-            snapshot
-                .servers
-                .iter()
-                .all(|server| server.last_error_code.as_deref() == Some("timeout"))
-        );
-
-        first_server.join().unwrap();
-        second_server.join().unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

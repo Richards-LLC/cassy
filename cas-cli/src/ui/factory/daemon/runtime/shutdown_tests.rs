@@ -1209,8 +1209,15 @@ async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0
     release_tx.send(()).unwrap();
     assert!(store_worker.wait_idle(Duration::from_secs(10)), "delayed cleanup completed");
     assert_eq!(agents.get(&old.id).unwrap().status, cas_types::AgentStatus::Shutdown);
-    assert_eq!(queue.message_delivery_report(brief.id).unwrap().unwrap().stage,
-        cas_store::DeliveryStage::Enqueued, "old cleanup must not cancel the replacement's brief");
+    // cas-c71e: selection runs while the old registration is Shutdown and
+    // the new same-name pane exists, but has not registered yet.
+    daemon.process_prompt_queue().await.unwrap();
+    assert_ne!(queue.message_delivery_report(brief.id).unwrap().unwrap().pending_reason,
+        Some(cas_store::PendingReason::ShutdownCancelled),
+        "selection must preserve the unregistered replacement's resume brief");
+    let mut replacement = cas_types::Agent::new("replacement-id".into(), name.into());
+    replacement.factory_session = Some(SESSION.into());
+    agents.register(&replacement).unwrap();
     let inbox = queue.poll_unseen_for_recipient(name, Some(SESSION), 100).unwrap();
     assert!(inbox.iter().any(|row| row.id == brief.id), "replacement receives its resume brief");
     let held = tasks.get(&task.id).unwrap();

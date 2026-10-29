@@ -6,8 +6,8 @@ use cas_types::Event;
 use crate::store::{find_cas_root_from, open_prompt_queue_store};
 
 use crate::bridge::server::types::{
-    AgentLatestActivityJson, AgentSummaryJson, EpicProgressJson, StatusJson, TaskSummaryJson,
-    session_json,
+    AgentLatestActivityJson, AgentSummaryJson, AgentTrailJson, EpicProgressJson, StatusJson,
+    TaskSummaryJson, session_json,
 };
 
 pub(crate) fn resolve_session_by_name(
@@ -209,7 +209,18 @@ fn session_agents(
         .into_iter()
         .map(|agent| {
             let latest = events.latest_worker_activity(&agent.id, &agent.name)?;
+            let task = held.iter().find(|task| {
+                task.assignee
+                    .as_deref()
+                    .is_some_and(|assignee| assignee == agent.name || assignee == agent.id)
+            });
+            let (task_started_at, recent_trail) = worker_task_facts(root, &events, task)?;
             Ok(AgentSummaryJson {
+                role: agent.role.to_string(),
+                harness: agent.metadata.get("worker_cli").cloned(),
+                model: agent.metadata.get("worker_model").cloned(),
+                task_started_at,
+                recent_trail,
                 generation: crate::ops::fleet::worker_generation(root, &session.name, &agent.name)
                     .ok()
                     .flatten(),
@@ -219,14 +230,7 @@ fn session_agents(
                         .as_str()
                         .to_string()
                 }),
-                current_task: held
-                    .iter()
-                    .find(|task| {
-                        task.assignee
-                            .as_deref()
-                            .is_some_and(|assignee| assignee == agent.name || assignee == agent.id)
-                    })
-                    .map(|task| task.id.clone()),
+                current_task: task.map(|task| task.id.clone()),
                 latest_activity: latest.map(|event| AgentLatestActivityJson {
                     summary: event.summary,
                     created_at_rfc3339: event.created_at.to_rfc3339(),
@@ -238,6 +242,74 @@ fn session_agents(
             })
         })
         .collect()
+}
+
+/// Only durable lifecycle records become Team marks. Bounded event history can
+/// omit a start; registration/heartbeat and arbitrary notes never stand in for it.
+fn worker_task_facts(
+    root: &std::path::Path,
+    events: &dyn EventStore,
+    task: Option<&cas_types::Task>,
+) -> Result<(Option<String>, Vec<AgentTrailJson>)> {
+    use cas_types::{EventEntityType, EventType, MergeCiAdmission, VerificationStatus};
+    let Some(task) = task else {
+        return Ok((None, Vec::new()));
+    };
+    let history = events.list_for_entity(EventEntityType::Task, &task.id, 200)?;
+    let started = history
+        .iter()
+        .find(|event| event.event_type == EventType::TaskStarted);
+    let start_at = started.map(|event| event.created_at.to_rfc3339());
+    let mut trail = Vec::new();
+    if let Some(event) = started {
+        trail.push(AgentTrailJson {
+            step: "started",
+            at: start_at.clone(),
+            reference: format!("event:{}", event.id),
+        });
+    }
+    let delivery = &task.deliverables;
+    if let Some(branch) = delivery.parked_branch.as_ref() {
+        trail.push(AgentTrailJson {
+            step: "pushed",
+            at: None,
+            reference: branch.clone(),
+        });
+    }
+    if delivery.merge_ci_admission == Some(MergeCiAdmission::Green)
+        && let Some(sha) = delivery.green_merge_commit.as_ref()
+    {
+        trail.push(AgentTrailJson {
+            step: "ci_green",
+            at: None,
+            reference: sha.clone(),
+        });
+    }
+    if let Some(sha) = delivery
+        .merge_commit
+        .as_ref()
+        .or(delivery.delivery_pr_merge_commit.as_ref())
+    {
+        trail.push(AgentTrailJson {
+            step: "merged",
+            at: delivery.delivery_pr_merged_at.map(|at| at.to_rfc3339()),
+            reference: sha.clone(),
+        });
+    }
+    // A verdict from an earlier task cycle cannot verify the current work.
+    if let Some(started) = started
+        && let Ok(store) = crate::store::open_verification_store(root)
+        && let Ok(Some(verdict)) = store.get_latest_for_task(&task.id)
+        && verdict.status == VerificationStatus::Approved
+        && verdict.created_at >= started.created_at
+    {
+        trail.push(AgentTrailJson {
+            step: "verified",
+            at: Some(verdict.created_at.to_rfc3339()),
+            reference: verdict.id,
+        });
+    }
+    Ok((start_at, trail))
 }
 
 /// A live lane can still be at its spawn base before any work is delivered.
@@ -500,7 +572,9 @@ mod focused_epic_tests {
         // and worker_status. A fresh registry heartbeat cannot hide death.
         worker.pid = Some(i32::MAX as u32);
         worker.metadata.insert("worker_cli".into(), "codex".into());
-        worker.metadata.insert("worker_model".into(), "gpt-6.1".into());
+        worker
+            .metadata
+            .insert("worker_model".into(), "gpt-6.1".into());
         crate::store::open_agent_store(&root)
             .unwrap()
             .register(&worker)
@@ -511,9 +585,17 @@ mod focused_epic_tests {
         task.assignee = Some(worker.id.clone());
         store.add(&task).unwrap();
         let started = chrono::Utc::now() - chrono::Duration::minutes(42);
-        let mut event = Event::new(cas_types::EventType::TaskStarted, cas_types::EventEntityType::Task, &task.id, "Raw details must not leak");
+        let mut event = Event::new(
+            cas_types::EventType::TaskStarted,
+            cas_types::EventEntityType::Task,
+            &task.id,
+            "Raw details must not leak",
+        );
         event.created_at = started;
-        event.id = SqliteEventStore::open(&root).unwrap().record(&event).unwrap();
+        event.id = SqliteEventStore::open(&root)
+            .unwrap()
+            .record(&event)
+            .unwrap();
         let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
         let projected = status["agents"]
             .as_array()
@@ -525,7 +607,10 @@ mod focused_epic_tests {
         assert_eq!(projected["harness"], "codex");
         assert_eq!(projected["model"], "gpt-6.1");
         assert_eq!(projected["task_started_at"], started.to_rfc3339());
-        assert_eq!(projected["recent_trail"], serde_json::json!([{"step":"started", "at": started.to_rfc3339(), "reference": format!("event:{}", event.id)}]));
+        assert_eq!(
+            projected["recent_trail"],
+            serde_json::json!([{"step":"started", "at": started.to_rfc3339(), "reference": format!("event:{}", event.id)}])
+        );
         let expected = crate::mcp::tools::service::factory_ops::worker_liveness_for_agent(
             &root,
             &worker,
@@ -534,6 +619,58 @@ mod focused_epic_tests {
         );
         assert_eq!(projected["liveness"], expected.state.as_str());
         assert_eq!(projected["liveness"], "dead");
+    }
+
+    #[test]
+    fn team_trail_requires_recorded_delivery_and_current_approved_verdict() {
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, _session) = fixture();
+        let events = SqliteEventStore::open(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-trail".into(), "Trail".into());
+        task.status = cas_types::TaskStatus::Closed;
+        task.deliverables.factory_branch_anchor = Some("local-commit".into());
+        assert!(
+            worker_task_facts(&root, &events, Some(&task))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        let mut start = Event::new(
+            cas_types::EventType::TaskStarted,
+            cas_types::EventEntityType::Task,
+            &task.id,
+            "Started",
+        );
+        start.created_at = chrono::Utc::now() - chrono::Duration::minutes(10);
+        events.record(&start).unwrap();
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.merge_commit = Some("merge-sha".into());
+        task.deliverables.green_merge_commit = Some("merge-sha".into());
+        task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Advisory);
+        let store = crate::store::open_verification_store(&root).unwrap();
+        let mut verdict = cas_types::Verification::new("ver-old".into(), task.id.clone());
+        verdict.created_at = start.created_at - chrono::Duration::minutes(1);
+        store.add(&verdict).unwrap();
+        let steps = |task: &cas_types::Task| {
+            worker_task_facts(&root, &events, Some(task))
+                .unwrap()
+                .1
+                .into_iter()
+                .map(|mark| mark.step)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(steps(&task), ["started", "pushed", "merged"]);
+        task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Green);
+        verdict.id = "ver-current".into();
+        verdict.created_at = chrono::Utc::now();
+        store.add(&verdict).unwrap();
+        assert_eq!(
+            steps(&task),
+            ["started", "pushed", "ci_green", "merged", "verified"]
+        );
+        verdict.status = cas_types::VerificationStatus::Rejected;
+        store.update(&verdict).unwrap();
+        assert_eq!(steps(&task), ["started", "pushed", "ci_green", "merged"]);
     }
 
     #[test]

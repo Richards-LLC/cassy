@@ -306,7 +306,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
                 "team_id": "qa-peer-team", "status": "ok"
             }))).mount(&server).await;
     }
-    for team in [false, true] {
+    for (team, newer_local) in [(false, false), (true, false), (false, true), (true, true)] {
         let (peer, peer_core) = setup_cas(&mut env);
         let root = peer.path().join(".cas");
         std::fs::write(root.join("config.toml"), format!(
@@ -324,6 +324,13 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         git(peer.path(), &["merge", "-q", "--ff-only", "factory/test-agent"]);
         std::fs::write(peer.path().join(".git/info/exclude"), "/.cas/\n").unwrap();
         let tasks = cas::store::open_task_store_local(&root).unwrap();
+        if newer_local {
+            let mut local = published.clone();
+            local.notes.clear();
+            local.title = "Newer peer merge metadata".into();
+            local.updated_at += chrono::Duration::hours(2);
+            tasks.add(&local).unwrap();
+        }
         let queue = std::sync::Arc::new(cas::cloud::SyncQueue::open(&root).unwrap());
         queue.init().unwrap();
         let syncer = cas::cloud::CloudSyncer::new_for_project(queue, cas::cloud::CloudConfig {
@@ -343,6 +350,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
                 &*cas::store::open_commit_link_store(&root).unwrap())
         }.unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
+        if newer_local { assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata"); }
         assert!(tasks.get(TASK).unwrap().notes.lines().any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")),
             "peer lost closure receipt: {}", tasks.get(TASK).unwrap().notes);
         let closed = close_text(&peer_core, TASK).await;

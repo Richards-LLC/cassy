@@ -195,6 +195,65 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
 
 /// GH #276: a task close must quarantine its default reminders while retaining
 /// only the explicit cross-session/task-close opt-in.
+/// cas-1b4d: inside an operator's rapid-response window an unsampled task
+/// closes without the verification jail, and the skip is ledgered.
+#[tokio::test]
+async fn rapid_response_window_samples_close_verification() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let create = |req: TaskCreateRequest| {
+        let core = &core;
+        async move {
+            let text = extract_text(core.cas_task_create(Parameters(req)).await.unwrap());
+            extract_task_id(&text).expect("task id").to_string()
+        }
+    };
+    let mut epic = create_req("hotfix epic", None);
+    epic.task_type = "epic".to_string();
+    let epic_id = create(epic).await;
+    let mut child = create_req("hotfix", None);
+    child.epic = Some(epic_id.clone());
+    let mut id = create(child.clone()).await;
+    while cas::rapid_response::verification_sampled(&id) {
+        id = create(child.clone()).await;
+    }
+    let close = |id: String| {
+        let core = &core;
+        async move {
+            core.cas_task_start(Parameters(IdRequest { id: id.clone() })).await.unwrap();
+            extract_text(
+                core.cas_task_close(Parameters(TaskCloseRequest {
+                    no_delivery: None,
+                    stranded_branch_override: None,
+                    id,
+                    reason: Some("Fixed.".to_string()),
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
+                    search_manifest: None,
+                    commit_receipt: None,
+                }))
+                .await
+                .unwrap(),
+            )
+        }
+    };
+    let mut control = create_req("hotfix control", None);
+    control.epic = Some(epic_id.clone());
+    let control_id = create(control).await;
+    assert!(close(control_id).await.contains("VERIFICATION REQUIRED"), "no window: verification runs");
+    let window = cas::rapid_response::enable(
+        &cas_dir, task_store.as_ref(), &epic_id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
+    )
+    .unwrap();
+    let text = close(id.clone()).await;
+    assert!(!text.contains("VERIFICATION REQUIRED"), "{text}");
+    assert_eq!(task_store.get(&id).unwrap().status, TaskStatus::Closed);
+    let skips = cas::rapid_response::ledger(&cas_dir, &window);
+    assert!(skips.iter().any(|skip| skip.task == id && skip.check == "verification"), "{skips:?}");
+}
+
 #[tokio::test]
 async fn task_close_quarantines_linked_reminders_unless_explicitly_kept() {
     let mut test_env = TestEnvGuard::temp_home();

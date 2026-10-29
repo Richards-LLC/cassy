@@ -1641,6 +1641,44 @@ pub(super) fn report_provision_failure(
     });
 }
 
+/// cas-1b4d: turn each closed rapid-response window's ledger into one
+/// back-fill task under its epic and tell the supervisor.
+pub(super) fn backfill_closed_rapid_response_windows(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+) {
+    let Ok(store) = crate::store::open_task_store(cas_dir) else {
+        return;
+    };
+    let done = match crate::rapid_response::backfill_due(cas_dir, store.as_ref(), chrono::Utc::now()) {
+        Ok(done) => done,
+        Err(error) => {
+            tracing::warn!(%error, "rapid-response back-fill failed; retried next refresh");
+            return;
+        }
+    };
+    for item in done {
+        let (summary, message) = match &item.task {
+            Some(task) => (
+                format!("Rapid-response back-fill: {} skipped check(s) for {}", item.skipped, item.epic),
+                format!(
+                    "The rapid-response window for {} has closed; normal gates apply again. Back-fill task {task} lists the {} check(s) the window skipped. Dispatch it; its close reports each result.",
+                    item.epic, item.skipped
+                ),
+            ),
+            None => (
+                format!("Rapid-response window closed: {}", item.epic),
+                format!(
+                    "The rapid-response window for {} has closed with no skipped checks; normal gates apply again.",
+                    item.epic
+                ),
+            ),
+        };
+        notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, message);
+    }
+}
+
 /// Queue a director notice to the supervisor that must not be lost to a spent
 /// store budget: tried now, deferred to the store worker otherwise
 /// (cas-00d5, cas-981e). A failed enqueue inserts nothing, so a retry cannot

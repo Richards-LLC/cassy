@@ -332,14 +332,18 @@ for (const width of [1280, 390]) {
           await press(point.x, point.y);
           try {
             // While the finger is down, both kinds of live update land: the
-            // prowl pair trades places (the other one just did something), and
-            // a session starts or ends on soundwave, which rebuilds the list.
+            // prowl pair's newer activity changes hands (cas-4f42: its rows
+            // keep their places; only "Most recent" moves), and a session
+            // starts or ends on soundwave, which rebuilds the list.
+            const firstProwl = await list.locator('.conversation-row[data-machine-id="prowl"]').first().getAttribute("data-thread-key");
             const [, other] = [...prowl.sessions].sort((a, b) => Date.parse(b.last_activity_at!) - Date.parse(a.last_activity_at!));
             stamp += 61_000;
             other!.last_activity_at = journeyStamp(stamp);
             await hub.announceCatalog(prowl.id);
+            await expect(list.locator(`.conversation-row[data-thread-key="${prowl.id}:${other!.name}"] .conversation-session-mark`),
+              `tap ${tap}: the catalog moved Most recent`).toHaveText("Most recent");
             await expect(list.locator('.conversation-row[data-machine-id="prowl"]').first(),
-              `tap ${tap}: the catalog re-sorted the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:${other!.name}`);
+              `tap ${tap}: activity never re-sorts the prowl group`).toHaveAttribute("data-thread-key", firstProwl!);
             if (soundwave.sessions.some((session) => session.name === PASSING.name)) {
               soundwave.sessions = soundwave.sessions.filter((session) => session.name !== PASSING.name);
               await hub.announceCatalog(soundwave.id, { removed: [PASSING.name] });

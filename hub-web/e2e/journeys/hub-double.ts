@@ -27,6 +27,8 @@ export type Session = {
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;
   last_activity?: string;
+  /** When the session started; sibling rows keep start order (cas-4f42). */
+  started_at?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), as the hub reports it. */
   cloud_project_id?: string;
   /** Additive catalog identity; older hubs omit these fields. */

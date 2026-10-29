@@ -61,7 +61,8 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 conversations on Atlas");
     await expect(list.getByRole("group", { name: "gabber-studio · 3 conversations on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(3);
     const rows = list.locator(".conversation-row");
-    await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "wild-shark-68", "noble-cheetah-84"]);
+    // cas-4f42: stable order (no start reported: by codename); "Most recent" marks the active one.
+    await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "noble-cheetah-84", "wild-shark-68"]);
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.locator(".conversation-when")).toHaveText(["2m", "40m", /^\d+h$/]);

@@ -13,6 +13,8 @@ const ATLAS: Machine = {
   sessions: NAMES.map((supervisor, index) => ({
     name: `gabber-studio-${supervisor}`, supervisor, project_dir: "/projects/gabber-studio", workers: [], liveness: "live" as const,
     last_activity_at: journeyStamp(-(index + 1) * 7 * 60_000), last_activity: "supervisor → worker",
+    // cas-4f42: rows keep start order, so amber-fox-29, started last, is the last row.
+    started_at: journeyStamp(-(NAMES.length - index) * 60 * 60_000),
   })),
 };
 

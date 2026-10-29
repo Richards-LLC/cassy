@@ -6171,23 +6171,52 @@ mod tests {
         let (repo, _, tip) = delivery_ci_fixture(true, Some("success"));
         let worker = repo.path().join(".cas/worktrees/alice");
         for args in [
-            vec!["remote", "set-url", "origin", "git@github.com:Richards-LLC/cassy.git"],
-            vec!["worktree", "add", "-q", "-b", "factory/alice", worker.to_str().unwrap()],
+            vec![
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:Richards-LLC/cassy.git",
+            ],
+            vec![
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "factory/alice",
+                worker.to_str().unwrap(),
+            ],
         ] {
-            assert!(std::process::Command::new("git").current_dir(repo.path())
-                .args(args).status().unwrap().success());
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(repo.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
         let gh = repo.path().join("gh-fixture");
-        crate::test_paths::warm_stub(&gh, &format!(
-            "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view Richards-LLC/cassy') printf '%s\\n' '{{\"nameWithOwner\":\"Richards-LLC/cassy\"}}'; exit 0 ;;\nesac\ncase \"$4\" in\nrepos/Richards-LLC/cassy/commits/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*) exit 97 ;;\nesac\n"
-        ));
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!(
+                "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view Richards-LLC/cassy') printf '%s\\n' '{{\"nameWithOwner\":\"Richards-LLC/cassy\"}}'; exit 0 ;;\nesac\ncase \"$4\" in\nrepos/Richards-LLC/cassy/commits/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*) exit 97 ;;\nesac\n"
+            ),
+        );
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let lookup = super::lookup_branch_ci("factory/alice", "main", &worker);
         assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
         let receipt = super::describe_branch_ci_lookup("factory/alice", &lookup);
-        assert!(receipt.contains(&format!("repos/Richards-LLC/cassy/commits/{tip}/check-runs")), "{receipt}");
+        assert!(
+            receipt.contains(&format!(
+                "repos/Richards-LLC/cassy/commits/{tip}/check-runs"
+            )),
+            "{receipt}"
+        );
         assert!(receipt.contains("CI state: green"), "{receipt}");
-        assert!(receipt.contains("Admission path: CI check-run (green)"), "{receipt}");
+        assert!(
+            receipt.contains("Admission path: CI check-run (green)"),
+            "{receipt}"
+        );
         assert!(!receipt.contains("(advisory)"), "{receipt}");
     }
 

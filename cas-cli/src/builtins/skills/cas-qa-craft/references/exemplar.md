@@ -3,9 +3,11 @@
 Task `cas-1234` says, “User filters tasks and sees no matches.” The build under
 test is commit `8b7f1de`, scope is “filtering plus adjacent task-list status,”
 and the 30-minute budget is written in
-`~/.cas/artifacts/cas-1234/LEDGER.md` before the run.
+`<artifacts_root>/<project-key>/cas-1234/LEDGER.md` before the run.
 
 ```text
+cells=7; PASS=4; FAIL=3; NOT EXERCISED=0
+labels: real-build=7
 id | cell | expected | observed | verdict | label | evidence path | defect task
 M01 | submit a task filter | matching rows update | 3 rows remained | PASS | real-build | step-01.png | —
 M02 | query with no matches (empty state) | clear no-results copy | message and no rows | PASS | real-build | step-02.png | —
@@ -22,8 +24,8 @@ written before each cell; every row has one capture and a two-sentence observed
 narrative in the full ledger. The row label is `real-build`, so each PASS is
 user-facing evidence rather than source inference or a fixture result.
 
-```markdown
 ## Telemetry sweep
+
 `[qa] telemetry_sweep = "scripts/qa/telemetry-sweep.sh"` produced the
 following valid line before the matrix:
 
@@ -45,15 +47,17 @@ Known, explained noise is cited rather than filed again with this table:
 | checkout | expected spike during migration | cas-1234 | task note |
 
 ## Constants vs expectation
+
 | `DEBOUNCE_MS=300` | filter.ts:18 | user sees delayed update | no — no progress cue | cas-defect-4 |
 
 ## Contradictions
+
 | filtered-empty | list | “No tasks” | status line says “5 results” | cas-defect-3 |
 
 ## Honesty
+
 - The timeout was induced by the local network throttle; it is a product-risk observation, not a claim of a production outage.
 - The phone-width cell used a real browser viewport, not a fixture.
-```
 
 The task note and close reason both cite the durable ledger path. Defects are
 filed separately; this QA pass does not patch their implementation.

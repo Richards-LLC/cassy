@@ -934,7 +934,7 @@ fn ledger_tier_requires_a_fresh_pass_row() {
     std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
     std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.task_dir.join("LEDGER.md");
-    std::fs::write(&ledger, ledger_rows("| M01 | cli | ok | ok | NOT EXERCISED | fixture | - | - |\n")).unwrap();
+    std::fs::write(&ledger, ledger_rows("| M01 | cli | ok | ok | NOT EXERCISED: not run in this fixture | fixture | - | - |\n")).unwrap();
     assert!(
         validate_ledger(&ctx)
             .unwrap_err()
@@ -2845,7 +2845,7 @@ fn ledger_rows(rows: &str) -> String {
         let cells: Vec<_> = row.trim().trim_matches('|').split('|').map(str::trim).collect();
         if cells.len() == 8 && cells[0] != "id" {
             n += 1;
-            *counts.entry(cells[4]).or_default() += 1;
+            *counts.entry(cells[4].split(':').next().unwrap()).or_default() += 1;
             *labels.entry(cells[5]).or_default() += 1;
         }
     }

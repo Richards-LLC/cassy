@@ -6,7 +6,6 @@ async fn operation(kind: &str) {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     let home = env.home().to_path_buf();
     env.set_current_dir(&home);
-    env.set("PATH", home.join("no-tools"));
     let folder = home.join(".claude-disposable");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"test@example.test"}}"#).unwrap();

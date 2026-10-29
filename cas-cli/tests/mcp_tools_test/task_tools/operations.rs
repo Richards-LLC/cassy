@@ -392,7 +392,7 @@ canonical_id = "start-read-fixture"
             task.assignee = Some("test-agent".into());
             task.origin_project = Some("start-read-fixture".into());
             if case == "synced-history" {
-                task.notes = "Undated history α🧪\n".repeat(1500);
+                task.notes = "🧪".repeat(11000);
                 task.execution_note = Some("no-code".into());
             } else {
                 task.notes.clear();
@@ -553,6 +553,10 @@ Keep reading.".into(),
             );
         }
         for instruction in required {
+            assert!(
+                paged.contains(&instruction),
+                "{case}: advertised pages must recover start instructions: {instruction}"
+            );
             assert!(
                 recovered.contains(&instruction),
                 "{case}: start-only instruction unreachable: {instruction}\n{started}"

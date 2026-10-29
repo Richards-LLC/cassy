@@ -52,6 +52,11 @@ pub enum PublishDisposition {
     Committed { cloud_url: Option<String> },
     /// Cloud has the bytes, but its portable task reference was not saved.
     CommittedMetadataUnavailable { reason: String },
+    /// The manifest was recorded, but its QA evidence cannot travel to a peer.
+    QaBundleNotPortable {
+        reason: String,
+        storage: Box<PublishDisposition>,
+    },
     /// Recorded locally; Cloud storage is not live on this endpoint yet.
     StorageNotLive { reason: String },
     /// Recorded locally; this installation has no cloud credentials.
@@ -65,7 +70,7 @@ impl PublishDisposition {
     /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
         matches!(
-            self,
+            self.storage_disposition(),
             PublishDisposition::Committed { .. }
                 | PublishDisposition::CommittedMetadataUnavailable { .. }
         )
@@ -73,15 +78,43 @@ impl PublishDisposition {
 
     pub fn metadata_state(&self) -> &'static str {
         match self {
+            Self::QaBundleNotPortable { .. } => "qa_bundle_not_portable",
             Self::Committed { .. } => "task_reference_recorded",
             Self::CommittedMetadataUnavailable { .. } => "metadata_unavailable",
             _ => "local_only",
         }
     }
 
+    pub fn qa_portability_error(&self) -> Option<&str> {
+        match self {
+            Self::QaBundleNotPortable { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn storage_disposition(&self) -> &Self {
+        match self {
+            Self::QaBundleNotPortable { storage, .. } => storage.storage_disposition(),
+            other => other,
+        }
+    }
+
+    fn with_qa_error(self, error: Option<String>) -> Self {
+        match error {
+            Some(reason) => Self::QaBundleNotPortable {
+                reason,
+                storage: Box::new(self),
+            },
+            None => self,
+        }
+    }
+
     /// One line for a person, naming what happened and what follows from it.
     pub fn summary(&self) -> String {
         match self {
+            PublishDisposition::QaBundleNotPortable { reason, storage } => {
+                format!("{}; QA bundle not portable: {reason}", storage.summary())
+            }
             PublishDisposition::Committed {
                 cloud_url: Some(url),
             } => {
@@ -342,11 +375,11 @@ pub fn publish(
 
     // Portability is optional: a missing/invalid companion must never prevent
     // publishing the requested manifest through the ordinary artifact path.
-    let closure = match qa::prepare(context, &source) {
-        Ok(closure) => closure,
+    let (closure, mut qa_error) = match qa::prepare(context, &source) {
+        Ok(closure) => (closure, None),
         Err(error) => {
             tracing::warn!(path = %source.display(), %error, "QA companion archive unavailable; publishing manifest only");
-            None
+            (None, Some(error.to_string()))
         }
     };
 
@@ -371,7 +404,7 @@ pub fn publish(
     let Some(client) = context.cloud.as_ref() else {
         return Ok(PublishOutcome {
             artifact,
-            disposition: PublishDisposition::NotLoggedIn,
+            disposition: PublishDisposition::NotLoggedIn.with_qa_error(qa_error),
             source,
         });
     };
@@ -410,11 +443,10 @@ pub fn publish(
         && let Some((_temp, archive)) = closure
     {
         if let Err(error) = qa::record(context, &outcome, &archive) {
-            outcome.disposition = PublishDisposition::CommittedMetadataUnavailable {
-                reason: error.to_string(),
-            };
+            qa_error = Some(error.to_string());
         }
     }
+    outcome.disposition = outcome.disposition.with_qa_error(qa_error);
     Ok(outcome)
 }
 
@@ -483,6 +515,7 @@ fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
     use tempfile::TempDir;
 
@@ -605,29 +638,91 @@ mod tests {
         assert!(error.to_string().contains("nothing to publish"), "{error}");
     }
 
-    #[test]
-    fn producer_publication_keeps_manifest_when_closure_is_unavailable() {
-        let f = fixture();
-        let manifest = f.task_dir.join("bundle.json");
-        let private = f.project_root.join("private.txt");
-        fs::write(&private, "private sentinel").unwrap();
-        let private_bytes = fs::read(&private).unwrap();
-        for path in ["../private.txt".to_string(), private.display().to_string()] {
-            fs::write(
-                &manifest,
-                serde_json::json!({
-                    "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
-                    "files": {"trace": path}
-                })
-                .to_string(),
+    #[tokio::test]
+    async fn producer_publication_keeps_manifest_when_closure_is_unavailable() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-manifest", "upload_url": format!("{}/blob", server.uri()),
+                "required_headers": {}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/cloud-manifest/complete"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})),
             )
-            .unwrap();
-            assert!(qa::prepare(&f.context(), &manifest).is_err());
-            let published = publish(&f.context(), &manifest).unwrap();
-            assert_eq!(published.artifact.name, "bundle.json");
-            assert_eq!(published.disposition, PublishDisposition::NotLoggedIn);
-        }
-        assert_eq!(fs::read(private).unwrap(), private_bytes);
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            crate::store::open_task_store(&f.project_root.join(".cas"))
+                .unwrap()
+                .add(&crate::types::Task::new(
+                    "cas-b72a".into(),
+                    "artifact".into(),
+                ))
+                .unwrap();
+            let manifest = f.task_dir.join("bundle.json");
+            let private = f.project_root.join("private.txt");
+            fs::write(&private, "private sentinel").unwrap();
+            let private_bytes = fs::read(&private).unwrap();
+            fs::File::create(f.task_dir.join("oversized.zip"))
+                .unwrap()
+                .set_len(ARTIFACT_MAX_BYTES + 1)
+                .unwrap();
+            for online in [true, false] {
+                let mut context = f.context();
+                if online {
+                    context.cloud = Some(ArtifactUploadClient::new(&endpoint, "test-token"));
+                }
+                for path in [
+                    "oversized.zip".into(),
+                    "../private.txt".to_string(),
+                    private.display().to_string(),
+                ] {
+                    fs::write(
+                        &manifest,
+                        serde_json::json!({
+                            "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
+                            "files": {"trace": path}
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                    assert!(qa::prepare(&context, &manifest).is_err());
+                    let published = publish(&context, &manifest).unwrap();
+                    assert_eq!(published.artifact.name, "bundle.json");
+                    assert_eq!(
+                        published.artifact.status,
+                        if online { "committed" } else { "local" }
+                    );
+                    assert!(
+                        published.disposition.summary().contains("not portable"),
+                        "{published:?}"
+                    );
+                    if path == "oversized.zip" {
+                        assert!(
+                            published.disposition.summary().contains("byte limit"),
+                            "{published:?}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(fs::read(private).unwrap(), private_bytes);
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -641,7 +736,7 @@ mod tests {
         manifest["task_id"] = "cas-b72a".into();
         let dir = f.task_dir.join("qa");
         fs::create_dir_all(&dir).unwrap();
-        let files = &manifest["files"];
+        let files = manifest["files"].clone();
         let mut declared = Vec::new();
         for key in [
             "trace",
@@ -665,11 +760,21 @@ mod tests {
                     .map(|path| path.as_str().unwrap()),
             );
         }
+        let expected: BTreeSet<_> = declared
+            .iter()
+            .map(|path| PathBuf::from("qa").join(path))
+            .chain([PathBuf::from("qa/bundle.json")])
+            .collect();
         for part in files["parts"].as_array().unwrap() {
             for key in ["receipt", "aria_yaml", "aria_json"] {
                 declared.push(part[key].as_str().unwrap());
             }
         }
+        for part in manifest["files"]["parts"].as_array_mut().unwrap() {
+            part["trace"] = "parts/unread-trace.zip".into();
+            part["trace_actions"] = "parts/unread-actions.txt".into();
+        }
+        declared.extend(["parts/unread-trace.zip", "parts/unread-actions.txt"]);
         for path in declared {
             let path = dir.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -686,14 +791,8 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().path().unwrap().into_owned())
             .collect();
-        assert_eq!(
-            paths.len(),
-            54,
-            "53 actual declared files plus the original manifest"
-        );
-        assert!(paths.contains(&PathBuf::from(
-            "qa/parts/paste-content-390-dark-04eda936cd96b5e5/receipt.webm"
-        )));
+        assert_eq!(paths.into_iter().collect::<BTreeSet<_>>(), expected);
+        let paths = expected;
         assert!(paths.contains(&PathBuf::from("qa/bundle.json")));
         assert!(
             !paths
@@ -803,6 +902,9 @@ mod tests {
             PublishDisposition::CommittedMetadataUnavailable {
                 reason: "task reference unavailable".into(),
             },
+            PublishDisposition::Committed { cloud_url: None }
+                .with_qa_error(Some("too large".into())),
+            PublishDisposition::NotLoggedIn.with_qa_error(Some("missing trace".into())),
             PublishDisposition::StorageNotLive {
                 reason: "not live".to_string(),
             },
@@ -817,7 +919,7 @@ mod tests {
             assert_eq!(
                 case.is_committed(),
                 matches!(
-                    case,
+                    case.storage_disposition(),
                     PublishDisposition::Committed { .. }
                         | PublishDisposition::CommittedMetadataUnavailable { .. }
                 )

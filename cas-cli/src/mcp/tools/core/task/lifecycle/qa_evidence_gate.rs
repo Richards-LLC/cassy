@@ -618,6 +618,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ledger_preflight_preserves_batch_evidence_ownership() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        env.set_current_dir(dir.path());
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let mut config = crate::config::Config::default();
+        config.set("factory.artifacts_root", artifacts.to_str().unwrap()).unwrap();
+        let mut task = Task::new("cas-ledger-batch".into(), "Batch delivery".into());
+        task.demo_statement = "Walk the assembled staging build".into();
+        for (mode, allowed_missing) in [("batch", true), ("per_task", false)] {
+            config.set("qa.mode", mode).unwrap();
+            config.save(&root).unwrap();
+            assert_eq!(ledger_preflight(&root, &task, true).is_ok(), allowed_missing, "{mode}: shared batch evidence must not become a missing individual ledger");
+        }
+        config.set("qa.mode", "batch").unwrap();
+        config.save(&root).unwrap();
+        let task_dir = crate::config::project_factory_artifacts_root(&root, &artifacts).join(&task.id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("LEDGER.md"), "malformed evidence").unwrap();
+        assert!(ledger_preflight(&root, &task, true).unwrap_err().contains("canonical evidence matrix header"), "existing malformed batch evidence still refuses locally");
+    }
+
+
+    #[test]
     fn interaction_classification_is_conservative_and_configurable_cas_266e() {
         let mut qa = crate::config::QaConfig::default();
         let factory = vec!["cas-cli/src/ui/factory/daemon/runtime/output.rs".into()];

@@ -851,8 +851,17 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
+    std::fs::write(
+        repo.join(".cas/config.toml"),
+        "[project]\ncanonical_id = \"cas-1630-fixture\"\n",
+    ).unwrap();
+    // Pin Git inputs: a decimal-only SHA[..9] is deliberately treated as a run ID.
+    std::fs::write(repo.join(".gitignore"), "/.cas/\n").unwrap();
+    test_env.set("GIT_AUTHOR_DATE", "1700000191 +0000");
+    test_env.set("GIT_COMMITTER_DATE", "1700000191 +0000");
     init_repo_with_commit(repo);
     let (v56, v56_branch, v56_tip) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
+    assert_eq!(v56_tip, "9402201732baa854ba8bc4b156e818d469a90cfb");
     let v57 = extract_task_id(&extract_text(
         service
             .cas_task_create(Parameters(epic_create_request("Burn Down V57")))

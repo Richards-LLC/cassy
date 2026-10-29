@@ -731,29 +731,27 @@ release_train_announce_posted_block
 fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a() {
     let project = TempDir::new().unwrap();
     fs::create_dir_all(project.path().join("docs/release-notes")).unwrap();
-    fs::write(project.path().join("docs/release-notes/v3.87.0.md"), "# Release notes\n\nCloses #705, #746.\n").unwrap();
+    fs::write(project.path().join("docs/release-notes/v9.99.1.md"), "# Release notes\n\nCloses #705, #746.\n").unwrap();
     cas_cmd(&project).args(["init", "--yes"]).assert().success();
     let mut config = cas::config::Config::load(&project.path().join(".cas")).unwrap();
     config.set("issues.repo", "example/project").unwrap();
     config.save(&project.path().join(".cas")).unwrap();
-    let fake_gh = install_fake_gh_version(&project, "3.87.0");
-    let real = include_str!("../../CHANGELOG.md");
-    let start = real.find("## [3.87.0]").unwrap();
-    let end = start + real[start..].find("\n## [3.86.0]").unwrap();
-    let grouped = &real[start..end];
+    let fake_gh = install_fake_gh_version(&project, "9.99.1");
+    // A captured release input keeps the historical shape stable after version bumps.
+    let grouped = include_str!("fixtures/changelog_grouped_387.md");
     assert_eq!(grouped.lines().filter(|line| line.starts_with("### ")).count(), 7);
     assert_eq!(grouped.lines().filter(|line| line.starts_with("- **")).count(), 27);
-    let legacy = "## [3.87.0] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n";
+    let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n";
     for (body, expected) in [(grouped, 27), (legacy, 2)] {
         fs::write(project.path().join("CHANGELOG.md"), format!("# Changelog\n\n{body}")).unwrap();
         let output = cas_cmd(&project)
             .env("GH_BIN", &fake_gh)
-            .args(["--json", "release", "report", "3.87.0", "--refresh-sources"])
+            .args(["--json", "release", "report", "9.99.1", "--refresh-sources"])
             .assert().success().get_output().stdout.clone();
         let report: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(report["change_count"], expected, "{report}");
         assert_eq!(report["issue_count"], 2, "official GitHub count is independent: {report}");
-        let html = fs::read_to_string(project.path().join("docs/release-reports/v3.87.0.html")).unwrap();
+        let html = fs::read_to_string(project.path().join("docs/release-reports/v9.99.1.html")).unwrap();
         assert_eq!(html.matches("data-change=\"").count(), expected, "one rendered mark per shipped change");
     }
 }

@@ -93,38 +93,7 @@ pub(crate) fn predicted(core: &CasCore, task: &Task) -> String {
         } else {
             close_ops::resolve_close_gate_repo_root(&core.cas_root).map_err(|e| anyhow!(e))?
         };
-        let tracked = qa_impact::io::git(&repo, &["ls-files", "-z", "--cached", "--full-name"])?;
-        let content = format!(
-            "{}\n{}\n{}\n{}",
-            task.title,
-            task.description,
-            task.design,
-            task.proof_targets.join("\n")
-        );
-        let mut paths = std::collections::BTreeSet::new();
-        for word in content.split_whitespace() {
-            let path =
-                word.trim_matches(|c: char| matches!(c, '`' | '\'' | '"' | '(' | ')' | ',' | ';'));
-            let path = path
-                .split(':')
-                .next()
-                .unwrap_or(path)
-                .trim_start_matches("./");
-            if !path.contains('/') && !path.contains('.') {
-                continue;
-            }
-            for file in tracked.split('\0').filter(|file| !file.is_empty()) {
-                if file == path
-                    || file.starts_with(&format!("{}/", path.trim_end_matches('/')))
-                    || crate::qa_registry::matches_path([path], file)
-                {
-                    paths.insert(file.to_string());
-                }
-            }
-        }
-        let changes: Vec<_> = paths.into_iter().map(Change::modified).collect();
-        let report = qa_impact::analyze(&repo, &core.load_config().qa(), &changes, None, None)?;
-        Ok(serde_json::to_value(report)?)
+        Ok(serde_json::to_value(crate::qa_impact::predicted(&repo, &core.load_config().qa(), task)?)?)
     })();
     match result {
         Ok(report) => format!(
@@ -210,18 +179,6 @@ impl CasCore {
     }
 }
 
-fn verdict(cell: &str) -> bool {
-    ["PASS", "FAIL", "NOT A ROUTE"].iter().any(|verdict| {
-        cell.strip_prefix(verdict).is_some_and(|rest| {
-            rest.is_empty()
-                || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'))
-        })
-    }) || cell.strip_prefix("NOT EXERCISED:").is_some_and(|reason| {
-        let reason = reason.trim();
-        !reason.is_empty() && reason != "<reason>"
-    })
-}
-
 /// G8 reads the park-time report, never a new diff. Legacy catalog adoption
 /// remains advisory; enforcement arms when a YAML registry exists.
 pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option<String> {
@@ -240,38 +197,10 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
     if impact["head_sha"].as_str() != Some(head) {
         return Some("QA RECORD REJECTED: journey impact is for a different delivery head; refresh the QA dispatch for this round before recording approval.".into());
     }
-    let mut fenced = false;
-    let rows: Vec<_> = ledger
-        .lines()
-        .filter(|line| {
-            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-                fenced = !fenced;
-                return false;
-            }
-            !fenced
-        })
-        .collect();
-    let missing: Vec<_> = live
-        .into_iter()
-        .filter(|id| {
-            !rows.iter().any(|line| {
-                let cells: Vec<_> = line
-                    .trim()
-                    .trim_matches('|')
-                    .split('|')
-                    .map(|c| c.trim().trim_matches('`').trim())
-                    .collect();
-                if cells.len() >= 2 {
-                    cells.iter().any(|cell| cell == id) && cells.iter().any(|cell| verdict(cell))
-                } else {
-                    // Also accept a compact Markdown list row: `- ID: PASS`.
-                    let row = line.trim().trim_start_matches("- ");
-                    row.strip_prefix(id)
-                        .and_then(|rest| rest.strip_prefix(':'))
-                        .is_some_and(|rest| verdict(rest.trim()))
-                }
-            })
-        })
-        .collect();
+    let parsed = crate::qa_ledger::parse(ledger, 1);
+    if !parsed.ok { return Some(format!("QA RECORD REJECTED: {}", parsed.refusal())); }
+    let missing: Vec<_> = live.into_iter().filter(|id| {
+        !parsed.rows.iter().any(|row| row.id == *id || row.cell == *id)
+    }).collect();
     (!missing.is_empty()).then(|| format!("QA RECORD REJECTED: the ledger has no row for live journeys {}. Add one row per journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.", missing.join(", ")))
 }

@@ -99,9 +99,10 @@ invariants:
     check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
     bug: {task: cas-8bb3}
   HUB-J4-TABLE-COPY:
-    statement: Evidence uses native table headers and cells, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
-    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts; read back both clipboard formats, verify commas and quotes, long paths at desktop/phone in both schemes, and headerless empty cells. thread-model.test.ts covers CSV newline quoting.'
+    statement: Evidence, including short status replies, uses native table headers and cells; adjacent plain progress stays quiet, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
+    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts, including its short status and headerless status stages; read back both clipboard formats, verify quiet adjacent plain progress, commas and quotes, long paths at desktop/phone in both schemes, and empty cells. Run the answer/status clipboard regression in conversation-view.test.ts. Native proof queues a short kind=status table through a candidate hub and verifies live and reloaded headers/cells and copied contents.'
     task: cas-0952
+    bug: {task: cas-2656}
   HUB-J4-MESSAGE-HIERARCHY:
     statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
@@ -199,6 +200,10 @@ invariants:
     statement: Claude account choices consume profile-local native statusline observations, including factory sessions; an older percentage stays visible with its Eastern observation time and, for an earlier day, its date until its known reset, while expired windows and changed identities cannot retain that percentage.
     check: Run generated_statusline_records_usage_even_for_a_factory_supervisor, configure_migrates_bare_statuslines_in_every_profile_once (including malformed-profile warnings and continued project hook setup), configured_profile_beats_ambient_and_main, weekly_observation_date_follows_the_eastern_day and native_claude_snapshot_reaches_limits_and_picker_without_authentication; then use the batch candidate for real sessions on two profiles and read back both cas claude percentages and their profile snapshots without a usage endpoint request or credential-content reads.
     bug: {task: cas-7045}
+  HUB-J13-ACCOUNT-MANAGEMENT:
+    statement: The shell Accounts panel lists each machine independently and scrolls through every account on a phone; only factory-manage pairings mutate named Claude/Codex accounts, destructive operations confirm and audit, Grok is read-only, and New session refreshes choices without reload with local 12-hour capacity times. The confirmation editor is not rendered for read-only pairings or after Cancel/completion, and dismissal clears its text and typed value.
+    check: Run accounts_route_tests, accounts-panel and launch-session UI tests and the HUB-J13 shell Accounts journey; assert rendered editor visibility after Cancel/remove and for read-only pairings, and prove CLI parity and each audited mutation on disposable profiles against the exact-tip real hub candidate, with 1280/390 light/dark captures.
+    bug: {task: cas-e5df}
   HUB-J13-LAUNCH-STORE:
     statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
     check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.
@@ -307,6 +312,9 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+  HUB-J26-GOAL:
+    statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
+    check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
   HUB-J25-GOAL:
     statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and
       follow one worker's live timeline from Tasks & progress, without a terminal
@@ -1312,10 +1320,16 @@ journeys:
     Start lands in the new session
   - A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close
     stays visible and the page does not scroll sideways
+  - Open Accounts from the shell, inspect per-machine login and capacity, confirm a named profile removal and see New session refresh without a page reload
   owner_groups:
   - commander_runtime
   - commander_dependencies
   owners:
+  - hub-web/src/accounts-panel.ts
+  - hub-web/src/accounts-panel.css
+  - hub-web/src/accounts-model.ts
+  - cas-cli/src/hub/accounts.rs
+  - cas-cli/src/hub/account_routes.rs
   - hub-web/src/launch-session.ts
   - hub-web/src/pairing-scopes.ts
   - hub-web/src/connection.ts
@@ -1367,6 +1381,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-ACCOUNT-MANAGEMENT
   - HUB-J13-NATIVE-CLAUDE-CAPACITY
   - HUB-J13-PROVIDER-CREDENTIAL-BOUNDARY
   - HUB-J13-LAUNCH-STORE
@@ -2121,6 +2136,35 @@ journeys:
     basis: No per-journey usage instrumentation.
   spec: hub-web/e2e/journeys/history-window.journey.ts
   catalog_gaps: The hub double supplies cursor pages; frozen real-thread performance is measured separately.
+
+- id: HUB-J26
+  name: See live staffing beside a conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: open a supervisor conversation and select Team
+  steps:
+  - Open Team beside the supervisor conversation
+  - A lifecycle event updates staffing without reloading
+  - Read Team with forced colors and reduced motion
+  owner_groups: [commander_runtime]
+  owners:
+  - hub-web/src/team-view.ts
+  - hub-web/src/progress-model.ts
+  - hub-web/src/progress-view.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/main.ts
+  - hub-web/src/styles.css
+  - cas-cli/src/bridge/server/session.rs
+  - cas-cli/src/bridge/server/types.rs
+  - hub-web/e2e/journeys/team.journey.ts
+  invariants: [HUB-J26-GOAL]
+  traffic:
+    share_pct: null
+    basis: No per-journey usage instrumentation.
+  spec: hub-web/e2e/journeys/team.journey.ts
+  catalog_gaps: Protocol-double lifecycle changes supplement a separate read-only real-hub staffing comparison.
 
 - id: HUB-J27
   name: Run supervisor commands with native outcome receipts

@@ -157,7 +157,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Recent turns appear without any action, grouped by speaker and day.
 - Loading earlier keeps the reading position; the button shows progress.
-- Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting. Clipboard refusal offers a visible retry; long paths wrap at phone width without widening the page.
+- Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting. Clipboard refusal offers a visible retry; long paths wrap at phone width without widening the page.
 - The end of history is stated, not implied.
 
 #### Edge paths
@@ -834,6 +834,32 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
 - A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
 - A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.
+
+### HUB-J26 · See live staffing beside a conversation
+
+- **Entry:** `/commander/` at desktop 1280 and phone 390, a supervisor conversation with three live worker registrations
+- **Goal:** see the selected supervisor's workers, tasks, authoritative state and receipt trail alongside epic merge progress without opening raw output
+- **Touches:** `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/bridge/server/session.rs`, `cas-cli/src/bridge/server/types.rs`
+- **Suite:** `hub-web/e2e/journeys/team.journey.ts`
+- **Gaps:** the protocol double supplies lifecycle events; acceptance additionally compares a read-only real hub with simultaneous factory worker and epic readbacks
+
+#### Steps
+
+1. Open Team beside the supervisor conversation — keyboard-select the lazy tab; read epic progress, worker tasks and reported model, with no output requests.
+2. A lifecycle event updates staffing without reloading — change a worker state and read it within five seconds while Team stays selected.
+3. Read Team with forced colors and reduced motion — keep lanes readable without animation or phone overflow, then return to the conversation and composer.
+
+#### Expected experience
+
+- Team loads only when selected, with the same session roster, task titles and epic progress as Tasks & progress.
+- Every receipt mark names actual lifecycle evidence; missing model, start time and evidence remain explicitly unreported.
+- Needs you opens the existing conversation or fleet controls, and the conversation draft stays intact while viewing Team.
+
+#### Edge paths
+
+- An empty session roster stays empty; unrelated project workers never enter the view.
+- Unavailable or stale status remains labeled and a failed status request offers Retry staffing.
+- Forced colors and reduced motion preserve textual state and evidence without decorative animation or phone overflow.
 
 ### HUB-J27 · Run a supervisor command and read what the harness did
 

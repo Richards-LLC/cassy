@@ -931,8 +931,10 @@ fn ledger_tier_requires_a_fresh_pass_row() {
             .problem
             .contains("missing")
     );
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.task_dir.join("LEDGER.md");
-    std::fs::write(&ledger, "| id | cell | expected | observed | verdict | label | evidence | defect |\n| M01 | cli | ok | ok | NOT EXERCISED | fixture | - | - |\n").unwrap();
+    std::fs::write(&ledger, ledger_rows("| M01 | cli | ok | ok | NOT EXERCISED | fixture | - | - |\n")).unwrap();
     assert!(
         validate_ledger(&ctx)
             .unwrap_err()
@@ -941,13 +943,13 @@ fn ledger_tier_requires_a_fresh_pass_row() {
     );
     std::fs::write(
         &ledger,
-        "| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n"),
     )
     .unwrap();
     validate_ledger(&ctx).expect("fresh pipe-form PASS row");
     std::fs::write(
         &ledger,
-        "M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | -\n",
+        ledger_rows(&"M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | -\n"),
     )
     .unwrap();
     validate_ledger(&ctx).expect("fresh doc-style PASS row");
@@ -984,6 +986,9 @@ fn ledger_rejects_failed_row_without_defect_ownership() {
     let refusal = validate_ledger(&ctx)
         .expect_err("a passing row must not hide a failed row with no defect owner");
     assert!(refusal.problem.contains("M02") && refusal.problem.contains("defect"), "{refusal:?}");
+    let cli = crate::cli::qa_ledger::check(&fx.task_dir.join("LEDGER.md"), None);
+    assert!(!cli.ok);
+    assert_eq!(cli.refusal(), refusal.problem, "CLI and verifier use the same diagnostics");
 }
 
 #[test]
@@ -1372,10 +1377,12 @@ fn ledger_pass_row_must_be_real_build() {
         notes: "",
         deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(
         &ledger,
-        "| M01 | cli | ok | ok | PASS | fixture | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cli | ok | ok | PASS | fixture | qa/M01.txt | - |\n"),
     )
     .unwrap();
     let refusal = validate_ledger(&ctx).unwrap_err();
@@ -1427,9 +1434,11 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
     );
 
     // The ledger tier composes both requirements.
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     std::fs::write(
         fx.task_dir.join("LEDGER.md"),
-        "| M01 | cas status | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cas status | ok | ok | PASS | real-build | qa/M01.txt | - |\n"),
     )
     .unwrap();
     let error = run_close_gate(
@@ -2735,7 +2744,7 @@ fn identical_tree_merge_accepts_repaired_ledger_without_reexecuting_gh1395() {
     assert!(missing.contains("no ledger"), "{missing}");
     std::fs::write(
         fx.task_dir.join("LEDGER.md"),
-        "| M01 | reviewed flow | ready | ready | PASS | real-build | qa/trace.zip | - |\n",
+        ledger_rows(&"| M01 | reviewed flow | ready | ready | PASS | real-build | qa/trace.zip | - |\n"),
     ).unwrap();
     run_close_gate(
         &context, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[],
@@ -2825,4 +2834,23 @@ fn non_visual_listed_screencast_is_still_validated_cas_7e91() {
     std::fs::write(fx.bundle_dir().join("receipt.webm"), "").unwrap();
     let refusal = fx.validate(&fx.notes()).expect_err("a listed optional capture must be valid");
     assert!(refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"), "{refusal:?}");
+}
+
+
+fn ledger_rows(rows: &str) -> String {
+    let mut labels = std::collections::BTreeMap::<&str, usize>::new();
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut n = 0;
+    for row in rows.lines().filter(|line| !line.trim().is_empty()) {
+        let cells: Vec<_> = row.trim().trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() == 8 && cells[0] != "id" {
+            n += 1;
+            *counts.entry(cells[4]).or_default() += 1;
+            *labels.entry(cells[5]).or_default() += 1;
+        }
+    }
+    format!("cells={n}; PASS={}; FAIL={}; NOT EXERCISED={}\nlabels: {}\n{}\n{}",
+        counts.get("PASS").unwrap_or(&0), counts.get("FAIL").unwrap_or(&0), counts.get("NOT EXERCISED").unwrap_or(&0),
+        labels.iter().map(|(key,n)| format!("{key}={n}")).collect::<Vec<_>>().join("; "),
+        crate::qa_ledger::HEADER, rows)
 }

@@ -121,7 +121,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_seed.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - journey safety, path filters, impact snapshots and selection.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - `cas qa journeys --traffic` shares from the hub's Commander usage ledger (`POST /v1/usage`).
-- `cas-cli/src/qa_post_release.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/qa_pass/`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/config/upkeep.rs` - release observations, independent QA, trace rebinds and upkeep gates.
+- `cas-cli/src/qa_post_release.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/qa_pass/`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/config/upkeep.rs` - release observations, independent QA, ledger scaffolds and format checks, trace rebinds and upkeep gates.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence, end causes and successor claims.
 - `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/accepted_proposal_store.rs` - durable prompts and proposal ownership.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas (captured harness payloads in `hooks/fixtures/`), memory maintenance and temporal retrieval.
@@ -137,9 +137,11 @@
 - `hub-web/src/rich-syntax.ts`, `hub-web/src/code-syntax.brief.md` - lazy lexical source color with bounded input, spans and cache, safe token nodes, selection restoration and honest plain-text fallback.
 - `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css` - reusable fenced-source header with literal-source Copy feedback and per-block Wrap, retained around rich previews.
 - `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - reserved inline media, lifecycle and PDF first-page pixels.
-- `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts` - scoped release/task ledger, server merge metrics and accessible device-local context width.
+- `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts`, `hub-web/src/context-resize.ts` - shared session staffing/delivery state, scoped release/task ledger, lazy Team lanes, daemon receipt trail and accessible device-local context width.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, typed operation/scope disclosures with exact raw evidence, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
+- `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs`, `cas-cli/src/hub/accounts_route_tests.rs` - registry projection, allowlisted paired-account lifecycle and real-router authorization/audit tests.
+- `hub-web/src/accounts-panel.ts`, `hub-web/src/accounts-panel.css`, `hub-web/src/accounts-model.ts` - body-mounted Accounts ledger, confirmations, local 12-hour capacity and New session invalidation.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
 - `cas-cli/src/hub/auth/cache.rs`, `cas-cli/src/hub/auth/audit.rs` - stat-validated auth snapshots, process-local capabilities and batched rotating audits.
 - `cas-cli/src/hub/composer_upload.rs` - DPoP-authenticated, bounded upload storage, host MIME sniffing and persistent upload identity.

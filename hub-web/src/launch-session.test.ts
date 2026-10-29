@@ -665,3 +665,19 @@ describe("New session sheet copy (cas-cee5, journey F31-F34)", () => {
     expect(dialog.querySelector(".launch-grant-note")!.textContent).toBe("The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.");
   });
 });
+
+
+it("refreshes changed accounts without losing the selected project or workers", async () => {
+  const options = { machines: [ATLAS], catalog: { projects: [project("ledger", "2026-10-28T00:00:00Z")], browse_roots: [] }, profiles: { claude: { installed: true, profiles: [{ name: "spare", logged_in: true, is_default: true }] } } };
+  const { sheet: instance, dialog } = sheet(options);
+  instance.open(); await flush();
+  const selected = dialog().querySelector<HTMLInputElement>('input[name="launch-project"]')!;
+  selected.checked = true; selected.dispatchEvent(new Event("change", { bubbles: true }));
+  const workers = dialog().querySelector<HTMLInputElement>('input[name="launch-workers"]')!;
+  workers.value = "2"; workers.dispatchEvent(new Event("input", { bubbles: true }));
+  options.profiles.claude.profiles = [{ name: "replacement", logged_in: true, is_default: true }];
+  instance.accountsChanged("atlas"); await flush();
+  expect(dialog().querySelector('input[name="launch-account"][value="spare"]')).toBeNull();
+  expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="replacement"]')!.checked).toBe(true);
+  expect(selected.checked).toBe(true); expect(workers.value).toBe("2");
+});

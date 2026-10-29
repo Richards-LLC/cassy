@@ -1627,6 +1627,16 @@ A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
+## QA ledger preflight
+
+`cas qa ledger init --task <id>` writes an honest scaffold in the project's task
+artifact directory, with predicted live journeys and no-code route exclusions.
+It preserves existing evidence. Edit rows after exercising the named build,
+then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
+parser checks structure, counts, labels, defect ownership and readable PASS
+captures; it does not judge what a capture proves. Close applies its diagnostics
+before either verification dispatch path mutates state.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
@@ -3310,7 +3320,10 @@ as a START CONTEXT task note before budgeting. An unchanged latest context reuse
 its note and cursor; transient claim/lease text stays in the start response.
 Warnings take precedence over scope, notes and recall; an oversized warning block
 is replaced by an explicit instruction to read its saved note before acting.
-The start response gives a byte cursor into `task notes` and a full-notes path.
+The start response gives a `task notes offset=0` paging path (follow `next=` to
+`end` and read the latest `START CONTEXT`) and a full-notes path. It never gives a tail cursor from the
+start snapshot: Cloud reconciliation can reorder note blocks before the next
+read, making that cursor invalid or hiding the saved instructions.
 Default show retains Type and Demo for builtin gates, and names full-only sections
 (including dependencies, design, deliverables and terminal outcomes) explicitly.
 

@@ -7,6 +7,10 @@ keep rendered components out of these globs. Follow [Fewest tests](../../cas-tdd
 one transcript per changed status/error code, including refusal cases. The only
 required artifacts are `LEDGER.md` (the transcript itself) and `contracts.diff`
 (captured comparison against vendored contract fixtures, empty when they agree).
+Start with `cas qa ledger init --task <id>` and keep its matrix header/counts.
+The transcript may follow the rows in the same file; an inline transcript row
+uses `LEDGER.md` as its readable evidence path. Run
+`cas qa ledger check <path> --task <id>` before submitting it.
 Record `head_sha: <delivered SHA>` and `origin: <HTTP origin>` in the transcript,
 a PASS/real-build ledger row for approval, then `request: <METHOD> <absolute URL>`,
 `status: <numeric code>` and `body: <captured response>` for each cell.

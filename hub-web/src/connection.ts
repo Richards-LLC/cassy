@@ -1,4 +1,5 @@
 import type { CommandReceipt } from "./supervisor-commands";
+import type { AccountChange, AccountsCatalog } from "./accounts-model";
 import { installationLock, notifyInstallation } from "./installation-access";
 import { catalog, installationStore } from "./storage";
 import { credentialFence, type CredentialFence } from "./commander-journal";
@@ -808,6 +809,15 @@ export class HubConnectionSupervisor {
   /** The machine's main project folders and launch roots (cas-41b9). */
   async projects(signal?: AbortSignal): Promise<ProjectCatalog> {
     return this.request("GET", "/v1/projects", undefined, signal);
+  }
+
+  /** Registry-backed machine accounts; management uses the hub's allowlist. */
+  async accounts(signal?: AbortSignal): Promise<AccountsCatalog> {
+    return this.request("GET", "/v1/accounts", undefined, signal);
+  }
+
+  async changeAccount(change: AccountChange): Promise<void> {
+    await this.request("POST", "/v1/accounts/operations", change);
   }
 
   /** Each launch CLI's account profiles on the machine (cas-7b52). */

@@ -27,6 +27,8 @@ use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid
 
 #[path = "composer_upload.rs"]
 mod composer_upload;
+#[path = "account_routes.rs"]
+mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
 
@@ -180,6 +182,8 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/account/enrollment",
             post(account_enrollment::<R>).options(preflight::<R>),
         )
+        .route("/v1/accounts", get(account_routes::list::<R>).options(preflight::<R>))
+        .route("/v1/accounts/operations", post(account_routes::operate::<R>).options(preflight::<R>))
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route(
             "/v1/launch/profiles",
@@ -1782,7 +1786,7 @@ mod launch_profile_tests {
                 logged_in: true,
                 is_default: false,
                 recommendation: None,
-                usage: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None,
                 exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
@@ -1790,7 +1794,7 @@ mod launch_profile_tests {
                 logged_in: false,
                 is_default: true,
                 recommendation: None,
-                usage: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None,
                 exclusion: None,
             },
         ];
@@ -1824,7 +1828,7 @@ mod launch_profile_tests {
             logged_in: true,
             is_default: true,
             recommendation: None,
-            usage: None,
+            usage: None, windows: Vec::new(), usage_observed_at: None,
             exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});

@@ -239,11 +239,27 @@ pub(crate) struct AgentLatestActivityJson {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) struct AgentTrailJson {
+    pub(crate) step: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) at: Option<String>,
+    pub(crate) reference: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AgentSummaryJson {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) current_task: Option<String>,
+    pub(crate) role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_started_at: Option<String>,
+    pub(crate) recent_trail: Vec<AgentTrailJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) liveness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -83,3 +83,15 @@ export function taskGroups(tasks: readonly ProgressTask[], epics: readonly Relea
     ...(all ? [{ label: "Finished", tasks: scoped.filter(done) }] : []),
   ];
 }
+
+
+/** The rail and Team use the same lifecycle/liveness precedence. */
+export function workerState(worker: WorkerProgress, tasks: readonly FleetTask[]): string {
+  const agent = worker.agent;
+  if (["dead", "offline"].includes(agent?.liveness ?? "")) return "Offline";
+  const task = tasks.find(item => item.id === worker.currentTask);
+  if (task?.delivery_state === "merged") return "Merged";
+  if (statusLabel(task?.status) === "Awaiting merge") return "Parked for merge";
+  const live: Record<string, string> = { executing: "Executing", waiting_for_input: "Waiting", awaiting_first_prompt: "Waiting", budget_aborted: "Budget stopped", stalled: "Stalled" };
+  return live[agent?.liveness ?? ""] ?? statusLabel(agent?.status);
+}

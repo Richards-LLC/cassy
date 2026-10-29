@@ -42,6 +42,22 @@ pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Resul
     Ok(file)
 }
 
+/// A queue may switch branches only inside this worker's own checkout.
+pub(crate) fn ensure_owned_queue_checkout(worker: &Agent) -> Result<(), McpError> {
+    let checkout = worker.metadata.get("clone_path").ok_or_else(|| {
+        error(format!(
+            "Worker {} needs an isolated checkout for task queues; respawn with isolate=true",
+            worker.name
+        ))
+    })?;
+    crate::factory_isolation::verify_worker_worktree_binding(
+        &worker.name,
+        Path::new(checkout),
+        None,
+    )
+    .map_err(error)
+}
+
 /// Only this module can construct a start principal on behalf of a worker.
 pub(crate) struct QueueStartPrincipal(Agent, File);
 impl QueueStartPrincipal {
@@ -116,6 +132,9 @@ impl CasCore {
             .transpose()?;
         let mut queue = queues.get(session, &worker.name).map_err(error)?;
         let changed = task_ids.is_some();
+        if task_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            ensure_owned_queue_checkout(&worker)?;
+        }
         if let Some(ids) = task_ids {
             if expected.is_some_and(|expected| expected != queue.revision) {
                 return Err(error(
@@ -143,6 +162,13 @@ impl CasCore {
                             .is_some_and(|a| a == worker.name || a == worker.id)
                     })
                     .map(|task| task.id);
+            }
+            if queue.current_task.as_deref().is_some_and(|id| {
+                tasks
+                    .get(id)
+                    .is_ok_and(|task| task.status == TaskStatus::InProgress)
+            }) {
+                queue.current_started = true;
             }
             if ids.iter().any(|id| Some(id) == queue.current_task.as_ref()) {
                 return Err(error(
@@ -272,6 +298,7 @@ impl CasCore {
         if queue.revision == 0 {
             return Ok(None);
         }
+        ensure_owned_queue_checkout(&worker)?;
         let retrying = queue.starting && queue.dispatch_from.as_deref() == predecessor;
         let tasks = self.open_task_store()?;
         let agents = self.open_agent_store()?;
@@ -387,6 +414,7 @@ impl CasCore {
                 }
             }
             queue.current_task = selected.clone();
+            queue.current_started = false;
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
             queue.dispatch_revision = queue.revision + 1;
@@ -520,6 +548,11 @@ impl CasCore {
         }
         match result {
             Ok(()) => {
+                queue.current_started = true;
+                // Persist the executed cursor even if its brief cannot be queued.
+                queues
+                    .save(session, &worker.name, &mut queue)
+                    .map_err(error)?;
                 let notification = crate::task_assignment::enqueue_queued(
                     &self.cas_root,
                     &tasks.get(&id).map_err(error)?,
@@ -633,6 +666,23 @@ pub(crate) async fn reconcile_worker_task_queues(
         if queue.revision == 0 {
             continue;
         }
+        // Started work can yield its lease while blocked. Preserve that
+        // execution; only an unstarted spawn head is eligible for skip repair.
+        if queue.current_started
+            && queue.current_task.as_deref().is_some_and(|id| {
+                tasks.get(id).is_ok_and(|task| {
+                    task.assignee
+                        .as_deref()
+                        .is_some_and(|a| a == worker.name || a == worker.id)
+                        && !task.is_terminal()
+                        && !(matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                            && !task.deliverables.merge_conflicted)
+                        && !(queue.starting && task.status == TaskStatus::InProgress)
+                })
+            })
+        {
+            continue;
+        }
         let predecessor = if queue.starting {
             queue.dispatch_from.clone()
         } else if let Some(id) = queue.current_task.clone() {
@@ -644,6 +694,12 @@ pub(crate) async fn reconcile_worker_task_queues(
                         .as_deref()
                         .is_some_and(|a| a == worker.name || a == worker.id)
             }) {
+                if !queue.current_started {
+                    queue.current_started = true;
+                    queues
+                        .save(session, &worker.name, &mut queue)
+                        .map_err(error)?;
+                }
                 continue;
             }
             if task.as_ref().is_some_and(|task| {
@@ -656,6 +712,7 @@ pub(crate) async fn reconcile_worker_task_queues(
                 // registration. Re-select it with the ordinary skip policy.
                 queue.pending.insert(0, id);
                 queue.current_task = None;
+                queue.current_started = false;
                 queues
                     .save(session, &worker.name, &mut queue)
                     .map_err(error)?;

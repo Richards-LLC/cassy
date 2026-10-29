@@ -2554,6 +2554,11 @@ impl CasService {
             }
             let tasks = self.inner.open_task_store()?;
             for id in ids { tasks.get(id).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?; }
+            if req.isolate == Some(false) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Ordered task queues require isolate=true so each task starts in its worker's own checkout"));
+            }
+            req.isolate = Some(true);
             req.task_id = ids.first().cloned();
         }
         let provisioner_build = ctx

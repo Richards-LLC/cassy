@@ -2250,6 +2250,11 @@ impl CasCore {
                 queued_start = true;
             }
         }
+        if queued_start {
+            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
+                "Queued start requires its registered worker"))?;
+            crate::worker_task_queue::ensure_owned_queue_checkout(worker)?;
+        }
         let task_store = self.open_task_store()?;
 
         if let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {

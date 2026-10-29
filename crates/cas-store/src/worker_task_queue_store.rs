@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS spawn_task_queues (
 pub struct WorkerTaskQueue {
     pub revision: u64,
     pub current_task: Option<String>,
+    /// An execution that later blocks is a hold, not an unstarted spawn head.
+    #[serde(default)]
+    pub current_started: bool,
     pub pending: Vec<String>,
     /// An interrupted selection is retried by its predecessor, never popped twice.
     pub dispatch_from: Option<String>,
@@ -154,6 +157,8 @@ mod tests {
         let store = SqliteWorkerTaskQueueStore::open(root.path()).unwrap();
         let mut first = store.get("session", "worker").unwrap();
         let mut stale = first.clone();
+        first.current_task = Some("cas-running".into());
+        first.current_started = true;
         first.pending = vec!["cas-b".into(), "cas-a".into()];
         store.save("session", "worker", &mut first).unwrap();
         stale.pending = vec!["cas-lost".into()];

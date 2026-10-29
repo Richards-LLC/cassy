@@ -170,7 +170,12 @@ impl FactoryDaemon {
             // Navigation remains scoped to the observed native dialog. A stale
             // browser cannot send a key after that dialog disappeared.
             let current = screen(pane);
-            anyhow::ensure!(native_observation(record.receipt.command, "", &current).is_some_and(|(_, open)| open), "The native chooser is no longer open.");
+            if !native_observation(record.receipt.command, "", &current).is_some_and(|(_, open)| open) {
+                record.receipt.phase = Phase::Observed;
+                record.receipt.interactive = false;
+                record.receipt.detail = "The native chooser is no longer open. No additional change was confirmed.".into();
+                return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
+            }
             pane.deliver_user_input(key.bytes(), cas_mux::UserInputKind::KeyStream).await?;
             record.before = current;
             record.started = Instant::now();

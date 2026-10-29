@@ -322,6 +322,12 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
         );
     }
 
+    if config.session_start.enabled {
+        hooks.insert("PostModelSwitch".into(), serde_json::json!([
+            {"hooks": [{"type": "command", "command": "cas hook PostModelSwitch", "timeout": config.session_start.timeout}]}
+        ]));
+    }
+
     // SessionEnd always uses session_start timeout (no separate config needed)
     // async: true - pure cleanup, no context injection
     if config.session_start.enabled {

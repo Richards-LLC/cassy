@@ -27,6 +27,7 @@ pub mod account_registry;
 pub mod account_selection;
 pub mod accounts;
 pub mod agent_id;
+pub mod agent_model;
 pub(crate) mod ai_enrichment;
 pub(crate) mod ambient_recall;
 pub mod artifacts;

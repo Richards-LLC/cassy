@@ -23,6 +23,8 @@ pub const FACTORY_IDENTITY_ENV: &[&str] = &[
     "CAS_FACTORY_WORKER_CLI",
     "CAS_FACTORY_WORKER_MODEL",
     "CAS_FACTORY_WORKER_EFFORT",
+    "CAS_FACTORY_SUPERVISOR_MODEL",
+    "CAS_FACTORY_SUPERVISOR_EFFORT",
 ];
 
 /// Apply the isolation contract to a directly-spawned command.

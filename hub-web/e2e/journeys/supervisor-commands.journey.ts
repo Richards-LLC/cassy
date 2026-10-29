@@ -41,23 +41,46 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(receipt.locator("untrusted")).toHaveCount(0);
         expect(mutations()).toHaveLength(1);
       });
+      await journey.stage("Send pasted paths and unknown slash text as messages (cas-62ea)", async () => {
+        const messages = ["/home/pippenz/notes.md", "/mnt/notes.md review this", "/shell whoami", "//usage"];
+        for (const [index, text] of messages.entries()) {
+          await input.fill(text);
+          await expect(page.locator("#supervisor-command-palette")).toBeHidden();
+          if (index % 2 === 0) await input.press("Enter");
+          else await page.locator("#message-send").click();
+          await expect.poll(() => hub.sends.length).toBe(index + 1);
+          expect(hub.sends[index].text).toBe(text);
+          await expect(input).toHaveValue("");
+        }
+        expect(mutations()).toHaveLength(1);
+      });
+      await journey.stage("Submit an exact Usage token from the composer (cas-62ea)", async () => {
+        await input.fill("/usage");
+        await page.locator("#message-send").click();
+        await expect.poll(() => mutations().length).toBe(2);
+        const request = mutations()[1].body as { client_ref: string; command: string };
+        expect(request.command).toBe("usage");
+        expect(hub.sends).toHaveLength(4);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Usage", interactive: false } } });
+        await expect(page.locator(".supervisor-command-receipt").last()).toHaveAttribute("data-phase", "observed");
+      });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {
         await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
         await page.locator('[data-supervisor-command="clear"]').click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");
         await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-        expect(mutations()).toHaveLength(1);
+        expect(mutations()).toHaveLength(2);
         await expect(input).toBeFocused();
         await input.fill("/exit"); await input.press("Enter");
         await expect(dialog).toContainText("Its harness will end");
         await dialog.getByRole("button", { name: "Exit", exact: true }).click();
-        await expect.poll(() => mutations().length).toBe(2);
-        expect(mutations()[1].body).toMatchObject({ command: "exit", confirmed: true });
+        await expect.poll(() => mutations().length).toBe(3);
+        expect(mutations()[2].body).toMatchObject({ command: "exit", confirmed: true });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
       });
       await journey.stage("Settle Exit from the ended catalog after its status request loses the daemon", async () => {
-        const request = mutations()[1].body as { client_ref: string };
+        const request = mutations()[2].body as { client_ref: string };
         const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/exit" });
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
@@ -70,8 +93,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(receipt).not.toContainText("not sent");
         await expect(receipt).not.toContainText("Retry");
         await expect(page.locator("#conversation-connection")).toContainText("Ended");
-        await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/usage" })).toHaveAttribute("data-phase", "observed");
-        expect(mutations()).toHaveLength(2);
+        for (const receipt of await page.locator(".supervisor-command-receipt").filter({ hasText: "/usage" }).all()) await expect(receipt).toHaveAttribute("data-phase", "observed");
+        expect(mutations()).toHaveLength(3);
       });
     });
   });

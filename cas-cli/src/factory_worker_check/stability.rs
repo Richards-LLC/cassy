@@ -18,6 +18,12 @@ pub(super) struct Proof {
     pub(super) parallelism: u32,
     pub(super) retries: u32,
     pub(super) trials: Vec<Trial>,
+    /// Version 2: touched test id -> its exact compiled names.
+    #[serde(default)]
+    pub(super) cases: BTreeMap<String, Vec<String>>,
+    /// Version 2: compiled name -> its five trial durations in seconds.
+    #[serde(default)]
+    pub(super) durations: BTreeMap<String, Vec<f64>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,13 +36,28 @@ pub(super) struct Trial {
 }
 
 #[derive(Deserialize)]
-struct Plan {
-    base: String,
-    tests: Vec<PlannedTest>,
+pub(super) struct Plan {
+    pub(super) base: String,
+    pub(super) tests: Vec<PlannedTest>,
 }
 
 #[derive(Deserialize)]
-struct PlannedTest { id: String }
+pub(super) struct PlannedTest { pub(super) id: String, pub(super) fingerprint: String }
+
+/// Touched tests at a delivery that lack each kind of commit-bound evidence.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Touched {
+    /// No five-run concurrent pass.
+    pub(crate) unstable: Vec<String>,
+    /// No failing run before the change (fail-first).
+    pub(crate) never_red: Vec<String>,
+    /// Over the runtime budget, with the measured median.
+    pub(crate) over_budget: Vec<(String, String)>,
+}
+
+/// Unit (`--lib`) and integration (`--test`) budgets, in seconds.
+const UNIT_BUDGET: f64 = 1.0;
+const INTEGRATION_BUDGET: f64 = 10.0;
 
 /// Resolve Cargo's target with the runtime's TOML parser. The embedded Python
 /// path therefore keeps supporting hosts whose system Python predates 3.11.
@@ -59,7 +80,7 @@ pub(super) fn target_metadata(repo: &Path, test: &TargetedTest) -> Result<Option
 
 impl Proof {
     pub(super) fn valid(&self, base: &str, head: &str) -> bool {
-        self.version == 1 && self.base == base && self.head == head
+        matches!(self.version, 1 | 2) && self.base == base && self.head == head
             && self.runs == 5 && self.parallelism == 5 && self.retries == 0
             && !self.tests.is_empty() && !self.names.is_empty()
             && self.trials.len() == 5
@@ -69,10 +90,24 @@ impl Proof {
             && self.trials.iter().map(|run| run.started).fold(f64::NEG_INFINITY, f64::max)
                 < self.trials.iter().map(|run| run.ended).fold(f64::INFINITY, f64::min)
     }
+
+    /// The slowest case's median trial time, or why none can be measured.
+    fn median(&self, id: &str) -> Result<f64, String> {
+        let names = self.cases.get(id).filter(|names| !names.is_empty())
+            .ok_or("no per-case durations; rerun through the current capped runner")?;
+        names.iter().map(|name| {
+            let mut times = self.durations.get(name).cloned().unwrap_or_default();
+            if times.len() != 5 || times.iter().any(|time| !time.is_finite()) {
+                return Err(format!("{name} lacks five trial durations"));
+            }
+            times.sort_by(f64::total_cmp);
+            Ok(times[2])
+        }).try_fold(0.0_f64, |slowest, median| median.map(|median| slowest.max(median)))
+    }
 }
 
 /// Planning inspects immutable Git blobs; it never builds or executes tests.
-fn plan(repo: &Path, target: &str, head: &str) -> Result<Plan> {
+pub(super) fn plan(repo: &Path, target: &str, head: &str) -> Result<Plan> {
     let remote = if target.starts_with("origin/") { target.to_owned() } else { format!("origin/{target}") };
     let base = super::git(repo, &["merge-base", &remote, head])
         .or_else(|_| super::git(repo, &["merge-base", target, head]))?;
@@ -87,15 +122,40 @@ fn plan(repo: &Path, target: &str, head: &str) -> Result<Plan> {
     serde_json::from_slice(&output.stdout).context("invalid touched Rust test plan")
 }
 
-pub(super) fn missing(
+/// Every touched test at `head` needs a concurrent pass within its budget
+/// and a failing run before the change; park only reads these receipts.
+pub(super) fn evaluate(
     repo: &Path, target: &str, head: &str,
-    records: &[(String, String, TestReceipt)],
-) -> Result<Vec<String>> {
+    records: &[(String, String, TestReceipt)], reds: &[super::red::Red],
+) -> Result<Touched> {
     let plan = plan(repo, target, head)?;
-    let covered = records.iter().filter_map(|(receipt_head, _, test)| {
-        test.stability.as_ref().filter(|proof| proof.valid(&plan.base, receipt_head))
-    }).flat_map(|proof| proof.tests.iter()).collect::<BTreeSet<_>>();
-    Ok(plan.tests.into_iter().filter_map(|test| (!covered.contains(&test.id)).then_some(test.id)).collect())
+    let mut touched = Touched::default();
+    for test in &plan.tests {
+        let proofs = records.iter().filter_map(|(receipt_head, _, receipt)| {
+            receipt.stability.as_ref()
+                .filter(|proof| proof.valid(&plan.base, receipt_head) && proof.tests.contains(&test.id))
+                .map(|proof| (proof, receipt.harness.is_some()))
+        }).collect::<Vec<_>>();
+        if proofs.is_empty() {
+            touched.unstable.push(test.id.clone());
+        } else {
+            let measured = proofs.iter().map(|(proof, integration)| {
+                let budget = if *integration { INTEGRATION_BUDGET } else { UNIT_BUDGET };
+                proof.median(&test.id).map(|median| (median, budget))
+            }).collect::<Vec<_>>();
+            if !measured.iter().any(|result| matches!(result, Ok((median, budget)) if median <= budget)) {
+                let reason = match &measured[0] {
+                    Ok((median, budget)) => format!("median {median:.3}s over the {budget}s budget"),
+                    Err(reason) => reason.clone(),
+                };
+                touched.over_budget.push((test.id.clone(), reason));
+            }
+        }
+        if !reds.iter().any(|red| red.proves(repo, head, test)) {
+            touched.never_red.push(test.id.clone());
+        }
+    }
+    Ok(touched)
 }
 
 #[cfg(test)]

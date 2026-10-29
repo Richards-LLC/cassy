@@ -128,17 +128,14 @@ pub(super) fn park_refusal(
         && Path::new(path).ancestors().skip(1).any(|dir| proof_repo.join(dir).join("Cargo.toml").is_file()))
     {
         let evidence = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head);
-        match evidence.missing_stability(target) {
-            Ok(missing) if missing.is_empty() => {}
-            result => {
-                let reason = match result {
-                    Ok(missing) => format!("missing five-run evidence for {}", missing.join(", ")),
-                    Err(error) => format!("selection could not be resolved: {error:#}"),
-                };
-                return Some(format!(
-                    "TOUCHED TEST STABILITY REQUIRED at {short}.\n{reason}\nRun the named tests through the capped worker lane, then retry `{caller}task action=close id={}`. Five concurrent zero-retry passes are required; park only reads their bound receipt.", task.id
-                ));
-            }
+        let refusal = match evidence.touched(target) {
+            Ok(touched) => touched_test_refusal(task, &touched),
+            Err(error) => Some(format!("selection could not be resolved: {error:#}")),
+        };
+        if let Some(reason) = refusal {
+            return Some(format!(
+                "TOUCHED TEST EVIDENCE REQUIRED at {short}.\n{reason}\nEvery test earns its place (cas-tdd): run the named tests through the capped worker lane, then retry `{caller}task action=close id={}`. Park only reads their bound receipts.", task.id
+            ));
         }
     }
     // cas-d6eb: a blast-radius module neither declared nor covered by a
@@ -164,6 +161,44 @@ pub(super) fn park_refusal(
         modules = uncovered.join(", "),
         targets = widened.join(","),
     ))
+}
+
+/// A recorded `test-waiver: <kind> <test id> - <reason>` task note line.
+fn waived(task: &Task, kind: &str, id: &str) -> bool {
+    let marker = format!("test-waiver: {kind} {id} - ");
+    task.notes.lines().any(|line| line.split_once(&marker).is_some_and(|(_, reason)| !reason.trim().is_empty()))
+}
+
+/// The touched-test rules park reads from receipts: five concurrent passes,
+/// a failing run before the change, and the runtime budget.
+fn touched_test_refusal(task: &Task, touched: &crate::factory_worker_check::Touched) -> Option<String> {
+    let mut reasons = Vec::new();
+    if !touched.unstable.is_empty() {
+        reasons.push(format!(
+            "missing five-run evidence for {}; five concurrent zero-retry passes are required.",
+            touched.unstable.join(", ")
+        ));
+    }
+    let characterization = task.execution_note.as_deref() == Some("characterization-first");
+    let never_red = touched.never_red.iter()
+        .filter(|id| !characterization && !waived(task, "fail-first", id))
+        .map(String::as_str).collect::<Vec<_>>();
+    if !never_red.is_empty() {
+        reasons.push(format!(
+            "no failing run before the change for {}. Run the test red on a commit before the fix, or revert the fix uncommitted and run `CAS_RED_CONTROL=<label> cargo nextest run ...` (snapshotted to refs/cas/red, never pushed). A test that never failed proves nothing; if it truly cannot fail first, note `test-waiver: fail-first <test id> - <reason>`.",
+            never_red.join(", ")
+        ));
+    }
+    let over = touched.over_budget.iter()
+        .filter(|(id, _)| !waived(task, "budget", id))
+        .map(|(id, reason)| format!("{id} ({reason})")).collect::<Vec<_>>();
+    if !over.is_empty() {
+        reasons.push(format!(
+            "over the runtime budget (unit under 1s, integration under 10s): {}. Move it to a cheaper layer or speed it up; a justified exception notes `test-waiver: budget <test id> - <reason>`.",
+            over.join(", ")
+        ));
+    }
+    (!reasons.is_empty()).then(|| reasons.join("\n"))
 }
 
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
@@ -642,18 +677,37 @@ mod tests {
         std::fs::write(repo.path().join("cas-cli/src/lib.rs"), "#[test] fn new_test() {}\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "new test"]);
+        let red = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("cas-cli/src/fix.rs"), "pub fn fixed() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "fix"]);
         let delivery = git(&["rev-parse", "HEAD"]);
         for package in ["cas", "cas-store"] {
             crate::factory_worker_check::record_passing_test_for_tests(
                 cas_root.path(), repo.path(), &delivery, package, "test(worker)",
             );
         }
+        let id = "cas-cli/src/lib.rs::new_test";
         let refusal = park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").unwrap();
-        assert!(refusal.contains("TOUCHED TEST STABILITY REQUIRED"), "{refusal}");
-        assert!(refusal.contains("cas-cli/src/lib.rs::new_test"), "{refusal}");
-        crate::factory_worker_check::record_stability_for_tests(
-            cas_root.path(), repo.path(), &delivery, &head, "cas", "test(worker)", "cas-cli/src/lib.rs::new_test",
+        assert!(refusal.contains("TOUCHED TEST EVIDENCE REQUIRED"), "{refusal}");
+        assert!(refusal.contains(&format!("missing five-run evidence for {id}")), "{refusal}");
+        // Each touched-test rule refuses alone and is met by its own receipt or waiver.
+        crate::factory_worker_check::record_stability_with_durations_for_tests(
+            cas_root.path(), repo.path(), &delivery, &head, "cas", "test(worker)", id, 2.5,
         );
+        let refusal = park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").unwrap();
+        assert!(!refusal.contains("five-run"), "{refusal}");
+        assert!(refusal.contains(&format!("no failing run before the change for {id}")), "{refusal}");
+        assert!(refusal.contains(&format!("{id} (median 2.500s over the 1s budget)")), "{refusal}");
+        crate::factory_worker_check::record_red_for_tests(cas_root.path(), repo.path(), &red, &delivery, "main", id);
+        let refusal = park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").unwrap();
+        assert!(!refusal.contains("no failing run"), "{refusal}");
+        plain.notes = format!("[2026-10-29 21:00] note test-waiver: budget {id} - spawns a real git fixture");
+        assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").is_none());
+        crate::factory_worker_check::record_stability_for_tests(
+            cas_root.path(), repo.path(), &delivery, &head, "cas", "test(worker)", id,
+        );
+        plain.notes.clear();
         assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").is_none());
 
         // The touched-test check also finds a workspace below the repository root.

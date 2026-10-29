@@ -229,14 +229,20 @@ def discovery(command):
 
 
 def selected(root, touched, requested, cargo, target=None):
+    cases = selected_cases(root, touched, requested, cargo, target)
+    return sorted(cases), sorted({name for names in cases.values() for name in names})
+
+
+def selected_cases(root, touched, requested, cargo, target=None):
+    """Touched test id -> the exact compiled names the requested filter runs."""
     if not touched['tests']:
-        return [], []
+        return {}
     package = requested[requested.index('-p')+1]
     harness = requested[requested.index('--test')+1] if '--test' in requested else None
     graph = source_graph(root, package, harness, target)
     candidates = [t for t in touched['tests'] if (root / t['file']).resolve() in graph]
     if not candidates:
-        return [], []
+        return {}
     index = requested.index('-E')
     listing = discovery([cargo, 'nextest', 'list', *requested[2:index], '--message-format', 'json'])
     names = {}
@@ -245,7 +251,7 @@ def selected(root, touched, requested, cargo, target=None):
             if name in names:
                 raise ValueError('ambiguous compiled test name: '+name)
             names[name] = info
-    identities, exact = [], set()
+    cases = {}
     for test in candidates:
         expected = {'::'.join((*prefix, test['function'])) for prefix in graph[(root / test['file']).resolve()]}
         resolved = [name for name in names if any(name == target or
@@ -262,28 +268,71 @@ def selected(root, touched, requested, cargo, target=None):
                 raise ValueError('touched test is ignored; explicit platform/provider proof required: '+test['id'])
             if not re.fullmatch(r'[A-Za-z0-9_:.-]+', name):
                 raise ValueError('cannot encode exact touched-test name: '+name)
-        identities.append(test['id'])
-        exact.update(selected_names)
-    return sorted(identities), sorted(exact)
+        cases[test['id']] = sorted(selected_names)
+    return cases
 
 
-def verified(script, cargo, args, count, output=None):
+# nextest status lines, with or without the "(i/n)" counter.
+STATUS = re.compile(r'^\s*(PASS|FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|ABORT|LEAK-FAIL)'
+                    r'\s+\[\s*([0-9.]+)s\]\s+(?:\(\d+/\d+\)\s+)?\S+\s+(\S+)\s*$', re.M)
+
+
+def outcomes(path):
+    text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', Path(path).read_text(errors='replace'))
+    return [(m[1], m[3], float(m[2])) for m in STATUS.finditer(text)]
+
+
+def record_red(root, touched, requested, cargo, target, log, receipt):
+    """Bind a failing requested run to the touched tests it ran, for park's fail-first check."""
+    try:
+        cases = selected_cases(root, touched, requested, cargo, target)
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        # A build failure cannot list tests; the test failure itself still stands.
+        print('red: not recorded: '+str(error), flush=True)
+        return
+    failed = {name for status, name, _ in outcomes(log) if status != 'PASS'}
+    tests = [{'id': t['id'], 'fingerprint': t['fingerprint'], 'names': cases[t['id']],
+              'failed': sorted(failed & set(cases[t['id']]))}
+             for t in touched['tests'] if t['id'] in cases]
+    if not any(t['failed'] for t in tests):
+        print('red: not recorded: no touched test failed in this run', flush=True)
+        return
+    receipt.write_text(json.dumps({'version': 1, 'base': touched['base'], 'head': touched['head'],
+                                   'tests': tests,
+                                   'log_sha256': hashlib.sha256(Path(log).read_bytes()).hexdigest()})+'\n')
+    print(f'red: FAIL {touched["head"]} tests={",".join(t["id"] for t in tests if t["failed"])}', flush=True)
+
+
+def verified(script, cargo, args, count, output=None, log=None):
     env = {**os.environ, 'CARGO': str(cargo), 'VERIFIED_TEST_COUNT_FILE': str(count)}
+    if log is not None:
+        env['VERIFIED_TEST_LOG'] = str(log)
     return subprocess.run(['bash', '-c', script, 'worker-stability-tests', *args],
                           env=env, stdout=output, stderr=subprocess.STDOUT if output else None,
                           close_fds=False).returncode
 
 
-def run_requested(root, base, requested, cargo, script, count, target=None):
+def run_requested(root, base, requested, cargo, script, count, target=None, head=None, red=False):
+    """`head` names the tested commit (a red-control snapshot when `red`)."""
     count = Path(count)
     receipt = count.with_suffix('.stability.json')
-    receipt.unlink(missing_ok=True)
-    touched = plan(root, base, git(root, 'rev-parse', 'HEAD').strip())
+    red_receipt = count.with_suffix('.red.json')
+    log = count.with_suffix('.requested.log')
+    for stale in (receipt, red_receipt):
+        stale.unlink(missing_ok=True)
+    touched = plan(root, base, head or git(root, 'rev-parse', 'HEAD').strip())
     # Compile and execute the user's requested affected scope once, as before.
-    result = verified(script, cargo, requested, count)
-    if result:
-        raise SystemExit(result)
-    identities, names = selected(root, touched, requested, cargo, target)
+    try:
+        result = verified(script, cargo, requested, count, log=log)
+        if result:
+            record_red(root, touched, requested, cargo, target, log, red_receipt)
+            raise SystemExit(result)
+    finally:
+        log.unlink(missing_ok=True)
+    if red:
+        raise ValueError('red control: the named tests passed under the mutation; no red receipt recorded')
+    cases = selected_cases(root, touched, requested, cargo, target)
+    identities, names = sorted(cases), sorted({name for found in cases.values() for name in found})
     if not identities:
         return
     directory = Path(tempfile.mkdtemp(prefix='stability-', dir=count.parent))
@@ -311,8 +360,14 @@ def run_requested(root, base, requested, cargo, script, count, target=None):
         raise ValueError('touched-test stability failed; original failed copies retained, no retries; park has no stability receipt')
     if max(t['started'] for t in trials) >= min(t['ended'] for t in trials):
         raise ValueError('five touched-test runs did not overlap; no concurrent stability receipt recorded')
-    proof = {**touched, 'tests': identities, 'names': names, 'runs': 5, 'parallelism': 5,
-             'retries': 0, 'trials': trials, 'load_before': load_before,
+    durations = {name: [] for name in names}
+    for result in trials:
+        for status, name, seconds in outcomes(result['log']):
+            if status == 'PASS' and name in durations:
+                durations[name].append(seconds)
+    proof = {**touched, 'version': 2, 'tests': identities, 'names': names, 'runs': 5, 'parallelism': 5,
+             'retries': 0, 'trials': trials, 'cases': cases, 'durations': durations,
+             'load_before': load_before,
              'load_after': os.getloadavg() if hasattr(os, 'getloadavg') else None}
     receipt.write_text(json.dumps(proof)+'\n')
     print(f'stability: PASS {touched["head"]} tests={len(identities)} runs=5 parallelism=5 retries=0 receipt={receipt}', flush=True)
@@ -327,6 +382,7 @@ def main():
     parser.add_argument('--verified-script')
     parser.add_argument('--count-file')
     parser.add_argument('--target-metadata', default=os.environ.get('CAS_WORKER_STABILITY_TARGET'))
+    parser.add_argument('--red', action='store_true')
     parser.add_argument('args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     root = Path.cwd().resolve()
@@ -335,7 +391,8 @@ def main():
     else:
         requested = args.args[1:] if args.args[:1] == ['--'] else args.args
         run_requested(root, args.base, requested, args.cargo, args.verified_script, args.count_file,
-                      json.loads(args.target_metadata) if args.target_metadata else None)
+                      json.loads(args.target_metadata) if args.target_metadata else None,
+                      args.head, args.red)
 
 
 if __name__ == '__main__':

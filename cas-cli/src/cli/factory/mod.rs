@@ -761,6 +761,10 @@ pub enum FactoryCommands {
         /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
         #[arg(long)]
         isolated_test_env: Option<std::path::PathBuf>,
+        /// Run the named tests once against the uncommitted tracked mutation
+        /// (snapshotted to refs/cas/red/<task>/<n>) and record their failure.
+        #[arg(long)]
+        red_control: Option<String>,
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -1275,14 +1279,16 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 cas_root,
                 detach: true,
                 isolated_test_env,
+                red_control,
                 cargo_args,
-            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref()),
+            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref(), red_control.as_deref()),
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: false,
                 isolated_test_env,
+                red_control,
                 cargo_args,
-            } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
+            } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref(), red_control.as_deref()),
             FactoryCommands::ScratchCheckout { cas_root, task_id, dispatch_id, head } => {
                 let checkout = crate::factory_review_scratch::create(
                     cas_root, &std::env::current_dir()?, task_id, dispatch_id.as_deref(), head,

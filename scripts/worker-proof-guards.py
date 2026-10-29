@@ -122,10 +122,13 @@ def main():
     parser.add_argument('--count-file', required=True)
     parser.add_argument('--stability-script')
     parser.add_argument('--target-metadata', default=os.environ.get('CAS_WORKER_STABILITY_TARGET'))
+    parser.add_argument('--head')
+    parser.add_argument('--red', action='store_true')
     parser.add_argument('args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     repo = Path.cwd()
-    Path(args.count_file).with_suffix('.stability.json').unlink(missing_ok=True)
+    for sidecar in ('.stability.json', '.red.json'):
+        Path(args.count_file).with_suffix(sidecar).unlink(missing_ok=True)
     base = git(repo, 'merge-base', args.base, 'HEAD').strip()
     started = time.monotonic()
     subprocess.run([sys.executable, str(repo / 'scripts/check-test-shape.py'),
@@ -148,7 +151,8 @@ def main():
     exec(source, stability.__dict__)
     stability.run_requested(repo.resolve(), base, requested, args.cargo,
                             args.verified_script, args.count_file,
-                            json.loads(args.target_metadata) if args.target_metadata else None)
+                            json.loads(args.target_metadata) if args.target_metadata else None,
+                            args.head, args.red)
 
 
 if __name__ == '__main__':

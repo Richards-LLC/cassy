@@ -49,3 +49,7 @@ crossterm = "0.29"
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.15"
+
+[[test]]
+name = "concurrent_factory_session_isolation"
+path = "tests/concurrent_factory_session_isolation.rs"

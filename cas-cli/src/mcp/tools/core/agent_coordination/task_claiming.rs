@@ -549,6 +549,9 @@ impl CasCore {
                     let prior_assignee = task.assignee.clone();
                     task.status = TaskStatus::Open;
                     task.assignee = None;
+                    // Returning ownership to the pool also retires its source
+                    // binding; the next holder must capture its own start.
+                    crate::factory_isolation::retire_branch_binding(&mut task.deliverables);
                     task.updated_at = chrono::Utc::now();
                     let ts = task.updated_at.format("%Y-%m-%d %H:%M");
                     let audit = format!(
@@ -611,6 +614,7 @@ impl CasCore {
                             let prior_assignee = task.assignee.clone();
                             task.status = TaskStatus::Open;
                             task.assignee = None;
+                            crate::factory_isolation::retire_branch_binding(&mut task.deliverables);
                             let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                             let audit = format!(
                                 "[{ts}] release: lease absent; auto-recovered from {prior_status:?} (prior assignee: {}) to Open — assumed orphaned by dead session",

@@ -4810,6 +4810,22 @@ async fn test_release_foreign_lease_refusal_uses_registered_role_cas_35af() {
     assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, worker.id);
 }
 
+fn seed_branch_binding_for_release(task: &mut Task) -> String {
+    let assignee = task.assignee.clone().unwrap();
+    let branch = format!("factory/{assignee}");
+    let target = cas::types::WorkTarget {
+        repo_selector: "project:release-fixture".into(), target_branch: "epic/release".into(),
+    };
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target.clone(), assignee, branch: branch.clone(), base_sha: "a".repeat(40),
+    });
+    task.deliverables.work_target = Some(target);
+    task.deliverables.parked_branch = Some(branch);
+    let anchor = "b".repeat(40);
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    anchor
+}
+
 #[tokio::test]
 async fn test_release_active_started_task_resets_status_to_open_and_ready() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -4849,6 +4865,11 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
         .await
         .expect("start should create an active lease");
 
+    let tasks = open_task_store(&_temp.path().join(".cas")).unwrap();
+    let mut started = tasks.get(&id).unwrap();
+    let anchor = seed_branch_binding_for_release(&mut started);
+    tasks.update(&started).unwrap();
+
     let released = service
         .cas_task_release(Parameters(cas::mcp::tools::TaskReleaseRequest {
             task_id: id.clone(),
@@ -4857,6 +4878,11 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
         .await
         .expect("active lease release should succeed");
     let release_text = extract_text(released);
+    let after = tasks.get(&id).unwrap();
+    assert!(after.deliverables.factory_branch_start.is_none()
+        && after.deliverables.parked_branch.is_none()
+        && after.deliverables.factory_branch_anchor.is_none());
+    assert!(after.deliverables.historical_factory_branch_anchors.contains(&anchor));
     assert!(
         release_text.contains("status reset") && release_text.contains("Open"),
         "release must report the lifecycle transition: {release_text}"
@@ -4960,6 +4986,11 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
         .await
         .expect("status update");
 
+    let tasks = open_task_store(&_temp.path().join(".cas")).unwrap();
+    let mut orphan = tasks.get(&id).unwrap();
+    let anchor = seed_branch_binding_for_release(&mut orphan);
+    tasks.update(&orphan).unwrap();
+
     // Call release — no active lease exists for this agent, and the task is
     // InProgress. The handler must auto-recover instead of surfacing the raw
     // "No active lease found" error.
@@ -4970,6 +5001,11 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
         }))
         .await
         .expect("release auto-recovery must succeed for lease-less InProgress");
+    let after = tasks.get(&id).unwrap();
+    assert!(after.deliverables.factory_branch_start.is_none()
+        && after.deliverables.parked_branch.is_none()
+        && after.deliverables.factory_branch_anchor.is_none());
+    assert!(after.deliverables.historical_factory_branch_anchors.contains(&anchor));
     let text = extract_text(released);
     assert!(
         text.contains("auto-recovered") || text.contains("Released"),

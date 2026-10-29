@@ -29,11 +29,15 @@ pub(crate) fn delivery_tip_belongs_to_task(
     tip: &str,
 ) -> bool {
     let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-    if let Some(start) = task.deliverables.factory_branch_start.as_ref() {
-        return task.assignee.as_deref() == Some(start.assignee.as_str())
+    // Older release paths retained the preceding holder's start. Like close
+    // attribution, ignore an unusable binding and require explicit task commit
+    // identity below; a stale record cannot veto the new holder's own work.
+    if let Some(start) = task.deliverables.factory_branch_start.as_ref().filter(|start| {
+        task.assignee.as_deref() == Some(start.assignee.as_str())
             && task.deliverables.work_target.as_ref() == Some(&start.work_target)
             && branch == start.branch
-            && tip != start.base_sha
+    }) {
+        return tip != start.base_sha
             && super::close_ops::git_commit_is_ancestor(repo, &start.base_sha, tip);
     }
     let identity = super::close_ops::task_commit_identity(task, None);

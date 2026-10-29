@@ -4,6 +4,26 @@
 use super::*;
 
 pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Result<bool> {
+    if !agent.metadata.contains_key("clone_path") { return Ok(false); }
+    let tasks = snapshot_worker_tasks(cas_root, agent)?;
+    retire_worker_with_snapshot(cas_root, agent, &tasks)
+}
+
+/// Capture ownership before shutdown releases task bindings. No Git or target I/O.
+pub(crate) fn snapshot_worker_tasks(cas_root: &Path, agent: &cas_types::Agent) -> io::Result<Vec<cas_types::Task>> {
+    let tasks = crate::store::open_task_store(cas_root).map_err(io::Error::other)?
+        .list(None).map_err(io::Error::other)?;
+    Ok(tasks.into_iter().filter(|task| task.assignee.as_deref()
+        .is_some_and(|owner| owner == agent.id || owner == agent.name)).collect())
+}
+
+/// The frozen task facts retain safety and evidence ownership even after release.
+/// The existing live registry/task recheck still fences changes during cleanup.
+pub(crate) fn retire_worker_with_snapshot(
+    cas_root: &Path,
+    agent: &cas_types::Agent,
+    tasks: &[cas_types::Task],
+) -> io::Result<bool> {
     let Some(worktree) = agent.metadata.get("clone_path") else {
         return Ok(false);
     };
@@ -14,9 +34,7 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
     );
     // A worker's latest task is the receipt owner. Unassociated retired workers
     // have a separate inventory-only namespace, never closed-task artifact GC.
-    let store = crate::store::open_task_store(cas_root).map_err(io::Error::other)?;
-    let tasks = store.list(None).map_err(io::Error::other)?;
-    if !delivery_safe(agent, &tasks) {
+    if !delivery_safe(agent, tasks) {
         tracing::warn!(worker = %agent.name, "retired target deferred: nonterminal or unpushed work");
         return Ok(false);
     }

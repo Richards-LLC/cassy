@@ -1532,6 +1532,22 @@ pub struct CrashCleanupOutcome {
     pub worktree: Option<crate::worktree::WorktreeResult<RemoveOutcome>>,
 }
 
+pub(crate) const WORKER_CLEANUP_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub(crate) struct WorkerCleanupJob {
+    pub(crate) worker: String,
+    pub(crate) occurrence: String,
+    pub(crate) started: Instant,
+    pub(crate) warned: bool,
+    pub(crate) handle: std::thread::JoinHandle<CrashCleanupOutcome>,
+}
+
+impl WorkerCleanupJob {
+    pub(crate) fn new(worker: String, handle: std::thread::JoinHandle<CrashCleanupOutcome>) -> Self {
+        Self { worker, occurrence: uuid::Uuid::new_v4().to_string(), started: Instant::now(), warned: false, handle }
+    }
+}
+
 /// cas-58a3: the I/O half of [`FactoryApp::mark_worker_crashed`], for a job
 /// lane. The interactive leader may have exited while a long-lived child
 /// remains in its process group: reap the durable group before the lane is
@@ -3122,14 +3138,14 @@ impl FactoryApp {
                     // cleanup could cancel its resume brief before registration.
                     // Like a live-pane recycle, release only the old leases:
                     // task bindings and unread mail belong to the replacement.
+                    let agent = (*matching[0]).clone();
+                    let tasks = crate::factory_target_cache::retirement::snapshot_worker_tasks(self.cas_dir(), &agent);
                     for agent in matching {
                         if let Err(error) = agent_store.graceful_shutdown(&agent.id) {
                             defer_worker_retirement(self.cas_dir(), &agent.id, &error.to_string());
                         }
-                        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(self.cas_dir(), agent) {
-                            tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
-                        }
                     }
+                    self.queue_worker_cleanup(&agent_store, agent, tasks, false);
                     self.last_db_fingerprint = None;
                     return Ok(Vec::new());
                 }
@@ -3282,13 +3298,9 @@ impl FactoryApp {
         // Check before settling bindings: that step can clear task assignees.
         // Retirement checks the configured scratch path and preserves evidence
         // before deleting; no absent in-tree target can stand in for success.
-        let target_retired = match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
-            Ok(complete) => complete,
-            Err(error) => {
-                tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
-                false
-            }
-        };
+        let retirement_tasks = if agent.metadata.contains_key("clone_path") {
+            crate::factory_target_cache::retirement::snapshot_worker_tasks(&cas_dir, agent)
+        } else { Ok(Vec::new()) };
 
         // Only after the process is actually gone: a shutdown parks and
         // releases what the worker held; a recycle keeps it (cas-a622).
@@ -3326,9 +3338,8 @@ impl FactoryApp {
         // work. Dirty trees are preserved for the daemon reaper (Unit 3) to
         // salvage later, and we flag the agent record + warn the supervisor so
         // nothing is silently abandoned.
-        if target_retired && crate::worktree::should_finalize_worker_worktree(preserve_worktree, has_open_tasks) {
-            self.finalize_worker_worktree(&agent_store, &agent_id, name);
-        }
+        self.queue_worker_cleanup(&agent_store, agent.clone(), retirement_tasks,
+            crate::worktree::should_finalize_worker_worktree(preserve_worktree, has_open_tasks));
 
         // Sync pane sizes to adjust layout
         let _ = self.sync_pane_sizes();
@@ -3336,29 +3347,38 @@ impl FactoryApp {
         Ok(released_task_ids)
     }
 
-    /// Queue final worktree removal after graceful shutdown. Git, symlink
-    /// scans and filesystem deletion must not hold the daemon's control loop.
+    /// Queue target retirement and optional worktree removal after shutdown.
+    /// Git, evidence copies and deletion must not hold the control loop.
     /// Reserve the name until its outcome lands, just as crash cleanup does.
-    fn finalize_worker_worktree(
+    fn queue_worker_cleanup(
         &mut self,
         agent_store: &std::sync::Arc<dyn cas_store::AgentStore>,
-        agent_id: &str,
-        name: &str,
+        agent: cas_types::Agent,
+        tasks: std::io::Result<Vec<cas_types::Task>>,
+        remove_worktree: bool,
     ) {
-        let Some(plan) = self
-            .worktree_manager
-            .as_ref()
-            .and_then(|manager| manager.worker_removal_plan(name))
-        else {
-            return;
-        };
+        if !agent.metadata.contains_key("clone_path") { return; }
+        let name = agent.name.clone();
+        let plan = remove_worktree.then(|| self.worktree_manager.as_ref()
+            .and_then(|manager| manager.worker_removal_plan(&name))).flatten();
+        let cas_dir = self.cas_dir().to_path_buf();
         let agents = std::sync::Arc::clone(agent_store);
-        let agent_id = agent_id.to_string();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        *self.crash_cleanups_pending.entry(name.to_string()).or_default() += 1;
+        let agent_id = agent.id.clone();
         let started = std::thread::Builder::new()
             .name(format!("worktree-cleanup-{name}"))
             .spawn(move || {
+                let retired = tasks.and_then(|tasks|
+                    crate::factory_target_cache::retirement::retire_worker_with_snapshot(&cas_dir, &agent, &tasks));
+                match retired {
+                    Ok(true) => {}
+                    result => {
+                        if let Err(error) = result {
+                            tracing::warn!(%error, worker = %agent.name, "retired target evidence/reclamation deferred; checkout retained");
+                        }
+                        return CrashCleanupOutcome { worktree: None };
+                    }
+                }
+                let Some(plan) = plan else { return CrashCleanupOutcome { worktree: None }; };
                 let outcome = crate::worktree::remove_worker_worktree_io(&plan);
                 if let Ok(RemoveOutcome::DirtyDeferred(warning)) = &outcome {
                     if let Err(e) = flag_agent_dirty_on_shutdown(
@@ -3370,13 +3390,41 @@ impl FactoryApp {
                         tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
                     }
                 }
-                let _ = sender.send(CrashCleanupOutcome { worktree: Some(outcome) });
+                CrashCleanupOutcome { worktree: Some(outcome) }
             });
         match started {
-            Ok(_) => self.worktree_cleanup_jobs.push((name.to_string(), receiver)),
+            Ok(handle) => self.register_worker_cleanup(WorkerCleanupJob::new(name, handle)),
             Err(error) => {
-                self.abandon_crash_cleanup(name);
                 self.set_error(format!("Worker '{name}' worktree cleanup failed: {error}"));
+            }
+        }
+    }
+
+    pub(crate) fn register_worker_cleanup(&mut self, job: WorkerCleanupJob) {
+        *self.crash_cleanups_pending.entry(job.worker.clone()).or_default() += 1;
+        self.worktree_cleanup_jobs.push(job);
+    }
+
+    pub(crate) fn join_worker_worktree_cleanups(&mut self) {
+        for job in std::mem::take(&mut self.worktree_cleanup_jobs) {
+            self.apply_worker_cleanup(job);
+        }
+    }
+
+    pub(crate) fn worker_cleanup_threads_running(&self) -> bool {
+        self.worktree_cleanup_jobs.iter().any(|job| !job.handle.is_finished())
+    }
+
+    /// A warning is spent only after its durable write is admitted.
+    pub(crate) fn warn_worker_cleanups_at(
+        &mut self,
+        now: Instant,
+        mut warn: impl FnMut(&str, &str, std::time::Duration) -> bool,
+    ) {
+        for job in &mut self.worktree_cleanup_jobs {
+            let elapsed = now.saturating_duration_since(job.started);
+            if !job.warned && !job.handle.is_finished() && elapsed >= WORKER_CLEANUP_WARN_AFTER {
+                job.warned = warn(&job.worker, &job.occurrence, elapsed);
             }
         }
     }
@@ -3387,19 +3435,22 @@ impl FactoryApp {
 
     /// Apply finished removals without waiting for Git or filesystem work.
     pub(crate) fn poll_worker_worktree_cleanups(&mut self) {
-        use std::sync::mpsc::TryRecvError;
         let mut pending = Vec::new();
-        for (name, receiver) in std::mem::take(&mut self.worktree_cleanup_jobs) {
-            match receiver.try_recv() {
-                Ok(outcome) => self.apply_crash_cleanup(&name, outcome),
-                Err(TryRecvError::Empty) => pending.push((name, receiver)),
-                Err(TryRecvError::Disconnected) => {
-                    self.abandon_crash_cleanup(&name);
-                    self.set_error(format!("Worker '{name}' worktree cleanup failed: cleanup thread exited without an outcome"));
-                }
-            }
+        for job in std::mem::take(&mut self.worktree_cleanup_jobs) {
+            if job.handle.is_finished() { self.apply_worker_cleanup(job); }
+            else { pending.push(job); }
         }
         self.worktree_cleanup_jobs = pending;
+    }
+
+    fn apply_worker_cleanup(&mut self, job: WorkerCleanupJob) {
+        match job.handle.join() {
+            Ok(outcome) => self.apply_crash_cleanup(&job.worker, outcome),
+            Err(_) => {
+                self.abandon_crash_cleanup(&job.worker);
+                self.set_error(format!("Worker '{}' worktree cleanup failed: cleanup thread panicked", job.worker));
+            }
+        }
     }
 
     /// Mark a worker as crashed (removes from tracking, keeps worktree for respawn)
@@ -6481,11 +6532,35 @@ mod tests {
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
 
-    /// Shutdown must give control back while Git's worktree cleanup is held.
+    #[test]
+    fn exit_joins_held_cleanup_before_releasing_name_cas_af63() {
+        use std::sync::mpsc;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (release, held) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = held.recv();
+            CrashCleanupOutcome { worktree: None }
+        });
+        let (returned, observe) = mpsc::channel();
+        let gate = std::thread::spawn(move || {
+            let returned_before_release = observe.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+            drop(release);
+            returned_before_release
+        });
+        let mut app = FactoryApp::for_test_at(_env.home().join("project/.cas"));
+        app.register_worker_cleanup(WorkerCleanupJob::new("held-worker".into(), handle));
+        app.join_worker_worktree_cleanups();
+        let _ = returned.send(());
+        assert!(!gate.join().unwrap(), "exit returned while cleanup still held");
+        assert!(!app.worker_worktree_cleanups_pending());
+        assert!(!app.crash_cleanup_pending("held-worker"));
+    }
+
+    /// Shutdown must give control back while Git inside target retirement is held.
     /// The same name cannot be relaunched underneath that outstanding cleanup.
     #[cfg(unix)]
-    #[test]
-    fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
+    #[tokio::test]
+    async fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
         use std::io::{Read, Write};
         use std::os::unix::fs::PermissionsExt;
         use std::sync::mpsc;
@@ -6502,6 +6577,8 @@ mod tests {
         git(&["init", "-q"]);
         git(&["config", "user.name", "Fixture"]);
         git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        git(&["add", ".gitignore"]);
         git(&["commit", "--allow-empty", "-qm", "fixture"]);
         let cas = crate::store::init_cas_dir(&repo).unwrap();
         let mut manager = WorktreeManager::new(&repo, crate::worktree::WorktreeConfig {
@@ -6512,6 +6589,15 @@ mod tests {
         let name = "held-cleanup";
         manager.create_for_worker(name).unwrap();
         let worker = manager.worker_removal_plan(name).unwrap().worktree.path;
+        drop(crate::factory_target_cache::owner::acquire(&cas, &worker).unwrap().unwrap());
+        let target = crate::factory_scratch::worker_target_dir(&worker);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("worker-check.log"), "preserve proof").unwrap();
+        let agents = open_agent_store(&cas).unwrap();
+        let mut agent = cas_types::Agent::new("fixture-agent".into(), name.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.metadata.insert("clone_path".into(), worker.display().to_string());
+        agents.register(&agent).unwrap();
         let entered = env.home().join("entered");
         let release = env.home().join("release");
         for path in [&entered, &release] {
@@ -6524,7 +6610,8 @@ mod tests {
             env.home().join("once").display(), entered.display(), release.display(),
         )).unwrap();
         std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o700)).unwrap();
-        git(&["config", "core.fsmonitor", monitor.to_str().unwrap()]);
+        git(&["config", "extensions.worktreeConfig", "true"]);
+        git(&["-C", worker.to_str().unwrap(), "config", "--worktree", "core.fsmonitor", monitor.to_str().unwrap()]);
         let (returned_tx, returned_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let gate = std::thread::spawn(move || {
@@ -6538,7 +6625,14 @@ mod tests {
         });
         let mut app = FactoryApp::for_test_at(cas.clone());
         app.set_worktree_manager_for_test(manager);
-        app.finalize_worker_worktree(&open_agent_store(&cas).unwrap(), "fixture-agent", name);
+        let pty = cas_mux::Pty::spawn(name, cas_mux::PtyConfig {
+            command: "/bin/sleep".into(), args: vec!["300".into()],
+            cwd: Some(worker.clone()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        app.shutdown_worker(name, true).await.unwrap();
         let _ = returned_tx.send(());
         let reserved = app.crash_cleanup_pending(name);
         let _ = release_tx.send(());
@@ -6550,6 +6644,7 @@ mod tests {
             std::thread::park_timeout(Duration::from_millis(1));
         }
         assert!(!worker.exists(), "the released Git cleanup must finish");
+        assert!(!target.exists(), "target retirement finishes before checkout removal");
         assert!(!app.crash_cleanup_pending(name), "completed cleanup releases the name");
         assert!(app.worktree_manager().unwrap().worker_removal_plan(name).is_none());
     }

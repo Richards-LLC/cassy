@@ -6154,3 +6154,61 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
 
 #[path = "accounts_route_tests.rs"]
 mod accounts_route_tests;
+
+/// Native model observations reach both read APIs without borrowing another role/session.
+#[test]
+fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status() {
+    use crate::store::{AgentStore, init_cas_dir};
+    use crate::ui::factory::create_metadata;
+    use cas_types::{Agent, AgentRole};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let project = env.home().join("model-project");
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    let store = crate::store::open_agent_store(&root).unwrap();
+    let session = SessionInfo { name: "model-session".into(),
+        metadata: create_metadata("model-session", std::process::id(), "lead", &["helper".into()], None, project.to_str(), Some(4173)),
+        is_running: true, socket_exists: true };
+    for (id, role, harness, model, effort) in [
+        ("lead", AgentRole::Supervisor, "claude", "claude-opus-5-5", "high"),
+        ("helper", AgentRole::Worker, "codex", "gpt-6.1-sol", "xhigh"),
+    ] {
+        let mut agent = Agent::new_with_role(id.into(), id.into(), role);
+        agent.factory_session = Some(session.name.clone());
+        let prefix = if role == AgentRole::Worker { "worker" } else { "supervisor" };
+        agent.metadata.insert(format!("{prefix}_cli"), harness.into());
+        // Opposite-role launch defaults cannot supply this pane's observations.
+        agent.metadata.insert(if role == AgentRole::Worker { "supervisor_model" } else { "worker_model" }.into(), "wrong-model".into());
+        store.register(&agent).unwrap();
+        let input = serde_json::from_value(serde_json::json!({
+            "session_id": id, "hook_event_name":"PostModelSwitch",
+            "from_model":"old", "to_model":model, "effort":{"level":effort}
+        })).unwrap();
+        crate::hooks::handle_hook("PostModelSwitch", input).unwrap();
+    }
+    let catalog = serde_json::to_value(hub_session(&session)).unwrap();
+    assert_eq!(catalog["model"], "claude-opus-5-5");
+    assert_eq!(catalog["effort"], "high");
+    assert_eq!(catalog["workers"], serde_json::json!(["helper"]));
+    let status = serde_json::to_value(crate::bridge::server::session::build_status_json(&session, &root, 20).unwrap()).unwrap();
+    for view in [&catalog, &status] {
+        let agents = view["agents"].as_array().unwrap();
+        for (name, harness, model, effort) in [("lead", "claude", "claude-opus-5-5", "high"), ("helper", "codex", "gpt-6.1-sol", "xhigh")] {
+            let row = agents.iter().find(|row| row["name"] == name).unwrap();
+            assert_eq!(row["harness"], harness);
+            assert_eq!(row["model"], model);
+            assert_eq!(row["effort"], effort);
+        }
+    }
+    // A pre-switch attempt is not a completed selection.
+    crate::hooks::handle_hook("PreModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"unconfirmed"})).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(hub_session(&session)).unwrap()["model"], "claude-opus-5-5");
+    // Changing models without an effort observation clears the old model's effort.
+    crate::hooks::handle_hook("PostModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"claude-sonnet-5-5"})).unwrap()).unwrap();
+    let changed = serde_json::to_value(hub_session(&session)).unwrap();
+    assert_eq!(changed["model"], "claude-sonnet-5-5");
+    assert!(changed.get("effort").is_none());
+    let missing = serde_json::to_value(hub_session(&SessionInfo { name:"unreported".into(), ..session })).unwrap();
+    assert!(missing.get("model").is_none());
+    assert!(missing.get("effort").is_none());
+}

@@ -891,6 +891,7 @@ fn hook_entries_emit_shell_form_command() {
 
     for (event, expected_command) in &[
         ("SessionStart", "cas hook SessionStart"),
+        ("PostModelSwitch", "cas hook PostModelSwitch"),
         ("SessionEnd", "cas hook SessionEnd"),
         ("Stop", "cas hook Stop"),
         ("SubagentStart", "cas hook SubagentStart"),

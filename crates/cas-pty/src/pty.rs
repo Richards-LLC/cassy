@@ -6723,6 +6723,15 @@ echo SMOKE_DONE
     // -------------------------------------------------------------------
 
     #[test]
+    fn supervisor_launch_records_own_model_and_effort() {
+        let _env = TestEnvGuard::new();
+        let config = PtyConfig::claude("lead", "supervisor", PathBuf::from("/tmp"), None, None, None, Some("claude-opus-5-5"), Some("high"), None);
+        assert!(config.env.iter().any(|(key, value)| key == "CAS_FACTORY_SUPERVISOR_MODEL" && value == "claude-opus-5-5"));
+        assert!(config.env.iter().any(|(key, value)| key == "CAS_FACTORY_SUPERVISOR_EFFORT" && value == "high"));
+        assert!(!config.env.iter().any(|(key, _)| key == "CAS_FACTORY_WORKER_MODEL"));
+    }
+
+    #[test]
     fn opencode_worker_launch_is_self_contained_and_model_driven() {
         let _env = TestEnvGuard::new();
         let cwd = std::env::temp_dir().join("cas-opencode-worker");

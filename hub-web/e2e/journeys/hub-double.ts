@@ -1343,6 +1343,7 @@ export class HubDouble {
     const subscribed = new Set<string>();
     const channel = (session: string): WebSocketRoute => ({
       send: (text: string) => { if (!this.stalledSockets.has(ws)) ws.send(JSON.stringify({ channel: `pty:${session}`, message: JSON.parse(text) })); },
+      close: () => { subscribed.delete(session); ws.send(JSON.stringify({ channel: `pty:${session}`, closed: true })); },
     }) as unknown as WebSocketRoute;
     ws.onMessage((data) => {
       if (this.stalledSockets.has(ws) || !this.reachable(machineId)) { this.stalledSockets.add(ws); return; }

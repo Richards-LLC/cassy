@@ -652,9 +652,11 @@ impl SessionInfo {
             .collect();
         // The daemon's actual pane roster spans the registration gap during
         // a same-name recycle. A dead metadata PID cannot keep a lane alive.
-        names.extend(self.metadata.workers.iter()
-            .filter(|worker| worker.pid.is_some_and(is_process_running))
-            .map(|worker| worker.name.clone()));
+        names.extend(
+            self.metadata.workers.iter()
+                .filter(|worker| worker.pid.is_some_and(is_process_running))
+                .map(|worker| worker.name.clone()),
+        );
         Some(names.into_iter().collect())
     }
 

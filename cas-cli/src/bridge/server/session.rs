@@ -220,22 +220,30 @@ fn session_agents(
             // Task ownership survives a harness recycle. Keep retired IDs
             // only for this logical worker in the selected session; a same-
             // name registration in another session is not an alias.
-            let aliases: std::collections::HashSet<_> = registrations.iter()
-                .filter(|registration| registration.name == agent.name && registration.role == agent.role)
+            let aliases: std::collections::HashSet<_> = registrations
+                .iter()
+                .filter(|registration| {
+                    registration.name == agent.name && registration.role == agent.role
+                })
                 .map(|registration| registration.id.as_str())
                 .chain(std::iter::once(agent.name.as_str()))
                 .collect();
-            let task = held.iter()
-                .filter(|task| task.assignee.as_deref().is_some_and(|owner| aliases.contains(owner)))
-                .min_by_key(|task| (
-                    match task.status {
-                        TaskStatus::InProgress => 0,
-                        TaskStatus::Open => 1,
-                        TaskStatus::Blocked => 2,
-                        _ => 3,
-                    },
-                    std::cmp::Reverse(task.updated_at),
-                ));
+            let task = held
+                .iter()
+                .filter(|task| {
+                    task.assignee.as_deref().is_some_and(|owner| aliases.contains(owner))
+                })
+                .min_by_key(|task| {
+                    (
+                        match task.status {
+                            TaskStatus::InProgress => 0,
+                            TaskStatus::Open => 1,
+                            TaskStatus::Blocked => 2,
+                            _ => 3,
+                        },
+                        std::cmp::Reverse(task.updated_at),
+                    )
+                });
             let (task_started_at, recent_trail) = worker_task_facts(root, &events, task)?;
             Ok(AgentSummaryJson {
                 role: agent.role.to_string(),
@@ -755,7 +763,7 @@ mod focused_epic_tests {
         let mut next = Task::new("cas-next-assignment".into(), "New assignment".into());
         next.assignee = Some(current.name.clone());
         tasks.add(&next).unwrap();
-        for owner in [&current.name, &previous.id] {
+        for owner in [&current.name, &current.id, &previous.id] {
             next.assignee = Some(owner.clone());
             for state in [TaskStatus::Open, TaskStatus::InProgress] {
                 next.status = state;
@@ -765,6 +773,19 @@ mod focused_epic_tests {
                 assert_eq!(worker.current_task.as_deref(), Some(next.id.as_str()), "{owner} / {state}");
             }
         }
+        // A fresher same-name registration in another factory is neither
+        // this session's authoritative worker nor an ownership alias.
+        let mut foreign = current.clone();
+        foreign.id = "foreign-worker".into();
+        foreign.factory_session = Some("other-session".into());
+        foreign.last_heartbeat += chrono::Duration::seconds(1);
+        agents.register(&foreign).unwrap();
+        next.assignee = Some(foreign.id);
+        tasks.update(&next).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let worker = status.agents.iter().find(|agent| agent.name == current.name).unwrap();
+        assert_eq!(worker.id, current.id);
+        assert_eq!(worker.current_task.as_deref(), Some(parked.id.as_str()));
     }
 
     #[test]

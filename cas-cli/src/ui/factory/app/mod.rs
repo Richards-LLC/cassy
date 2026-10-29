@@ -2334,9 +2334,13 @@ impl FactoryApp {
 
     /// Publish changed pane identities, including a same-name replacement's
     /// new PID. This never performs filesystem work on the daemon loop.
-    pub(crate) fn take_worker_roster_write(&mut self) -> Option<(PathBuf, Vec<crate::ui::factory::protocol::AgentInfo>)> {
+    pub(crate) fn take_worker_roster_write(
+        &mut self,
+    ) -> Option<(PathBuf, Vec<crate::ui::factory::protocol::AgentInfo>)> {
         let session = self.factory_session.as_deref()?;
-        let roster: Vec<_> = self.worker_names.iter()
+        let roster: Vec<_> = self
+            .worker_names
+            .iter()
             .map(|name| (name.clone(), self.mux.pane_process_group_id(name)))
             .collect();
         if self.last_worker_roster_write.as_ref() == Some(&roster) {
@@ -2344,8 +2348,9 @@ impl FactoryApp {
         }
         self.last_worker_roster_write = Some(roster.clone());
         let workers = roster.into_iter().map(|(name, pid)| {
-            let worktree_path = self.worktree_manager.as_ref()
-                .map(|manager| manager.worktree_path_for_worker(&name).to_string_lossy().into_owned());
+            let worktree_path = self.worktree_manager.as_ref().map(|manager| {
+                manager.worktree_path_for_worker(&name).to_string_lossy().into_owned()
+            });
             crate::ui::factory::protocol::AgentInfo { name, pid, worktree_path }
         }).collect();
         Some((crate::ui::factory::session::metadata_path(session), workers))

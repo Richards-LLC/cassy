@@ -1571,6 +1571,10 @@ async fn long_transcript_recycle(register_replacement: bool) {
             tasks.get("cas-recycled-held").unwrap().status,
             cas_types::TaskStatus::Open,
         );
+        daemon.flush_epic_focus_write(&store_worker);
+        assert!(store_worker.wait_idle(Duration::from_secs(5)));
+        let session = crate::ui::factory::SessionManager::new().find_session(Some(SESSION)).unwrap().unwrap();
+        assert_eq!(session.metadata.workers.iter().map(|worker| worker.name.as_str()).collect::<Vec<_>>(), vec!["roster-peer"]);
     } else {
         assert_eq!(
             state.as_deref(),

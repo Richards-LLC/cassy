@@ -149,6 +149,29 @@ export function commandReceiptNode(receipt: CommandReceipt, step?: (key: Command
   return row;
 }
 
+/** Reconcile by command identity so a poll cannot erase disclosure or focus. */
+export function updateCommandReceipts(parent: HTMLElement, receipts: readonly CommandReceipt[], step: (ref: string, key: CommandKey) => void): void {
+  const kept = new Set<HTMLElement>();
+  for (const receipt of receipts) {
+    const existing = [...parent.children].find(child => (child as HTMLElement).dataset.commandRef === receipt.client_ref) as HTMLElement | undefined;
+    const signature = JSON.stringify(receipt);
+    if (existing?.dataset.signature === signature) { kept.add(existing); continue; }
+    const row = commandReceiptNode(receipt, key => step(receipt.client_ref, key));
+    row.dataset.commandRef = receipt.client_ref; row.dataset.signature = signature;
+    const focused = existing?.contains(document.activeElement);
+    const label = focused ? document.activeElement?.textContent : undefined;
+    const open = existing?.querySelector("details")?.open;
+    if (open && row.querySelector("details")) row.querySelector("details")!.open = true;
+    if (existing) existing.replaceWith(row); else parent.append(row);
+    if (focused) {
+      const control = [...row.querySelectorAll<HTMLElement>("button, summary")].find(node => node.textContent === label);
+      row.tabIndex = -1; (control ?? row).focus();
+    }
+    kept.add(row);
+  }
+  for (const child of [...parent.children]) if (!kept.has(child as HTMLElement)) child.remove();
+}
+
 interface SessionOptions {
   unavailable(): string | undefined;
   control(): Promise<void>;

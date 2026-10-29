@@ -1,4 +1,4 @@
-import { commandReceiptNode, type CommandReceipt, type CommandKey } from "./supervisor-commands";
+import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
 import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
@@ -709,8 +709,7 @@ export class ConversationView {
     if (signature === this.commandSignature) return;
     this.commandSignature = signature;
     this.commands.hidden = !receipts.length;
-    const nodes = receipts.map(receipt => commandReceiptNode(receipt, key => this.options.commandStep?.(receipt.client_ref, key)));
-    this.commands.replaceChildren(...nodes);
+    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key));
   }
 
   /** Scroll-only window changes reuse the last data/state presentation. */

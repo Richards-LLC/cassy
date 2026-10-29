@@ -834,3 +834,24 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
 - A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
 - A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.
+
+### HUB-J26 · Run a supervisor command and read what the harness did
+
+- **Entry:** `/commander/`, paired Claude or Codex conversation, desktop and 390 px
+- **Goal:** choose a curated command from `/` or the header, confirm destructive actions, and distinguish requested input from observed harness execution
+- **Touches:** `hub-web/src/supervisor-commands.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs`, `cas-cli/src/hub/server.rs`, `cas-cli/src/hub/auth.rs`
+- **Suite:** `hub-web/e2e/journeys/supervisor-commands.journey.ts`
+- **Gaps:** browser outcomes use protocol doubles. Rust tests enforce the allowlist, lease, confirmation and private receipts; disposable real Claude and Codex probes verify native mappings.
+
+#### Steps
+
+1. Type `/us`, navigate to Usage by keyboard, and run it once; ordinary message sends stay empty.
+2. Read the pending receipt before the observed native outcome; output is escaped text and no mutation is replayed.
+3. Open the same list from the header, cancel Clear, then explicitly confirm Exit for the named supervisor.
+4. Without pane input, read the permission reason and send no command; adjacent Raw output stays readable and Escape returns focus.
+
+#### Expected experience
+
+- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
+- Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
+- Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.

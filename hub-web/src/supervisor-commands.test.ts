@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode } from "./supervisor-commands";
+import { SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
 
 describe("supervisor slash commands", () => {
   it("filters the real composer palette and keeps arbitrary slash text out of message sends", async () => {
@@ -46,6 +46,17 @@ describe("supervisor slash commands", () => {
 });
 
 describe("supervisor command receipts", () => {
+  it("keeps output open and keyboard focus through receipt updates", () => {
+    const parent = document.createElement("section"); document.body.replaceChildren(parent);
+    const receipt: CommandReceipt = { client_ref: "cmd-1", command: "usage", phase: "observed", detail: "Usage shown", output: "Usage", interactive: false };
+    updateCommandReceipts(parent, [receipt], () => {});
+    const details = parent.querySelector("details")!; details.open = true;
+    parent.querySelector("summary")!.focus();
+    updateCommandReceipts(parent, [{ ...receipt, output: "Usage updated" }], () => {});
+    expect(parent.querySelector("details")!.open).toBe(true);
+    expect(document.activeElement).toBe(parent.querySelector("summary"));
+  });
+
   it("settles a pending Exit from the authoritative session end without claiming Finish completed", async () => {
     vi.useFakeTimers();
     try {

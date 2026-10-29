@@ -3372,7 +3372,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-command-palette [role="alertdialog"] button,
 .supervisor-command-receipt button { min-height: 44px; margin: var(--space-1); }
 .supervisor-command-receipts { margin: var(--space-4); }
-.supervisor-command-receipt { border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); color: var(--ink-mid); }
+.supervisor-command-receipt { border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); background: var(--bg-panel); color: var(--ink-mid); }
 .supervisor-command-receipt strong { color: var(--ink); font-family: var(--font-mono); }
 .supervisor-command-receipt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: var(--fs-xs)/var(--line-ui) var(--font-mono); }
 #conversation-commands .action-label { display: none; }

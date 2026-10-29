@@ -437,8 +437,16 @@ fn project_deliveries(
             .into_iter()
             .filter(|task| task.status != cas_types::TaskStatus::Cancelled)
             .collect();
+        // Undelivered assignments contribute to total, but their worker's
+        // reused lane cannot establish a merge for this task. Do not spend
+        // the bounded proof budget measuring unrelated work on that lane.
+        let deliveries: Vec<_> = children
+            .iter()
+            .filter(|task| task.has_delivery_to_integrate() && has_recorded_delivery(task))
+            .cloned()
+            .collect();
         let collection = collect_epic_projection_statuses(
-            &children,
+            &deliveries,
             target,
             repo,
             EpicStatusOptions {
@@ -491,7 +499,7 @@ fn project_deliveries(
             }
         }
         progress.last_merged_at = last.map(|at| at.to_rfc3339());
-        if !collection.budget_exhausted && collection.statuses.len() == children.len() {
+        if !collection.budget_exhausted && collection.statuses.len() == deliveries.len() {
             epic.progress = Some(progress);
         }
     }
@@ -801,6 +809,8 @@ mod focused_epic_tests {
         store.add(&epic).unwrap();
         for (id, status, delivered) in [
             ("cas-landed", TaskStatus::AwaitingMerge, true),
+            ("cas-landed-2", TaskStatus::AwaitingMerge, true),
+            ("cas-landed-3", TaskStatus::AwaitingMerge, true),
             ("cas-open", TaskStatus::Open, false),
             ("cas-active", TaskStatus::InProgress, false),
             ("cas-cancel", TaskStatus::Cancelled, false),
@@ -816,8 +826,9 @@ mod focused_epic_tests {
             if delivered {
                 child.deliverables.factory_branch_anchor = Some(anchor.clone());
                 child.deliverables.merge_commit = Some(anchor.clone());
-                child.deliverables.parked_branch = Some("factory/worker-cas-landed".into());
-                git(&["branch", "factory/worker-cas-landed", &anchor]);
+                let branch = format!("factory/worker-{id}");
+                child.deliverables.parked_branch = Some(branch.clone());
+                git(&["branch", &branch, &anchor]);
             }
             store.add(&child).unwrap();
             store
@@ -843,7 +854,7 @@ mod focused_epic_tests {
         for _ in 0..4 {
             status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
             if status["epics"].as_array().unwrap().iter().any(|item| {
-                item["id"] == epic.id && item["progress"]["total"] == 3
+                item["id"] == epic.id && item["progress"]["total"] == 5
             }) {
                 break;
             }
@@ -874,9 +885,9 @@ mod focused_epic_tests {
             .iter()
             .find(|item| item["id"] == epic.id)
             .unwrap()["progress"];
-        assert_eq!(progress["total"], 3);
-        assert_eq!(progress["merged"], 1);
-        assert_eq!(progress["merges_per_hour"], 1);
+        assert_eq!(progress["total"], 5);
+        assert_eq!(progress["merged"], 3);
+        assert_eq!(progress["merges_per_hour"], 3);
         assert!(
             chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok()
         );
@@ -910,7 +921,7 @@ mod focused_epic_tests {
         let progress = &changed["epics"]
             .as_array().unwrap().iter()
             .find(|item| item["id"] == epic.id).unwrap()["progress"];
-        assert_eq!(progress["total"], 3);
+        assert_eq!(progress["total"], 5);
         assert_eq!(progress["merged"], 0, "moved refs must not reuse a live merge verdict");
         assert!(progress["last_merged_at"].is_null());
     }

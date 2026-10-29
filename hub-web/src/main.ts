@@ -1,5 +1,3 @@
-import { AccountsSheet } from "./accounts-panel";
-import "./accounts-panel.css";
 import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
@@ -1198,14 +1196,21 @@ const launchSheet = new LaunchSheet({
   returnFocus: () => document.querySelector<HTMLButtonElement>("#new-session-toggle")?.focus(),
 });
 
-const accountsSheet = new AccountsSheet({
-  machines: () => [...machines.values()].map(machine => ({ id: machine.id, label: machine.label, scopes: machine.scopes })),
-  list: (machineId, signal) => launchConnection(machineId).accounts(signal),
-  change: (machineId, change) => launchConnection(machineId).changeAccount(change),
-  changed: machineId => launchSheet.accountsChanged(machineId),
-  copy: text => navigator.clipboard.writeText(text),
-  returnFocus: () => document.querySelector<HTMLButtonElement>("#accounts-toggle")?.focus(),
-});
+let accountsSheet: Promise<import("./accounts-panel").AccountsSheet> | undefined;
+function openAccounts(): void {
+  accountsSheet ??= import("./accounts-panel").then(({ AccountsSheet }) => new AccountsSheet({
+    machines: () => [...machines.values()].map(machine => ({ id: machine.id, label: machine.label, scopes: machine.scopes })),
+    list: (machineId, signal) => launchConnection(machineId).accounts(signal),
+    change: (machineId, change) => launchConnection(machineId).changeAccount(change),
+    changed: machineId => launchSheet.accountsChanged(machineId),
+    copy: text => navigator.clipboard.writeText(text),
+    returnFocus: () => document.querySelector<HTMLButtonElement>("#accounts-toggle")?.focus(),
+  }));
+  void accountsSheet.then(sheet => sheet.open()).catch(() => {
+    accountsSheet = undefined;
+    toast("Could not open Accounts. Try again or reload Commander.");
+  });
+}
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
@@ -5594,7 +5599,7 @@ function bindEvents(): void {
   const paletteLaunch = palette.querySelector<HTMLButtonElement>("[data-palette-action='new-session']");
   if (paletteLaunch) paletteLaunch.onclick = () => { closePalette(); launchSheet.open(); };
   const accountsToggle = document.querySelector<HTMLButtonElement>("#accounts-toggle");
-  if (accountsToggle) accountsToggle.onclick = () => accountsSheet.open();
+  if (accountsToggle) accountsToggle.onclick = openAccounts;
   const newSession = document.querySelector<HTMLButtonElement>("#new-session-toggle");
   if (newSession) newSession.onclick = () => launchSheet.open();
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");

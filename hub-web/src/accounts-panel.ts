@@ -1,3 +1,4 @@
+import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
 import { accountCapacity, type AccountChange, type AccountOperation, type AccountRow, type AccountsCatalog } from "./accounts-model";

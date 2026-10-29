@@ -10987,6 +10987,7 @@ impl FactoryDaemon {
     /// `spawn_blocking`. Only one background spawn runs at a time. Each tick we
     /// either: (a) check if the in-flight spawn finished, or (b) start a new one.
     pub(super) async fn process_pending_spawns(&mut self) {
+        self.app.poll_worker_worktree_cleanups();
         // Step 1: Check if in-flight background spawn completed
         let spawn_finished = self
             .spawn_task

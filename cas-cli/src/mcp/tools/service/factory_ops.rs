@@ -12004,8 +12004,8 @@ pub(crate) fn worker_liveness_for_agent(
 
 /// cas-9bf6: the execution evidence `worker_status` reports for `worker`,
 /// reused by the director's stall classifier so the two surfaces agree.
-/// `executing` is the worker_status liveness verdict (turn evidence within
-/// `stall_secs`, or a CPU-busy harness); `worktree_activity_age` is the
+/// `executing` is the shared worker_status verdict: turn/process evidence,
+/// or recent local work while the transcript is unresolved. `worktree_activity_age` is the
 /// freshest scoped dirty-file or HEAD commit age, using the same probe as
 /// is-wedged. Only this registered worker's checkout is read.
 /// `None` when the worker is unknown.
@@ -18959,6 +18959,9 @@ effort = "high"
                 assert_eq!(store.get(&agent.id).unwrap().last_heartbeat, agent.last_heartbeat);
                 std::fs::remove_file(&path).unwrap();
             }
+            if index == 4 {
+                std::fs::remove_file(&path).unwrap();
+            }
             // Terminal turns and confirmed exits still beat fresh activity.
             // Row 3 has only expired own activity and fresh foreign activity.
             if matches!(index, 0 | 2 | 3 | 4) {
@@ -18968,6 +18971,10 @@ effort = "high"
             if index == 5 {
                 queue.enqueue_with_session(&agent.name, "supervisor", "working after recycle",
                     "liveness-fixture-session").unwrap();
+            }
+            if index == 3 {
+                queue.enqueue_with_session(&agent.name, "supervisor", "different factory",
+                    "foreign-factory-session").unwrap();
             }
         }
         events.record(&make_event(cas_types::EventType::WorkerActivity, "foreign-worker", 0)).unwrap();

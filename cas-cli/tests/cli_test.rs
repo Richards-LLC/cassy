@@ -3246,6 +3246,12 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     use std::path::{Path, PathBuf};
     use std::fs;
 
+    let mut env = crate::test_env_guard::TestEnvGuard::new();
+    let gate = tempfile::Builder::new().prefix("cas-release-gate.").tempdir_in("/tmp").unwrap();
+    let deep_tmp = gate.path().join("schedule/nextest.tmp");
+    fs::create_dir_all(&deep_tmp).unwrap();
+    env.set("TMPDIR", &deep_tmp);
+
     // The real projects live under the runtime fixture parent, like every
     // real-project fixture.
     let fixture = tempfile::tempdir_in(cas::test_paths::runtime_fixture_parent()).unwrap();

@@ -64,7 +64,8 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
-    let artifacts = temp.path().join("artifacts");
+    // A release-gate temporary root can make the bounded start pointer clip.
+    let artifacts = temp.path().join("long-artifact-root-".repeat(8));
     std::fs::write(
         cas_dir.join("config.toml"),
         format!("[factory]\nartifacts_root = {:?}\n", artifacts.display().to_string()),

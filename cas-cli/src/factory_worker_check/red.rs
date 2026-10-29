@@ -113,9 +113,16 @@ fn snapshot(repo: &Path, label: &str, task: &str) -> Result<Snapshot> {
     if !valid_label(label) {
         bail!("Red-control label must be 1-64 characters of [A-Za-z0-9_.:-]");
     }
-    let status = git(repo, &["status", "--porcelain", "--untracked-files=all"])?;
-    if status.lines().any(|line| line.starts_with("??")) {
-        bail!("Red control runs against a tracked-only mutation; remove or commit the untracked files first");
+    // `git` trims the output, so read raw porcelain lines: XY, a space, the path.
+    let status = Command::new("git").args(["status", "--porcelain", "--untracked-files=all"])
+        .env("GIT_OPTIONAL_LOCKS", "0").current_dir(repo).output()?;
+    if !status.status.success() {
+        bail!("git status failed");
+    }
+    if String::from_utf8_lossy(&status.stdout).lines()
+        .any(|line| !line.bytes().take(2).all(|code| matches!(code, b' ' | b'M' | b'D')))
+    {
+        bail!("Red control runs against a mutation of tracked files only; remove, unstage or commit added, renamed and untracked files first");
     }
     let parent = git(repo, &["rev-parse", "HEAD"])?;
     let paths = git(repo, &["diff", "--name-only", "--no-renames", "HEAD"])?
@@ -132,7 +139,11 @@ fn snapshot(repo: &Path, label: &str, task: &str) -> Result<Snapshot> {
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     };
-    plumbing(&["read-tree", "HEAD"])?;
+    // Start from the worktree's own index so `add -u` reuses its stat cache.
+    let real_index = repo.join(git(repo, &["rev-parse", "--git-path", "index"])?);
+    if std::fs::copy(&real_index, index.path()).is_err() {
+        plumbing(&["read-tree", "HEAD"])?;
+    }
     plumbing(&["add", "-u", "--", "."])?;
     let tree = plumbing(&["write-tree"])?;
     let commit = plumbing(&[
@@ -177,6 +188,12 @@ pub(super) fn execute(
     let restore = Restore { repo: &repo, snapshot: &snapshot };
     let result = run_capped(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, Some(&snapshot));
     drop(restore);
+    if result.is_err() {
+        eprintln!(
+            "red control {label}: mutated files restored; re-apply the mutation with `git diff HEAD {} | git apply` to retry",
+            snapshot.commit,
+        );
+    }
     result
 }
 

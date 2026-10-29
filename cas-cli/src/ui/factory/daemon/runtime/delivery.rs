@@ -2164,6 +2164,15 @@ mod tests {
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Unattributed));
         }
 
+        let command = ClientMessage::SupervisorCommand {
+            command: crate::ui::factory::supervisor_commands::SupervisorCommand::Finish,
+            client_ref: "cmd-finish".into(), confirmed: true, attribution: commander_attribution(),
+        };
+        for relay in [false, true] {
+            let Some(CommanderControl::SupervisorCommand { attribution, .. }) = commander_control_from_message(&command, relay) else { panic!("command control expected") };
+            assert_eq!(attribution.operator_verified, relay, "Finish must retain only authenticated operator provenance");
+        }
+
         // The hub relay's authenticated connection keeps the hub's verdict.
         let relayed =
             super::super::ws_client::commander_control_from_ws_message(&forged, true).unwrap();

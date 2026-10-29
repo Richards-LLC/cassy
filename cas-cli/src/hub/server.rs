@@ -4881,6 +4881,52 @@ mod upstream_unavailable_tests {
     use super::*;
     use crate::hub::SessionMultiplexer;
 
+    #[tokio::test]
+    async fn supervisor_commands_require_control_confirmation_and_private_audited_receipts() {
+        use crate::ui::factory::supervisor_commands::{SupervisorCommand, SupervisorCommandPhase, SupervisorCommandReceipt};
+        let temp = crate::test_support::private_hub_tempdir();
+        let root = temp.path().join("hub");
+        let auth = AuthStore::open(&root, "command-machine").unwrap();
+        let now = chrono::Utc::now();
+        let scopes: std::collections::BTreeSet<Scope> = [Scope::PaneInput, Scope::PaneRead].into_iter().collect();
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), now).unwrap();
+        let credential = auth.exchange_pairing(PairingExchange::test_fixture(invitation.token, "command-machine", "https://controller.example", scopes.clone()), now).unwrap();
+        let context = AuthContext {
+            device_id: credential.device_id, credential_id: credential.credential_id,
+            device_label: "phone".into(), operator_label: "Operator".into(),
+            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(),
+        };
+        let trusted = Some((auth.clone(), context.clone()));
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let command = |name: &str, confirmed: bool| serde_json::to_vec(&serde_json::json!({
+            "SupervisorCommand": {"command": name, "confirmed": confirmed, "client_ref": "cmd-test"}
+        })).unwrap();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&no_lease), "a command without control reached the daemon boundary");
+        auth.acquire_lease(&context, "command-session", now).unwrap();
+        let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false)).await.unwrap_err();
+        assert!(unconfirmed.to_string().contains("confirmation"));
+        let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true)).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&arbitrary));
+        let allowed = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        assert!(is_upstream_unavailable(&allowed), "allowlisted leased command did not reach the connector: {allowed:#}");
+
+        let mut pending = PendingRefs::new();
+        pending.insert(("command-session".into(), "cmd-test".into()), PendingRefKind::SupervisorCommand);
+        let mut receipt = SupervisorCommandReceipt { device_id: "another-device".into(), client_ref: "cmd-test".into(), command: SupervisorCommand::Compact,
+            phase: SupervisorCommandPhase::Observed, detail: "Native context reset observed".into(), output: String::new(), interactive: false };
+        let frame = |receipt| serde_json::to_vec(&DaemonMessage::SupervisorCommandReceipt { receipt }).unwrap();
+        assert!(!admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &frame(receipt.clone())));
+        receipt.device_id = context.device_id;
+        let bytes = frame(receipt);
+        assert!(admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &bytes));
+        assert!(!admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &bytes));
+        let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = audit.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(rows.iter().any(|row| row["action"] == "supervisor_command_invalid" && row["outcome"] == "denied"));
+        assert!(rows.iter().any(|row| row["action"] == "supervisor_command_receipt" && row["outcome"] == "observed"));
+    }
+
     /// Semantic sends need message:send alone, even without a pane lease.
     /// They reach the upstream boundary; raw terminal input remains refused.
     #[tokio::test]

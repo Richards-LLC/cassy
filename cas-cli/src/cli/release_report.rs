@@ -1269,18 +1269,18 @@ fn plain_change_title(title: &str) -> String {
 }
 
 /// The shipped changes in one CHANGELOG section. A titled heading
-/// (`### Fixed — what changed (refs)`) is one change; under an untitled
+/// (`### Fixed — what changed (refs)`) is one change unless top-level
+/// bold-titled entries identify it as a group. Under a group or an untitled
 /// heading each bullet is one change, titled by its bold lead-in.
 fn changelog_changes(body: &str) -> Vec<ShippedChange> {
     let mut changes = Vec::new();
     let mut kind = "Changes".to_string();
     let mut titled: Option<(String, String)> = None;
     let mut bullet: Option<String> = None;
+    let bold_title = Regex::new(r"^\*\*([^*]+)\*\*").expect("bold change title regex");
     let flush_bullet = |bullet: &mut Option<String>, kind: &str, changes: &mut Vec<ShippedChange>| {
         if let Some(text) = bullet.take() {
-            let title = Regex::new(r"^\*\*([^*]+)\*\*")
-                .ok()
-                .and_then(|regex| regex.captures(&text))
+            let title = bold_title.captures(&text)
                 .and_then(|capture| capture.get(1))
                 .map(|lead| lead.as_str().to_string())
                 .unwrap_or_else(|| heading_from_entry(&clean_markdown_text(&text)));
@@ -1302,6 +1302,14 @@ fn changelog_changes(body: &str) -> Vec<ShippedChange> {
     };
     for line in body.lines() {
         let trimmed = line.trim();
+        // A group's title is context, not an extra shipped change. Only a
+        // top-level titled entry switches modes; nested bold details retain
+        // the legacy single-change heading above them.
+        if titled.is_some()
+            && line.strip_prefix("- ").is_some_and(|entry| bold_title.is_match(entry))
+        {
+            titled = None;
+        }
         if let Some(heading) = trimmed.strip_prefix("### ") {
             flush_bullet(&mut bullet, &kind, &mut changes);
             flush_titled(&mut titled, &kind, &mut changes);

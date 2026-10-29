@@ -577,7 +577,7 @@ fn mark_recommendation(
     let selection = crate::account_selection::recommend(accounts, provider, now, policy);
     for row in rows {
         row.usage = accounts.iter().find(|account| account.name == row.name)
-            .and_then(|account| crate::cli::limits::summarize_windows_at(&account.windows, now));
+            .and_then(|account| crate::cli::limits::summarize_account_at(account, now));
         row.recommendation = selection
             .recommended
             .as_ref()

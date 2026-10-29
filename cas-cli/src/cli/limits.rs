@@ -300,15 +300,26 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
 
 /// Keep observation age next to capacity rather than implying a live probe.
 pub(crate) fn observation_label(observed_at: Option<DateTime<Utc>>) -> String {
-    observed_at.map(|at| format!(" as of {}", super::release_report::eastern_time(at)))
-        .unwrap_or_default()
+    observation_label_at(observed_at, Utc::now())
+}
+
+pub(crate) fn observation_label_at(observed_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    observed_at.map(|at| {
+        let at = super::release_report::eastern(at);
+        let stamp = if at.date_naive() == super::release_report::eastern(now).date_naive() {
+            at.format("%-I:%M %p ET").to_string()
+        } else {
+            at.format("%-d %B %Y · %-I:%M %p ET").to_string()
+        };
+        format!(" as of {stamp}")
+    }).unwrap_or_default()
 }
 
 pub(crate) fn summarize_account_at(account: &crate::account_registry::Account, now: DateTime<Utc>) -> Option<String> {
     let observed = account.usage_observed_at.filter(|_| account.provider == crate::accounts::Provider::Claude);
     summarize_windows_at(&account.windows, now)
         .map(|summary| match observed {
-            Some(_) => format!("{summary};{}", observation_label(observed)),
+            Some(_) => format!("{summary};{}", observation_label_at(observed, now)),
             None => summary,
         })
 }

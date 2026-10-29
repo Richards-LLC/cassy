@@ -969,6 +969,36 @@ mod tests {
     }
 
     #[test]
+    fn changelog_gate_recognizes_crlf_unreleased_headings_and_entries() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let empty_crlf = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n"
+            .replace('\n', "\r\n");
+        std::fs::write(repo.path().join("CHANGELOG.md"), empty_crlf).unwrap();
+        let unnoted = commit_changelog_fixture(repo.path(), "keep the CRLF release section");
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        let refusal = park_refusal(
+            cas_root.path(),
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &unnoted,
+            "main",
+        );
+        assert!(refusal.is_some(), "a CRLF Unreleased heading must enforce the gate");
+
+        let titled_crlf = "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Current status is visible** — The project card reflects the latest session state.\n\n## [1.0.0] - 2026-01-01\n"
+            .replace('\n', "\r\n");
+        std::fs::write(repo.path().join("CHANGELOG.md"), titled_crlf).unwrap();
+        let titled = commit_changelog_fixture(repo.path(), "add titled CRLF release note");
+        let changed = ["CHANGELOG.md".into(), "hub-web/src/app.ts".into()];
+        assert!(park_refusal(
+            cas_root.path(), repo.path(), &task, &changed, &titled, "main",
+        ).is_none(), "a titled entry under a CRLF Unreleased heading should pass");
+    }
+
+    #[test]
     fn changelog_templates_do_not_satisfy_entry_or_exception() {
         let repo = changelog_fixture();
         let mut task = Task::new("cas-changelog-fixture".into(), "delivery".into());
@@ -988,6 +1018,7 @@ mod tests {
         for entry in [
             "### Added — <area>\n\n- **Commander shows session state** — The status line follows live events.",
             "### Added — Commander\n\n- **Title** — What changed.",
+            "### Added — Commander\n\n- **Session state stays current** — <What changed>.",
         ] {
             let repo = changelog_fixture();
             std::fs::write(

@@ -262,7 +262,7 @@ class FastRows(unittest.TestCase):
         missing_title = self.fast()
         self.assertNotEqual(missing_title.returncode, 0, missing_title.stdout + missing_title.stderr)
         self.assertIn("FAIL changelog-and-versions", missing_title.stdout)
-        self.assertIn("needs a titled entry", missing_title.stdout)
+        self.assertIn("titled category and area format", missing_title.stdout)
 
         self.write("CHANGELOG.md", (
             "## [Unreleased]\n\n### Fixed — Fixture\n\n"

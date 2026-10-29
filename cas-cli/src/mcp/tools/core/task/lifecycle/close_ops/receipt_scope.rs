@@ -824,6 +824,7 @@ mod tests {
         std::fs::write(repo.path().join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
         repo
     }
 

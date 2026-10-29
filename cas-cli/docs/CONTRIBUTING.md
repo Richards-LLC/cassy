@@ -58,6 +58,12 @@ label and the durable reply reference.
 
 ## Supervisor succession and committed-work recovery
 
+Worker liveness uses concrete turn and process evidence. While a recycled
+worker's transcript is unresolved, its own recent activity or outbound message
+to the supervisor/director can establish execution within the configured stall
+window. Heartbeats and other workers' activity cannot. Resolved terminal turns
+and confirmed process exits retain precedence over this fallback.
+
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
 parked refs/PRs, pending messages and asks at startup, with a full JSON receipt in

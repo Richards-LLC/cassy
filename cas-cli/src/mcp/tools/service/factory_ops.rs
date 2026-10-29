@@ -11962,7 +11962,44 @@ pub(crate) fn worker_liveness_for_agent(
             };
         }
     }
-    super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs)
+    let mut observation = super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs);
+    // A recycled harness can perform authenticated work before its new
+    // transcript resolves or the first CPU delta is available. Use its own
+    // local activity, never heartbeat or another worker's progress, in that
+    // observation gap. Concrete turn/terminal and process-death evidence wins.
+    if observation.state == super::worker_liveness::Liveness::Stalled
+        && path.as_deref().is_none_or(|path| !path.exists())
+    {
+        let recent_age = |at| {
+            let age = (now - at).num_seconds();
+            (0..=stall_secs).contains(&age).then_some(age)
+        };
+        let activity = crate::store::open_event_store(cas_root).ok()
+            .and_then(|events| events.latest_worker_activity(&agent.id, &agent.name).ok().flatten())
+            .and_then(|event| recent_age(event.created_at))
+            .map(|age| ("worker activity", age))
+            .or_else(|| {
+                let targets: std::collections::BTreeSet<String> = crate::store::open_agent_store(cas_root).ok()
+                    .and_then(|agents| agents.list(None).ok()).unwrap_or_default().into_iter()
+                    .filter(|other| other.visible_to_factory_session(agent.factory_session.as_deref())
+                        && matches!(other.role, cas_types::AgentRole::Supervisor | cas_types::AgentRole::Director))
+                    .flat_map(|other| [other.name, other.id])
+                    .chain(["supervisor".to_string(), "director".to_string()]).collect();
+                let targets: Vec<_> = targets.iter().map(String::as_str).collect();
+                crate::store::open_prompt_queue_store(cas_root).ok()
+                    .and_then(|queue| queue.latest_created_at_for_targets_from_sources(
+                        &[&agent.name, &agent.id], &targets, agent.factory_session.as_deref(),
+                    ).ok())
+                    .and_then(|timestamps| timestamps.into_values().max())
+                    .and_then(recent_age)
+                    .map(|age| ("outbound message", age))
+            });
+        if let Some((source, age)) = activity {
+            observation.state = super::worker_liveness::Liveness::Executing;
+            observation.evidence = format!("recent {source} {age}s ago; {}", observation.evidence);
+        }
+    }
+    observation
 }
 
 /// cas-9bf6: the execution evidence `worker_status` reports for `worker`,

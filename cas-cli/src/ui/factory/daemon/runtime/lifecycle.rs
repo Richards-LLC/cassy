@@ -5,6 +5,8 @@ use crate::ui::factory::daemon::imports::*;
 pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// How often the loop runs while an urgent inject is settling (cas-786a6).
 const URGENT_INJECT_POLL_MS: u64 = 25;
+/// Cleanup gets the same grace as the director shutdown drain, never forever.
+const WORKER_CLEANUP_EXIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Stable identity for one alarm episode, independent of delivery retries.
 /// Session scope belongs to the caller's outer key. Tuple encoding prevents
@@ -3495,6 +3497,7 @@ impl FactoryDaemon {
         // cas-786a6: the loop's prompt-queue handle is opened (schema init
         // once) before this thread becomes a lane, and claims a previous
         // daemon never handed off are released.
+        self.app.resume_deferred_worker_cleanups();
         self.release_orphaned_claims_at_start();
         let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
@@ -4229,7 +4232,7 @@ impl FactoryDaemon {
         drop(director_refresh);
         // Keep warning writes alive while exit waits for owned filesystem jobs.
         // No cleanup is abandoned or allowed to outlive the daemon's teardown.
-        self.finish_worker_cleanup_jobs_for_exit(Duration::from_secs(10)).await;
+        self.finish_worker_cleanup_jobs_for_exit(WORKER_CLEANUP_EXIT_BUDGET).await;
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
         // Stop recording if it was enabled
@@ -4281,12 +4284,15 @@ impl FactoryDaemon {
         Ok(())
     }
 
-    /// Cleanup on shutdown
-    async fn finish_worker_cleanup_jobs_for_exit(&mut self, _budget: Duration) -> Vec<String> {
+    /// Drain owned cleanup without letting a hung job prevent daemon teardown.
+    async fn finish_worker_cleanup_jobs_for_exit(&mut self, budget: Duration) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + budget;
         while self.app.worker_cleanup_threads_running() {
             self.poll_worker_cleanup_jobs_at(Instant::now());
             if self.app.worker_cleanup_threads_running() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() { return self.app.detach_unfinished_worker_cleanups(); }
+                tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
             }
         }
         self.app.join_worker_worktree_cleanups();
@@ -5161,10 +5167,12 @@ mod communication_summary_tests {
         })));
         let result = tokio::time::timeout(std::time::Duration::from_secs(2),
             daemon.finish_worker_cleanup_jobs_for_exit(std::time::Duration::from_millis(100))).await;
+        let still_reserved = daemon.app.crash_cleanup_pending("held-worker");
         drop(release);
         daemon.app.join_worker_worktree_cleanups();
         assert!(result.is_ok(), "held cleanup exceeded the daemon exit budget");
         assert_eq!(result.unwrap(), vec!["held-worker"]);
+        assert!(still_reserved, "detaching must not allow name reuse during teardown");
     }
 
     #[tokio::test]

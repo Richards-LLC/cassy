@@ -1540,11 +1540,75 @@ pub(crate) struct WorkerCleanupJob {
     pub(crate) started: Instant,
     pub(crate) warned: bool,
     pub(crate) handle: std::thread::JoinHandle<CrashCleanupOutcome>,
+    pub(crate) recovery_path: Option<PathBuf>,
 }
 
 impl WorkerCleanupJob {
     pub(crate) fn new(worker: String, handle: std::thread::JoinHandle<CrashCleanupOutcome>) -> Self {
-        Self { worker, occurrence: uuid::Uuid::new_v4().to_string(), started: Instant::now(), warned: false, handle }
+        Self { worker, occurrence: uuid::Uuid::new_v4().to_string(), started: Instant::now(), warned: false, handle, recovery_path: None }
+    }
+}
+
+/// Pending work survives a bounded daemon exit, independently of agent-row deletion.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeferredWorkerCleanup {
+    occurrence: String,
+    agent: cas_types::Agent,
+    tasks: Vec<cas_types::Task>,
+    worktree: Option<(cas_types::Worktree, PathBuf)>,
+}
+
+impl DeferredWorkerCleanup {
+    fn path(&self, root: &std::path::Path) -> PathBuf {
+        root.join("worker-cleanups").join(format!("{}.json", self.occurrence))
+    }
+
+    fn persist(&self, root: &std::path::Path) -> anyhow::Result<()> {
+        use std::io::Write;
+        let path = self.path(root);
+        let directory = path.parent().unwrap();
+        std::fs::create_dir_all(directory)?;
+        anyhow::ensure!(std::fs::symlink_metadata(directory)?.file_type().is_dir(), "cleanup intent directory is not a real directory");
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer(temporary.as_file_mut(), self)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&path)?;
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok(())
+    }
+
+    fn run(&self, root: &std::path::Path) -> anyhow::Result<CrashCleanupOutcome> {
+        let Some(clone_path) = self.agent.metadata.get("clone_path") else {
+            return Ok(CrashCleanupOutcome { worktree: None });
+        };
+        let path = std::path::Path::new(clone_path);
+        if !path.exists() && !crate::factory_scratch::worker_target_dir(path).exists() {
+            return Ok(CrashCleanupOutcome { worktree: None });
+        }
+        if let Some((worktree, _)) = &self.worktree {
+            anyhow::ensure!(worktree.path.canonicalize()? == path.canonicalize()?, "cleanup worktree differs from its retired owner");
+        }
+        anyhow::ensure!(
+            crate::factory_target_cache::retirement::retire_worker_with_snapshot(root, &self.agent, &self.tasks)?,
+            "target retirement deferred; recovery intent retained"
+        );
+        let Some((worktree, repo_root)) = &self.worktree else {
+            return Ok(CrashCleanupOutcome { worktree: None });
+        };
+        let outcome = crate::worktree::remove_worker_worktree_io(&crate::worktree::WorkerRemovalPlan {
+            worker_name: self.agent.name.clone(), worktree: worktree.clone(), repo_root: repo_root.clone(),
+        });
+        if let Ok(RemoveOutcome::DirtyDeferred(warning)) = &outcome {
+            if let Err(error) = (|| -> anyhow::Result<()> {
+                let agents = open_agent_store(root)?;
+                flag_agent_dirty_on_shutdown(agents.as_ref(), &self.agent.id, &warning.path, warning.file_count)
+            })()
+            {
+                tracing::warn!(%error, worker = %self.agent.name, "could not flag dirty cleanup output");
+            }
+        }
+        Ok(CrashCleanupOutcome { worktree: Some(outcome) })
     }
 }
 
@@ -3352,52 +3416,102 @@ impl FactoryApp {
     /// Reserve the name until its outcome lands, just as crash cleanup does.
     fn queue_worker_cleanup(
         &mut self,
-        agent_store: &std::sync::Arc<dyn cas_store::AgentStore>,
+        _agent_store: &std::sync::Arc<dyn cas_store::AgentStore>,
         agent: cas_types::Agent,
         tasks: std::io::Result<Vec<cas_types::Task>>,
         remove_worktree: bool,
     ) {
         if !agent.metadata.contains_key("clone_path") { return; }
+        let tasks = match tasks {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(%error, worker = %agent.name, "cleanup snapshot unavailable; output retained");
+                return;
+            }
+        };
         let name = agent.name.clone();
         let plan = remove_worktree.then(|| self.worktree_manager.as_ref()
             .and_then(|manager| manager.worker_removal_plan(&name))).flatten();
+        self.start_worker_cleanup(DeferredWorkerCleanup {
+            occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks,
+            worktree: plan.map(|plan| (plan.worktree, plan.repo_root)),
+        });
+    }
+
+    fn start_worker_cleanup(&mut self, request: DeferredWorkerCleanup) {
+        let name = request.agent.name.clone();
         let cas_dir = self.cas_dir().to_path_buf();
-        let agents = std::sync::Arc::clone(agent_store);
-        let agent_id = agent.id.clone();
+        let recovery_path = request.path(&cas_dir);
+        let occurrence = request.occurrence.clone();
         let started = std::thread::Builder::new()
             .name(format!("worktree-cleanup-{name}"))
             .spawn(move || {
-                let retired = tasks.and_then(|tasks|
-                    crate::factory_target_cache::retirement::retire_worker_with_snapshot(&cas_dir, &agent, &tasks));
-                match retired {
-                    Ok(true) => {}
-                    result => {
-                        if let Err(error) = result {
-                            tracing::warn!(%error, worker = %agent.name, "retired target evidence/reclamation deferred; checkout retained");
+                // Commit the recovery intent before any probes, copies or deletion.
+                if let Err(error) = request.persist(&cas_dir) {
+                    tracing::error!(%error, worker = %request.agent.name, "cleanup intent could not be persisted; output retained");
+                    return CrashCleanupOutcome { worktree: None };
+                }
+                match request.run(&cas_dir) {
+                    Ok(outcome) => {
+                        if !matches!(&outcome.worktree, Some(Err(_))) {
+                            if let Err(error) = std::fs::remove_file(request.path(&cas_dir)) {
+                                tracing::warn!(%error, "completed cleanup intent could not be removed");
+                            }
                         }
-                        return CrashCleanupOutcome { worktree: None };
+                        outcome
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, worker = %request.agent.name, "cleanup deferred; recovery intent retained");
+                        CrashCleanupOutcome { worktree: None }
                     }
                 }
-                let Some(plan) = plan else { return CrashCleanupOutcome { worktree: None }; };
-                let outcome = crate::worktree::remove_worker_worktree_io(&plan);
-                if let Ok(RemoveOutcome::DirtyDeferred(warning)) = &outcome {
-                    if let Err(e) = flag_agent_dirty_on_shutdown(
-                        agents.as_ref(),
-                        &agent_id,
-                        &warning.path,
-                        warning.file_count,
-                    ) {
-                        tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
-                    }
-                }
-                CrashCleanupOutcome { worktree: Some(outcome) }
             });
         match started {
-            Ok(handle) => self.register_worker_cleanup(WorkerCleanupJob::new(name, handle)),
+            Ok(handle) => {
+                let mut job = WorkerCleanupJob::new(name, handle);
+                job.occurrence = occurrence;
+                job.recovery_path = Some(recovery_path);
+                self.register_worker_cleanup(job);
+            }
             Err(error) => {
                 self.set_error(format!("Worker '{name}' worktree cleanup failed: {error}"));
             }
         }
+    }
+
+    /// Run before accepting spawn controls, restoring the old name fences first.
+    pub(crate) fn resume_deferred_worker_cleanups(&mut self) {
+        let directory = self.cas_dir().join("worker-cleanups");
+        if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_dir()) { return; }
+        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) { continue; }
+            let request = std::fs::read(entry.path()).ok()
+                .and_then(|bytes| serde_json::from_slice::<DeferredWorkerCleanup>(&bytes).ok());
+            let Some(request) = request else {
+                tracing::warn!(path = %entry.path().display(), "invalid deferred cleanup intent retained");
+                continue;
+            };
+            if uuid::Uuid::parse_str(&request.occurrence).is_err()
+                || request.path(self.cas_dir()) != entry.path()
+                || self.crash_cleanup_pending(&request.agent.name)
+            { continue; }
+            self.start_worker_cleanup(request);
+        }
+    }
+
+    /// Called only after the exit budget. Keep the name fenced for this daemon's
+    /// remaining teardown; persisted intents restore that fence in the next run.
+    pub(crate) fn detach_unfinished_worker_cleanups(&mut self) -> Vec<String> {
+        self.poll_worker_worktree_cleanups();
+        let mut unfinished = Vec::new();
+        for job in std::mem::take(&mut self.worktree_cleanup_jobs) {
+            if job.handle.is_finished() { self.apply_worker_cleanup(job); continue; }
+            tracing::warn!(worker = %job.worker, recovery = ?job.recovery_path,
+                "daemon cleanup deadline reached; unfinished cleanup detached for recovery");
+            unfinished.push(job.worker);
+            // Dropping the JoinHandle detaches it; its intent remains until completion.
+        }
+        unfinished
     }
 
     pub(crate) fn register_worker_cleanup(&mut self, job: WorkerCleanupJob) {
@@ -6558,6 +6672,46 @@ mod tests {
 
     /// Shutdown must give control back while Git inside target retirement is held.
     /// The same name cannot be relaunched underneath that outstanding cleanup.
+    #[test]
+    fn restart_replays_deferred_cleanup_intent_cas_af63() {
+        use std::process::Command;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("project");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [vec!["init", "-q"], vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"]] {
+            assert!(Command::new("git").args(args).current_dir(&repo).status().unwrap().success());
+        }
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        assert!(Command::new("git").args(["add", ".gitignore"]).current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["commit", "-qm", "fixture"]).current_dir(&repo).status().unwrap().success());
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        let mut manager = WorktreeManager::new(&repo, crate::worktree::WorktreeConfig {
+            enabled: true, base_path: root.join("worktrees").to_string_lossy().into_owned(),
+            branch_prefix: "factory/".into(), auto_merge: false,
+            cleanup_on_close: false, promote_entries_on_merge: false,
+        }).unwrap();
+        let name = "retired-worker";
+        manager.create_for_worker(name).unwrap();
+        let plan = manager.worker_removal_plan(name).unwrap();
+        let worker = plan.worktree.path.clone();
+        let mut agent = cas_types::Agent::new("retired-id".into(), name.into());
+        agent.metadata.insert("clone_path".into(), worker.display().to_string());
+        let request = DeferredWorkerCleanup {
+            occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks: Vec::new(),
+            worktree: Some((plan.worktree, plan.repo_root)),
+        };
+        request.persist(&root).unwrap();
+        let path = request.path(&root);
+        let mut restarted = FactoryApp::for_test_at(root);
+        restarted.resume_deferred_worker_cleanups();
+        assert!(restarted.crash_cleanup_pending(name), "startup restores the name fence");
+        restarted.join_worker_worktree_cleanups();
+        assert!(!worker.exists(), "the new session finishes the recorded worktree cleanup");
+        assert!(!path.exists(), "completed recovery removes its durable intent");
+        assert!(!restarted.crash_cleanup_pending(name));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
@@ -6614,8 +6768,10 @@ mod tests {
         git(&["-C", worker.to_str().unwrap(), "config", "--worktree", "core.fsmonitor", monitor.to_str().unwrap()]);
         let (returned_tx, returned_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
         let gate = std::thread::spawn(move || {
             std::fs::File::open(entered).unwrap().read_exact(&mut [0]).unwrap();
+            entered_tx.send(()).unwrap();
             // This is a responsiveness deadline, not a sleep to order the test.
             // On the old path it releases Git so the failing test cannot hang.
             let returned_while_held = returned_rx.recv_timeout(Duration::from_secs(2)).is_ok();
@@ -6634,6 +6790,9 @@ mod tests {
         ).unwrap());
         app.shutdown_worker(name, true).await.unwrap();
         let _ = returned_tx.send(());
+        entered_rx.recv_timeout(Duration::from_secs(10)).expect("retirement reached the held Git call");
+        let recovery_path = app.worktree_cleanup_jobs[0].recovery_path.clone().unwrap();
+        assert!(recovery_path.is_file(), "cleanup intent must be durable before retirement I/O");
         let reserved = app.crash_cleanup_pending(name);
         let _ = release_tx.send(());
         assert!(gate.join().unwrap(), "worktree cleanup blocked the daemon's control lane");
@@ -6645,6 +6804,7 @@ mod tests {
         }
         assert!(!worker.exists(), "the released Git cleanup must finish");
         assert!(!target.exists(), "target retirement finishes before checkout removal");
+        assert!(!recovery_path.exists(), "successful cleanup removes its recovery intent");
         assert!(!app.crash_cleanup_pending(name), "completed cleanup releases the name");
         assert!(app.worktree_manager().unwrap().worker_removal_plan(name).is_none());
     }

@@ -25,8 +25,10 @@ status and SSE, and artifact URLs. The bridge's explicit `--cas-root` is a
 fallback only when session metadata has no resolvable project; without either,
 resolution fails. This is a shared session-store policy, not a phase-only override.
 
-Commander commits only the newest requested status for each machine/session;
-older successes and failures cannot replace it. Native compaction starts expire
+Commander publishes completed status reads in request order for each
+machine/session: older successes and failures cannot replace a newer settled
+read. An available response can still publish while the next read is pending,
+so reads slower than the heartbeat do not starve status updates. Native compaction starts expire
 after five minutes without a newer lifecycle, including a cancelled compaction
 whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including

@@ -1,18 +1,25 @@
-/** Only the latest read for a session may publish status or failure. */
+/** Publish completed session reads in order without waiting for newer flights. */
 export class StatusRefresh {
-  private readonly latest = new Map<string, symbol>();
+  private readonly sessions = new Map<string, { next: number; published: number; pending: number }>();
 
   async request<T>(key: string, read: () => Promise<T>, received: (value: T) => void, failed: () => void): Promise<void> {
-    const request = Symbol();
-    this.latest.set(key, request);
+    const state = this.sessions.get(key) ?? { next: 0, published: 0, pending: 0 };
+    this.sessions.set(key, state);
+    const request = ++state.next;
+    state.pending++;
+    const publish = () => {
+      if (request < state.published) return false;
+      state.published = request;
+      return true;
+    };
     try {
       const value = await read();
-      if (this.latest.get(key) === request) received(value);
+      if (publish()) received(value);
     } catch {
-      if (this.latest.get(key) === request) failed();
+      if (publish()) failed();
     } finally {
-      // A stale response must not release a newer read's ownership.
-      if (this.latest.get(key) === request) this.latest.delete(key);
+      // Keep ordering until every overlapping read has settled, then release it.
+      if (--state.pending === 0) this.sessions.delete(key);
     }
   }
 }

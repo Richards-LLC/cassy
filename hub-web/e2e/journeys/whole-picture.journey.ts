@@ -197,7 +197,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
     test(`HUB-J25 live phase ${width} ${colorScheme}`, journeyPart, async ({ page, journey }) => {
       const world = fleet();
       world.supervisor_phase = { event_id: "phase-1", kind: "notice", lifecycle: { id: "turn-1", stage: "phase", phase: "setting_up", started_at: journeyStamp(-42_000) }, observed_at: journeyStamp(), stale: false };
-      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, fleet: { [PELICAN]: world } });
+      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], multiplex: true, history, fleet: { [PELICAN]: world } });
       const line = page.getByRole("log").locator(".phase-line");
       const refresh = async () => page.evaluate(session => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
       await journey.stage("Read the reported phase without opening Show work", async () => {
@@ -233,6 +233,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await refresh(); await expect(line).toContainText("Compacted");
         await expect(line).not.toContainText("Compacting");
         await expect(line.locator(".phase-clock")).toHaveCount(0);
+        // The machine hub can stay live while this supervisor's stream is gone.
+        hub.hold(PELICAN); hub.drop(PELICAN);
+        await expect(line).toContainText("Disconnected");
+        await expect(line).toHaveAttribute("data-active", "false");
         await hub.down("atlas", { sockets: "close" });
         await expect(line).toContainText("Disconnected");
         await expect(line).toHaveAttribute("data-active", "false");

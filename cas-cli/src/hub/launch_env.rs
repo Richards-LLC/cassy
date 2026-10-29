@@ -792,20 +792,28 @@ mod tests {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
         use crate::accounts::Provider;
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let home = env.home().to_owned();
-        env.remove("CAS_ROOT");
-        env.remove("CLAUDE_CONFIG_DIR");
-        env.remove("CODEX_HOME");
-        env.set("XDG_CONFIG_HOME", home.join(".config"));
-        env.set_current_dir(&home);
+        if std::env::var_os("CAS_TEST_CATALOG_AUDIT_CHILD").is_some() {
+            let home = dirs::home_dir().unwrap();
+            for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+                let rows = profiles_for_project(cli, None).unwrap();
+                let chosen = rows.iter().find(|row| row.name == "chosen").unwrap();
+                assert!(chosen.logged_in && chosen.recommendation.is_some(), "{cli:?}: {rows:?}");
+                assert!(resolve(cli, Some("chosen")).is_ok());
+            }
+            let accounts = crate::account_registry::collect_for(Provider::Codex, &home, false).unwrap();
+            let account = accounts.iter().find(|account| account.name == "chosen").unwrap();
+            assert_eq!(account.plan.as_deref(), Some("pro"), "retain native rollout plan metadata");
+            assert!(account.email.is_none() && account.identity.is_none(), "secret-only identity stays unknown");
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().to_owned();
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
-        env.set("PATH", std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap());
+        let path = std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap();
         let shell = bin.join("private-shell");
         std::fs::write(&shell, "#!/bin/sh\nprintf '__CAS_PATH_BEGIN__%s__CAS_PATH_END__' \"$PATH\"\n").unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        env.set("SHELL", &shell);
         for (name, args, output) in [
             ("claude", "auth status --json", r#"{"loggedIn":true}"#),
             ("codex", "login status", "Logged in using ChatGPT"),
@@ -849,13 +857,15 @@ mod tests {
             let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
             assert!(unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_OPEN) } >= 0);
         }
-        for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
-            let rows = profiles_for_project(cli, None).unwrap();
-            let chosen = rows.iter().find(|row| row.name == "chosen").unwrap();
-            assert!(chosen.logged_in && chosen.recommendation.is_some(), "{cli:?}: {rows:?}");
-            assert!(resolve(cli, Some("chosen")).is_ok());
-        }
-        let accounts = crate::account_registry::collect_for(Provider::Codex, &home, false).unwrap();
+        // Run the real entry path in a child with a private PATH; lib tests
+        // never mutate process-global PATH even through an environment guard.
+        let module = module_path!().split_once("::").unwrap().1;
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::launch_catalog_recommends_without_opening_provider_credentials"), "--nocapture"])
+            .current_dir(&home).env("HOME", &home).env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("SHELL", &shell).env("PATH", path).env("CAS_TEST_CATALOG_AUDIT_CHILD", "1")
+            .env_remove("CAS_ROOT").env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME")
+            .output().unwrap();
         let mut events = [0u8; 4096];
         let opened = match watch.read(&mut events) {
             Ok(bytes) => bytes,
@@ -863,9 +873,7 @@ mod tests {
             Err(error) => panic!("cannot audit credential opens: {error}"),
         };
         assert_eq!(opened, 0, "catalog/readiness must not open provider credential files");
-        let account = accounts.iter().find(|account| account.name == "chosen").unwrap();
-        assert_eq!(account.plan.as_deref(), Some("pro"), "retain native rollout plan metadata");
-        assert!(account.email.is_none() && account.identity.is_none(), "secret-only identity stays unknown");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
 
     #[test]

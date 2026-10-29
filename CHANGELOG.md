@@ -24,8 +24,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **A phase line with an honest clock** — Was: generic working dots gave little
   sense of the current activity. → Now: reported setup, tool, work and
   compaction phases show their measured duration, and the live status line
-  refreshes during real tool runs and reported compaction. Waiting, completed, stale
-  and disconnected states stop animating; the existing status heartbeat keeps
+  refreshes during real tool runs and reported compaction. Waiting, completed,
+  stale and disconnected states stop animating; the existing status heartbeat keeps
   the line fresh without requiring Show work. Codex compaction start is not
   reported, so that interval is not given an invented start time or duration.
 - **Know which version each machine runs** — Was: the browser gave little help
@@ -197,6 +197,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   project release could block uploading the report for a different published
   release. → Now: report publication resolves its owning release from the
   merged release PR and retains the uploaded-byte integrity checks.
+- **Previous-release records are complete** — Was: the v3.87.0 report and its
+  shipped issue references needed follow-up. → Now: its Markdown, brief, HTML,
+  PDF and visual QA records are committed, and shipped issue references have
+  been reconciled with that release.
+- **Regression checks follow the current interface** — Was: history checks
+  could send before their conversation socket was ready, outage checks expected
+  a retired footer, and account checks expected email from credential contents.
+  → Now: those checks wait for readiness and assert the current Web footer and
+  credential-free identity contract, without claiming new runtime behavior.
+
 ### Known limits — Team refresh and Codex command confirmation
 
 - **Team refresh after reassignment** — Was: Team could flicker during refresh

@@ -417,6 +417,39 @@ test("HUB-J12 network switch: stale proofs retry with no re-pair request", journ
   });
 });
 
+test("HUB-J12 expired credentials before the first Welcome offer Re-pair on a phone", journeyPart, async ({ page, journey }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const releaseAttach = hub.holdAttach(PELICAN);
+  const recovery = page.locator("#conversation-stage");
+  await journey.stage("Expired credentials leave a named recovery on the phone", async () => {
+    await journey.open();
+    await chooseConversation(page);
+    await expect.poll(() => hub.hasSocket(PELICAN)).toBe(true);
+    await expect(page.locator(".conversation-loading")).toHaveText("Opening the conversation…");
+    // A failed refresh must remain expired, rather than the double silently
+    // supplying a new credential before the recovery surface is exercised.
+    await page.route("https://atlas.test/v1/auth/refresh", route => route.fulfill({
+      status: 401, json: { error: "unauthorized", reason: "expired", retryable: false },
+    }));
+    hub.refuseProofs("atlas", 1_000, "expired", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await expect(recovery).toContainText("Connection failed — re-pair required.");
+    await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/expired-auth-390.png` });
+    const repair = recovery.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true });
+    await expect(repair).toBeVisible();
+    await expect(repair).toBeInViewport();
+    await expect(recovery.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+    expect(hub.refusedProofs.some(refusal => refusal.reason === "expired")).toBe(true);
+  });
+  await journey.stage("The phone recovery opens pairing", async () => {
+    await recovery.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true }).click();
+    releaseAttach();
+    await expect(page.locator("#pair-dialog")).toBeVisible();
+  });
+});
+
 test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on desktop and phone", journeyPart, async ({ page, journey }) => {
   await journey.stage("A revoked pairing says so and offers Re-pair, on a phone too", async () => {
     // Keep the original two-machine world. A singleton fleet currently leaves

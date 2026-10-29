@@ -970,6 +970,30 @@ mod tests {
     }
 
     #[test]
+    fn pending_replacement_names_follow_lifecycle_and_session_cas_c71e() {
+        for action in [SpawnAction::Spawn, SpawnAction::Recycle, SpawnAction::Shutdown] {
+            let (_temp, store) = create_test_store();
+            let names = ["worker-a".to_string()];
+            let id = match action {
+                SpawnAction::Spawn => store.enqueue_spawn(1, &names, false, None, Some("s"), None),
+                SpawnAction::Recycle => store.enqueue_recycle("worker-a", None, Some("s")),
+                SpawnAction::Shutdown => store.enqueue_shutdown(None, &names, false, Some("s")),
+                _ => unreachable!(),
+            }.unwrap();
+            for state in [SpawnLifecycleState::Queued, SpawnLifecycleState::Provisioning,
+                SpawnLifecycleState::Launched, SpawnLifecycleState::Registered,
+                SpawnLifecycleState::Failed, SpawnLifecycleState::Stopped] {
+                store.record_spawn_state(id, state, Some("worker-a"), None).unwrap();
+                let pending = action != SpawnAction::Shutdown && !state.is_terminal();
+                assert_eq!(store.has_pending_spawn("worker-a", Some("s")).unwrap(), pending,
+                    "{action:?}/{state:?}");
+                assert!(!store.has_pending_spawn("worker-a", Some("other-session")).unwrap());
+                assert!(!store.has_pending_spawn("worker-a-suffix", Some("s")).unwrap());
+            }
+        }
+    }
+
+    #[test]
     fn limit_episode_is_atomic_and_survives_reopen_and_queue_cleanup() {
         let (dir, store) = create_test_store();
         let first = store

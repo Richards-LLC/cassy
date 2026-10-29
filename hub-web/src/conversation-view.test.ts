@@ -1015,7 +1015,7 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     expect(view.element.scrollTop).toBe(1300);
   });
 
-  it("keeps following when content shrinks during the deferred pin and grows before its scroll event", () => {
+  it.each(["deferred pin", "browser clamp"] as const)("keeps following when content shrinks in a %s and grows before its scroll event", (shrink) => {
     const flush = frames();
     const { history, view, jump } = longThread();
     const content = { height: 1400 };
@@ -1025,7 +1025,8 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     // An attachment preview shrinks before the frame-late pin. The browser
     // queues that layout scroll, then more content grows before delivery.
     content.height = 1000;
-    flush();
+    if (shrink === "deferred pin") flush();
+    else view.element.scrollTop = view.element.scrollTop;
     expect(view.element.scrollTop).toBe(800);
     content.height = 1500;
     view.element.dispatchEvent(new Event("scroll"));

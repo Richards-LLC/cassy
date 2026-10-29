@@ -330,16 +330,16 @@ fn has_recorded_delivery(task: &cas_types::Task) -> bool {
 }
 
 /// Optional evidence never turns a timed-out/unreadable proof into zero work.
-/// Prioritize the focused/session-active epic and bound the overall read; the shared collector
-/// caches immutable verdicts, allowing later refreshes to complete cold proofs.
+/// Prioritize the focused/session-active epic and bound the overall read.
+/// Team's ancestry-based display does not run or cache mutation-gate proofs.
 fn project_deliveries(
     status: &mut StatusJson,
     root: &std::path::Path,
     store: Option<&dyn cas_store::TaskStore>,
 ) {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
-        EpicStatusOptions, collect_epic_projection_statuses, git_commit_is_ancestor,
-        last_commit_unix,
+        EpicStatusOptions, collect_epic_ancestry_merges,
+        collect_epic_branch_statuses_with_options, git_commit_is_ancestor, last_commit_unix,
     };
     let Some(store) = store else { return };
     let started = std::time::Instant::now();
@@ -446,17 +446,14 @@ fn project_deliveries(
             .filter(|task| task.has_delivery_to_integrate() && has_recorded_delivery(task))
             .cloned()
             .collect();
-        let collection = collect_epic_projection_statuses(
+        let Some(merged_children) = collect_epic_ancestry_merges(
             &deliveries,
             target,
             repo,
-            EpicStatusOptions {
-                offset: 0,
-                limit: None,
-                summary: false,
-                budget: std::time::Duration::from_millis(250),
-            },
-        );
+            std::time::Duration::from_millis(250),
+        ) else {
+            continue;
+        };
         let mut progress = EpicProgressJson {
             total: children.len(),
             merged: 0,
@@ -464,22 +461,11 @@ fn project_deliveries(
             merges_per_hour: 0,
         };
         let mut last = None;
-        for row in &collection.statuses {
-            let Some(child) = children.iter().find(|child| child.id == row.task_id) else {
-                continue;
-            };
-            if row.refs_unresolved || row.content_check_error.is_some() {
+        for child in &deliveries {
+            if !merged_children.contains(&child.id) {
                 continue;
             }
             checked_ids.insert(child.id.clone());
-            if !child.has_delivery_to_integrate()
-                || !has_recorded_delivery(child)
-                || (row.recorded_anchor.is_none() && row.factory_branch.is_none())
-                || row.unmerged_count != 0
-                || !row.dropped_paths.is_empty()
-            {
-                continue;
-            }
             merged_ids.insert(child.id.clone());
             progress.merged += 1;
             let at = child.deliverables.delivery_pr_merged_at.or_else(|| {
@@ -514,9 +500,7 @@ fn project_deliveries(
             }
         }
         progress.last_merged_at = last.map(|at| at.to_rfc3339());
-        if !collection.budget_exhausted && collection.statuses.len() == deliveries.len() {
-            epic.progress = Some(progress);
-        }
+        epic.progress = Some(progress);
     }
     // A task without an epic still has an explicit delivery target. Reuse the
     // very same collector, rather than trusting its parked lifecycle status.
@@ -546,7 +530,7 @@ fn project_deliveries(
         }) else {
             continue;
         };
-        let collection = collect_epic_projection_statuses(
+        let collection = collect_epic_branch_statuses_with_options(
             std::slice::from_ref(&record),
             &context.target_branch,
             &context.repo_root,
@@ -884,6 +868,11 @@ mod focused_epic_tests {
         assert!(
             first_epic_read.contains("refs/heads/main"),
             "the selected supervisor's staffed epic must be measured before history: {first_epic_read}"
+        );
+        assert_eq!(
+            reads.lines().filter(|line| line.contains("git rev-list") && line.contains("--not")).count(),
+            1,
+            "all 35 anchors must share one ancestry pass"
         );
         let landed = status["tasks_in_progress"]
             .as_array()

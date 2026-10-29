@@ -22,10 +22,6 @@
 //! repository's common Git directory, so worktrees of one repository share it
 //! and nothing appears in the working tree. Cache I/O failures never change a
 //! verdict; they only cost a recomputation.
-//!
-//! The read-only Team projection uses a separate file and also retains completed
-//! active-child proofs, bound to live delivery metadata as well as Git inputs.
-//! Mutation/close gates never load those projection verdicts.
 
 use super::{BranchContentDirection, EpicChildBranchStatus, EpicGitSnapshot};
 use cas_types::Task;
@@ -56,7 +52,6 @@ struct CachedVerdict {
 #[derive(Debug, Default)]
 pub(super) struct EpicVerdictCache {
     path: Option<PathBuf>,
-    projection: bool,
     entries: BTreeMap<String, CachedVerdict>,
     proven: BTreeMap<String, CachedVerdict>,
 }
@@ -74,23 +69,7 @@ impl EpicVerdictCache {
         let entries = read_entries(&path);
         Self {
             path: Some(path),
-            projection: false,
             entries,
-            proven: BTreeMap::new(),
-        }
-    }
-
-    /// Status refreshes must make progress even when children remain live.
-    /// Keep these verdicts out of the cache consumed by mutation/close gates.
-    pub(super) fn load_projection(repo_path: &Path) -> Self {
-        let Some(mut path) = cache_path(repo_path) else {
-            return Self::disabled();
-        };
-        path.set_file_name("epic-projection-verdicts.json");
-        Self {
-            entries: read_entries(&path),
-            path: Some(path),
-            projection: true,
             proven: BTreeMap::new(),
         }
     }
@@ -105,10 +84,7 @@ impl EpicVerdictCache {
 
     /// Record a freshly proven verdict when it is stable enough to reuse.
     pub(super) fn record(&mut self, key: String, child: &Task, status: &EpicChildBranchStatus) {
-        if self.path.is_none()
-            || (!self.projection && !child.is_terminal())
-            || !verdict_is_complete(status)
-        {
+        if self.path.is_none() || !verdict_is_cacheable(child, status) {
             return;
         }
         self.proven.insert(
@@ -157,7 +133,6 @@ pub(super) fn verdict_key(
     branches: &[String],
     snapshot: &EpicGitSnapshot,
     children: &[Task],
-    projection: bool,
 ) -> String {
     use sha2::Digest;
     use std::fmt::Write as _;
@@ -181,15 +156,6 @@ pub(super) fn verdict_key(
         commit(&format!("origin/{target_branch}"))
     );
     let _ = writeln!(material, "anchor={recorded_anchor:?} resolved={anchor_resolved}");
-    if projection {
-        // Live receipts can change without moving a ref (retarget, reviewed
-        // drop, integration-batch receipt, or negative-result transition).
-        let _ = writeln!(
-            material,
-            "projection={}",
-            serde_json::to_string(&child.deliverables).unwrap_or_default()
-        );
-    }
     for decision in super::accepted_delivery_drop_decisions(child) {
         let _ = writeln!(material, "accepted-reviewed-drop={decision}");
     }
@@ -219,8 +185,9 @@ pub(super) fn verdict_key(
     key
 }
 
-fn verdict_is_complete(status: &EpicChildBranchStatus) -> bool {
-    status.content_check_error.is_none()
+fn verdict_is_cacheable(child: &Task, status: &EpicChildBranchStatus) -> bool {
+    child.is_terminal()
+        && status.content_check_error.is_none()
         && !status
             .content_directions
             .iter()

@@ -316,7 +316,16 @@ async fn close_classifies_delivery_after_start_boundary_gh1382() {
 #[tokio::test]
 async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
     let mut env = TestEnvGuard::temp_home();
-    for explicit_receipt in [false, true] {
+    for (subject, explicit_receipt, advances) in [
+        (format!("fix({TASK}): GREEN implementation"), false, true),
+        ("test: correct pre-push failure".into(), false, false),
+        ("test: correct pre-push failure".into(), true, true),
+        (
+            format!("fix(cas-abcd): sibling work\n\nContext: {TASK}"),
+            true,
+            false,
+        ),
+    ] {
         let f = fixture_with_surface(&mut env, "note.txt", false);
         let repo = f.dir.path();
         git(&f.worker_path, &["reset", "--hard", "main"]);
@@ -359,18 +368,7 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
         assert!(git(repo, &["ls-remote", "--heads", "origin"]).is_empty());
         std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
         git(&f.worker_path, &["add", "fix.txt"]);
-        git(
-            &f.worker_path,
-            &[
-                "commit",
-                "-qm",
-                &if explicit_receipt {
-                    "test: correct pre-push failure".into()
-                } else {
-                    format!("fix({TASK}): GREEN implementation")
-                },
-            ],
-        );
+        git(&f.worker_path, &["commit", "-qm", &subject]);
         let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
         git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
 
@@ -408,8 +406,25 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
                 .await
                 .unwrap(),
         );
-        assert!(output.contains("MERGE REQUIRED"), "{output}");
         let parked = tasks.get(TASK).unwrap();
+        if !advances {
+            assert!(
+                output.contains("FAST ROWS REQUIRED") && output.contains(&red[..12]),
+                "must keep the old anchor for {subject:?}, explicit={explicit_receipt}: {output}"
+            );
+            assert_eq!(parked.status, TaskStatus::InProgress, "{output}");
+            assert_eq!(
+                parked.deliverables.factory_branch_anchor.as_deref(),
+                Some(red.as_str())
+            );
+            assert!(
+                cas_store::list_qa_passes(&repo.join(".cas"), TASK)
+                    .unwrap()
+                    .is_empty()
+            );
+            continue;
+        }
+        assert!(output.contains("MERGE REQUIRED"), "{output}");
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
         assert_eq!(

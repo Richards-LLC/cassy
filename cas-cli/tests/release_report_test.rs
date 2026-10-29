@@ -769,6 +769,7 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
             // pin: published 3.88 filed two docs/test entries under Fixed; do not reinterpret history.
             assert!(source.contains("| Changes shipped | 40 | 8 added, 26 fixed, 6 changed;"), "{source}");
             for title in ["Previous-release records are complete", "Regression checks follow the current interface"] {
+                // pin: keep both published historical entries in the report prose.
                 assert!(source.contains(title), "historical docs/test entry must remain in prose: {title}");
             }
         }

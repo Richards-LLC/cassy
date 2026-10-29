@@ -826,6 +826,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Expected experience
 
+- Live status never regresses when an older heartbeat read arrives late; an unmatched compaction start stops claiming activity after five minutes without newer native evidence (cas-d17e). Deferred status success/failure is covered by `status-refresh.test.ts`; native expiry and selected-session queue isolation by the Rust work-events and bridge session tests.
 - Work reads as quiet context between replies, never as a reply: one muted line, chips for task moves, rows a tap deeper.
 - The timeline replaces watching a worker's terminal: state, task and the last things it did, updating by itself.
 - Nothing heavy loads until asked: no work page while Show work is off, and no detail until a row opens.

@@ -7,6 +7,197 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Commander controls and a clearer picture of progress
+
+- **Commands beside the conversation** — Was: compacting or clearing context,
+  choosing a model, checking usage, ending a session and requesting Finish
+  required the terminal. → Now: a slash palette and header controls expose the
+  supported Claude and Codex actions. Destructive actions confirm, busy input
+  is protected, and receipts distinguish submission from observed completion.
+  Opening a model chooser does not claim the model changed; Finish points to
+  its completed reply without claiming the session ended.
+- **Team beside the chat** — Was: following assignments and delivery meant
+  opening separate views. → Now: a lazy Team tab shows the selected session's
+  current staffing, task state, elapsed time and delivery receipts beside its
+  conversation, with a Needs you strip, keyboard tabs and a stacked phone view.
+  Missing evidence stays Not reported, and no raw output stream is required.
+- **A phase line with an honest clock** — Was: generic working dots gave little
+  sense of the current activity. → Now: reported setup, tool, work and
+  compaction phases show their measured duration. Waiting, completed, stale
+  and disconnected states stop animating; the existing status heartbeat keeps
+  the line fresh without requiring Show work. Codex compaction start is not
+  reported, so that interval is not given an invented start time or duration.
+- **Know which version each machine runs** — Was: the browser gave little help
+  comparing connected machines with the current release. → Now: machine cards
+  and project chips show the reported Cassy version and a quiet update note
+  when a newer stable release is known. The cached lookup retains its last
+  result offline; the Web footer names the browser build separately.
+- **Accounts across machines** — Was: inspecting and managing accounts required
+  leaving Commander. → Now: the Accounts panel groups Claude, Codex and Grok
+  by machine, with login state, capacity, defaults and local reset times.
+  Authorized Claude and Codex changes confirm and audit removal, disabling,
+  enabling, renaming and default selection, then refresh New session choices.
+  Grok remains read-only and unknown capacity stays unknown.
+- **Work rows that say what happened** — Was: tool activity looked like generic
+  expandable rows. → Now: read, search, command and edit rows name their
+  operation and scope, show failures explicitly and open the matching detail
+  with exact raw evidence. Unknown tools retain a readable raw fallback, and
+  live updates preserve focus and expansion.
+
+### Added — tables and source that are easier to use
+
+- **Real tables with two copy formats** — Was: pipe tables could lose escaped
+  separators, confuse fenced code with tables or lose columns when copied. →
+  Now: native headers and cells preserve table semantics, escaped pipes and
+  empty cells. Copy Markdown retains the original source; Copy CSV quotes
+  spreadsheet cells, with visible failure and retry. Wide tables scroll inside
+  the message and prose keeps whole words.
+- **Source color after source text** — Was: fenced code stayed uncolored. →
+  Now: explicitly tagged JavaScript, TypeScript, JSON, Python, Rust and shell
+  source loads safe lexical color on demand. Selection, exact Copy and Wrap
+  survive coloring and repaint. Bounded input and cache limits keep large or
+  unavailable coloring on an explained plain-text fallback; this is not a full
+  language parser or automatic language detection.
+
+### Fixed — Commander recovery, phones and current status
+
+- **Short status tables are still tables** — Was: compact status replies could
+  remain raw pipe text without table-copy controls. → Now: short and
+  headerless status tables use the native table view and both copy formats,
+  while adjacent plain progress remains quiet.
+- **Current release progress gets measured first** — Was: historical releases
+  could consume the bounded status budget before the selected active release,
+  leaving Team's header empty or delayed. → Now: current staffed work is
+  prioritized and batched ancestry reads provide the display's merge progress.
+  Full close-time delivery proofs retain their own checks.
+- **Re-pair before the first reply opens** — Was: revoked access during the
+  first conversation attach could leave Opening on screen and hide recovery.
+  → Now: the pairing failure immediately replaces it with a named Re-pair
+  action, and a late attach cannot override the authentication result.
+- **Replay stays with its own conversation** — Was: replay from an unselected
+  session could trigger command-control reads for the selected conversation.
+  → Now: peer replay does not make those unrelated reads. The separate
+  timeout observed while pasting in dark mode under parallel journey load
+  still has unproven causation; this release does not claim that timeout fixed.
+- **Account confirmations really close** — Was: the confirmation editor could
+  remain visibly open after Cancel, a completed change or a read-only view.
+  → Now: dismissal hides the editor and clears its text, value and validation
+  state; read-only pairings cannot expose editing controls.
+- **Conversation tabs clear phone notches** — Was: the phone shell could place
+  its tabs under a display cutout. → Now: the conversation tab layout respects
+  safe-area spacing while keeping its controls reachable.
+
+### Fixed — trustworthy account choices and usage
+
+- **Claude usage survives until its reset** — Was: native usage observations
+  could be missing, lost too early or shown without their age. → Now: each
+  profile records the official Claude statusline observation, including
+  sessions launched by Cassy, and retains valid windows until their reset.
+  Older percentages show their observation time and, when needed, Eastern
+  date in both launch choices and weekly readings.
+- **Account discovery avoids credential contents** — Was: account and launch
+  catalogs derived identity from provider credential files. → Now: they use
+  non-secret provider information and native usage observations instead.
+  Missing Codex identity stays unknown and explicit aliases remain selectable.
+- **One malformed profile does not stop hook setup** — Was: invalid settings
+  in one profile could abort setup for the remaining profiles and project.
+  → Now: setup reports that profile's problem and continues the remaining
+  installations, retaining the native usage recorder where it can be installed.
+
+### Changed — evidence that is easier to prepare and carry
+
+- **Batch QA is the default** — Was: new projects inherited per-delivery QA.
+  → Now: shared batch QA is built in, with per-task QA available as an explicit
+  opt-in. User-level QA settings are inherited consistently, while project
+  overrides and existing recorded review requirements remain authoritative.
+- **Check the evidence format before submitting it** — Was: malformed evidence
+  led to repeated review-time ledger rejections. → Now: `cas qa ledger init`
+  scaffolds the verifier's format and `cas qa ledger check` uses the same
+  parser. Close checks the producer ledger before verification dispatch and
+  preserves shared batch ownership instead of demanding a private ledger.
+- **QA proof can follow a delivery to another machine** — Was: independent
+  reviews and evidence bundles could remain tied to local paths, and quoted
+  audit text could be confused with producer evidence. → Now: review records
+  sync, declared bundle files export within the task boundary, and artifact
+  references recover peer evidence without changing its original ownership.
+- **The current review stays current** — Was: a waived review and its successor
+  could share an ordinal and cause an older result to win. → Now: review
+  selection follows observation order and active state, retaining the current
+  review claim and its actual proof requirements.
+- **Regression cases can live independently** — Was: unrelated fixes repeatedly
+  conflicted at one shared bug-family append point. → Now: journey bug families
+  can live in separate files with the same ownership and validation rules.
+- **Startup guidance fits its budget** — Was: accumulated role guidance already
+  exceeded the native startup context allowance. → Now: shorter entry guidance
+  and conditional references retain the required commands without overrunning
+  that allowance.
+
+### Fixed — delivery state and safe local operations
+
+- **Landed content stays recognizable** — Was: unavailable attribution or a
+  regenerated merge could mark byte-identical delivered files as dropped. →
+  Now: content proof follows the recorded delivery and its attributable merge
+  output, including a restart, while preserving ownership and ancestry fences.
+- **Upkeep sees the delivered regression case** — Was: post-merge distribution
+  regeneration could hide a case added by the delivery and incorrectly refuse
+  close. → Now: upkeep reads the introducing integration merge against its
+  first parent, rather than a later generated-only tip.
+- **Close tolerates appended audit notes** — Was: a receipt or upkeep note
+  appended during a long close could invalidate its own parking snapshot. →
+  Now: close preserves appended notes and retries against a refreshed guarded
+  snapshot. Request changes and edits to ownership, proof scope, acceptance,
+  delivery or existing history still win and refuse the stale close.
+- **Ready means this delivery** — Was: merge readiness could credit a previous,
+  already-merged delivery to a newly assigned task or retain an old start after
+  a lease ended. → Now: readiness binds the current task and delivery identity,
+  retiring released bindings without discarding valid historical start records.
+- **Received messages get their recipient receipt** — Was: a claimed transport
+  record could prevent a later actual recipient surfacing from being recorded.
+  → Now: receipt promotion records that surfacing while retaining the distinction
+  between transport delivery and model execution.
+- **Resume starts from the latest checkpoint** — Was: start guidance advertised
+  a notes offset the notes reader rejected, or pointed at older context. → Now:
+  start uses valid recovery guidance and retains the latest saved checkpoint,
+  including after notes are reordered.
+- **Bulk shutdown has a bounded store wait** — Was: shared SQLite contention
+  made bulk shutdown exhaust its wait budget and report dead processes as
+  failures. → Now: authorization is isolated from the shared store mutex and
+  queue maintenance is indexed, while ownership checks remain required.
+- **Recycling preserves the replacement's resume** — Was: delayed cleanup of a
+  dead pane could cancel the replacement's resume message under the same name.
+  → Now: the old process identity retires before relaunch and cleanup remains
+  bound to that generation.
+- **Stop owned processes that left their scope** — Was: stopping a registered
+  systemd scope could leave its owned Node process alive after it moved out.
+  → Now: stop also checks and terminates verified owned survivors, retaining
+  the process-identity guard against unrelated processes.
+- **Less idle store work** — Was: repeated QA and shutdown queue maintenance
+  scanned historical rows and kept the store writer busy while idle. → Now:
+  indexed maintenance avoids those repeated historical scans.
+
+### Fixed — release records and regression checks
+
+- **Count the changes inside grouped release notes** — Was: release reports
+  counted grouped headings instead of each titled changelog entry. → Now:
+  every titled entry is counted while wrapped content and legacy heading
+  formats keep their meaning.
+- **Release headings accept multibyte text** — Was: truncating a long release
+  heading at a byte index could panic inside a multibyte character. → Now:
+  truncation respects UTF-8 boundaries.
+- **Publish the report for the release being described** — Was: a focused
+  project release could block uploading the report for a different published
+  release. → Now: report publication resolves its owning release from the
+  merged release PR and retains the uploaded-byte integrity checks.
+- **Previous-release records are complete** — Was: the v3.87.0 report and its
+  shipped issue references needed follow-up. → Now: its Markdown, brief, HTML,
+  PDF and visual QA records are committed, and shipped issue references have
+  been reconciled with that release.
+- **Regression checks follow the current interface** — Was: history checks
+  could send before their conversation socket was ready, outage checks expected
+  a retired footer, and account checks expected email from credential contents.
+  → Now: those checks wait for readiness and assert the current Web footer and
+  credential-free identity contract, without claiming new runtime behavior.
+
 ## [3.87.0] - 2026-10-28
 
 ### Fixed — steadier Commander connections

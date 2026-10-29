@@ -6417,6 +6417,7 @@ impl CasCore {
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
+        expected: &Task,
         reason: &str,
         message: &str,
         factory_branch_anchor: Option<String>,
@@ -6468,7 +6469,7 @@ impl CasCore {
             format!("{}\n\n{}", parked.notes, audit)
         };
 
-        match task_store.update_if_current(&parked, task) {
+        match update_close_snapshot_preserving_notes(task_store, &mut parked, expected) {
             Err(e) => {
                 tracing::warn!(
                     task_id = %task.id,
@@ -9087,6 +9088,7 @@ impl CasCore {
                         if let Err(error) = self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &parking,
+                            &task,
                             "MERGE REQUIRED",
                             &msg,
                             anchor.clone(),
@@ -19602,6 +19604,49 @@ impl<'a> CloseNoteTracker<'a> {
     }
 }
 
+/// A long close can overlap receipt/upkeep note appends. Refresh only an
+/// append-only timeline change, then CAS against that exact refreshed row.
+/// Other fields, rewritten history and request_changes still invalidate the
+/// snapshot. Keep the generic store and replication CAS strict.
+fn update_close_snapshot_preserving_notes(
+    task_store: &dyn cas_store::TaskStore,
+    task: &mut Task,
+    expected: &Task,
+) -> cas_store::Result<chrono::DateTime<chrono::Utc>> {
+    let pending = task.notes.strip_prefix(&expected.notes)
+        .map(|suffix| suffix.strip_prefix("\n\n").unwrap_or(suffix).to_owned())
+        .ok_or_else(|| cas_store::StoreError::Other(
+            "close audit does not extend its expected task timeline".into(),
+        ))?;
+    let mut baseline = expected.clone();
+    for attempt in 0..3 {
+        match task_store.update_if_current(task, &baseline) {
+            Ok(stamp) => {
+                task.updated_at = stamp;
+                return Ok(stamp);
+            }
+            Err(error @ cas_store::StoreError::Other(_)) if attempt < 2 => {
+                let current = task_store.get(&expected.id)?;
+                if !only_notes_changed(&baseline, &current)
+                    || !current.notes.starts_with(&baseline.notes)
+                {
+                    return Err(error);
+                }
+                // Rebuild from the frozen suffix, so retries cannot duplicate
+                // this close's audits or discard the intervening appends.
+                task.notes = match (current.notes.is_empty(), pending.is_empty()) {
+                    (_, true) => current.notes.clone(),
+                    (true, false) => pending.clone(),
+                    (false, false) => format!("{}\n\n{pending}", current.notes),
+                };
+                baseline = current;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final guarded update returns its result")
+}
+
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) -> bool {
     if task.notes.contains(note) {
         return false;
@@ -19614,7 +19659,7 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
     } else {
         format!("{}\n\n{formatted}", task.notes)
     };
-    match task_store.update_if_current(task, &expected) {
+    match update_close_snapshot_preserving_notes(task_store, task, &expected) {
         Ok(persisted_at) => {
             task.updated_at = persisted_at;
             true
@@ -27451,15 +27496,22 @@ mod merge_state_gate_tests {
         assert!(tasks.get(&task.id).unwrap().notes.contains("UPKEEP: documentation checked"),
             "an intervening receipt note must not prevent close's own upkeep audit");
         receipts.append_trusted_note(&task.id, "Final receipt imported before park").unwrap();
+        // Anchor advancement is an unpersisted close-owned change. It must
+        // be written against the original snapshot, not mistaken for a
+        // conflicting change made by another actor.
+        let mut parking = task.clone();
+        parking.deliverables.factory_branch_anchor = Some("delivery-tip".into());
+        parking.notes.push_str("\n\nDelivery anchor advanced during close");
         core.park_task_awaiting_merge(
-            &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
+            &tasks, &parking, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: relay fixture"),
         ).unwrap();
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
         for note in ["UPKEEP: registry checked", "Receipt imported during close",
-            "UPKEEP: documentation checked", "Final receipt imported before park"]
+            "UPKEEP: documentation checked", "Final receipt imported before park",
+            "Delivery anchor advanced during close"]
         {
             assert_eq!(parked.notes.matches(note).count(), 1,
                 "park must retain each intervening audit exactly once: {note}");
@@ -27486,7 +27538,7 @@ mod merge_state_gate_tests {
         append_close_decision_note(&tasks, &mut stale_close, "stale pre-park audit");
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
         let refused = core.park_task_awaiting_merge(
-            &tasks, &stale_close, "MERGE REQUIRED", "stale close still running",
+            &tasks, &stale_close, &stale_close, "MERGE REQUIRED", "stale close still running",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: stale close"),
         ).expect_err("GH #1276: a stale close cannot erase the review rejection");
@@ -27497,6 +27549,44 @@ mod merge_state_gate_tests {
         assert!(reopened.deliverables.factory_branch_anchor.is_none());
         assert_eq!(queue.peek("relay-supervisor-id", 10).unwrap().len(), 1,
             "a refused park cannot enqueue another relay");
+    }
+
+    #[test]
+    fn park_note_refresh_preserves_concurrent_task_corrections_cas_62e0f() {
+        use cas_store::{SupervisorQueueStore, TaskStore};
+
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let (core, tasks, queue, mut original) = close_relay_fixture_cas_3a82(dir.path());
+        original.notes = "Original timeline".into();
+        let edits: [(&str, fn(&mut Task)); 6] = [
+            ("status", |task| task.status = TaskStatus::Open),
+            ("assignee", |task| task.assignee = Some("replacement-worker".into())),
+            ("proof scope", |task| task.proof_targets = vec!["new proof target".into()]),
+            ("acceptance", |task| task.acceptance_criteria = "Corrected acceptance".into()),
+            ("delivery", |task| task.deliverables.factory_branch_anchor = Some("replacement-tip".into())),
+            ("timeline rewrite", |task| task.notes = "Corrected timeline".into()),
+        ];
+        for (field, edit) in edits {
+            tasks.update(&original).unwrap();
+            let snapshot = tasks.get(&original.id).unwrap();
+            let mut corrected = snapshot.clone();
+            corrected.notes.push_str("\n\nConcurrent audit");
+            edit(&mut corrected);
+            tasks.update(&corrected).unwrap();
+            let corrected = tasks.get(&original.id).unwrap();
+
+            let refused = core.park_task_awaiting_merge(
+                &tasks, &snapshot, &snapshot, "MERGE REQUIRED", "stale close",
+                Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+                Some("PASS delivery-tip: stale close"),
+            ).expect_err(field);
+            assert!(refused.to_string().contains("task changed"), "{field}: {refused}");
+            assert_eq!(serde_json::to_value(tasks.get(&original.id).unwrap()).unwrap(),
+                serde_json::to_value(corrected).unwrap(), "park overwrote {field}");
+            assert!(queue.peek("relay-supervisor-id", 10).unwrap().is_empty(),
+                "refused {field} correction must not relay a park");
+        }
     }
 
     #[tokio::test]

@@ -211,6 +211,7 @@ describe("messageBlocks", () => {
     ]);
   });
   it("treats a table without a rule as body rows and leaves plain prose alone", () => {
+    // pin: Copy Markdown preserves headerless source and its line breaks exactly.
     expect(messageBlocks("| a | b |\n| c | d |")).toEqual([{ type: "table", table: { header: undefined, rows: [["a", "b"], ["c", "d"]] }, source: "| a | b |\n| c | d |" }]);
     expect(messageBlocks("just | a pipe in prose")).toEqual([{ type: "text", text: "just | a pipe in prose" }]);
   });

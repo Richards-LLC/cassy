@@ -6480,6 +6480,76 @@ mod tests {
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
 
+    /// Shutdown must give control back while Git's worktree cleanup is held.
+    /// The same name cannot be relaunched underneath that outstanding cleanup.
+    #[cfg(unix)]
+    #[test]
+    fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args)
+                .current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        git(&["commit", "--allow-empty", "-qm", "fixture"]);
+        let cas = crate::store::init_cas_dir(&repo).unwrap();
+        let mut manager = WorktreeManager::new(&repo, crate::worktree::WorktreeConfig {
+            enabled: true, base_path: cas.join("worktrees").to_string_lossy().into_owned(),
+            branch_prefix: "factory/".into(), auto_merge: false,
+            cleanup_on_close: false, promote_entries_on_merge: false,
+        }).unwrap();
+        let name = "held-cleanup";
+        manager.create_for_worker(name).unwrap();
+        let worker = manager.worker_removal_plan(name).unwrap().worktree.path;
+        let entered = env.home().join("entered");
+        let release = env.home().join("release");
+        for path in [&entered, &release] {
+            let path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        let monitor = env.home().join("fsmonitor");
+        std::fs::write(&monitor, format!(
+            "#!/bin/sh\nif mkdir '{}' 2>/dev/null; then\nprintf x > '{}'\nread signal < '{}'\nfi\nprintf 'token\\0'\n",
+            env.home().join("once").display(), entered.display(), release.display(),
+        )).unwrap();
+        std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        git(&["config", "core.fsmonitor", monitor.to_str().unwrap()]);
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gate = std::thread::spawn(move || {
+            std::fs::File::open(entered).unwrap().read_exact(&mut [0]).unwrap();
+            // This is a responsiveness deadline, not a sleep to order the test.
+            // On the old path it releases Git so the failing test cannot hang.
+            let returned_while_held = returned_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            if returned_while_held { let _ = release_rx.recv_timeout(Duration::from_secs(10)); }
+            std::fs::File::create(release).unwrap().write_all(b"continue\n").unwrap();
+            returned_while_held
+        });
+        let mut app = FactoryApp::for_test_at(cas.clone());
+        app.set_worktree_manager_for_test(manager);
+        app.finalize_worker_worktree(&open_agent_store(&cas).unwrap(), "fixture-agent", name);
+        let _ = returned_tx.send(());
+        let reserved = app.crash_cleanup_pending(name);
+        let _ = release_tx.send(());
+        assert!(gate.join().unwrap(), "worktree cleanup blocked the daemon's control lane");
+        assert!(reserved, "a late cleanup must not remove a same-name replacement");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while worker.exists() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(!worker.exists(), "the released Git cleanup must finish");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cas_50713_stale_reset_releases_cloud_then_replacement_starts_without_claim_lost() {
         use std::sync::{Arc, Mutex};

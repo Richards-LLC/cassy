@@ -1554,6 +1554,8 @@ impl WorkerCleanupJob {
 struct DeferredWorkerCleanup {
     occurrence: String,
     agent: cas_types::Agent,
+    #[serde(default)]
+    additional_agents: Vec<cas_types::Agent>,
     tasks: Vec<cas_types::Task>,
     worktree: Option<(cas_types::Worktree, PathBuf)>,
 }
@@ -1564,8 +1566,11 @@ impl DeferredWorkerCleanup {
     }
 
     fn persist(&self, root: &std::path::Path) -> anyhow::Result<()> {
+        self.persist_at(&self.path(root))
+    }
+
+    fn persist_at(&self, path: &std::path::Path) -> anyhow::Result<()> {
         use std::io::Write;
-        let path = self.path(root);
         let directory = path.parent().unwrap();
         std::fs::create_dir_all(directory)?;
         anyhow::ensure!(std::fs::symlink_metadata(directory)?.file_type().is_dir(), "cleanup intent directory is not a real directory");
@@ -1589,7 +1594,8 @@ impl DeferredWorkerCleanup {
         if let Some((worktree, _)) = &self.worktree {
             anyhow::ensure!(worktree.path.canonicalize()? == path.canonicalize()?, "cleanup worktree differs from its retired owner");
         }
-        if !crate::factory_target_cache::retirement::retire_worker_with_snapshot(root, &self.agent, &self.tasks)? {
+        let agents: Vec<_> = std::iter::once(&self.agent).chain(&self.additional_agents).cloned().collect();
+        if !crate::factory_target_cache::retirement::retire_workers_with_snapshot(root, &agents, &self.tasks)? {
             // A deliberate hold completes this attempt; frozen snapshots cannot
             // make progress by replaying at every subsequent daemon startup.
             return Ok(CrashCleanupOutcome { worktree: None });
@@ -1611,6 +1617,30 @@ impl DeferredWorkerCleanup {
         }
         Ok(CrashCleanupOutcome { worktree: Some(outcome) })
     }
+}
+
+/// Stage only metadata on the caller's lane; the daemon reserves each name
+/// before starting these jobs. Capture every ID before shutdown parks bindings.
+pub(crate) fn stage_dead_worker_cleanup(root: &std::path::Path, agents: &[cas_types::Agent]) -> std::io::Result<()> {
+    let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?;
+    let active = root.join("worker-cleanups");
+    std::fs::create_dir_all(&active)?;
+    if !std::fs::symlink_metadata(&active)?.file_type().is_dir() {
+        return Err(std::io::Error::other("cleanup intent directory is not a real directory"));
+    }
+    let mut paths = std::collections::HashSet::new();
+    for agent in agents {
+        let Some(path) = agent.metadata.get("clone_path") else { continue; };
+        if !paths.insert(path) { continue; }
+        let request = DeferredWorkerCleanup {
+            occurrence: uuid::Uuid::new_v4().to_string(), agent: agent.clone(),
+            additional_agents: agents.iter().filter(|other| other.id != agent.id).cloned().collect(),
+            tasks: tasks.clone(), worktree: None,
+        };
+        let incoming = root.join("worker-cleanups/incoming").join(format!("{}.json", request.occurrence));
+        request.persist_at(&incoming).map_err(std::io::Error::other)?;
+    }
+    Ok(())
 }
 
 /// cas-58a3: the I/O half of [`FactoryApp::mark_worker_crashed`], for a job
@@ -3203,14 +3233,14 @@ impl FactoryApp {
                     // cleanup could cancel its resume brief before registration.
                     // Like a live-pane recycle, release only the old leases:
                     // task bindings and unread mail belong to the replacement.
-                    let agent = (*matching[0]).clone();
-                    let tasks = crate::factory_target_cache::retirement::snapshot_worker_tasks(self.cas_dir(), &agent);
+                    let group: Vec<_> = matching.iter().map(|agent| (**agent).clone()).collect();
+                    let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(self.cas_dir(), &group);
                     for agent in matching {
                         if let Err(error) = agent_store.graceful_shutdown(&agent.id) {
                             defer_worker_retirement(self.cas_dir(), &agent.id, &error.to_string());
                         }
                     }
-                    self.queue_worker_cleanup(&agent_store, agent, tasks, false);
+                    self.queue_workers_cleanup(&agent_store, group, tasks, false);
                     self.last_db_fingerprint = None;
                     return Ok(Vec::new());
                 }
@@ -3422,7 +3452,18 @@ impl FactoryApp {
         tasks: std::io::Result<Vec<cas_types::Task>>,
         remove_worktree: bool,
     ) {
-        if !agent.metadata.contains_key("clone_path") { return; }
+        self.queue_workers_cleanup(_agent_store, vec![agent], tasks, remove_worktree);
+    }
+
+    fn queue_workers_cleanup(
+        &mut self,
+        _agent_store: &std::sync::Arc<dyn cas_store::AgentStore>,
+        mut agents: Vec<cas_types::Agent>,
+        tasks: std::io::Result<Vec<cas_types::Task>>,
+        remove_worktree: bool,
+    ) {
+        let Some(index) = agents.iter().position(|agent| agent.metadata.contains_key("clone_path")) else { return; };
+        let agent = agents.remove(index);
         let tasks = match tasks {
             Ok(tasks) => tasks,
             Err(error) => {
@@ -3434,7 +3475,7 @@ impl FactoryApp {
         let plan = remove_worktree.then(|| self.worktree_manager.as_ref()
             .and_then(|manager| manager.worker_removal_plan(&name))).flatten();
         self.start_worker_cleanup(DeferredWorkerCleanup {
-            occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks,
+            occurrence: uuid::Uuid::new_v4().to_string(), agent, additional_agents: agents, tasks,
             worktree: plan.map(|plan| (plan.worktree, plan.repo_root)),
         });
     }
@@ -3482,9 +3523,16 @@ impl FactoryApp {
 
     /// Run before accepting spawn controls, restoring the old name fences first.
     pub(crate) fn resume_deferred_worker_cleanups(&mut self) {
-        let directory = self.cas_dir().join("worker-cleanups");
+        self.adopt_worker_cleanup_intents(false);
+        self.adopt_worker_cleanup_intents(true);
+    }
+
+    fn adopt_worker_cleanup_intents(&mut self, incoming: bool) {
+        let mut directory = self.cas_dir().join("worker-cleanups");
         if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_dir()) { return; }
-        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+        if incoming { directory.push("incoming"); }
+        if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_dir()) { return; }
+        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
             if !entry.file_type().is_ok_and(|kind| kind.is_file()) { continue; }
             let request = std::fs::read(entry.path()).ok()
                 .and_then(|bytes| serde_json::from_slice::<DeferredWorkerCleanup>(&bytes).ok());
@@ -3493,9 +3541,17 @@ impl FactoryApp {
                 continue;
             };
             if uuid::Uuid::parse_str(&request.occurrence).is_err()
-                || request.path(self.cas_dir()) != entry.path()
+                || directory.join(format!("{}.json", request.occurrence)) != entry.path()
                 || self.crash_cleanup_pending(&request.agent.name)
             { continue; }
+            if incoming {
+                // Move the queue entry before launch. A crash still leaves a
+                // normal recovery record; retained errors never requeue per tick.
+                if let Err(error) = std::fs::rename(entry.path(), request.path(self.cas_dir())) {
+                    tracing::warn!(%error, "could not adopt queued worker cleanup");
+                    continue;
+                }
+            }
             self.start_worker_cleanup(request);
         }
     }
@@ -3550,6 +3606,9 @@ impl FactoryApp {
 
     /// Apply finished removals without waiting for Git or filesystem work.
     pub(crate) fn poll_worker_worktree_cleanups(&mut self) {
+        // Called before pending spawn processing, so every launched cleanup
+        // takes the existing name fence before any replacement can start.
+        self.adopt_worker_cleanup_intents(true);
         let mut pending = Vec::new();
         for job in std::mem::take(&mut self.worktree_cleanup_jobs) {
             if job.handle.is_finished() { self.apply_worker_cleanup(job); }
@@ -6691,7 +6750,7 @@ mod tests {
             cleanup_on_close: false, promote_entries_on_merge: false,
         }).unwrap();
         for (name, disposition) in [
-            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"),
+            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"),
             ("interrupted-worker", "interrupted"), ("failed-worker", "error"),
         ] {
             manager.create_for_worker(name).unwrap();
@@ -6711,11 +6770,12 @@ mod tests {
                 std::fs::create_dir_all(&target).unwrap();
                 std::fs::write(target.join("unverified.log"), "preserve").unwrap();
             }
-            if disposition == "duplicates" {
+            if disposition == "duplicates" || disposition == "staged" {
                 let agents = open_agent_store(&root).unwrap();
                 agent.role = cas_types::AgentRole::Worker;
                 agent.pid = Some(i32::MAX as u32);
-                agent.status = cas_types::AgentStatus::Shutdown;
+                agent.status = if disposition == "staged" { cas_types::AgentStatus::Stale } else { cas_types::AgentStatus::Shutdown };
+                agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
                 agents.register(&agent).unwrap();
                 let mut sibling = agent.clone();
                 sibling.id = "sibling-registration".into();
@@ -6730,13 +6790,29 @@ mod tests {
                 let proof = target.join("worker-check.log");
                 std::fs::write(&proof, "preserve").unwrap();
                 let mut app = FactoryApp::for_test_at(root.clone());
-                app.shutdown_worker_for_recycle(name).await.unwrap();
+                if disposition == "staged" {
+                    crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None).unwrap();
+                    let parked = crate::store::open_task_store_cached(&root).unwrap().get(&task.id).unwrap();
+                    assert!(parked.assignee.is_none(), "MCP cleanup releases the binding after capturing it");
+                    app.shutdown_worker(name, true).await.unwrap();
+                    let (done, receive) = std::sync::mpsc::channel();
+                    crate::ui::factory::daemon::runtime::store_worker::submit_write("staged cleanup sentinel", move || {
+                        let _ = done.send(());
+                        Ok::<_, String>(())
+                    });
+                    receive.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    app.poll_worker_worktree_cleanups();
+                } else {
+                    app.shutdown_worker_for_recycle(name).await.unwrap();
+                }
                 app.join_worker_worktree_cleanups();
-                assert!(proof.is_file(), "a task owned by a later duplicate identity must protect recycled output");
+                assert!(proof.is_file(), "{disposition}: original WIP facts must protect retired output");
+                app.resume_deferred_worker_cleanups();
+                assert!(!app.worker_worktree_cleanups_pending(), "completed holds do not replay");
                 continue;
             }
             let request = DeferredWorkerCleanup {
-                occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks,
+                occurrence: uuid::Uuid::new_v4().to_string(), agent, additional_agents: Vec::new(), tasks,
                 worktree: Some((plan.worktree, if disposition == "error" {
                     // A missing repository makes worktree removal return an I/O error.
                     repo.join("missing-repository")

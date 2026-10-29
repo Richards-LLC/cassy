@@ -9130,15 +9130,24 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     if matching.is_empty() || super::agent_liveness::has_live_agent_named(&matching, name) {
         return Ok(None);
     }
+    // The MCP call can precede the daemon's queued shutdown. Stage the original
+    // task facts once per registration before either path releases bindings;
+    // the later daemon call must not replace them with an empty snapshot.
+    const CLEANUP_STAGED: &str = "shutdown_target_cleanup_staged";
+    if matching.iter().any(|agent| !agent.metadata.contains_key(CLEANUP_STAGED)) {
+        crate::ui::factory::app::render_and_ops::epic_workers::stage_dead_worker_cleanup(cas_root, &matching)?;
+        for agent in &matching {
+            let mut staged = agent.clone();
+            staged.metadata.insert(CLEANUP_STAGED.into(), "true".into());
+            agents.update(&staged)?;
+        }
+    }
     let queue = crate::store::open_prompt_queue_store(cas_root)?;
     let detail =
         format!("Cancelled: shutdown requested for dead worker {name}; its recipient is retired");
     let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
-        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
-            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
-        }
         if agent.status != cas_types::AgentStatus::Shutdown {
             // cas-b06f: requested, so reported by the shutdown receipt.
             super::orphan_recovery::recover_worker_retired_on_request(

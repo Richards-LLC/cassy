@@ -179,6 +179,7 @@ pub(crate) struct TargetsJson {
 #[serde(rename_all = "snake_case")]
 pub(crate) struct StatusJson {
     pub(crate) schema_version: u32,
+    pub(crate) supervisor_phase: Option<crate::ui::factory::daemon::runtime::work_events::SupervisorPhase>,
     pub(crate) session: SessionJson,
     pub(crate) prompt_queue_pending: usize,
     pub(crate) activity: Vec<Event>,

@@ -1189,7 +1189,8 @@ mod large_artifact_staging_tests {
             "Honor non-goals and layer boundaries",
             "Never block the pane",
             "Checkpoint, never compact",
-            "verification required",
+            "cas qa ledger init",
+            "cas qa ledger check",
             "MERGE REQUIRED",
         ] {
             assert!(

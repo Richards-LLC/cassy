@@ -4350,7 +4350,6 @@ mod tests {
         std::fs::write(repo.join("delivery.txt"), "parked delivery\n").unwrap();
         git(&["add", "delivery.txt"]);
         git(&["commit", "-q", "-m", "feat(cas-a0a0): parked delivery"]);
-        TeamsManager::install_worker_pre_commit_hook(repo).expect("install worker push hook");
         let initial = std::process::Command::new("git")
             .args(["push", "-q", "-u", "origin", "factory/w"])
             .env("CAS_AGENT_NAME", "w")
@@ -4364,9 +4363,10 @@ mod tests {
         git(&["checkout", "-q", "main"]);
         std::fs::write(repo.join("target.txt"), "target update\n").unwrap();
         git(&["add", "target.txt"]);
-        git(&["commit", "--no-verify", "-q", "-m", "feat(cas-b0b0): target update"]);
+        git(&["commit", "-q", "-m", "feat(cas-b0b0): target update"]);
         git(&["push", "-q", "origin", "main"]);
         git(&["checkout", "-q", "factory/w"]);
+        TeamsManager::install_worker_pre_commit_hook(repo).expect("install worker push hook");
         (repo_tmp, remote_tmp, cas_root)
     }
 

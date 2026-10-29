@@ -5142,6 +5142,7 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
   if (!panel || !conversation || !team) return;
   panel.hidden = !opened;
   const select = (wantTeam: boolean): void => {
+    if (wantTeam && teamOpenKey !== key) countUsage("team.open");
     teamOpenKey = wantTeam ? key : undefined;
     syncTeamView(status, stale);
     (wantTeam ? team : conversation).focus();

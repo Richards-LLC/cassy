@@ -41,6 +41,7 @@ export const USAGE_ACTIONS = {
   "reply.attachment": "HUB-J24",
   "show-work.toggle": "HUB-J25",
   "worker.timeline": "HUB-J25",
+  "team.open": "HUB-J26",
 } as const;
 
 export type UsageAction = keyof typeof USAGE_ACTIONS;

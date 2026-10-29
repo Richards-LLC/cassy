@@ -135,7 +135,7 @@
 - `hub-web/src/rich-syntax.ts`, `hub-web/src/code-syntax.brief.md` - lazy lexical source color with bounded input, spans and cache, safe token nodes, selection restoration and honest plain-text fallback.
 - `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css` - reusable fenced-source header with literal-source Copy feedback and per-block Wrap, retained around rich previews.
 - `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - reserved inline media, lifecycle and PDF first-page pixels.
-- `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts` - scoped release/task ledger, server merge metrics and accessible device-local context width.
+- `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts`, `hub-web/src/context-resize.ts` - shared session staffing/delivery state, scoped release/task ledger, lazy Team lanes, daemon receipt trail and accessible device-local context width.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, typed operation/scope disclosures with exact raw evidence, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs`, `cas-cli/src/hub/accounts_route_tests.rs` - registry projection, allowlisted paired-account lifecycle and real-router authorization/audit tests.

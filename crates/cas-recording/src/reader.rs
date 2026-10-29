@@ -701,6 +701,8 @@ mod tests {
         // budget. This still catches wrong index ordering and boundary picks.
         let entries = &reader.keyframe_index().entries;
         let duration = reader.duration_ms();
+        let max_comparisons =
+            (entries.len() + 1).next_power_of_two().trailing_zeros() as usize;
         for n in 0..1_000_u64 {
             let target = n * duration / 999;
             let expected = entries
@@ -711,6 +713,13 @@ mod tests {
                 .map_or(0, |entry| entry.timestamp_ms);
             let position = reader.seek_to(target).unwrap();
             assert_eq!(position.timestamp_ms, expected, "target {target}ms");
+            assert!(
+                reader
+                    .keyframe_index()
+                    .find_keyframe_comparison_count(target)
+                    <= max_comparisons,
+                "seek index inspected more than {max_comparisons} entries for {target}ms"
+            );
         }
     }
 }

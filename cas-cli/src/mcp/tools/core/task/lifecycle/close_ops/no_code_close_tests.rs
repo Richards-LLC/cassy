@@ -1778,7 +1778,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
         git(&checkout, &["add", "."]);
         git(&checkout, &["commit", "-qm", "feat(cas-8488-a): task A"]);
-        git(&checkout, &["push", "-q", "origin", LANE]);
+        git(&checkout, &["push", "-q", "--force", "origin", LANE]);
         let delivered = git(&checkout, &["rev-parse", "HEAD"]);
         let first = assigned("cas-8488-a", TaskType::Task, "main");
         f.put(&first);

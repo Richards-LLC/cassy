@@ -15,6 +15,8 @@ struct Record {
     started: Instant,
     at: DateTime<Utc>,
     before: String,
+    // Keep the pre-command history when chooser navigation replaces `before`.
+    before_command: String,
     write: Box<dyn Fn() -> Option<Result<(), String>> + Send>,
     hook: Option<tokio::task::JoinHandle<Option<String>>>,
     last_key: Option<Key>,
@@ -184,7 +186,7 @@ impl FactoryDaemon {
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before, write: Box::new(move || write.result()), hook: None, last_key: None });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         let record = self.supervisor_commands.records.get_mut(&owner).ok_or_else(|| anyhow::anyhow!("The original command receipt is unavailable. Do not resend an uncertain command."))?;
@@ -230,8 +232,14 @@ impl FactoryDaemon {
                 if matches!(record.last_key, Some(Key::Next | Key::Previous | Key::Select)) && current != record.before { "" } else { &record.before }, &current) {
                 if record.receipt.command == Command::Model && !interactive && record.last_key == Some(Key::Select)
                     && pane.harness() == cas_mux::SupervisorCli::Codex
-                    && let Some((model, effort)) = codex_model_selection(&record.before, &current)
                 {
+                    let Some((model, effort)) = codex_model_selection(&record.before_command, &current) else {
+                        record.receipt.phase = Phase::Unconfirmed;
+                        record.receipt.detail = "No fresh model selection was confirmed by the harness.".into();
+                        record.receipt.interactive = false;
+                        record.receipt.output = super::work_events::redact(&current).chars().take(8 * 1024).collect();
+                        return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
+                    };
                     record_supervisor_model(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &model, effort.as_deref());
                 }
                 record.receipt.phase = Phase::Observed;

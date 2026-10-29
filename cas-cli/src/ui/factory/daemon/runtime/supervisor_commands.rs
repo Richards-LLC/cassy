@@ -50,6 +50,9 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
     match command {
         Command::Compact if fresh("compacted (ctrl+o") || fresh("context compacted ·") =>
             Some(("Context compaction confirmed by the supervisor's harness.".into(), false)),
+        Command::Clear if lower.contains("openai codex") && idle_prompt(current)
+            && (fresh("tip: use the desktop app") || fresh("to get started, describe a task")) =>
+                Some(("Codex returned to its fresh native welcome prompt after Clear.".into(), false)),
         Command::Model if fresh("select model") || fresh("select a model")
             || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
         Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),

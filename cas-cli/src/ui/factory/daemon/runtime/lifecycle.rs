@@ -3649,7 +3649,10 @@ impl FactoryDaemon {
 
             // Process pending spawns (non-blocking: git ops run on background thread)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);
-            if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
+            if self.spawn_task.is_some()
+                || !self.pending_spawns.is_empty()
+                || self.app.worker_worktree_cleanups_pending()
+            {
                 self.process_pending_spawns().await;
             }
 

@@ -6733,6 +6733,9 @@ mod tests {
                     continue;
                 }
                 assert!(worker.exists(), "{name}: deliberate holds preserve output");
+                if disposition == "unowned" {
+                    assert_eq!(std::fs::read_to_string(crate::factory_scratch::worker_target_dir(&worker).join("unverified.log")).unwrap(), "preserve");
+                }
                 assert!(!path.exists(), "{name}: a deliberate hold must complete its intent");
             }
             drop(first);
@@ -6762,6 +6765,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
+        for dead in [false, true] {
         let env = crate::test_support::TestEnvGuard::temp_home();
         let repo = env.home().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -6792,6 +6796,7 @@ mod tests {
         let agents = open_agent_store(&cas).unwrap();
         let mut agent = cas_types::Agent::new("fixture-agent".into(), name.into());
         agent.role = cas_types::AgentRole::Worker;
+        if dead { agent.pid = Some(i32::MAX as u32); }
         agent.metadata.insert("clone_path".into(), worker.display().to_string());
         agents.register(&agent).unwrap();
         let entered = env.home().join("entered");
@@ -6823,6 +6828,7 @@ mod tests {
         });
         let mut app = FactoryApp::for_test_at(cas.clone());
         app.set_worktree_manager_for_test(manager);
+        if !dead {
         let pty = cas_mux::Pty::spawn(name, cas_mux::PtyConfig {
             command: "/bin/sleep".into(), args: vec!["300".into()],
             cwd: Some(worker.clone()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
@@ -6830,25 +6836,42 @@ mod tests {
         app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
             name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
         ).unwrap());
+        }
         app.shutdown_worker(name, true).await.unwrap();
-        let _ = returned_tx.send(());
-        entered_rx.recv_timeout(Duration::from_secs(10)).expect("retirement reached the held Git call");
-        let recovery_path = app.worktree_cleanup_jobs[0].recovery_path.clone().unwrap();
-        assert!(recovery_path.is_file(), "cleanup intent must be durable before retirement I/O");
+        let (flushed_tx, flushed_rx) = mpsc::channel();
+        crate::ui::factory::daemon::runtime::store_worker::submit_write("cleanup regression sentinel", move || {
+            let _ = returned_tx.send(());
+            let _ = flushed_tx.send(());
+            Ok::<_, String>(())
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            app.poll_worker_worktree_cleanups();
+            if entered_rx.try_recv().is_ok() { break; }
+            assert!(std::time::Instant::now() < deadline, "retirement reached the held Git call");
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        let recovery_path = app.worktree_cleanup_jobs.first().and_then(|job| job.recovery_path.clone());
+        let intent_durable = recovery_path.as_ref().is_some_and(|path| path.is_file());
         let reserved = app.crash_cleanup_pending(name);
         let _ = release_tx.send(());
-        assert!(gate.join().unwrap(), "worktree cleanup blocked the daemon's control lane");
+        let lane_free = gate.join().unwrap();
+        flushed_rx.recv_timeout(Duration::from_secs(10)).expect("store write lane finishes after release");
+        assert!(lane_free, "dead={dead}: target retirement blocked the store write lane");
+        assert!(intent_durable, "cleanup intent must be durable before retirement I/O");
+        let recovery_path = recovery_path.unwrap();
         assert!(reserved, "a late cleanup must not remove a same-name replacement");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while app.worker_worktree_cleanups_pending() && std::time::Instant::now() < deadline {
             app.poll_worker_worktree_cleanups();
             std::thread::park_timeout(Duration::from_millis(1));
         }
-        assert!(!worker.exists(), "the released Git cleanup must finish");
+        assert_eq!(worker.exists(), dead, "dead registrations retain their checkout; live shutdown reclaims it");
         assert!(!target.exists(), "target retirement finishes before checkout removal");
         assert!(!recovery_path.exists(), "successful cleanup removes its recovery intent");
         assert!(!app.crash_cleanup_pending(name), "completed cleanup releases the name");
-        assert!(app.worktree_manager().unwrap().worker_removal_plan(name).is_none());
+        assert_eq!(app.worktree_manager().unwrap().worker_removal_plan(name).is_none(), !dead);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

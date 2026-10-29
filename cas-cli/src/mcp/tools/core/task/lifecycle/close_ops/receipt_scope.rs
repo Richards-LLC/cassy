@@ -924,6 +924,52 @@ mod tests {
     }
 
     #[test]
+    fn changelog_gate_skips_projects_without_unreleased_section() {
+        let repo = changelog_fixture();
+        std::fs::remove_file(repo.path().join("CHANGELOG.md")).unwrap();
+        let head = commit_changelog_fixture(repo.path(), "project without release notes");
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &head,
+            "main",
+        ).is_none(), "projects without an Unreleased section are outside this gate");
+    }
+
+    #[test]
+    fn changelog_templates_do_not_satisfy_entry_or_exception() {
+        let repo = changelog_fixture();
+        let mut task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let source_only = commit_changelog_fixture(repo.path(), "product change");
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: <reason>".into();
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &source_only,
+            "main",
+        ).is_some(), "the literal decision template is not a reason");
+
+        task.notes.clear();
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Added — <area>\n\n- **Title** — What changed.\n\n## [1.0.0] - 2026-01-01\n",
+        ).unwrap();
+        let placeholder = commit_changelog_fixture(repo.path(), "add changelog template");
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["CHANGELOG.md".into(), "hub-web/src/app.ts".into()],
+            &placeholder,
+            "main",
+        ).is_some(), "the literal CHANGELOG template is not a release entry");
+    }
+
+    #[test]
     fn non_product_paths_do_not_require_a_changelog_entry() {
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();

@@ -337,19 +337,27 @@ fn recorded_delivery(repo: &Path, task: &Task) -> Option<Delivery> {
 }
 
 /// Whether a release of `epic` may treat its post-release check as a watch:
-/// the epic branch's change since its target carries no migration and no
-/// secret-shaped line. An unreadable diff keeps the gate.
+/// the epic branch's change against every release branch it ships to (the
+/// post-release `release_branches`, else the default branch, as the watch
+/// itself arms) carries no migration and no secret-shaped line. The epic's
+/// own work target is not used: it is often the epic lane itself, whose
+/// `X...X` range is empty. An unreadable diff, or a release branch that is
+/// the epic branch, keeps the gate.
 fn epic_release_clear(cas_root: &Path, epic: &Task) -> bool {
     let (Some(branch), Some(repo)) = (epic.branch.as_deref(), cas_root.parent()) else {
         return false;
     };
-    let target = epic
-        .deliverables
-        .work_target
-        .as_ref()
-        .map_or("main", |target| target.target_branch.as_str());
-    let range = format!("{target}...{branch}");
-    diff_between(repo, &[range.as_str(), "--"]).is_some_and(|delivery| floor_clear(&delivery, &[]))
+    let mut targets = crate::qa_post_release::configured(cas_root)
+        .map(|config| config.release_branches)
+        .unwrap_or_default();
+    if targets.is_empty() {
+        targets.push(crate::worktree::GitOperations::new(repo.to_path_buf()).detect_default_branch());
+    }
+    targets.iter().all(|target| {
+        target != branch
+            && diff_between(repo, &[format!("{target}...{branch}").as_str(), "--"])
+                .is_some_and(|delivery| floor_clear(&delivery, &[]))
+    })
 }
 
 /// The open window that makes `epic`'s post-release check a watch, if any.
@@ -693,8 +701,18 @@ mod tests {
     #[test]
     fn window_makes_the_post_release_check_a_watch() {
         let (dir, cas, store, mut delivery) = epic_fixture();
-        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
-        let epic = store.get("cas-ep1c").unwrap();
+        std::fs::write(
+            cas.join("config.toml"),
+            "[qa.post_release]\ncommand = \"echo healthy\"\nrelease_branches = [\"main\"]\n",
+        )
+        .unwrap();
+        // The epic's own work target is its lane, as factory epics record it.
+        let mut epic = store.get("cas-ep1c").unwrap();
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "epic/hot".into(),
+        });
+        store.update(&epic).unwrap();
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
         let window = open(&cas, store.as_ref());
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none());

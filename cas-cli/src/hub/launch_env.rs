@@ -785,6 +785,89 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_catalog_recommends_without_opening_provider_credentials() {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+        use crate::accounts::Provider;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_owned();
+        env.remove("CAS_ROOT");
+        env.remove("CLAUDE_CONFIG_DIR");
+        env.remove("CODEX_HOME");
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set_current_dir(&home);
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        env.set("PATH", std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap());
+        let shell = bin.join("private-shell");
+        std::fs::write(&shell, "#!/bin/sh\nprintf '__CAS_PATH_BEGIN__%s__CAS_PATH_END__' \"$PATH\"\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("SHELL", &shell);
+        for (name, args, output) in [
+            ("claude", "auth status --json", r#"{"loggedIn":true}"#),
+            ("codex", "login status", "Logged in using ChatGPT"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n[ \"$*\" = '{args}' ] || exit 71\nprintf '%s' '{output}'\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let now = chrono::Utc::now();
+        let reset = now + chrono::Duration::days(2);
+        let mut forbidden = Vec::new();
+        for provider in Provider::ALL {
+            let folder = home.join(format!("{}chosen", provider.prefix()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let credential = folder.join(provider.credentials());
+            std::fs::write(&credential, r#"{"tokens":{"account_id":"secret-only-id","id_token":"fixture.not-a-real-token.signature"}}"#).unwrap();
+            forbidden.push(credential);
+            if provider == Provider::Claude {
+                std::fs::write(folder.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"public@example.test","accountUuid":"public-id","organizationUuid":"public-org"}}"#).unwrap();
+                let identity = crate::account_registry::AccountIdentity {
+                    account_id: Some("public-id".into()), workspace_id: Some("public-org".into()), email: None,
+                };
+                std::fs::write(folder.join(".cas-claude-usage.json"), serde_json::json!({
+                    "identity": serde_json::to_string(&identity).unwrap(), "observed_at": now,
+                    "windows": [{"name":"weekly", "used_percent":20.0,"reset_at":reset.to_rfc3339(),"spend_dollars":null}],
+                }).to_string()).unwrap();
+            } else {
+                std::fs::create_dir(folder.join("sessions")).unwrap();
+                std::fs::write(folder.join("sessions/usage.jsonl"), serde_json::json!({
+                    "timestamp": now, "payload":{"rate_limits":{"plan_type":"pro",
+                        "primary":{"used_percent":20.0,"window_minutes":10080,"resets_at":reset.timestamp()}}},
+                }).to_string()).unwrap();
+            }
+        }
+        // Watch actual file opens, not a mock of registry metadata. The private
+        // official-CLI doubles above never inspect any credential path.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0);
+        let mut watch = unsafe { std::fs::File::from_raw_fd(fd) };
+        for path in &forbidden {
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert!(unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_OPEN) } >= 0);
+        }
+        for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let rows = profiles_for_project(cli, None).unwrap();
+            let chosen = rows.iter().find(|row| row.name == "chosen").unwrap();
+            assert!(chosen.logged_in && chosen.recommendation.is_some(), "{cli:?}: {rows:?}");
+            assert!(resolve(cli, Some("chosen")).is_ok());
+        }
+        let accounts = crate::account_registry::collect_for(Provider::Codex, &home, false).unwrap();
+        let mut events = [0u8; 4096];
+        let opened = match watch.read(&mut events) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => 0,
+            Err(error) => panic!("cannot audit credential opens: {error}"),
+        };
+        assert_eq!(opened, 0, "catalog/readiness must not open provider credential files");
+        let account = accounts.iter().find(|account| account.name == "chosen").unwrap();
+        assert_eq!(account.plan.as_deref(), Some("pro"), "retain native rollout plan metadata");
+        assert!(account.email.is_none() && account.identity.is_none(), "secret-only identity stays unknown");
+    }
+
     #[test]
     fn configured_profile_beats_ambient_and_main() {
         assert_eq!(

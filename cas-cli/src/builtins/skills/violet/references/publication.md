@@ -14,3 +14,16 @@ hours, and every post it lets through is logged on the epic.
 
 The epic is the post's `epic_id` or `task_id`, else the session's focused epic.
 With neither, or with no open verification, the post is allowed.
+
+
+For `cas violet post --file`, an explicit `--epic` wins. Otherwise, when every
+attachment is a report PDF for the same version, the CLI selects that version's
+merged release PR and matches its head branch to one stored epic. PDFs named
+`v<version>.pdf` under `release-reports/` are recognized; custom output directories
+also work when the generated Markdown companion remains beside the PDF.
+The released epic's own open verification still blocks its report.
+
+Missing or ambiguous release/epic evidence and mixed attachments keep the normal
+focused-epic gate. Pass `--epic <released-epic-id>` when automatic inference is
+unavailable, or name `epic_id` on a direct Violet call. Thread uploads use their
+explicit epic or session focus. Keep the session focused on its current work.

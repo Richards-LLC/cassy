@@ -322,12 +322,17 @@ fn run_post(
             ),
         ));
     }
+    let epic = args.epic.clone().or_else(|| {
+        context.cas_root.and_then(|root| {
+            crate::cli::release_report::publication_epic_for_reports(root, &args.files)
+        })
+    });
     let post = json!({
         "channel": channel,
         "kind": route_kind(route),
         "text": text,
         "release_notes": args.release_notes,
-        "epic_id": args.epic,
+        "epic_id": epic,
     });
     if route != Route::Message
         || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post)

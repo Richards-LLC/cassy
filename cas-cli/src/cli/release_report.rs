@@ -967,37 +967,11 @@ fn acquire_sources(
             }
         }
 
-        for search in [tag, version] {
-            match gh_json(
-                project_root,
-                &[
-                    "pr",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--state",
-                    "merged",
-                    "--search",
-                    search,
-                    "--limit",
-                    "30",
-                    "--json",
-                    "number,title,body,url,closingIssuesReferences,createdAt,mergedAt",
-                ],
-            ) {
-                Ok(value) => {
-                    release_pr = select_release_pr(&value, version);
-                    if release_pr.is_some() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    warnings.push(format!(
-                        "GitHub release PRs: {error}; remedy `gh pr list --repo {repo} --state merged`"
-                    ));
-                    break;
-                }
-            }
+        match fetch_release_pr(project_root, repo, version) {
+            Ok(pr) => release_pr = pr,
+            Err(error) => warnings.push(format!(
+                "GitHub release PRs: {error}; remedy `gh pr list --repo {repo} --state merged`"
+            )),
         }
         match &release_pr {
             Some(pr) => referenced.extend(pr.referenced.iter().copied()),
@@ -1525,6 +1499,7 @@ fn collect_pr_issue_references(value: &Value, referenced: &mut BTreeSet<u64>) {
 #[derive(Debug, Clone)]
 struct ReleasePr {
     number: u64,
+    head_ref: Option<String>,
     url: Option<String>,
     created_at: Option<DateTime<Utc>>,
     merged_at: DateTime<Utc>,
@@ -1576,6 +1551,7 @@ fn select_release_pr(value: &Value, version: &str) -> Option<ReleasePr> {
             collect_pr_issue_references(&Value::Array(vec![pr.clone()]), &mut referenced);
             Some(ReleasePr {
                 number: pr.get("number").and_then(Value::as_u64)?,
+                head_ref: pr.get("headRefName").and_then(Value::as_str).map(ToOwned::to_owned),
                 url: pr.get("url").and_then(Value::as_str).map(ToOwned::to_owned),
                 created_at: parse_utc(pr.get("createdAt").and_then(Value::as_str)),
                 merged_at,
@@ -1583,6 +1559,61 @@ fn select_release_pr(value: &Value, version: &str) -> Option<ReleasePr> {
             })
         })
         .min_by_key(|pr| pr.merged_at)
+}
+
+/// The same version-bound merged PR drives report evidence and upload ownership.
+fn fetch_release_pr(project_root: &Path, repo: &str, version: &str) -> anyhow::Result<Option<ReleasePr>> {
+    let tag = format!("v{version}");
+    for search in [tag.as_str(), version] {
+        let value = gh_json(project_root, &[
+            "pr", "list", "--repo", repo, "--state", "merged", "--search", search,
+            "--limit", "30", "--json",
+            "number,title,body,url,closingIssuesReferences,createdAt,mergedAt,headRefName",
+        ])?;
+        if let Some(pr) = select_release_pr(&value, version) {
+            return Ok(Some(pr));
+        }
+    }
+    Ok(None)
+}
+
+/// Recognize generated report PDFs, including custom output directories with
+/// their generated Markdown companion. Other files keep normal publication
+/// context; a version-looking filename alone does not confer release identity.
+fn report_pdf_version(path: &Path) -> Option<String> {
+    let path = fs::canonicalize(path).ok()?;
+    if path.extension()?.to_str()? != "pdf" {
+        return None;
+    }
+    let version = normalize_version(path.file_stem()?.to_str()?.strip_prefix('v')?).ok()?;
+    let report_directory = path.parent()?.file_name()?.to_str()? == "release-reports";
+    let generated_source = || fs::read_to_string(path.with_extension("md")).ok().is_some_and(|source| {
+        source.lines().next().is_some_and(|title| title.starts_with("# ") && title.ends_with(&format!(" v{version}")))
+            && source.contains("\n## Evidence and scope\n")
+    });
+    (report_directory || generated_source()).then_some(version)
+}
+
+/// File uploads of one release use its PR's durable epic lane, independently
+/// of session focus. Missing/ambiguous evidence preserves the ordinary gate;
+/// callers can explicitly name --epic. Mixed attachments never borrow a PDF's
+/// release identity for an unrelated deliverable.
+pub(crate) fn publication_epic_for_reports(cas_root: &Path, files: &[PathBuf]) -> Option<String> {
+    let first = report_pdf_version(files.first()?)?;
+    if files.iter().skip(1).any(|path| report_pdf_version(path).as_deref() != Some(&first)) {
+        return None;
+    }
+    let project = cas_root.parent()?;
+    let config = Config::load(cas_root).ok()?;
+    let repo = config.issue_repo_registry_for_project(project).project?;
+    let branch = fetch_release_pr(project, &repo, &first).ok()??.head_ref?;
+    let store = crate::store::open_task_store(cas_root).ok()?;
+    let mut epics = store.list(None).ok()?.into_iter().filter(|task| {
+        task.task_type == cas_types::TaskType::Epic
+            && task.effective_epic_branch() == Some(branch.as_str())
+    });
+    let epic = epics.next()?;
+    epics.next().is_none().then_some(epic.id)
 }
 
 /// Split one snapshot of issue states into this release's closures.

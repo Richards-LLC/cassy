@@ -1368,6 +1368,32 @@ printf '%s' '[{"number":85,"title":"Release v3.85.0","headRefName":"epic/release
     result.expect("released report must not inherit unrelated focused-epic verification");
     assert_eq!(seen.borrow()[0]["epic_id"], "cas-released");
     assert_eq!(hub.calls().len(), 1);
+    // Explicit context wins; unrecognized/mixed files retain the session gate.
+    let unrelated = write_file(&dir, "v3.85.0.pdf", bytes);
+    for extra in [
+        vec!["--epic", "cas-focused"],
+        vec!["--file", unrelated.to_str().unwrap()],
+    ] {
+        let mut argv = vec!["post", "--channel", "cas-internal", "--file", pdf.to_str().unwrap()];
+        argv.extend(extra);
+        let blocked = ScriptedHub::default();
+        let (_, result) = run_cli_at(&argv, &blocked, false, &gate, None, Some(&root));
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "publication_blocked");
+        assert!(error.message.contains("cas-focused"), "{error:?}");
+        assert_eq!(blocked.connects(), 0);
+    }
+    let custom = dir.path().join("custom");
+    std::fs::create_dir_all(&custom).unwrap();
+    let custom_pdf = custom.join("v3.85.0.pdf");
+    std::fs::write(&custom_pdf, bytes).unwrap();
+    std::fs::write(custom_pdf.with_extension("md"), "# Project v3.85.0\n\n## Evidence and scope\n").unwrap();
+    let custom_hub = ScriptedHub::with(vec![file_receipt("F86", "v3.85.0.pdf", bytes)]);
+    let (_, result) = run_cli_at(
+        &["post", "--channel", "cas-internal", "--file", custom_pdf.to_str().unwrap()],
+        &custom_hub, false, &gate, None, Some(&root),
+    );
+    result.expect("generated custom output retains the release identity");
     // The released epic's own pending verification remains a hard gate.
     let mut released = store.get("cas-released").unwrap();
     released.pending_verification = true;

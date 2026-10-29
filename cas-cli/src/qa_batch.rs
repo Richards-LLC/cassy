@@ -294,6 +294,12 @@ pub(crate) fn satisfying_receipt(
     let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
+    // Retired history can recover only its exact delivery. Without an active
+    // park, a later integrated head may be an unreviewed correction, rather
+    // than an umbrella integration receipt for the reviewed work.
+    if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
+        return Ok(None);
+    }
     let receipts = cas_store::qa_batch_receipts_for_task(root, &project, &task.id)
         .map_err(|e| e.to_string())?;
     for receipt in receipts {
@@ -337,6 +343,9 @@ pub(crate) fn covering_pass(
     let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
+    if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
+        return Ok(None);
+    }
     if ancestor(repo, &anchor, head) != Some(true)
         || (head != anchor && integration_state(repo, head, target) != Some(true))
     {
@@ -369,10 +378,9 @@ pub(crate) fn ensure_deferred_close(
         return Ok(());
     }
     let (repo, target) = task_context(root, task)?;
-    let head = match receipt {
-        Some(head) => commit(&repo, head),
-        None => delivery_anchor(&repo, task),
-    }
+    let head = receipt
+        .or(task.deliverables.factory_branch_anchor.as_deref())
+        .and_then(|head| commit(&repo, head))
         .ok_or_else(|| debt_refusal(&task.id))?;
     let satisfies = |head: &str| -> Result<bool, String> {
         Ok(

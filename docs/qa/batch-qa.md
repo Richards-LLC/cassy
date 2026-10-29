@@ -61,7 +61,10 @@ be empty while the delivery remains in recorded history. Receipt recording,
 status and close use the latest historical anchor in that case. An active
 anchor always takes precedence; an invalid active or latest historical anchor
 does not fall back to older records or a mutable branch tip. All staging,
-target, independent-recorder and published-ledger checks still apply. This
+target, independent-recorder and published-ledger checks still apply. Close
+recovery supplies `commit_receipt` naming that exact historical anchor; a later
+integrated correction cannot inherit its approval without a new active parked
+anchor and matching QA. This
 recovers delivery identity for QA; it does not restore declined merge authority
 or clear deferred evidence without its receipt or passed independent round.
 

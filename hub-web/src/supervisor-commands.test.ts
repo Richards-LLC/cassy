@@ -46,6 +46,23 @@ describe("supervisor slash commands", () => {
 });
 
 describe("supervisor command receipts", () => {
+  it("settles a pending Exit from the authoritative session end without claiming Finish completed", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const command of ["exit", "finish"] as const) {
+        const send = vi.fn().mockReturnValue(true);
+        const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+        await session.run(command, true);
+        session.ended("prompt_input_exit");
+        const receipt = [...session.receipts.values()][0];
+        expect(receipt.phase).toBe(command === "exit" ? "observed" : "unconfirmed");
+        expect(receipt.detail).toContain("prompt_input_exit");
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(send).toHaveBeenCalledTimes(1);
+      }
+    } finally { vi.useRealTimers(); }
+  });
+
   it("polls only the outcome and stops after observation, without replaying a mutation", async () => {
     vi.useFakeTimers();
     try {

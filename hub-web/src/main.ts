@@ -962,7 +962,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
-      for (const item of items) connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
+      for (const item of items) {
+        connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
+        if (item.ended) supervisorCommands.get(sessionKey(machine.id, item.name))?.ended(item.ended.reason);
+      }
       retireEndedSessionNotices(machine.id, items);
       // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));

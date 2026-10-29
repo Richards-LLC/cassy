@@ -179,6 +179,19 @@ export class SupervisorCommandSession {
     if (receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
     this.options.changed();
   }
+  /** Only the authenticated catalog's ended receipt may settle a vanished pane. */
+  ended(reason: string): void {
+    for (const receipt of this.receipts.values()) {
+      if (receipt.phase !== "submitted" && !receipt.interactive) continue;
+      receipt.phase = receipt.command === "exit" ? "observed" : "unconfirmed";
+      receipt.interactive = false;
+      receipt.detail = receipt.command === "exit"
+        ? `Session ended after Exit (${reason}). See the session-ended receipt.`
+        : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
+      this.stopPoll(receipt.client_ref);
+    }
+    this.options.changed();
+  }
   reject(ref: string, detail: string): boolean {
     const receipt = this.receipts.get(ref); if (!receipt) return false;
     receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
@@ -186,7 +199,9 @@ export class SupervisorCommandSession {
   }
   async step(ref: string, key: CommandKey): Promise<void> {
     const receipt = this.receipts.get(ref); if (!receipt?.interactive) return;
+    const reason = this.options.unavailable(); if (reason) throw new Error(reason);
     await this.options.control();
+    const changed = this.options.unavailable(); if (changed) throw new Error(changed);
     if (!this.options.send({ SupervisorCommandStep: { client_ref: ref, key } })) throw new Error("The selection was not sent. Check the connection.");
     receipt.phase = "submitted"; receipt.interactive = false; receipt.detail = "Selection requested; awaiting the harness's response.";
     this.options.changed(); this.poll(ref);

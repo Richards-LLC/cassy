@@ -30,7 +30,12 @@ fn idle_prompt(text: &str) -> bool {
     let lower = text.to_lowercase();
     !lower.contains("esc to interrupt") && !lower.contains("select model")
         && !lower.contains("select a model") && !lower.contains("select effort")
-        && text.lines().rev().take(12).any(|line| matches!(line.trim(), "❯" | "›"))
+        && !lower.contains("compacting conversation") && !lower.contains("esc to cancel")
+        && text.lines().rev().take(12).any(|line| {
+            let line = line.trim();
+            matches!(line, "❯" | "›") || line.starts_with("❯ Try \"")
+                || line == "› Ask Codex to do anything"
+        })
 }
 
 fn native_observation(command: Command, before: &str, current: &str) -> Option<(String, bool)> {
@@ -46,6 +51,10 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
                 Some(("Usage displayed by the supervisor's harness.".into(), !idle_prompt(current))),
         _ => None,
     }
+}
+
+fn finish_turn_handled(_rows: &[serde_json::Value], _cli: cas_mux::SupervisorCli, _after: DateTime<Utc>) -> bool {
+    false
 }
 
 /// The hook is an independent source: SessionStart(source=compact|clear) says
@@ -155,6 +164,23 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {
+        use cas_mux::SupervisorCli::{Claude, Codex};
+        use serde_json::json;
+        let at = Utc::now();
+        for (cli, prompt, done) in [
+            (Claude, json!({"type":"user","timestamp":at,"message":{"content":"<command-message>finish</command-message>\n<command-name>/finish</command-name>"}}),
+                json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}})),
+            (Codex, json!({"type":"event_msg","timestamp":at,"payload":{"type":"user_message","message":"$finish"}}),
+                json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete"}})),
+        ] {
+            assert!(!finish_turn_handled(&[prompt.clone()], cli, at));
+            assert!(!finish_turn_handled(&[done.clone()], cli, at));
+            assert!(finish_turn_handled(&[prompt.clone(), done.clone()], cli, at));
+            assert!(!finish_turn_handled(&[prompt, done], cli, at + chrono::Duration::seconds(1)));
+        }
+    }
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
         assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯").is_none());

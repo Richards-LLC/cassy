@@ -654,6 +654,7 @@ mod tests {
         let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
         for (reset, expected) in [
             (Some("2026-10-27T18:00:00Z"), "5h 34%, resets Tue 2:00 PM ET (in 6h)"),
+            (Some("2026-10-28T02:00:00Z"), "5h 34%, resets Tue 10:00 PM ET (in 14h)"),
             (Some("2026-10-28T13:00:00Z"), "5h 34%, resets Wed 9:00 AM ET (in 1d 1h)"),
             (Some("2026-10-31T13:00:00Z"), "5h 34%, resets Sat Oct 31 9:00 AM ET (in 4d 1h)"),
             (Some("2026-10-28T11:59:00Z"), "5h 34%, resets Wed 7:59 AM ET (in 24h)"),

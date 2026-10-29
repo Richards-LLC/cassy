@@ -6166,11 +6166,67 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ssh_factory_worktree_confirms_green_lane_ci_cas_e1ca() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (repo, _, tip) = delivery_ci_fixture(true, Some("success"));
+        let worker = repo.path().join(".cas/worktrees/alice");
+        for args in [
+            vec![
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:Richards-LLC/cassy.git",
+            ],
+            vec![
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "factory/alice",
+                worker.to_str().unwrap(),
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(repo.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let gh = repo.path().join("gh-fixture");
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!(
+                "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view Richards-LLC/cassy') printf '%s\\n' '{{\"nameWithOwner\":\"Richards-LLC/cassy\"}}'; exit 0 ;;\nesac\ncase \"$4\" in\nrepos/Richards-LLC/cassy/commits/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*) exit 97 ;;\nesac\n"
+            ),
+        );
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let lookup = super::lookup_branch_ci("factory/alice", "main", &worker);
+        assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
+        let receipt = super::describe_branch_ci_lookup("factory/alice", &lookup);
+        assert!(
+            receipt.contains(&format!(
+                "repos/Richards-LLC/cassy/commits/{tip}/check-runs"
+            )),
+            "{receipt}"
+        );
+        assert!(receipt.contains("CI state: green"), "{receipt}");
+        assert!(
+            receipt.contains("Admission path: CI check-run (green)"),
+            "{receipt}"
+        );
+        assert!(!receipt.contains("(advisory)"), "{receipt}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn canonical_repo_lookup_failure_never_queries_implicit_repo_cas_28c8() {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
         let gh = repo.path().join("gh-fixture");
-        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\nexit 1\n");
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\nexit 7\n");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let lookup = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
@@ -6183,6 +6239,7 @@ mod tests {
             receipt.contains("endpoint unavailable: repository unresolved"),
             "{receipt}"
         );
+        assert!(receipt.contains("canonical GitHub repository lookup failed for origin acme/cas (exit status: 7)"), "{receipt}");
         let requests = std::fs::read_to_string(repo.path().join("canonical-requests.log")).unwrap();
         assert_eq!(requests.lines().count(), 1, "{requests}");
         assert!(!requests.contains("api"), "{requests}");

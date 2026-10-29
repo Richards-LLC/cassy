@@ -147,6 +147,30 @@ pub(super) fn park_refusal(
     ))
 }
 
+fn product_source_path(path: &str) -> bool {
+    if path.starts_with("cas-cli/src/builtins/skills/") {
+        return true;
+    }
+    if (path.starts_with("cas-cli/src/") || (path.starts_with("crates/") && path.contains("/src/")))
+        && path.ends_with(".rs")
+    {
+        return true;
+    }
+    if path.starts_with("hub-web/src/") {
+        return true;
+    }
+    if !path.starts_with("scripts/") || path.split('/').any(|part| matches!(part, "tests" | "fixtures")) {
+        return false;
+    }
+    let file = path.rsplit('/').next().unwrap_or_default();
+    if file.starts_with("test-") || file.contains(".test.") || file.contains("_test.") {
+        return false;
+    }
+    [".sh", ".py", ".js", ".mjs", ".ts", ".ps1"]
+        .iter()
+        .any(|extension| file.ends_with(extension))
+}
+
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
 /// `scripts/fast-rows-pre-push.sh` when no `fast-rows: PASS <tip>` receipt
 /// exists. That happens when the push skipped the hook through

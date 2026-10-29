@@ -946,13 +946,13 @@ mod tests {
         std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
         let source_only = commit_changelog_fixture(repo.path(), "product change");
         task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: <reason>".into();
-        assert!(changelog_refusal(
+        let placeholder_reason = changelog_refusal(
             repo.path(),
             &task,
             &["hub-web/src/app.ts".into()],
             &source_only,
             "main",
-        ).is_some(), "the literal decision template is not a reason");
+        );
 
         task.notes.clear();
         std::fs::write(
@@ -960,13 +960,17 @@ mod tests {
             "# Changelog\n\n## [Unreleased]\n\n### Added — <area>\n\n- **Title** — What changed.\n\n## [1.0.0] - 2026-01-01\n",
         ).unwrap();
         let placeholder = commit_changelog_fixture(repo.path(), "add changelog template");
-        assert!(changelog_refusal(
+        let placeholder_entry = changelog_refusal(
             repo.path(),
             &task,
             &["CHANGELOG.md".into(), "hub-web/src/app.ts".into()],
             &placeholder,
             "main",
-        ).is_some(), "the literal CHANGELOG template is not a release entry");
+        );
+        assert!(
+            placeholder_reason.is_some() && placeholder_entry.is_some(),
+            "the literal templates must be refused: reason={placeholder_reason:?}; entry={placeholder_entry:?}"
+        );
     }
 
     #[test]

@@ -3106,6 +3106,17 @@ mod status_transition_tests {
 
     #[tokio::test]
     async fn task_update_rejects_terminal_status_changes_and_reopen_clears_factory_branch_anchor() {
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set("CAS_AGENT_ROLE", "worker");
+        task_update_reopen_fixture().await;
+        let _lock = crate::test_env_guard::test_env_lock();
+        assert_eq!(
+            std::env::var("CAS_AGENT_ROLE").as_deref(),
+            Ok("worker"),
+            "the actual update/reopen fixture must restore its caller's role"
+        );
+    }
+
+    async fn task_update_reopen_fixture() {
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-q", "-b", "main"]);

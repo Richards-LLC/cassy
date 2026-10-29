@@ -938,6 +938,32 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
         )
         .is_err()
     );
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    // Moving a pending explicit review, and correcting a rejection, both owe
+    // the next round even though ordinary batch parks open none.
+    for (index, rejected) in [false, true].into_iter().enumerate() {
+        if rejected {
+            cas_store::claim_qa_pass(&root, "cas-bq03", "independent-reviewer", chrono::Utc::now()).unwrap();
+            cas_store::resolve_qa_pass(&root, "cas-bq03", "independent-reviewer",
+                cas::types::QaVerdict::Rejected, "Spacing still needs correction", None,
+                fx.ledger.to_str().unwrap(), chrono::Utc::now()).unwrap();
+        }
+        let mut task = tasks.get("cas-bq03").unwrap();
+        task.status = TaskStatus::InProgress;
+        tasks.update(&task).unwrap();
+        std::fs::write(fx.repo.join("cas-bq03.css"), format!("body{{gap:{}px}}\n", 9 + index)).unwrap();
+        git(&fx.repo, &["add", "cas-bq03.css"]);
+        git(&fx.repo, &["commit", "-qm", "fix(cas-bq03): correct spacing"]);
+        let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+        let parked = fx.close("cas-bq03").await;
+        let passes = cas_store::list_qa_passes(&root, "cas-bq03").unwrap();
+        assert_eq!(passes.len(), index + 2, "rejected={rejected}: {parked}");
+        let latest = passes.iter().max_by_key(|pass| pass.round).unwrap();
+        assert_eq!(latest.bound_head, head);
+        assert_eq!(latest.state, cas_types::QaPassState::Pending);
+    }
+
 }
 
 #[tokio::test]

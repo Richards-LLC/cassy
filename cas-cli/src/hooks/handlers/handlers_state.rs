@@ -1117,7 +1117,11 @@ mod supervisor_handoff_tests {
         env.set("CAS_AGENT_NAME", "successor");
         env.set("CAS_FACTORY_SESSION", "new-session");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
-        handle_session_start(&start, Some(&root)).unwrap();
+        let output = handle_session_start(&start, Some(&root)).unwrap();
+        let output = serde_json::to_value(output).unwrap();
+        let context = output["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("Answer each once in your final pane reply"), "{context}");
+        assert!(!context.contains("Answer them with target=operator"), "{context}");
         handle_session_start(&start, Some(&root)).unwrap();
 
         let row = queue.queued_prompt(go).unwrap().unwrap();

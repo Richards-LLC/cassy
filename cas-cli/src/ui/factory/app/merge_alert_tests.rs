@@ -387,6 +387,14 @@ fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
     let mut task = store.get("cas-9efb-test").unwrap();
     task.execution_note = Some("test-first".into());
     task.deliverables.factory_branch_anchor = None;
+    // A started test-first task records its graph boundary before its red
+    // checkpoint; completion readiness and commit attribution are separate.
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: "merge-w".into(),
+        branch: "factory/merge-w".into(),
+        base_sha: git(f.repo.path(), &["rev-parse", "epic/test"]),
+    });
     let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
     // Replace the fixture delivery with a real test-only, intentionally red
     // commit. Its lane CI fixture remains green because that lane skips it.

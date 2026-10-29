@@ -1747,3 +1747,71 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
         assert_eq!(closed.notes.matches(note).count(), 1, "persisted upkeep must appear once: {}", closed.notes);
     }
 }
+
+/// A queued successor uses its own target, while the delivery just parked or
+/// closed keeps its immutable ref. Replaying that close cannot consume C.
+#[tokio::test]
+async fn queued_task_starts_after_close_or_park_cas_8488() {
+    let mut env = TestEnvGuard::temp_home();
+    for park in [false, true] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        env.set("CAS_FACTORY_SESSION", "queue-session");
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+            let mut agent = agents.get(id).unwrap();
+            agent.factory_session = Some("queue-session".into());
+            if agent.role == AgentRole::Worker {
+                agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+            }
+            agents.update(&agent).unwrap();
+        }
+        git(repo, &["checkout", "-q", "-b", "epic/next", "main"]);
+        std::fs::write(repo.join("next-base.txt"), "next epic only\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "seed next epic"]);
+        git(repo, &["push", "-q", "origin", "epic/next"]);
+        let next_base = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(&checkout, &["reset", "--hard", "main"]);
+        std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "feat(cas-8488-a): task A"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        let delivered = git(&checkout, &["rev-parse", "HEAD"]);
+        let first = assigned("cas-8488-a", TaskType::Task, "main");
+        f.put(&first);
+        claim(&f, &first.id);
+        for id in ["cas-8488-b", "cas-8488-c"] {
+            let mut next = assigned(id, TaskType::Task, "epic/next");
+            next.status = TaskStatus::Open;
+            next.assignee = None;
+            f.put(&next);
+        }
+        let queued = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":"cas-8488-b", "assignee":WORKER,
+            "task_ids":["cas-8488-b", "cas-8488-c"],
+        })).await;
+        assert!(!queued.contains("REJECTED"), "{queued}");
+        if !park {
+            git(repo, &["merge", "--no-ff", "-qm", "merge task A", LANE]);
+            git(repo, &["push", "-q", "origin", "main"]);
+        }
+        let close = serde_json::json!({"action":"close", "id":first.id,"reason":"Delivered"});
+        let response = call(&f.worker, close.clone()).await;
+        assert_eq!(f.task(&first.id).status,
+            if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
+        let next = f.task("cas-8488-b");
+        assert_eq!(next.status, TaskStatus::InProgress, "{response}");
+        assert_eq!(next.assignee.as_deref(), Some(WORKER));
+        assert_eq!(git(&checkout, &["branch", "--show-current"]),
+            format!("factory/{WORKER}-cas-8488-b"));
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), next_base);
+        assert_eq!(git(repo, &["rev-parse", LANE]), delivered);
+        assert!(agents.get_lease("cas-8488-b").unwrap().is_some());
+        let _ = call(&f.worker, close).await;
+        assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
+        assert!(f.task("cas-8488-c").assignee.is_none());
+    }
+}

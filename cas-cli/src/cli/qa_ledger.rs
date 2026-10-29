@@ -64,14 +64,14 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                             .unwrap_or_default(),
                         d.field
                     );
-                    println!("{}", fit(&location, 80));
+                    println!("{}", crate::ui::widgets::truncate(&location, 80));
                     for value in [&d.message, &d.remedy] {
                         println!(
                             "  {}",
                             if cli.verbose {
                                 value.to_owned()
                             } else {
-                                fit(value, 78)
+                                crate::ui::widgets::truncate(value, 78)
                             }
                         );
                     }
@@ -145,15 +145,13 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                     crate::qa_ledger::parse(&body, 1).rows.len()
                 );
                 println!("Check: cas qa ledger check <path> --task {id}");
-                println!("{}", path.display());
+                println!(
+                    "Path: {}",
+                    crate::ui::widgets::truncate(&path.display().to_string(), 74)
+                );
+                println!("Use --json for the full path.");
             }
         }
     }
     Ok(())
-}
-
-/// ASCII truncation also reads cleanly in the C locale; JSON/verbose retain detail.
-fn fit(value: &str, width: usize) -> String {
-    let truncated = crate::ui::widgets::truncate(value, width.saturating_sub(2));
-    truncated.replace('…', "...")
 }

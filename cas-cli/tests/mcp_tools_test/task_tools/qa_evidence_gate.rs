@@ -224,6 +224,11 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let producer = fx.write_bundle(&head);
     let producer_bytes = std::fs::read(&producer).unwrap();
+    // Pin a distinct source timestamp so fetch-time mtimes cannot masquerade
+    // as the capture's freshness when restoring the archive.
+    let captured_at = git(&fx.repo, &["show", "-s", "--format=%ct", &head]).parse::<u64>().unwrap() + 3600;
+    std::fs::File::options().write(true).open(producer.parent().unwrap().join("trace.zip")).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(captured_at))).unwrap();
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now()).unwrap().unwrap();
@@ -356,6 +361,12 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         let closed = close_text(&peer_core, TASK).await;
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed,
             "team={team}: the real close gate lost the peer verdict: {closed}");
+        let notes = tasks.get(TASK).unwrap().notes;
+        let restored = notes.lines().find_map(|line| line.split_once("QA evidence bundle accepted: "))
+            .unwrap().1.split(" (head ").next().unwrap();
+        let restored_trace = Path::new(restored).parent().unwrap().join("trace.zip");
+        assert_eq!(std::fs::metadata(restored_trace).unwrap().modified().unwrap()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), captured_at);
         let rounds = cas_store::list_qa_passes(&root, TASK).unwrap();
         assert_eq!(rounds.len(), 1, "the peer must retain the existing round");
         assert_eq!(rounds[0].qa_task_id.as_deref(), Some(qa_task.as_str()));

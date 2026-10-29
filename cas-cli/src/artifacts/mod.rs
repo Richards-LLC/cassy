@@ -584,6 +584,23 @@ mod tests {
     }
 
     #[test]
+    fn producer_publication_refuses_escaping_evidence_before_recording() {
+        let f = fixture();
+        let manifest = f.task_dir.join("bundle.json");
+        let private = f.project_root.join("private.txt");
+        fs::write(&private, "private sentinel").unwrap();
+        for path in ["../private.txt".to_string(), private.display().to_string()] {
+            fs::write(&manifest, serde_json::json!({
+                "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
+                "files": {"trace": path}
+            }).to_string()).unwrap();
+            assert!(publish(&f.context(), &manifest).is_err());
+            assert!(f.store.list_for_task("cas-b72a").unwrap().is_empty());
+        }
+        assert_eq!(fs::read_to_string(private).unwrap(), "private sentinel");
+    }
+
+    #[test]
     fn a_path_outside_the_roots_is_refused_before_anything_is_hashed() {
         let f = fixture();
         let outside = f._dir.path().canonicalize().unwrap().join("stray.pdf");

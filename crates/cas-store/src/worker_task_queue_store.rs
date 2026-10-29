@@ -31,6 +31,8 @@ pub struct WorkerTaskQueue {
     /// An interrupted selection is retried by its predecessor, never popped twice.
     pub dispatch_from: Option<String>,
     pub starting: bool,
+    #[serde(default)]
+    pub dispatch_revision: u64,
     pub notes: Vec<String>,
 }
 

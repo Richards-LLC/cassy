@@ -27,7 +27,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 1. Run `coordination action=whoami`, then `task action=mine`. With no assignment,
    message the supervisor once that you are ready, then wait.
 2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
-   Successful start accepts the assignment; no prose ACK. Follow task criteria,
+   A queued successor may already be started by Cassy on its task branch; inspect
+   its task and branch, then continue that assignment. Successful start accepts
+   the assignment; no prose ACK. Follow task criteria,
    depth, execution note and project instructions. Checkpoint dirt before
    `git rebase <target>` in a reused checkout.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.

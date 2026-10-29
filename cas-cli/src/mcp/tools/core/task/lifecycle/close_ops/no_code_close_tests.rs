@@ -1755,6 +1755,10 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
     for park in [false, true] {
         let f = fixture(&mut env, "main");
+        let config = f.cas_dir().join("config.toml");
+        let mut body = std::fs::read_to_string(&config).unwrap();
+        body.push_str("[orchestration.auto_prompt]\nenabled=false\n");
+        std::fs::write(config, body).unwrap();
         let repo = f.dir.path();
         let checkout = f.cas_dir().join("worktrees").join(WORKER);
         env.set("CAS_FACTORY_SESSION", "queue-session");
@@ -1799,7 +1803,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             git(repo, &["push", "-q", "origin", "main"]);
         }
         let close = serde_json::json!({"action":"close", "id":first.id,"reason":"Delivered"});
-        let response = call(&f.worker, close.clone()).await;
+        let closer = if park { &f.worker } else { &f.supervisor };
+        let response = call(closer, close.clone()).await;
         assert_eq!(f.task(&first.id).status,
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
         let next = f.task("cas-8488-b");
@@ -1810,7 +1815,15 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), next_base);
         assert_eq!(git(repo, &["rev-parse", LANE]), delivered);
         assert!(agents.get_lease("cas-8488-b").unwrap().is_some());
-        let _ = call(&f.worker, close).await;
+        let briefs = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap().poll_all(100).unwrap();
+        assert!(briefs.iter().any(|row| row.target == WORKER
+            && row.prompt.contains("Task ID: cas-8488-b")
+            && row.prompt.contains("started this task automatically")), "{briefs:?}");
+        let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"start", "id":"cas-8488-c",
+        })).unwrap())).await;
+        assert!(denied.is_err(), "A second task must not start beside B: {denied:?}");
+        let _ = call(closer, close).await;
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         assert!(f.task("cas-8488-c").assignee.is_none());
     }

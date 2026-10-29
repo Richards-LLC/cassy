@@ -75,6 +75,7 @@
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - semantic allowlist, native mappings and outcome evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
+- `cas-cli/src/worker_task_queue.rs` - ordered worker backlog policy, start authorization and delivery handoff.
 
 ## MCP and delivery gates
 
@@ -97,6 +98,7 @@
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - local action counts and per-journey traffic shares.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence and successor claims.
+- `crates/cas-store/src/worker_task_queue_store.rs` - persistent per-session worker queues and spawn payload binding.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and indexed QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and temporal memory/search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - startup, selected conversation state and reply grants.

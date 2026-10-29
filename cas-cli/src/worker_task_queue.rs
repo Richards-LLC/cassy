@@ -61,7 +61,12 @@ impl CasCore {
             .into_iter()
             .filter(|a| a.name.eq_ignore_ascii_case(name) || a.id == name)
             .max_by_key(|a| a.registered_at)
-            .filter(|a| a.role == AgentRole::Worker && crate::supervisor_notices::is_live(a))
+            .filter(|a| {
+                a.role == AgentRole::Worker
+                    && a.is_alive()
+                    && (chrono::Utc::now() - a.last_heartbeat).num_seconds()
+                        <= cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS
+            })
             .ok_or_else(|| error(format!("No live registered worker '{name}'")))?;
         let session = worker
             .factory_session
@@ -294,6 +299,7 @@ impl CasCore {
             queue.current_task = selected.clone();
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
+            queue.dispatch_revision = queue.revision + 1;
             queues
                 .save(session, &worker.name, &mut queue)
                 .map_err(error)?;
@@ -337,25 +343,39 @@ impl CasCore {
             if started {
                 return Ok(());
             }
-            self.task_start_for_queue(
-                TaskStartRequest {
-                    id: id.clone(),
-                    brief: Some(true),
-                    force: None,
-                },
-                QueueStartPrincipal(worker.clone()),
-            )
-            .await
-            .map(|_| ())
+            let output = self
+                .task_start_for_queue(
+                    TaskStartRequest {
+                        id: id.clone(),
+                        brief: Some(true),
+                        force: None,
+                    },
+                    QueueStartPrincipal(worker.clone()),
+                )
+                .await?;
+            let committed = tasks.get(&id).map_err(error)?;
+            if output.is_error.unwrap_or(false)
+                || committed.status != TaskStatus::InProgress
+                || committed.assignee.as_deref() != Some(worker.name.as_str())
+            {
+                return Err(error(
+                    "Queued start did not commit; inspect the task before retrying",
+                ));
+            }
+            Ok(())
         }
         .await;
         match result {
             Ok(()) => {
+                crate::task_assignment::enqueue_queued(
+                    &self.cas_root,
+                    &tasks.get(&id).map_err(error)?,
+                    queue.dispatch_revision,
+                )
+                .map_err(error)?;
                 queue.starting = false;
                 queues
                     .save(session, &worker.name, &mut queue)
-                    .map_err(error)?;
-                crate::task_assignment::enqueue(&self.cas_root, &tasks.get(&id).map_err(error)?)
                     .map_err(error)?;
                 Ok(Some(format!("Task queue started {id} for {}", worker.name)))
             }

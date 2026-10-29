@@ -2324,6 +2324,11 @@ impl CasCore {
                 data: None,
             })?;
 
+        if queued_start && declared_repo_context.is_none() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Queued task needs a declared work target before its branch can be allocated"));
+        }
+
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
         // work, so its assigned worker may resume it. A clean AwaitingMerge
         // task remains worker-complete and must stay parked for the supervisor.

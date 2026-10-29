@@ -699,6 +699,10 @@ mod tests {
         assert!(!refusal.contains("five-run"), "{refusal}");
         assert!(refusal.contains(&format!("no failing run before the change for {id}")), "{refusal}");
         assert!(refusal.contains(&format!("{id} (median 2.500s over the 1s budget)")), "{refusal}");
+        let mut characterization = plain.clone();
+        characterization.execution_note = Some("characterization-first".into());
+        let refusal = park_refusal(cas_root.path(), repo.path(), &characterization, &changed, &delivery, "main").unwrap();
+        assert!(!refusal.contains("no failing run"), "characterization-first pins current behaviour: {refusal}");
         crate::factory_worker_check::record_red_for_tests(cas_root.path(), repo.path(), &red, &delivery, "main", id);
         let refusal = park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").unwrap();
         assert!(!refusal.contains("no failing run"), "{refusal}");

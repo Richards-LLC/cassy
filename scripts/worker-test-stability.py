@@ -272,9 +272,11 @@ def selected_cases(root, touched, requested, cargo, target=None):
     return cases
 
 
-# nextest status lines, with or without the "(i/n)" counter.
-STATUS = re.compile(r'^\s*(PASS|FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|ABORT|LEAK-FAIL)'
-                    r'\s+\[\s*([0-9.]+)s\]\s+(?:\(\d+/\d+\)\s+)?\S+\s+(\S+)\s*$', re.M)
+# nextest status lines, with or without the "(i/n)" counter, which nextest
+# pads to the total's width: "(  2/120)". LEAK is a pass that leaked handles.
+STATUS = re.compile(r'^\s*(PASS|LEAK|FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|ABORT|LEAK-FAIL)'
+                    r'\s+\[\s*([0-9.]+)s\]\s+(?:\(\s*\d+/\d+\)\s+)?\S+\s+(\S+)\s*$', re.M)
+PASSED = ('PASS', 'LEAK')
 
 
 def outcomes(path):
@@ -290,7 +292,7 @@ def record_red(root, touched, requested, cargo, target, log, receipt):
         # A build failure cannot list tests; the test failure itself still stands.
         print('red: not recorded: '+str(error), flush=True)
         return
-    failed = {name for status, name, _ in outcomes(log) if status != 'PASS'}
+    failed = {name for status, name, _ in outcomes(log) if status not in PASSED}
     tests = [{'id': t['id'], 'fingerprint': t['fingerprint'], 'names': cases[t['id']],
               'failed': sorted(failed & set(cases[t['id']]))}
              for t in touched['tests'] if t['id'] in cases]
@@ -363,7 +365,7 @@ def run_requested(root, base, requested, cargo, script, count, target=None, head
     durations = {name: [] for name in names}
     for result in trials:
         for status, name, seconds in outcomes(result['log']):
-            if status == 'PASS' and name in durations:
+            if status in PASSED and name in durations:
                 durations[name].append(seconds)
     proof = {**touched, 'version': 2, 'tests': identities, 'names': names, 'runs': 5, 'parallelism': 5,
              'retries': 0, 'trials': trials, 'cases': cases, 'durations': durations,

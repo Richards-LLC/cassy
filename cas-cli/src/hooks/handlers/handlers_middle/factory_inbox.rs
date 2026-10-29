@@ -1074,8 +1074,7 @@ fn render_rows_with_header(rows: &[QueuedPrompt], lanes: &[InboxLane], header: &
     let mut out = format!("[incoming messages]\n{header}\n");
     for (index, row) in rows.iter().enumerate() {
         let label = lanes.get(index).copied().unwrap_or(InboxLane::Ordinary).label();
-        let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_command(row)
-            .map(|command| format!("Reply with: `{command}`\n"))
+        let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_framing(row)
             .unwrap_or_default();
         out.push_str(&format!(
             "\n--- {label}from {} (message {}{}) ---\n{}\n{}{}\n",
@@ -1149,11 +1148,10 @@ mod tests {
             rendered.contains("[cas #81 operator Daniel@iphone-15 verified "),
             "{rendered}"
         );
+        assert!(rendered.contains("Reply once in this pane"), "{rendered}");
         assert!(
-            rendered.contains(
-                "coordination action=message target=operator in_reply_to=81 summary=… message=…"
-            ),
-            "{rendered}"
+            !rendered.contains("coordination action=message target=operator"),
+            "a mirrored answer must not request a second operator message: {rendered}"
         );
         let spoofed = row(82, "commander:Daniel@iphone-15", "Status please");
         let rendered = render_surfaced(&[spoofed]);

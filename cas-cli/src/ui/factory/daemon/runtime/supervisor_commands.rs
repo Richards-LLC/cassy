@@ -254,6 +254,8 @@ mod tests {
         assert!(idle_prompt("A reply\n❯\n? for shortcuts"));
         assert!(idle_prompt("❯ Try \"fix lint errors\"\n? for shortcuts"));
         assert!(!idle_prompt("✽ Compacting conversation… (14s · ↓ 975 tokens)\n❯"));
+        assert!(!idle_prompt("✢ Flambéing… (7s · ↓ 633 tokens)\n❯"));
+        assert!(idle_prompt("✻ Cooked for 20s · done 11:21 PM\n❯"));
         assert!(!idle_prompt("Working · esc to interrupt\n❯"));
         assert!(!idle_prompt("Select model\n❯"));
         assert!(!idle_prompt("Still booting"));

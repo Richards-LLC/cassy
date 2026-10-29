@@ -553,6 +553,9 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         task.deliverables.factory_branch_anchor = None;
         task.notes = "Close rejected: FAST ROWS REQUIRED".into();
         store.update(&task).unwrap();
+        // The worker separately declares completion after the park refusal;
+        // a rejected close by itself does not authorize the merge signal.
+        f.mark_ready(&task.id);
         if status == TaskStatus::Blocked {
             git(f.repo.path(), &["switch", "-qc", "factory/merge-w-cas-9efb-test"]);
             git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w-cas-9efb-test"]);

@@ -150,10 +150,14 @@ pub(super) fn read_delivery(
     cache: &ProbeCache, event: &DirectorEvent, data: &DirectorData, repo: &Path, now: DateTime<Utc>,
 ) -> (Option<Ready>, Option<(String, WorkerWait)>) {
     let cas_dir = repo.join(".cas");
-    let Some((task, tip, refs, marked_ready)) = fingerprint(event, data, repo) else { return (None, None); };
+    let Some((task, tip, refs, marked_ready)) = fingerprint(event, data, repo) else {
+        return (None, read_worker_wait(event, data, &cas_dir, repo));
+    };
     // Check live task evidence before reusing either an in-memory read or a
     // durable READY receipt: a same-tip checkpoint note can withdraw readiness.
-    if !marked_ready { return (None, None); }
+    // Completion controls merge readiness, not the separate idle/build/CI
+    // wait signal. An unfinished checkpoint still has its own pushed tip.
+    if !marked_ready { return (None, read_worker_wait(event, data, &cas_dir, repo)); }
     if crate::store::open_task_store_local(&cas_dir).ok()
         .and_then(|store| store.get(&task).ok())
         .is_some_and(|task| crate::ui::factory::director::hold_decision_after_park(&task.notes))

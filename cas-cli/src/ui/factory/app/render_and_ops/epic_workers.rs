@@ -6691,25 +6691,66 @@ mod tests {
             branch_prefix: "factory/".into(), auto_merge: false,
             cleanup_on_close: false, promote_entries_on_merge: false,
         }).unwrap();
-        let name = "retired-worker";
-        manager.create_for_worker(name).unwrap();
-        let plan = manager.worker_removal_plan(name).unwrap();
-        let worker = plan.worktree.path.clone();
-        let mut agent = cas_types::Agent::new("retired-id".into(), name.into());
-        agent.metadata.insert("clone_path".into(), worker.display().to_string());
-        let request = DeferredWorkerCleanup {
-            occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks: Vec::new(),
-            worktree: Some((plan.worktree, plan.repo_root)),
-        };
-        request.persist(&root).unwrap();
-        let path = request.path(&root);
-        let mut restarted = FactoryApp::for_test_at(root);
-        restarted.resume_deferred_worker_cleanups();
-        assert!(restarted.crash_cleanup_pending(name), "startup restores the name fence");
-        restarted.join_worker_worktree_cleanups();
-        assert!(!worker.exists(), "the new session finishes the recorded worktree cleanup");
-        assert!(!path.exists(), "completed recovery removes its durable intent");
-        assert!(!restarted.crash_cleanup_pending(name));
+        for (name, disposition) in [
+            ("held-wip", "wip"), ("held-unowned", "unowned"),
+            ("interrupted-worker", "interrupted"), ("failed-worker", "error"),
+        ] {
+            manager.create_for_worker(name).unwrap();
+            let plan = manager.worker_removal_plan(name).unwrap();
+            let worker = plan.worktree.path.clone();
+            let mut agent = cas_types::Agent::new(format!("{name}-id"), name.into());
+            agent.metadata.insert("clone_path".into(), worker.display().to_string());
+            let mut tasks = Vec::new();
+            if disposition == "wip" {
+                let mut task = Task::new("unfinished-task".into(), "Still working".into());
+                task.assignee = Some(agent.id.clone());
+                task.status = TaskStatus::InProgress;
+                tasks.push(task);
+            }
+            if disposition == "unowned" {
+                let target = crate::factory_scratch::worker_target_dir(&worker);
+                std::fs::create_dir_all(&target).unwrap();
+                std::fs::write(target.join("unverified.log"), "preserve").unwrap();
+            }
+            let request = DeferredWorkerCleanup {
+                occurrence: uuid::Uuid::new_v4().to_string(), agent, tasks,
+                worktree: Some((plan.worktree, if disposition == "error" {
+                    // A missing repository makes worktree removal return an I/O error.
+                    repo.join("missing-repository")
+                } else { plan.repo_root })),
+            };
+            let path = request.path(&root);
+            let mut first = FactoryApp::for_test_at(root.clone());
+            if disposition == "interrupted" {
+                // A crash after intent persistence, before the job runs.
+                request.persist(&root).unwrap();
+                assert!(path.is_file(), "an interrupted job keeps its intent");
+            } else {
+                first.start_worker_cleanup(request);
+                first.join_worker_worktree_cleanups();
+                if disposition == "error" {
+                    assert!(path.is_file(), "I/O errors keep their recovery intent");
+                    std::fs::remove_file(path).unwrap();
+                    continue;
+                }
+                assert!(worker.exists(), "{name}: deliberate holds preserve output");
+                assert!(!path.exists(), "{name}: a deliberate hold must complete its intent");
+            }
+            drop(first);
+            let mut restarted = FactoryApp::for_test_at(root.clone());
+            restarted.resume_deferred_worker_cleanups();
+            if disposition == "interrupted" {
+                assert!(restarted.crash_cleanup_pending(name), "startup restores the name fence");
+                restarted.join_worker_worktree_cleanups();
+                assert!(!worker.exists(), "restart finishes interrupted cleanup");
+                assert!(!path.exists(), "completed recovery removes its intent");
+                assert!(!restarted.crash_cleanup_pending(name));
+            } else {
+                assert!(!restarted.worker_worktree_cleanups_pending(), "completed holds do not replay");
+            }
+            restarted.resume_deferred_worker_cleanups();
+            assert!(!restarted.worker_worktree_cleanups_pending(), "a completed intent replays only once");
+        }
     }
 
     #[cfg(unix)]

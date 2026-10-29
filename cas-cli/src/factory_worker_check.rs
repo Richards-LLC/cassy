@@ -2408,7 +2408,7 @@ child.wait()
     fn detached_runner_log_ends_with_the_runner_exit_code() {
         // `false` stands in for a runner that refuses: it exits 1.
         let args = vec!["-p".to_string(), "cas".into(), "--lib".into()];
-        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args, None)
+        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args, None, None)
             .output()
             .unwrap();
         let log = String::from_utf8(output.stdout).unwrap();

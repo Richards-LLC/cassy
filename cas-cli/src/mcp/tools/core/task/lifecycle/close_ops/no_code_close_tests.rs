@@ -1810,15 +1810,15 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let next = f.task("cas-8488-b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));
-        assert_eq!(git(&checkout, &["branch", "--show-current"]),
-            format!("factory/{WORKER}-cas-8488-b"));
+        let active_branch = git(&checkout, &["branch", "--show-current"]);
+        assert_eq!(active_branch, format!("factory/{WORKER}-cas-8488-b"));
         assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), next_base);
         assert_eq!(git(repo, &["rev-parse", LANE]), delivered);
         assert!(agents.get_lease("cas-8488-b").unwrap().is_some());
         let briefs = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap().poll_all(100).unwrap();
         assert!(briefs.iter().any(|row| row.target == WORKER
             && row.prompt.contains(&next.id)
-            && row.prompt.contains(&format!("factory/{WORKER}-{}", next.id))), "{briefs:?}");
+            && row.prompt.contains(&active_branch)), "{briefs:?}");
         let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
             "action":"start", "id":"cas-8488-c",
         })).unwrap())).await;

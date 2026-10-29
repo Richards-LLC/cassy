@@ -825,7 +825,17 @@ mod focused_epic_tests {
             }
             if delivered {
                 child.deliverables.factory_branch_anchor = Some(anchor.clone());
-                child.deliverables.merge_commit = Some(anchor.clone());
+                if id == "cas-landed" {
+                    child.deliverables.merge_commit = Some(anchor.clone());
+                } else {
+                    // Native factory merges record their receipt here.
+                    child.deliverables.green_merge_commit = Some(anchor.clone());
+                    child.deliverables.merge_ci_admission = Some(if id == "cas-landed-2" {
+                        cas_types::MergeCiAdmission::Green
+                    } else {
+                        cas_types::MergeCiAdmission::Advisory
+                    });
+                }
                 let branch = format!("factory/worker-{id}");
                 child.deliverables.parked_branch = Some(branch.clone());
                 git(&["branch", &branch, &anchor]);
@@ -887,7 +897,7 @@ mod focused_epic_tests {
             .unwrap()["progress"];
         assert_eq!(progress["total"], 5);
         assert_eq!(progress["merged"], 3);
-        assert_eq!(progress["merges_per_hour"], 3);
+        assert_eq!(progress["merges_per_hour"], 2);
         assert!(
             chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok()
         );

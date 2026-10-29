@@ -394,14 +394,17 @@ describe("ConversationView (Pebble thread)", () => {
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
-  it("copies original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async () => {
+  it.each(["answer", "status"] as const)("copies a %s table as original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async (kind) => {
     const markdown = '| item | note | result |\r\n| --- | --- | --- |\r\n| `a\\|b` | said "ready", now | **pass** |';
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     onTestFinished(() => { Reflect.deleteProperty(navigator, "clipboard"); });
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
-    history.reply(reply(1, "answer", markdown), at(9, 30)); view.update();
+    history.reply(reply(0, "status", "Checking evidence"), at(9, 29));
+    history.reply(reply(1, kind, markdown), at(9, 30)); view.update();
+    expect(view.element.querySelector(".coalesce")?.textContent).toContain("Checking evidence");
+    expect([...view.element.querySelectorAll("thead th")].map(cell => cell.textContent)).toEqual(["item", "note", "result"]);
     const table = view.element.querySelector<HTMLElement>(".evi")!;
     const buttons = [...table.querySelectorAll<HTMLButtonElement>("button")];
     buttons.find(button => button.textContent === "Copy Markdown")!.click();

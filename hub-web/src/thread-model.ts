@@ -199,7 +199,8 @@ const STATUS_FENCE = /^ {0,3}(?:`{3,}|~{3,})/m;
 
 /** Only a short, plain status with no ask folds into the quiet coalesced line. */
 export function foldsAsStatus(message: string): boolean {
-  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message) && !STATUS_FENCE.test(message);
+  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message) && !STATUS_FENCE.test(message)
+    && !messageBlocks(message).some(block => block.type === "table");
 }
 
 /**

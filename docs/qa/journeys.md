@@ -157,7 +157,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Recent turns appear without any action, grouped by speaker and day.
 - Loading earlier keeps the reading position; the button shows progress.
-- Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting. Clipboard refusal offers a visible retry; long paths wrap at phone width without widening the page.
+- Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting. Clipboard refusal offers a visible retry; long paths wrap at phone width without widening the page.
 - The end of history is stated, not implied.
 
 #### Edge paths

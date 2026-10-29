@@ -9,6 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Release-report shipped totals exclude Known limits sections while keeping
+  their entries, tests and documentation in the report prose.
 - Post-merge Commander builds install the merged lockfile's dependencies before
   regenerating output. Failed regeneration receipts include a retained build log.
 - macOS hosts can now install published releases automatically through the

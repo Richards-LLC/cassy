@@ -908,7 +908,7 @@ mod tests {
             rows,
             [
                 "main  login unknown\n    weekly usage unknown (login unknown)",
-                "alt  logged in\n    weekly usage unknown",
+                "alt  active\n    weekly usage unknown (no recent report)",
                 "operator@example.com  login unknown\n    weekly usage unknown (login unknown)",
                 "work  login unknown\n    weekly usage unknown (login unknown)",
                 "+ Log in a new account",

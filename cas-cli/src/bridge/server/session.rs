@@ -330,15 +330,16 @@ fn has_recorded_delivery(task: &cas_types::Task) -> bool {
 }
 
 /// Optional evidence never turns a timed-out/unreadable proof into zero work.
-/// Prioritize the focused/session-active epic and bound the overall read; the shared collector
-/// caches immutable verdicts, allowing later refreshes to complete cold proofs.
+/// Prioritize the focused/session-active epic and bound the overall read.
+/// Team's ancestry-based display does not run or cache mutation-gate proofs.
 fn project_deliveries(
     status: &mut StatusJson,
     root: &std::path::Path,
     store: Option<&dyn cas_store::TaskStore>,
 ) {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
-        EpicStatusOptions, collect_epic_branch_statuses_with_options, last_commit_unix,
+        EpicStatusOptions, collect_epic_ancestry_merges,
+        collect_epic_branch_statuses_with_options, git_commit_is_ancestor, last_commit_unix,
     };
     let Some(store) = store else { return };
     let started = std::time::Instant::now();
@@ -437,17 +438,22 @@ fn project_deliveries(
             .into_iter()
             .filter(|task| task.status != cas_types::TaskStatus::Cancelled)
             .collect();
-        let collection = collect_epic_branch_statuses_with_options(
-            &children,
+        // Undelivered assignments contribute to total, but their worker's
+        // reused lane cannot establish a merge for this task. Do not spend
+        // the bounded proof budget measuring unrelated work on that lane.
+        let deliveries: Vec<_> = children
+            .iter()
+            .filter(|task| task.has_delivery_to_integrate() && has_recorded_delivery(task))
+            .cloned()
+            .collect();
+        let Some(merged_children) = collect_epic_ancestry_merges(
+            &deliveries,
             target,
             repo,
-            EpicStatusOptions {
-                offset: 0,
-                limit: None,
-                summary: false,
-                budget: std::time::Duration::from_millis(250),
-            },
-        );
+            std::time::Duration::from_millis(250),
+        ) else {
+            continue;
+        };
         let mut progress = EpicProgressJson {
             total: children.len(),
             merged: 0,
@@ -455,22 +461,11 @@ fn project_deliveries(
             merges_per_hour: 0,
         };
         let mut last = None;
-        for row in &collection.statuses {
-            let Some(child) = children.iter().find(|child| child.id == row.task_id) else {
-                continue;
-            };
-            if row.refs_unresolved || row.content_check_error.is_some() {
+        for child in &deliveries {
+            if !merged_children.contains(&child.id) {
                 continue;
             }
             checked_ids.insert(child.id.clone());
-            if !child.has_delivery_to_integrate()
-                || !has_recorded_delivery(child)
-                || (row.recorded_anchor.is_none() && row.factory_branch.is_none())
-                || row.unmerged_count != 0
-                || !row.dropped_paths.is_empty()
-            {
-                continue;
-            }
             merged_ids.insert(child.id.clone());
             progress.merged += 1;
             let at = child.deliverables.delivery_pr_merged_at.or_else(|| {
@@ -478,6 +473,20 @@ fn project_deliveries(
                     .deliverables
                     .merge_commit
                     .as_deref()
+                    .or(child.deliverables.delivery_pr_merge_commit.as_deref())
+                    .or_else(|| {
+                        // Factory integration records the actual merge in its
+                        // green admission receipt rather than merge_commit.
+                        let delivery = &child.deliverables;
+                        let commit = delivery.green_merge_commit.as_deref()?;
+                        let child_target = delivery.work_target.as_ref()
+                            .map(|target| target.target_branch.as_str())
+                            .unwrap_or(target);
+                        (delivery.merge_ci_admission == Some(cas_types::MergeCiAdmission::Green)
+                            && (git_commit_is_ancestor(repo, commit, child_target)
+                                || git_commit_is_ancestor(repo, commit, &format!("origin/{child_target}"))))
+                            .then_some(commit)
+                    })
                     .and_then(|commit| last_commit_unix(repo, commit))
                     .and_then(|unix| chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0))
             });
@@ -491,9 +500,7 @@ fn project_deliveries(
             }
         }
         progress.last_merged_at = last.map(|at| at.to_rfc3339());
-        if !collection.budget_exhausted && collection.statuses.len() == children.len() {
-            epic.progress = Some(progress);
-        }
+        epic.progress = Some(progress);
     }
     // A task without an epic still has an explicit delivery target. Reuse the
     // very same collector, rather than trusting its parked lifecycle status.
@@ -735,6 +742,9 @@ mod focused_epic_tests {
     fn cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics() {
         use cas_store::AgentStore;
         use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType};
+        use crate::mcp::tools::core::task::lifecycle::close_ops::{
+            EpicStatusOptions, collect_epic_branch_statuses_with_options,
+        };
         let mut home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (project, root, session) = fixture();
         let git = |args: &[&str]| {
@@ -754,11 +764,20 @@ mod focused_epic_tests {
         git(&["config", "user.email", "fixture@example.test"]);
         git(&["config", "user.name", "Fixture"]);
         git(&["commit", "--allow-empty", "-m", "base"]);
-        std::fs::write(project.path().join("file"), "delivered\n").unwrap();
-        git(&["add", "file"]);
-        git(&["commit", "-m", "delivery"]);
-        let anchor = git(&["rev-parse", "HEAD"]);
-        git(&["branch", "factory/fresh-worker", &anchor]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let mut anchors = Vec::new();
+        for index in 0..35 {
+            if index == 34 {
+                git(&["checkout", "-b", "factory/pending"]);
+            }
+            let file = format!("delivery-{index}");
+            std::fs::write(project.path().join(&file), format!("delivery {index}\n")).unwrap();
+            git(&["add", &file]);
+            git(&["commit", "-m", &file]);
+            anchors.push(git(&["rev-parse", "HEAD"]));
+        }
+        git(&["checkout", "main"]);
+        git(&["branch", "factory/fresh-worker"]);
         git(&["branch", "historical"]);
         let agents = crate::store::open_agent_store(&root).unwrap();
         for (id, name, role) in [
@@ -777,7 +796,7 @@ mod focused_epic_tests {
         // These higher-priority historical epics precede the active release
         // in the project catalog. Trace actual Git reads rather than depending
         // on a particular machine exhausting the two-second budget.
-        for index in 0..300 {
+        for index in 0..296 {
             let mut historical = Task::new(format!("cas-history-{index}"), "Old release".into());
             historical.task_type = TaskType::Epic;
             historical.status = TaskStatus::Closed;
@@ -796,42 +815,51 @@ mod focused_epic_tests {
         epic.branch = Some("main".into());
         epic.epic_verification_owner = Some("supervisor-id".into());
         store.add(&epic).unwrap();
-        for (id, status, delivered) in [
-            ("cas-landed", TaskStatus::AwaitingMerge, true),
-            ("cas-open", TaskStatus::Open, false),
-            ("cas-active", TaskStatus::InProgress, false),
-            ("cas-cancel", TaskStatus::Cancelled, false),
+        let mut children = Vec::new();
+        for (index, anchor) in anchors.iter().enumerate() {
+            let id = if index == 0 { "cas-landed".into() } else { format!("cas-delivery-{index}") };
+            let mut child = Task::new(id, format!("Delivery {index}"));
+            child.status = TaskStatus::AwaitingMerge;
+            child.deliverables.factory_branch_anchor = Some(anchor.clone());
+            if index == 0 {
+                child.deliverables.merge_commit = Some(anchor.clone());
+            } else {
+                child.deliverables.green_merge_commit = Some(anchor.clone());
+                child.deliverables.merge_ci_admission = Some(if index == 1 {
+                    cas_types::MergeCiAdmission::Advisory
+                } else {
+                    cas_types::MergeCiAdmission::Green
+                });
+            }
+            children.push(child);
+        }
+        for (id, status, assignee) in [
+            ("cas-open", TaskStatus::Open, Some("fresh-worker")),
+            ("cas-active", TaskStatus::InProgress, Some("worker-id")),
+            ("cas-cancel", TaskStatus::Cancelled, None),
         ] {
             let mut child = Task::new(id.into(), id.into());
             child.status = status;
-            if id == "cas-open" {
-                child.assignee = Some("fresh-worker".into());
-            }
-            if id == "cas-active" {
-                child.assignee = Some("worker-id".into());
-            }
-            if delivered {
-                child.deliverables.factory_branch_anchor = Some(anchor.clone());
-                child.deliverables.merge_commit = Some(anchor.clone());
-                child.deliverables.parked_branch = Some("factory/worker-cas-landed".into());
-                git(&["branch", "factory/worker-cas-landed", &anchor]);
-            }
-            store.add(&child).unwrap();
-            store
-                .add_dependency(&Dependency {
-                    from_id: id.into(),
-                    to_id: epic.id.clone(),
-                    dep_type: DependencyType::ParentChild,
-                    created_at: chrono::Utc::now(),
-                    created_by: None,
-                })
-                .unwrap();
+            child.assignee = assignee.map(str::to_string);
+            children.push(child);
+        }
+        for child in &children {
+            store.add(child).unwrap();
+            store.add_dependency(&Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id.clone(),
+                dep_type: DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            }).unwrap();
         }
         let trace = project.path().join("status-git.trace");
         home.set("GIT_TRACE", &trace);
-        let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        // Like the native snapshot: 297 epics, 35 distinct delivery anchors,
+        // and no focus. The first refresh must contain the current header.
+        let status = serde_json::to_value(build_status_json(&session, &root, 100).unwrap()).unwrap();
         assert!(status["focused_epic"].is_null());
-        assert_eq!(status["epics"].as_array().unwrap().len(), 301);
+        assert_eq!(status["epics"].as_array().unwrap().len(), 297);
         let reads = std::fs::read_to_string(trace).unwrap();
         let first_epic_read = reads
             .lines()
@@ -840,6 +868,11 @@ mod focused_epic_tests {
         assert!(
             first_epic_read.contains("refs/heads/main"),
             "the selected supervisor's staffed epic must be measured before history: {first_epic_read}"
+        );
+        assert_eq!(
+            reads.lines().filter(|line| line.contains("git rev-list") && line.contains("--not")).count(),
+            1,
+            "all 35 anchors must share one ancestry pass"
         );
         let landed = status["tasks_in_progress"]
             .as_array()
@@ -855,9 +888,9 @@ mod focused_epic_tests {
             .iter()
             .find(|item| item["id"] == epic.id)
             .unwrap()["progress"];
-        assert_eq!(progress["total"], 3);
-        assert_eq!(progress["merged"], 1);
-        assert_eq!(progress["merges_per_hour"], 1);
+        assert_eq!(progress["total"], 37);
+        assert_eq!(progress["merged"], 34);
+        assert_eq!(progress["merges_per_hour"], 33);
         assert!(
             chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok()
         );
@@ -868,6 +901,31 @@ mod focused_epic_tests {
                 .iter()
                 .all(|task| task.get("delivery_state").is_none())
         );
+        // Read-only live verdicts cannot authorize a close-gate decision.
+        let gate = collect_epic_branch_statuses_with_options(
+            &store.get_subtasks(&epic.id).unwrap(),
+            "main",
+            project.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: false,
+                budget: std::time::Duration::ZERO,
+            },
+        );
+        assert!(
+            gate.statuses.is_empty(),
+            "projection proofs must stay out of the close cache"
+        );
+        // A moved delivery target must invalidate completed live proofs.
+        git(&["update-ref", "refs/heads/main", &base]);
+        let changed = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        let progress = &changed["epics"]
+            .as_array().unwrap().iter()
+            .find(|item| item["id"] == epic.id).unwrap()["progress"];
+        assert_eq!(progress["total"], 37);
+        assert_eq!(progress["merged"], 0, "moved refs must not reuse a live merge verdict");
+        assert!(progress["last_merged_at"].is_null());
     }
 
     /// cas-9b08: status names the session's pinned epic (null when

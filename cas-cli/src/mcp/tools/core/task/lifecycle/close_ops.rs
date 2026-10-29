@@ -20591,6 +20591,66 @@ fn child_delivery_target<'a>(child: &'a Task, epic_target: &'a str) -> &'a str {
         .unwrap_or(epic_target)
 }
 
+/// Ancestry-based display only: immutable task delivery anchors reachable
+/// from their recorded targets count as historical merges. One batched Git
+/// read per target replaces per-child close/content proofs. This produces no
+/// reusable close verdict; close gates and squash reconciliation keep their
+/// full content/lost-work checks below. Unreadable or timed-out input is None.
+pub(crate) fn collect_epic_ancestry_merges(
+    subtasks: &[Task],
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    budget: std::time::Duration,
+) -> Option<std::collections::HashSet<String>> {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    let mut groups: BTreeMap<&str, Vec<&Task>> = BTreeMap::new();
+    for child in subtasks {
+        if child.has_delivery_to_integrate() && child.deliverables.factory_branch_anchor.is_some() {
+            groups.entry(child_delivery_target(child, parent_branch)).or_default().push(child);
+        }
+    }
+    let mut merged = HashSet::new();
+    if groups.is_empty() {
+        return Some(merged);
+    }
+    let _scope = epic_measurement::Scope::new(budget);
+    let snapshot = EpicGitSnapshot::collect(repo_path, parent_branch, subtasks);
+    for (target, children) in groups {
+        let targets: BTreeSet<_> = [target.to_string(), format!("origin/{target}")]
+            .iter()
+            .filter_map(|name| snapshot.ref_info(name).map(|info| info.commit.clone()))
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let mut anchors = BTreeSet::new();
+        for child in &children {
+            let anchor = child.deliverables.factory_branch_anchor.as_deref()?;
+            if anchor.len() != 40 || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !snapshot.commit_exists(anchor)
+            {
+                return None;
+            }
+            anchors.insert(anchor);
+        }
+        // Use captured immutable target SHAs, so ref movement cannot mix
+        // two repository states within this display measurement.
+        let output = std::process::Command::new("git")
+            .arg("rev-list").args(&anchors).arg("--not").args(&targets)
+            .current_dir(repo_path).measurement_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let uncontained = std::str::from_utf8(&output.stdout).ok()?.lines().collect::<HashSet<_>>();
+        for child in children {
+            if !uncontained.contains(child.deliverables.factory_branch_anchor.as_deref()?) {
+                merged.insert(child.id.clone());
+            }
+        }
+    }
+    (!epic_measurement::expired()).then_some(merged)
+}
+
 /// Collect an epic-status view with an explicit page and deadline. The close
 /// gate uses the full-fidelity mode with its own bounded deadline, while the
 /// public status action selects its page and summary mode independently.

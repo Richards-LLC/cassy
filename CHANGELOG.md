@@ -23,8 +23,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Missing evidence stays Not reported, and no raw output stream is required.
 - **A phase line with an honest clock** — Was: generic working dots gave little
   sense of the current activity. → Now: reported setup, tool, work and
-  compaction phases show their measured duration. Waiting, completed, stale
-  and disconnected states stop animating; the existing status heartbeat keeps
+  compaction phases show their measured duration, and the live status line
+  refreshes during real tool runs and reported compaction. Waiting, completed,
+  stale and disconnected states stop animating; the existing status heartbeat keeps
   the line fresh without requiring Show work. Codex compaction start is not
   reported, so that interval is not given an invented start time or duration.
 - **Know which version each machine runs** — Was: the browser gave little help
@@ -61,6 +62,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander recovery, phones and current status
 
+- **Exit cards follow the ended session** — Was: an Exit command card could
+  stay unconfirmed after the session ended. → Now: Claude and Codex Exit cards
+  settle as ended when the session end is observed.
+- **Urgent unread alarms survive a wider window** — Was: widening the window
+  could silence an alarm for urgent unread items. → Now: resizing no longer
+  silences that alarm while those items remain unread.
 - **Short status tables are still tables** — Was: compact status replies could
   remain raw pipe text without table-copy controls. → Now: short and
   headerless status tables use the native table view and both copy formats,
@@ -199,6 +206,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   a retired footer, and account checks expected email from credential contents.
   → Now: those checks wait for readiness and assert the current Web footer and
   credential-free identity contract, without claiming new runtime behavior.
+
+### Known limits — Team refresh and Codex command confirmation
+
+- **Team refresh after reassignment** — Was: Team lanes could flicker during
+  refresh and briefly show the previous task after reassignment. → Now: this can still
+  occur in this release; a fix is planned.
+- **Codex Clear can stay unconfirmed** — Was: Clear could finish while its
+  command card stayed unconfirmed. → Now: the Codex session can be cleared
+  while the card still says unconfirmed; this remains a known limit.
 
 ## [3.87.0] - 2026-10-28
 

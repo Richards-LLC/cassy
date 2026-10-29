@@ -267,6 +267,19 @@ mod tests {
         assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if !receipt.interactive));
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), writes, "stale controls must send no key");
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "cmd-usage".into(), owner).await.unwrap();
+        // Pane names are human names; the registry's primary key is a different ID.
+        let cas_dir = daemon.app.cas_dir();
+        let store = crate::store::open_agent_store(cas_dir).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.cc_session_id = Some("finish-fixture".into()); store.update(&agent).unwrap();
+        let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+        std::fs::create_dir_all(&projects).unwrap();
+        let at = Utc::now();
+        std::fs::write(projects.join("finish-fixture.jsonl"), format!("{}\n{}\n",
+            serde_json::json!({"type":"user","timestamp":at,"message":{"content":"<command-name>/finish</command-name>"}}),
+            serde_json::json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}}))).unwrap();
+        assert!(finish_observation(cas_dir, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude, at).is_some());
+        assert!(finish_observation(cas_dir, "another-session", &name, cas_mux::SupervisorCli::Claude, at).is_none());
     }
     #[test]
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {

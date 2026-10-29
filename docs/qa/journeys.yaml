@@ -90,9 +90,10 @@ invariants:
     check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
     bug: {task: cas-8bb3}
   HUB-J4-TABLE-COPY:
-    statement: Evidence uses native table headers and cells, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
-    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts; read back both clipboard formats, verify commas and quotes, long paths at desktop/phone in both schemes, and headerless empty cells. thread-model.test.ts covers CSV newline quoting.'
+    statement: Evidence, including short status replies, uses native table headers and cells; adjacent plain progress stays quiet, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
+    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts, including its short status and headerless status stages; read back both clipboard formats, verify quiet adjacent plain progress, commas and quotes, long paths at desktop/phone in both schemes, and empty cells. Run the answer/status clipboard regression in conversation-view.test.ts. Native proof queues a short kind=status table through a candidate hub and verifies live and reloaded headers/cells and copied contents.'
     task: cas-0952
+    bug: {task: cas-2656}
   HUB-J4-MESSAGE-HIERARCHY:
     statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'

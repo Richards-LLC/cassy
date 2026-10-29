@@ -157,6 +157,8 @@ struct CheckReport<'a> {
 
 #[derive(Subcommand)]
 pub enum QaCommand {
+    /// Validate or scaffold a task evidence ledger
+    Ledger(super::qa_ledger::LedgerArgs),
     /// Build an exact-revision binary for a task's real-build QA evidence
     Candidate(CandidateArgs),
     /// Map a diff to journeys and unowned CODEMAP areas
@@ -218,6 +220,7 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
 
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
+        QaCommand::Ledger(args) => super::qa_ledger::execute(args, cli, cas_root),
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),

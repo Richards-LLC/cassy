@@ -96,6 +96,7 @@ pub mod orchestration;
 pub mod otel;
 pub(crate) mod ops;
 pub mod qa_evidence;
+pub mod qa_ledger;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub(crate) mod task_assignment;

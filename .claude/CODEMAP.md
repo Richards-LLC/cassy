@@ -121,7 +121,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_seed.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - journey safety, path filters, impact snapshots and selection.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - `cas qa journeys --traffic` shares from the hub's Commander usage ledger (`POST /v1/usage`).
-- `cas-cli/src/qa_post_release.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/qa_pass/`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/config/upkeep.rs` - release observations, independent QA, trace rebinds and upkeep gates.
+- `cas-cli/src/qa_post_release.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/qa_pass/`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/config/upkeep.rs` - release observations, independent QA, ledger scaffolds and format checks, trace rebinds and upkeep gates.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence, end causes and successor claims.
 - `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/accepted_proposal_store.rs` - durable prompts and proposal ownership.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas (captured harness payloads in `hooks/fixtures/`), memory maintenance and temporal retrieval.

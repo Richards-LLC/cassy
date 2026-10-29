@@ -372,7 +372,7 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by report evidence guidance prefers safe sources."
         },
         {
-          "text": "read-only backlog visibility — not self-dispatch",
+          "text": "read-only backlog visibility \u2014 not self-dispatch",
           "reason": "Preserve the operational safety boundary documented by worker never self dispatch guidance present and mirrored."
         },
         {
@@ -898,10 +898,6 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
         {
-          "text": "source-inferred",
-          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
-        },
-        {
           "text": "real-build",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
@@ -940,6 +936,14 @@
         {
           "text": "eyewitness/telemetry",
           "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "cas qa ledger init --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
+        },
+        {
+          "text": "cas qa ledger check <path> --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
         }
       ],
       "absent": [],
@@ -1093,7 +1097,7 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains mcp integration."
         },
         {
-          "text": "## Symptom → cause",
+          "text": "## Symptom \u2192 cause",
           "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
         }
       ],
@@ -1472,7 +1476,7 @@
           "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
         },
         {
-          "text": "each ≥ 4",
+          "text": "each \u2265 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1517,7 +1521,7 @@
       ],
       "contains": [
         {
-          "text": "each ≥ 4",
+          "text": "each \u2265 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1875,14 +1879,6 @@
       ],
       "contains": [
         {
-          "text": "id | cell | expected | observed | verdict | label | evidence path | defect task",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "source-inferred",
-          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
-        },
-        {
           "text": "real-build",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
@@ -1907,8 +1903,12 @@
           "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
         },
         {
-          "text": "eyewitness",
-          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+          "text": "cas qa ledger init --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
+        },
+        {
+          "text": "cas qa ledger check <path> --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
         }
       ],
       "absent": [],
@@ -2316,7 +2316,7 @@
           "case_sensitive": false
         },
         {
-          "text": "Was → Now",
+          "text": "Was \u2192 Now",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
         },
         {
@@ -2407,7 +2407,7 @@
       ],
       "contains": [
         {
-          "text": "was → now",
+          "text": "was \u2192 now",
           "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
           "case_sensitive": false,
           "unicode_case": true
@@ -3857,7 +3857,7 @@
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         },
         {
-          "text": "`radius` —",
+          "text": "`radius` \u2014",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         }
       ],
@@ -4260,11 +4260,11 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "30°",
+          "text": "30\u00b0",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "150°",
+          "text": "150\u00b0",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {

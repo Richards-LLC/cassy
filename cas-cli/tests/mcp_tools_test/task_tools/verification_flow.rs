@@ -12315,3 +12315,38 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
     assert_eq!(head(), starting_head, "the no-code delivery authored no commit");
 }
+
+/// Existing no-code ledgers bypass the runtime QA gate, but malformed evidence
+/// must fail before a dispatch, pending flag or lease can be created.
+#[tokio::test]
+async fn malformed_ledger_refuses_close_before_verification_dispatch() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut env);
+    let cas_dir = temp.path().join(".cas");
+    let artifacts = temp.path().join("artifacts");
+    std::fs::write(cas_dir.join("config.toml"), format!(
+        "[verification]\nenabled=true\n[factory]\nartifacts_root={:?}\n", artifacts.display().to_string()
+    )).unwrap();
+    let created = service.cas_task_create(Parameters(simple_task_req("Review external evidence"))).await.unwrap();
+    let id = extract_task_id(&extract_text(created)).unwrap().to_owned();
+    service.cas_task_start(Parameters(IdRequest { id: id.clone() })).await.unwrap();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = store.get(&id).unwrap();
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some("artifact:cas-ledger/report".into());
+    store.update(&task).unwrap();
+    let base = cas::config::project_factory_artifacts_root(&cas_dir, &artifacts).join(&id);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("LEDGER.md"), concat!(
+        "cells=1; PASS=0; FAIL=1; NOT EXERCISED=0\nlabels: real-build=1\n",
+        "| id | cell | expected | observed | verdict | label | evidence path | defect task |\n",
+        "| M01 | help | usage | broken | FAIL | real-build | - | - |\n"
+    )).unwrap();
+    let before = store.get(&id).unwrap();
+    let leases = cas::store::open_agent_store(&cas_dir).unwrap().get_lease_history(&id, None).unwrap();
+    let refused = extract_text(service.cas_task_close(Parameters(serde_json::from_value(serde_json::json!({ "id": id, "reason": "external review complete" })).unwrap())).await.unwrap());
+    assert!(refused.contains("QA LEDGER REJECTED") && refused.contains("line 4 row M01 [defect task]"), "{refused}");
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, &id).unwrap().is_none());
+    assert_eq!(store.get(&id).unwrap().pending_verification, before.pending_verification);
+    assert_eq!(cas::store::open_agent_store(&cas_dir).unwrap().get_lease_history(&id, None).unwrap().len(), leases.len());
+}

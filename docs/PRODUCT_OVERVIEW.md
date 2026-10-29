@@ -46,7 +46,7 @@ The operator can paste text, screenshots or files into Commander: long text beco
 
 1. The operator launches `cas`, reviews the active epic and staffs workers for its ready tasks.
 2. A worker starts its lease, commits in its worktree, runs targeted tests and pushes; the supervisor merges on green, and the verifier's verdict at the merge commit closes or reopens the task.
-3. A QA reviewer runs `cas qa impact` on a delivery, walks the touched journeys and records the verdict in the QA ledger.
+3. A QA reviewer runs `cas qa impact` on a delivery, scaffolds its evidence with `cas qa ledger init --task <id>`, walks the touched journeys, and runs `cas qa ledger check <path> --task <id>` before submitting the verdict. The same format check refuses malformed evidence at close before verification dispatch.
 4. A supervisor messages a supervisor on another project or machine, sees RECEIVED or PENDING, or splits an epic with that peer.
 5. After a release merges, `cas serve` runs the post-release check, `cas release report` builds the branded release report, and Violet posts the release notes to Slack; `cas violet channels` and `cas doctor` check the configured channels. After publication, the release workflow also updates `hub.petrastella.io` from the released Commander bundle when its files change, verifies public access and bytes, restores the previous deployment on a failed check, and attaches deployment provenance to the release.
 6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change; `cas deliverable finalize --audience customer` brands it, embeds its screenshots, refuses internal vocabulary and prints and checks the A4 and Letter PDFs. For a client product, `cas-customer-release-notes` writes the period's customer release notes from its `docs/deliverables/PROFILE.md`; the client's `DESIGN.md` shapes the layout, and the same `finalize --audience customer` call produces the HTML and PDFs.
@@ -66,7 +66,7 @@ The operator can paste text, screenshots or files into Commander: long text beco
 - Task lifecycle and close states: `crates/cas-types/src/task.rs`.
 - Agent roles and session responsibilities: `crates/cas-types/src/agent.rs`.
 - Memory, rule and skill records: `crates/cas-types/src/entry.rs`, `crates/cas-types/src/rule.rs`, `crates/cas-types/src/skill.rs`.
-- Adaptive QA: `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_post_release.rs`, `docs/qa/impact.md`, `docs/qa/docs-upkeep.md`.
+- Adaptive QA: `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/qa_post_release.rs`, `docs/qa/impact.md`, `docs/qa/docs-upkeep.md`.
 - CLI and MCP surfaces: `cas-cli/src/cli/` and `cas-cli/src/mcp/tools/`.
 - Commander browser app: `hub-web/`.
 - Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`, `cas-cli/src/builtins/skills/cas-feature-report/`, `cas-cli/src/builtins/skills/cas-customer-release-notes/`; all finish through `cas deliverable finalize` (`cas-cli/src/deliverable/finalize.rs`), the one path for image inlining, audience hygiene, printing and the PDF check (`cas-cli/src/deliverable/assets/`).

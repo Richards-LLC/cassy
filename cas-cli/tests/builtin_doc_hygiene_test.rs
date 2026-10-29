@@ -657,6 +657,11 @@ const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
 /// art. A file-level exception is intentionally visible and checked for drift.
 const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "skills/cas-qa-craft/references/evidence-ledger.md",
+        "journey",
+        "Names the registry-backed journey IDs prefilled by cas qa ledger init.",
+    ),
+    (
         "skills/cas-codebase-design/references/design-it-twice.md",
         "leverage",
         "Architecture term for caller benefit used to compare the proposed interfaces.",

@@ -3,7 +3,7 @@
 The matrix tests the demo and the nearby risks, rather than replaying a report.
 Write the expected result in the user's words before running any cell.
 The project-agnostic matrix and quota guidance are adapted from
-https://github.com/Richards-LLC/cassy/issues/759; PostHog and mobile-device
+<https://github.com/Richards-LLC/cassy/issues/759>; PostHog and mobile-device
 details from that issue are intentionally outside this skill.
 
 1. Name the build (binary version or commit SHA), the one-line scope, and the

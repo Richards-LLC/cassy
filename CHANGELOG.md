@@ -209,8 +209,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Known limits — Team refresh and Codex command confirmation
 
-- **Team refresh after reassignment** — Was: Team could flicker during refresh
-  and briefly show the previous task after reassignment. → Now: this can still
+- **Team refresh after reassignment** — Was: Team lanes could flicker during
+  refresh and briefly show the previous task after reassignment. → Now: this can still
   occur in this release; a fix is planned.
 - **Codex Clear can stay unconfirmed** — Was: Clear could finish while its
   command card stayed unconfirmed. → Now: the Codex session can be cleared

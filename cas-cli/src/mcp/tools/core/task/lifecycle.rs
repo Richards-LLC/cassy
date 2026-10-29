@@ -3477,7 +3477,7 @@ impl CasCore {
                 "\n{}\n{}\nNotes:\n{}\n{}\n{}",
                 clipping.excerpt(&related_context, 120),
                 task_scope(&task, &mut clipping),
-                task_show_notes(&saved.notes, &task.id, &mut clipping),
+                task_show_notes(&task.notes, &task.id, &mut clipping),
                 clipping.excerpt(&execution_state.unwrap_or_default(), 120),
                 clipping.excerpt(&cited_pointer, 220),
             );

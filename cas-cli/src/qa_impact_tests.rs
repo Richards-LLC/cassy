@@ -460,8 +460,11 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         "docs/qa/journeys.md",
         &format!("{catalog}\n### {}", template.replace(template_id, added_id)),
     );
-    let mut registry =
-        crate::qa_registry::load(&root.join(crate::qa_registry::DEFAULT_PATH)).unwrap();
+    // Edit only the main file; the combined loader also includes family files
+    // that must remain in their own files when this fixture writes the registry.
+    let mut registry = crate::qa_registry::parse(
+        &std::fs::read_to_string(root.join(crate::qa_registry::DEFAULT_PATH)).unwrap(),
+    ).unwrap();
     let mut added = registry
         .journeys
         .iter()

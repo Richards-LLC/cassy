@@ -64,11 +64,7 @@ pub(super) fn at_park(
             warnings.push(format!("UPKEEP WARNING G6: {warning}"));
         }
         let mut registry = |revision: &str, files: &[String]| -> anyhow::Result<_> {
-            let text = read(repo, revision, &qa.registry.path, files)?;
-            match text
-                .map(|text| crate::qa_registry::parse(&text))
-                .transpose()
-            {
+            match registry_upkeep::read_registry(repo, revision, &qa.registry.path, files) {
                 Ok(registry) => Ok(registry),
                 Err(error) => {
                     warnings.push(format!("UPKEEP WARNING: {} at {revision} malformed; registry overview signal unavailable (not blocking): {error}", qa.registry.path));

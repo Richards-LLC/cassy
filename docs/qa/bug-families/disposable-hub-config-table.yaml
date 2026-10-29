@@ -1,0 +1,4 @@
+title: Disposable hub fixtures must write parseable AI enrichment config so real composer uploads can store files
+tasks: [cas-6217, cas-de58]
+invariants: [HUB-J24-GOAL]
+journeys: [HUB-J24]

@@ -1,0 +1,4 @@
+title: Parallel bug fixes must merge their separate family files without losing registry or close-gate case coverage
+tasks: [cas-c968]
+invariants: []
+journeys: []

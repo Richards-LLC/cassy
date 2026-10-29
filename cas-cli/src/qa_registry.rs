@@ -421,9 +421,71 @@ pub fn parse(contents: &str) -> Result<Registry> {
     serde_yaml::from_str(contents).context("invalid journey registry YAML")
 }
 
+fn bug_family_key<'a>(registry_path: &str, path: &'a str) -> Option<&'a str> {
+    let path = Path::new(path);
+    let directory = Path::new(registry_path).parent()?.join("bug-families");
+    if path.parent()? != directory || !matches!(path.extension()?.to_str()?, "yaml" | "yml") {
+        return None;
+    }
+    path.file_stem()?.to_str().filter(|key| !key.is_empty())
+}
+
+/// Inputs belonging to a registry, including its immediate per-family files.
+pub(crate) fn is_registry_input(registry_path: &str, path: &str) -> bool {
+    path == registry_path || bug_family_key(registry_path, path).is_some()
+}
+
+/// Use one caller-owned snapshot for both the registry and its family files.
+/// `paths` is that snapshot's inventory, never the current checkout for Git reads.
+pub(crate) fn load_with(
+    registry_path: &str,
+    paths: &[String],
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<Option<Registry>> {
+    let Some(contents) = read(registry_path)? else {
+        return Ok(None);
+    };
+    let mut registry = parse(&contents)?;
+    let mut families: Vec<_> = paths
+        .iter()
+        .filter_map(|path| bug_family_key(registry_path, path).map(|key| (path, key)))
+        .collect();
+    families.sort_unstable();
+    for (path, key) in families {
+        anyhow::ensure!(
+            !registry.bug_families.contains_key(key),
+            "duplicate bug family {key:?} in {path}; family keys must be unique across inline and file entries"
+        );
+        let contents = read(path)?.with_context(|| format!("missing bug family file {path}"))?;
+        let family: BugFamily = serde_yaml::from_str(&contents)
+            .with_context(|| format!("invalid bug family YAML in {path}"))?;
+        registry.bug_families.insert(key.into(), family);
+    }
+    Ok(Some(registry))
+}
+
 pub fn load(path: &Path) -> Result<Registry> {
-    parse(&std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?)
-        .with_context(|| format!("load {}", path.display()))
+    let registry_path = path.to_str().context("registry path must be UTF-8")?;
+    let directory = path.parent().unwrap_or(Path::new("")).join("bug-families");
+    let paths = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .map(|entry| {
+                let path = entry?.path();
+                Ok(path
+                    .to_str()
+                    .context("bug family path must be UTF-8")?
+                    .to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(error) => return Err(error).with_context(|| format!("read {}", directory.display())),
+    };
+    load_with(registry_path, &paths, |path| {
+        std::fs::read_to_string(path)
+            .map(Some)
+            .with_context(|| format!("read {path}"))
+    })?
+    .with_context(|| format!("load {}", path.display()))
 }
 
 pub fn check(project_root: &Path, registry_path: &Path) -> Result<ValidationReport> {
@@ -1263,6 +1325,32 @@ journeys:
         assert_eq!(
             registry.journeys[0].owners.globs(),
             ["server/auth/**", "pages/[id].vue"]
+        );
+        let families = dir.path().join("docs/qa/bug-families");
+        std::fs::create_dir(&families).unwrap();
+        let file = families.join("extra.yml");
+        std::fs::write(
+            &file,
+            "title: Extra\ninvariants: [missing]\njourneys: [missing]\n",
+        )
+        .unwrap();
+        let report = check(dir.path(), Path::new(custom_path)).unwrap();
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.code == "unknown_invariant")
+        );
+        assert!(report.problems.iter().any(|p| p.code == "unknown_journey"));
+        std::fs::write(&file, "invalid: [").unwrap();
+        assert!(
+            format!("{:#}", load(&dir.path().join(custom_path)).unwrap_err()).contains("extra.yml")
+        );
+        std::fs::remove_file(file).unwrap();
+        std::fs::write(families.join("claim.yaml"), "title: Duplicate\n").unwrap();
+        assert!(
+            format!("{:#}", load(&dir.path().join(custom_path)).unwrap_err())
+                .contains("duplicate bug family")
         );
     }
 

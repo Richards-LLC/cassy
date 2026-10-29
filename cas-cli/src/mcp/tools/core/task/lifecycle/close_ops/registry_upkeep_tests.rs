@@ -318,6 +318,73 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
 }
 
 #[test]
+fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
+    let mut f = Fixture::new(YAML);
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    let mut deliveries = Vec::new();
+    for (branch, task) in [("alpha", "cas-1234"), ("beta", "cas-5678")] {
+        git(f.repo.path(), &["checkout", "-qb", branch, &f.base]);
+        write(
+            f.repo.path(),
+            &format!("docs/qa/bug-families/{branch}.yaml"),
+            &format!("title: {branch}\ntasks: [{task}]\ninvariants: [INV]\njourneys: [signup]\n"),
+        );
+        deliveries.push(commit(f.repo.path()));
+    }
+    git(f.repo.path(), &["merge", "--no-edit", "alpha"]);
+    for delivery in deliveries {
+        let presence = delivery_content_presence_on_target(f.repo.path(), &delivery, "HEAD");
+        assert!(
+            matches!(presence, DeliveryContentPresence::Present { .. }),
+            "{presence:?}"
+        );
+    }
+    let registry =
+        crate::qa_registry::load(&f.repo.path().join(crate::qa_registry::DEFAULT_PATH)).unwrap();
+    assert!(registry.bug_families.contains_key("alpha"));
+    assert!(registry.bug_families.contains_key("beta"));
+    assert!(
+        registry
+            .validate(&tracked(f.repo.path(), "HEAD").unwrap())
+            .problems
+            .is_empty()
+    );
+    write(f.repo.path(), "src/pages/signup.ts", "fixed");
+    let head = commit(f.repo.path());
+    // Dirty checkout data must never replace the delivered snapshot's cases.
+    write(
+        f.repo.path(),
+        "docs/qa/bug-families/alpha.yaml",
+        "invalid: [",
+    );
+    for id in ["cas-1234", "cas-5678"] {
+        f.task.id = id.into();
+        let (findings, _) =
+            inspect(&f.task, f.repo.path(), &f.qa, &f.base, &head, &head, None).unwrap();
+        assert!(
+            findings.is_empty(),
+            "{id}: {}",
+            findings
+                .iter()
+                .map(|f| f.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    f.base = head;
+    f.task.id = "cas-1234".into();
+    write(
+        f.repo.path(),
+        "docs/qa/bug-families/alpha.yaml",
+        "title: alpha\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n",
+    );
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    let head = commit(f.repo.path());
+    assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
+}
+
+#[test]
 fn registry_upkeep_bug_requires_changed_case_for_task() {
     let mut f = Fixture::new(YAML);
     f.task.task_type = TaskType::Bug;

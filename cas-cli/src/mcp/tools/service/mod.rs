@@ -622,7 +622,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory control (factory mode). Fleet: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_queue, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, record_test_receipt, recover_branch, agent_list, agent_cleanup, lease_history. Servers: server_start, server_list, server_stop (workers stop own only). Neon (supervisor only): db_branch_create, db_branch_show, db_branch_delete; one branch/task, deleted at close; DATABASE_URL only in worker .env.cas-db; workers ask by blocker. Worktrees: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Loops/queues: loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack. Slack authority (authenticated supervisor): claim, claim_status, release_claim, transfer_claim, accept_claim, renew_claim, reply_intent. clear_context types reset and verifies a new transcript or errors. Messaging/reminders: coordination."
+        description = "Factory operations: workers/task queues, epics, worktrees, servers, loops, notices, leases and GC. worker_queue inspects/reorders/clears pending task_ids; ordered spawns use isolated checkouts. clear_context verifies a transcript reset or errors. Workers manage only owned servers. Neon: supervisor only, one branch/task, deleted at close; DATABASE_URL stays in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent require an authenticated supervisor. Identity/messages/reminders: coordination."
     )]
     pub async fn factory(
         &self,

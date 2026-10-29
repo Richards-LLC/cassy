@@ -1502,6 +1502,7 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         (false, Closed, false, true),
         (true, Closed, false, true),
         (true, AwaitingMerge, false, true),
+        (false, InProgress, false, false),
         (true, InProgress, false, false),
         (true, AwaitingMerge, true, false),
         (false, Closed, true, false),

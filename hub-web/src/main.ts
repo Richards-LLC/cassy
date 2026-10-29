@@ -145,7 +145,7 @@ const pairingOperations = new PairingOperationCoordinator();
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const supervisorCommands = new Map<string, SupervisorCommandSession>();
-let slashCommands: { input: HTMLTextAreaElement; palette: SlashCommands } | undefined;
+let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
 function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
   const key = sessionKey(machineId, session);
   let commands = supervisorCommands.get(key);
@@ -176,16 +176,18 @@ function supervisorCommandUnavailable(machineId: string, session: string): strin
   return undefined;
 }
 function bindSlashCommands(input: HTMLTextAreaElement): void {
-  if (slashCommands?.input === input) return;
   const machineId = selectedMachineId; const session = selectedSession;
   if (!machineId || !session) return;
+  const thread = sessionKey(machineId, session);
+  if (slashCommands?.input === input && slashCommands.thread === thread) return;
+  slashCommands?.palette.dispose();
   const palette = new SlashCommands(input, {
     harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
     unavailable: () => supervisorCommandUnavailable(machineId, session),
     label: () => supervisorPhrase(machineId, session),
     run: (command, confirmed) => supervisorCommandSession(machineId, session).run(command, confirmed),
   });
-  slashCommands = { input, palette };
+  slashCommands = { input, thread, palette };
 }
 
 bindKeyboardViewport(window);

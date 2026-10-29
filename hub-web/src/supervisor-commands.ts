@@ -33,6 +33,7 @@ export class SlashCommands {
   private open = false;
   private escaped = false;
   private pending = false;
+  private readonly events = new AbortController();
   constructor(private readonly input: HTMLTextAreaElement, private readonly options: Options) {
     this.panel = document.createElement("section");
     this.panel.className = "supervisor-command-palette";
@@ -42,7 +43,7 @@ export class SlashCommands {
     input.closest(".message")?.classList.add("has-supervisor-commands");
     input.parentElement!.insertBefore(this.panel, input);
     input.setAttribute("aria-controls", this.panel.id);
-    input.addEventListener("input", () => { this.escaped = false; this.sync(); });
+    input.addEventListener("input", () => { this.escaped = false; this.sync(); }, { signal: this.events.signal });
     input.addEventListener("keydown", event => {
       if (!input.value.startsWith("/") || event.isComposing) return;
       if (event.key === "Escape") { event.preventDefault(); this.close(); }
@@ -52,7 +53,7 @@ export class SlashCommands {
       if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
         event.preventDefault(); this.submit();
       }
-    }, { capture: true });
+    }, { capture: true, signal: this.events.signal });
     this.panel.addEventListener("keydown", event => {
       if (event.key === "Escape") { event.preventDefault(); this.close(); input.focus(); return; }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -60,9 +61,10 @@ export class SlashCommands {
       const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
       if (index < 0) return;
       event.preventDefault(); buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
-    });
+    }, { signal: this.events.signal });
     this.sync();
   }
+  dispose(): void { this.events.abort(); this.panel.remove(); }
   show(): void { this.open = true; this.escaped = false; this.sync(); this.panel.querySelector<HTMLButtonElement>("button")?.focus(); }
   close(): void { this.open = false; this.escaped = true; this.panel.hidden = true; }
   sync(): void {

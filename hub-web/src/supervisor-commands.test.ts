@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { SlashCommands, commandsForHarness, commandReceiptNode } from "./supervisor-commands";
+import { SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode } from "./supervisor-commands";
 
 describe("supervisor slash commands", () => {
   it("filters the real composer palette and keeps arbitrary slash text out of message sends", async () => {
@@ -11,7 +11,9 @@ describe("supervisor slash commands", () => {
     input.value = "/us"; input.dispatchEvent(new Event("input"));
     expect(document.querySelectorAll("[data-supervisor-command]")).toHaveLength(1);
     expect(document.querySelector("[data-supervisor-command]")?.textContent).toContain("Usage");
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
     await Promise.resolve();
     expect(run).toHaveBeenCalledWith("usage", false);
     input.value = "/shell whoami";
@@ -40,5 +42,23 @@ describe("supervisor slash commands", () => {
     expect(row.textContent).toContain("not confirmed");
     expect(row.querySelector("unsafe")).toBeNull();
     expect(row.querySelector("pre")?.textContent).toBe("<unsafe>");
+  });
+});
+
+describe("supervisor command receipts", () => {
+  it("polls only the outcome and stops after observation, without replaying a mutation", async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn().mockReturnValue(true);
+      const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+      await session.run("compact", false);
+      const ref = [...session.receipts.keys()][0];
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
+      expect(send.mock.calls.filter(([message]) => "SupervisorCommandStatus" in message)).toHaveLength(2);
+      session.receive({ client_ref: ref, command: "compact", phase: "observed", detail: "Harness started compact context", output: "", interactive: false });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(send).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
   });
 });

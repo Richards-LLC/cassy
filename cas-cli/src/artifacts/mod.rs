@@ -52,6 +52,11 @@ pub enum PublishDisposition {
     Committed { cloud_url: Option<String> },
     /// Cloud has the bytes, but its portable task reference was not saved.
     CommittedMetadataUnavailable { reason: String },
+    /// The manifest was recorded, but its QA evidence cannot travel to a peer.
+    QaBundleNotPortable {
+        reason: String,
+        storage: Box<PublishDisposition>,
+    },
     /// Recorded locally; Cloud storage is not live on this endpoint yet.
     StorageNotLive { reason: String },
     /// Recorded locally; this installation has no cloud credentials.
@@ -65,7 +70,7 @@ impl PublishDisposition {
     /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
         matches!(
-            self,
+            self.storage_disposition(),
             PublishDisposition::Committed { .. }
                 | PublishDisposition::CommittedMetadataUnavailable { .. }
         )
@@ -73,15 +78,43 @@ impl PublishDisposition {
 
     pub fn metadata_state(&self) -> &'static str {
         match self {
+            Self::QaBundleNotPortable { .. } => "qa_bundle_not_portable",
             Self::Committed { .. } => "task_reference_recorded",
             Self::CommittedMetadataUnavailable { .. } => "metadata_unavailable",
             _ => "local_only",
         }
     }
 
+    pub fn qa_portability_error(&self) -> Option<&str> {
+        match self {
+            Self::QaBundleNotPortable { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn storage_disposition(&self) -> &Self {
+        match self {
+            Self::QaBundleNotPortable { storage, .. } => storage.storage_disposition(),
+            other => other,
+        }
+    }
+
+    fn with_qa_error(self, error: Option<String>) -> Self {
+        match error {
+            Some(reason) => Self::QaBundleNotPortable {
+                reason,
+                storage: Box::new(self),
+            },
+            None => self,
+        }
+    }
+
     /// One line for a person, naming what happened and what follows from it.
     pub fn summary(&self) -> String {
         match self {
+            PublishDisposition::QaBundleNotPortable { reason, storage } => {
+                format!("{}; QA bundle not portable: {reason}", storage.summary())
+            }
             PublishDisposition::Committed {
                 cloud_url: Some(url),
             } => {
@@ -342,11 +375,11 @@ pub fn publish(
 
     // Portability is optional: a missing/invalid companion must never prevent
     // publishing the requested manifest through the ordinary artifact path.
-    let closure = match qa::prepare(context, &source) {
-        Ok(closure) => closure,
+    let (closure, mut qa_error) = match qa::prepare(context, &source) {
+        Ok(closure) => (closure, None),
         Err(error) => {
             tracing::warn!(path = %source.display(), %error, "QA companion archive unavailable; publishing manifest only");
-            None
+            (None, Some(error.to_string()))
         }
     };
 
@@ -371,7 +404,7 @@ pub fn publish(
     let Some(client) = context.cloud.as_ref() else {
         return Ok(PublishOutcome {
             artifact,
-            disposition: PublishDisposition::NotLoggedIn,
+            disposition: PublishDisposition::NotLoggedIn.with_qa_error(qa_error),
             source,
         });
     };
@@ -410,11 +443,10 @@ pub fn publish(
         && let Some((_temp, archive)) = closure
     {
         if let Err(error) = qa::record(context, &outcome, &archive) {
-            outcome.disposition = PublishDisposition::CommittedMetadataUnavailable {
-                reason: error.to_string(),
-            };
+            qa_error = Some(error.to_string());
         }
     }
+    outcome.disposition = outcome.disposition.with_qa_error(qa_error);
     Ok(outcome)
 }
 
@@ -870,6 +902,9 @@ mod tests {
             PublishDisposition::CommittedMetadataUnavailable {
                 reason: "task reference unavailable".into(),
             },
+            PublishDisposition::Committed { cloud_url: None }
+                .with_qa_error(Some("too large".into())),
+            PublishDisposition::NotLoggedIn.with_qa_error(Some("missing trace".into())),
             PublishDisposition::StorageNotLive {
                 reason: "not live".to_string(),
             },
@@ -884,7 +919,7 @@ mod tests {
             assert_eq!(
                 case.is_committed(),
                 matches!(
-                    case,
+                    case.storage_disposition(),
                     PublishDisposition::Committed { .. }
                         | PublishDisposition::CommittedMetadataUnavailable { .. }
                 )

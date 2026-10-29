@@ -60,8 +60,8 @@ fn relative(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Only declared path fields travel. files.parts also carries titles,
-// labels and project names; treating arbitrary strings as paths breaks publish.
+// Match the files the close gate's ManifestFiles reads. Per-part receipts and
+// traces are producer metadata; top-level aliases into parts/ still travel.
 fn declared_files(value: &serde_json::Value) -> BTreeSet<PathBuf> {
     let mut paths = BTreeSet::new();
     for key in [
@@ -88,19 +88,6 @@ fn declared_files(value: &serde_json::Value) -> BTreeSet<PathBuf> {
             .filter_map(|v| v.as_str())
         {
             paths.insert(path.into());
-        }
-    }
-    for part in value["parts"].as_array().into_iter().flatten() {
-        for key in [
-            "receipt",
-            "aria_yaml",
-            "aria_json",
-            "trace",
-            "trace_actions",
-        ] {
-            if let Some(path) = part[key].as_str().filter(|path| !path.is_empty()) {
-                paths.insert(path.into());
-            }
         }
     }
     paths
@@ -381,23 +368,28 @@ fn restore_archive(
             barrier.wait();
         }
     });
-    if already_restored {
-        anyhow::ensure!(
-            std::fs::symlink_metadata(&cached)?.is_dir(),
-            "QA restore cache is not a directory"
-        );
-        for path in paths {
-            let old = checked_file(&cached, &path)?;
-            let fresh = checked_file(temp.path(), &path)?;
-            anyhow::ensure!(
-                super::digest_file(&old)? == super::digest_file(&fresh)?
-                    && std::fs::metadata(old)?.modified()?
-                        == std::fs::metadata(fresh)?.modified()?,
-                "QA restore cache differs from published evidence"
-            );
+    if !already_restored {
+        match std::fs::rename(temp.path(), &cached) {
+            Ok(()) => return Ok(cached.join(&proof.manifest_path)),
+            // A concurrent first restore may have installed this immutable
+            // closure after our existence check. Verify it below, just as on
+            // a cache hit; an unrelated rename error remains an error.
+            Err(_) if cached.try_exists()? => {}
+            Err(error) => return Err(error.into()),
         }
-    } else {
-        std::fs::rename(temp.path(), &cached)?;
+    }
+    anyhow::ensure!(
+        std::fs::symlink_metadata(&cached)?.is_dir(),
+        "QA restore cache is not a directory"
+    );
+    for path in paths {
+        let old = checked_file(&cached, &path)?;
+        let fresh = checked_file(temp.path(), &path)?;
+        anyhow::ensure!(
+            super::digest_file(&old)? == super::digest_file(&fresh)?
+                && std::fs::metadata(old)?.modified()? == std::fs::metadata(fresh)?.modified()?,
+            "QA restore cache differs from published evidence"
+        );
     }
     Ok(cached.join(&proof.manifest_path))
 }

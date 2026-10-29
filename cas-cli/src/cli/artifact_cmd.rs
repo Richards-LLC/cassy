@@ -163,7 +163,8 @@ fn execute_publish(args: &PublishArgs, cas_root: &Path, json: bool) -> anyhow::R
 
 fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
     let artifact = &outcome.artifact;
-    let (storage, detail) = match &outcome.disposition {
+    let (storage, detail) = match outcome.disposition.storage_disposition() {
+        PublishDisposition::QaBundleNotPortable { .. } => unreachable!("storage disposition is unwrapped"),
         PublishDisposition::Committed { .. } => ("committed", None),
         PublishDisposition::CommittedMetadataUnavailable { reason } => ("committed", Some(reason.clone())),
         PublishDisposition::StorageNotLive { reason } => ("not_live", Some(reason.clone())),
@@ -181,6 +182,7 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
         "storage": storage,
         "storage_detail": detail,
         "metadata_state": outcome.disposition.metadata_state(),
+        "qa_portability_error": outcome.disposition.qa_portability_error(),
         "cloud_url": artifact.cloud_url,
         "source": outcome.source.display().to_string(),
     })
@@ -188,7 +190,9 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
 
 fn print_publish(outcome: &PublishOutcome) {
     let artifact = &outcome.artifact;
-    let verdict = if outcome.disposition.is_committed() {
+    let verdict = if outcome.disposition.qa_portability_error().is_some() {
+        "[WARN] QA bundle not portable"
+    } else if outcome.disposition.is_committed() {
         "[OK] published"
     } else {
         "[WARN] local-only"
@@ -199,9 +203,12 @@ fn print_publish(outcome: &PublishOutcome) {
         human_size(artifact.size_bytes),
         artifact.id
     );
-    println!("     {}", outcome.disposition.summary());
+    for line in crate::cloud::presence::wrap_line(&outcome.disposition.summary()).lines() {
+        println!("     {line}");
+    }
     println!("     sha256 {}", artifact.sha256);
-    match &outcome.disposition {
+    match outcome.disposition.storage_disposition() {
+        PublishDisposition::QaBundleNotPortable { .. } => unreachable!("storage disposition is unwrapped"),
         PublishDisposition::UploadFailed { reason } | PublishDisposition::CommittedMetadataUnavailable { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.

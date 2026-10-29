@@ -941,7 +941,16 @@ in one MCP call. Use `loaded_proof` for loaded evidence. A failed Cloud commit
 keeps the local artifact record but does not append a portable proof claim.
 The note carries the committed record (including Cloud id, size and SHA-256),
 so normal task sync transports it without syncing machine-local paths or a
-new artifact store. An existing committed id cited in `task action=notes` is
+new artifact store. Publishing a producer `bundle.json` also archives the evidence
+read by the close gate, including top-level aliases into `parts/`, but excludes
+per-part-only receipts and traces. If that archive cannot be prepared or
+published (including the 25 MiB limit), CLI and MCP report **QA bundle not
+portable** while retaining the manifest record and its storage outcome. JSON
+reports `metadata_state: "qa_bundle_not_portable"` and `qa_portability_error`;
+rebuild the evidence bundle and republish before asking a peer host to close.
+Concurrent restores verify the winning cached evidence before reusing it.
+
+An existing committed id cited in `task action=notes` is
 attached the same way. Citing an unpublished artifacts-root path warns the
 writer without discarding the note.
 

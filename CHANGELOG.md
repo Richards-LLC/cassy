@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory workflow
+
+- **Parked delivery anchors stay on the branch** — Worker pushes refuse
+  non-fast-forward rewrites of a published factory tip, and re-parking accepts
+  the unchanged recovery merge that restores the recorded anchor.
+
 ### Added — Delivery process
 
 - **Rapid response mode** — Was: Every delivery ran the full QA and verification

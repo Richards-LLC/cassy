@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Delivery process
+
+- **Rapid response mode** — Was: Every delivery ran the full QA and verification
+  gates, even during an urgent fix. → Now: The operator can open a time-boxed window
+  for one epic with `cas qa rapid-response enable <epic> --for 2h --reason ...
+  --rollback ...` (at most 12 hours; it expires on its own). While it is open,
+  per-task independent QA is skipped, close verification runs for one task in four,
+  evidence is needed only for journeys whose own files changed, fixes close without
+  waiting for a batch QA receipt, and the post-release check watches instead of
+  gating. Build, touched-test and evidence secret checks still refuse, and changes
+  that touch migrations keep every gate. Each skipped check is recorded, and when
+  the window closes the factory files one back-fill task under the epic and tells
+  the supervisor.
+
 ## [3.89.0] - 2026-10-29
 
 ### Added — Installation

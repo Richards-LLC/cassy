@@ -9318,9 +9318,29 @@ impl CasCore {
         // verdict before close; light tasks skip it entirely. For `Deep`/unset
         // (`!depth_light`) the condition is unchanged, so the jail arms exactly
         // as today.
+        // cas-1b4d: in an operator's rapid-response window close verification
+        // is sampled; an unsampled task's verification back-fills when the
+        // window closes. Data-state guards below are unaffected.
+        let rapid_unsampled = verification_enabled
+            && !skip_verification
+            && !depth_light
+            && task.task_type != TaskType::Epic
+            && !crate::rapid_response::verification_sampled(&task.id)
+            && crate::rapid_response::active_for_task_at(&self.cas_root, &task, None)
+                .inspect(|window| {
+                    crate::rapid_response::record_skip(
+                        &self.cas_root,
+                        window,
+                        &task.id,
+                        "verification",
+                        "close verification not sampled (one task in four runs it)",
+                    );
+                })
+                .is_some();
         if verification_enabled
             && !skip_verification
             && !depth_light
+            && !rapid_unsampled
         {
             let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 

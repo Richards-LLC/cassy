@@ -28,7 +28,9 @@ impl SupervisorCommand {
             (Codex, Self::Usage) => Some("/status"),
             (Claude | Codex, Self::Exit) => Some("/exit"),
             (Claude, Self::Finish) => Some("/finish"),
-            (Codex, Self::Finish) => Some("$finish "),
+            // The native $skill picker consumes Enter; the supported spoken
+            // invocation goes through the normal prompt path without a picker.
+            (Codex, Self::Finish) => Some("finish"),
             _ => None,
         }
     }

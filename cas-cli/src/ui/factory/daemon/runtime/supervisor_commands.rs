@@ -80,7 +80,7 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
                 if row["type"] == "response_item" && row["payload"]["type"] == "message" && row["payload"]["role"] == "user" {
                     let text = row["payload"]["content"].as_array().map(|blocks| blocks.iter()
                         .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-                    requested = text.trim() == "$finish";
+                    requested = matches!(text.trim(), "finish" | "$finish");
                 }
                 if requested && row["type"] == "event_msg" && row["payload"]["type"] == "task_complete" { return true; }
             }

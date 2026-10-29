@@ -595,11 +595,20 @@ struct Fixture {
 /// Two idle, clean workers (one Claude, one Codex) and a shutdown row the
 /// daemon has already dequeued: `processed_at` is set, nothing has run yet.
 fn processed_but_unexecuted_shutdown() -> Fixture {
+    processed_but_unexecuted_shutdown_with_dead_worker(false)
+}
+
+fn processed_but_unexecuted_shutdown_with_dead_worker(include_dead: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon(&cas_dir);
     let mut pids = Vec::new();
     let mut names = Vec::new();
+    if include_dead {
+        register_idle_worker(&cas_dir, "already-dead");
+        open_agent_store(&cas_dir).unwrap().graceful_shutdown("agent-already-dead").unwrap();
+        names.push("already-dead".to_string());
+    }
     for (name, harness) in [
         ("idle-claude", cas_mux::SupervisorCli::Claude),
         ("idle-codex", cas_mux::SupervisorCli::Codex),
@@ -753,6 +762,69 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
         "the row reaches a terminal state: {:?}",
         shutdown_row_state(&cas_dir, request_id)
     );
+}
+
+/// A background writer owns the pooled connection, as in the October 28
+/// mixed dead/live batch. Reads needed to authorize a stop must still work;
+/// retiring a dead identity must not prevent the held live pane from stopping.
+#[tokio::test(flavor = "current_thread")]
+async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let Fixture { _dir, mut daemon, request_id: request, pids } = processed_but_unexecuted_shutdown_with_dead_worker(true);
+    let cas_dir = daemon.app.cas_dir().to_path_buf();
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let names = vec!["already-dead".to_string(), pids[0].0.clone(), pids[1].0.clone()];
+    for name in &names {
+        let mut agent = agents.get(&format!("agent-{name}")).unwrap();
+        agent.factory_session = Some(SESSION.into());
+        agents.update(&agent).unwrap();
+    }
+    let mut foreign = cas_types::Agent::new("foreign-dead-name".into(), "already-dead".into());
+    foreign.role = cas_types::AgentRole::Worker;
+    foreign.factory_session = Some("another-factory".into());
+    foreign.pid = Some(std::process::id());
+    agents.register(&foreign).unwrap();
+    let metadata_path = crate::ui::factory::session::metadata_path(SESSION);
+    std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    let metadata = crate::ui::factory::session::create_metadata(
+        SESSION, std::process::id(), "supervisor", &names, None, None, None,
+    );
+    std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    crate::ui::factory::persist_session_metadata_worker_hold_at(&metadata_path, &pids[1].0, true).unwrap();
+    daemon.app.set_factory_session(SESSION.into());
+    daemon.app.refresh_data().unwrap();
+    assert!(crate::ui::factory::worker_holds_from_session_metadata_named(SESSION).unwrap().contains(&pids[1].0));
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _connection = shared.lock().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+    {
+        let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
+        daemon.process_pending_spawns().await;
+    }
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas_dir, request).0
+        .is_some_and(|state| SpawnLifecycleState::from_str(&state).is_some_and(|state| state.is_terminal()))));
+    let (state, detail) = shutdown_row_state(&cas_dir, request);
+    assert_eq!(state.as_deref(), Some(SpawnLifecycleState::Stopped.as_str()), "mixed batch: {detail:?}");
+    for (name, pid) in &pids {
+        assert!(wait_until(Duration::from_secs(5), || !alive(*pid)), "{name} must stop despite pooled contention");
+        assert!(!daemon.app.worker_names().contains(name), "{name} must leave the roster");
+    }
+    assert!(wait_until(Duration::from_secs(15), || names.iter().all(|name| {
+        agents.get(&format!("agent-{name}")).is_ok_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
+    })), "all identities retire after the writer releases the connection");
+    assert_eq!(agents.get(&foreign.id).unwrap().status, foreign.status, "a same-name foreign identity is preserved");
+    assert!(!crate::ui::factory::worker_holds_from_session_metadata_named(SESSION).unwrap().contains(&pids[1].0), "the stopped worker's durable hold is cleared");
+    for name in names {
+        assert!(detail.as_deref().unwrap().contains(&name), "each outcome must be recorded: {detail:?}");
+    }
 }
 
 /// cas-981e (GH #1185): a `clear_context` recycle runs the same shutdown, so
@@ -1452,6 +1524,7 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         (false, Closed, false, true),
         (true, Closed, false, true),
         (true, AwaitingMerge, false, true),
+        (false, InProgress, false, false),
         (true, InProgress, false, false),
         (true, AwaitingMerge, true, false),
         (false, Closed, true, false),

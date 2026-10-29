@@ -14292,10 +14292,20 @@ mod tests {
                 assert_eq!(pending.recipient_receipt, Some(transport));
                 assert!(pending.confirmed_at.is_none());
 
+                let transport_seen = recipient_seen_at(&store, id, "worker").unwrap();
                 store
                     .record_recipient_surfaced(id, "worker", surfaced)
                     .unwrap();
                 let received = store.message_delivery_report(id).unwrap().unwrap();
+                if transport == SurfacingSource::TransportClaimed && surfaced == SurfacingSource::ObservedWake {
+                    // Pane growth alone cannot prove that the claimed body
+                    // was read; transcript consumption has its own stronger API.
+                    assert_eq!(received.recipient_receipt, Some(transport));
+                    assert!(received.confirmed_at.is_none());
+                    assert_eq!(store.recipient_receipt(id, "other-worker").unwrap(), None);
+                    assert_eq!(recipient_seen_at(&store, id, "worker"), Some(transport_seen));
+                    continue;
+                }
                 assert_eq!(
                     received.recipient_receipt,
                     Some(surfaced),

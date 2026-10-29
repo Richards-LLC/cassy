@@ -316,89 +316,112 @@ async fn close_classifies_delivery_after_start_boundary_gh1382() {
 #[tokio::test]
 async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture_with_surface(&mut env, "note.txt", false);
-    let repo = f.dir.path();
-    git(&f.worker_path, &["reset", "--hard", "main"]);
-    std::fs::create_dir_all(f.worker_path.join("scripts")).unwrap();
-    std::fs::write(
-        f.worker_path.join("scripts/fast-rows-pre-push.sh"),
-        "#!/bin/sh\n",
-    )
-    .unwrap();
-    std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
-    git(&f.worker_path, &["add", "scripts", "regression.txt"]);
-    git(
-        &f.worker_path,
-        &["commit", "-qm", &format!("test({TASK}): RED regression")],
-    );
-    let red = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
-    git(&f.worker_path, &["add", "fix.txt"]);
-    git(
-        &f.worker_path,
-        &[
-            "commit",
-            "-qm",
-            &format!("fix({TASK}): GREEN implementation"),
-        ],
-    );
-    let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(
-        repo,
-        &[
-            "update-ref",
-            &format!("refs/remotes/origin/{BRANCH}"),
-            &green,
-        ],
-    );
+    for explicit_receipt in [false, true] {
+        let f = fixture_with_surface(&mut env, "note.txt", false);
+        let repo = f.dir.path();
+        git(&f.worker_path, &["reset", "--hard", "main"]);
+        std::fs::create_dir_all(f.worker_path.join("scripts")).unwrap();
+        std::fs::write(
+            f.worker_path.join("scripts/fast-rows-pre-push.sh"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
+        git(&f.worker_path, &["add", "scripts", "regression.txt"]);
+        git(
+            &f.worker_path,
+            &["commit", "-qm", &format!("test({TASK}): RED regression")],
+        );
+        let red = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        // cas-93d7: pre-push refuses the first delivery before origin updates.
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(
+            repo,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        let hook = repo.join(".git/hooks/pre-push");
+        std::fs::write(&hook, "#!/bin/sh\ngit cat-file -e HEAD:fix.txt\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = std::process::Command::new("git")
+            .args(["push", "origin", BRANCH])
+            .current_dir(&f.worker_path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "pre-push must reject RED");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("fix.txt"),
+            "{refused:?}"
+        );
+        assert!(git(repo, &["ls-remote", "--heads", "origin"]).is_empty());
+        std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
+        git(&f.worker_path, &["add", "fix.txt"]);
+        git(
+            &f.worker_path,
+            &[
+                "commit",
+                "-qm",
+                &if explicit_receipt {
+                    "test: correct pre-push failure".into()
+                } else {
+                    format!("fix({TASK}): GREEN implementation")
+                },
+            ],
+        );
+        let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
 
-    let common = git(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    );
-    let receipts = Path::new(&common).join("cas/fast-rows");
-    std::fs::create_dir_all(&receipts).unwrap();
-    std::fs::write(
-        receipts.join(format!("{green}.pass")),
-        format!("fast-rows: PASS {green} fixture\n"),
-    )
-    .unwrap();
-    let tasks = open_task_store(&repo.join(".cas")).unwrap();
-    let mut task = tasks.get(TASK).unwrap();
-    task.demo_statement.clear();
-    task.deliverables.parked_branch = None;
-    task.deliverables.factory_branch_anchor = Some(red.clone());
-    task.deliverables.historical_factory_branch_anchors.clear();
-    tasks.update(&task).unwrap();
+        let common = git(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        let receipts = Path::new(&common).join("cas/fast-rows");
+        std::fs::create_dir_all(&receipts).unwrap();
+        std::fs::write(
+            receipts.join(format!("{green}.pass")),
+            format!("fast-rows: PASS {green} fixture\n"),
+        )
+        .unwrap();
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.demo_statement.clear();
+        task.deliverables.parked_branch = None;
+        task.deliverables.factory_branch_anchor = Some(red.clone());
+        task.deliverables.historical_factory_branch_anchors.clear();
+        tasks.update(&task).unwrap();
 
-    let output = text(
-        f.core
-            .cas_task_close(Parameters(TaskCloseRequest {
-                id: TASK.into(),
-                reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
-                commit_receipt: None,
-                no_delivery: None,
-                supervisor_override: None,
-                stranded_branch_override: None,
-                legacy_bypass_code_review: None,
-                search_manifest: None,
-            }))
-            .await
-            .unwrap(),
-    );
-    assert!(output.contains("MERGE REQUIRED"), "{output}");
-    let parked = tasks.get(TASK).unwrap();
-    assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
-    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    assert_eq!(
-        parked.deliverables.factory_branch_anchor.as_deref(),
-        Some(green.as_str()),
-        "{output}"
-    );
-    assert!(
-        parked.notes.contains(&red),
-        "the original RED boundary stays audited"
-    );
+        let output = text(
+            f.core
+                .cas_task_close(Parameters(TaskCloseRequest {
+                    id: TASK.into(),
+                    reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
+                    commit_receipt: explicit_receipt.then(|| green.clone()),
+                    no_delivery: None,
+                    supervisor_override: None,
+                    stranded_branch_override: None,
+                    legacy_bypass_code_review: None,
+                    search_manifest: None,
+                }))
+                .await
+                .unwrap(),
+        );
+        assert!(output.contains("MERGE REQUIRED"), "{output}");
+        let parked = tasks.get(TASK).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(green.as_str()),
+            "{output}"
+        );
+        assert!(
+            parked.notes.contains(&red),
+            "the original RED boundary stays audited"
+        );
+    }
 }
 
 #[tokio::test]

@@ -3094,8 +3094,8 @@ impl FactoryApp {
         );
         // Shutdown authorization must not queue behind a background writer's
         // process-shared connection mutex. Read the same committed registry on
-        // an independent connection (no schema writes). Retirement below still
-        // obeys the bounded SQLite wait and defers if a foreign writer holds it.
+        // an independent connection (no schema writes). Ordinary dead-pane
+        // cleanup is deferred; recycle retires the old identity before relaunch.
         let agent_store: std::sync::Arc<dyn cas_store::AgentStore> = std::sync::Arc::new(
             cas_store::SqliteAgentStore::with_connection(
                 cas_store::shared_db::dedicated_connection(&self.cas_dir().join("cas.db"))?,
@@ -3114,8 +3114,20 @@ impl FactoryApp {
                 })
                 .collect();
             if !matching.is_empty()
-                && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(matching, name)
+                && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(matching.iter().copied(), name)
             {
+                if preserve_worktree {
+                    // Recycle must finish retiring the old identities before
+                    // launching the same-name replacement. Deferred shutdown
+                    // cleanup could cancel its resume brief before registration.
+                    // Like a live-pane recycle, release only the old leases:
+                    // task bindings and unread mail belong to the replacement.
+                    for agent in matching {
+                        agent_store.graceful_shutdown(&agent.id)?;
+                    }
+                    self.last_db_fingerprint = None;
+                    return Ok(Vec::new());
+                }
                 // The process is already dead. Inline notification/identity
                 // cleanup can spend this worker's entire budget and falsely
                 // report a failed stop. Revalidate on the store worker before

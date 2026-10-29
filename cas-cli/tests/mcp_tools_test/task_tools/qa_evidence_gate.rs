@@ -223,6 +223,33 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let producer = fx.write_bundle(&head);
+    // Real cas-qa-craft/journey bundles mix path fields with descriptive
+    // metadata in files.parts. Shared pairs live alongside qa/, inside task.
+    let pairs_dir = fx.artifacts.join(TASK).join("pairs");
+    std::fs::create_dir_all(&pairs_dir).unwrap();
+    for name in ["before.png", "before.jpg", "after.png", "after.jpg"] {
+        std::fs::write(pairs_dir.join(name), name).unwrap();
+    }
+    let capture = |side: &str| serde_json::json!({
+        "png": format!("{side}.png"), "jpg": format!("{side}.jpg"),
+        "sha256": cas::deliverable::pairs::digest(&pairs_dir.join(format!("{side}.png"))).unwrap(),
+        "jpg_sha256": cas::deliverable::pairs::digest(&pairs_dir.join(format!("{side}.jpg"))).unwrap()
+    });
+    std::fs::write(pairs_dir.join("pairs.json"), serde_json::json!({
+        "schema": 1, "task_id": TASK, "head_sha": head,
+        "pairs": [{"id": "M01", "before": capture("before"), "after": capture("after")}],
+        "unpaired": [{"id": "M02", "after": capture("after")}],
+        "findings": []
+    }).to_string()).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&producer).unwrap()).unwrap();
+    manifest["pairs_status"] = "partial".into();
+    manifest["files"]["pairs"] = "../pairs/pairs.json".into();
+    manifest["files"]["parts"] = serde_json::json!([{
+        "title": "Composer spacing", "project": "desktop", "title_path": ["composer", "spacing"],
+        "verdict": "PASS", "label": "real-build",
+        "receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"
+    }]);
+    std::fs::write(&producer, manifest.to_string()).unwrap();
     let producer_bytes = std::fs::read(&producer).unwrap();
     // Pin a distinct source timestamp so fetch-time mtimes cannot masquerade
     // as the capture's freshness when restoring the archive.
@@ -300,6 +327,8 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     // insufficient: its trace and all relative evidence must travel too.
     let hidden = producer.parent().unwrap().with_extension("source-only");
     std::fs::rename(producer.parent().unwrap(), &hidden).unwrap();
+    let hidden_pairs = pairs_dir.with_extension("source-only");
+    std::fs::rename(&pairs_dir, &hidden_pairs).unwrap();
     let mut published = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
     assert!(published.notes.lines().any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")), "closure receipt missing: {}", published.notes);
     published.origin_project = Some("qa-peer-project".into());
@@ -374,6 +403,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     }
 
     std::fs::rename(&hidden, producer.parent().unwrap()).unwrap();
+    std::fs::rename(&hidden_pairs, &pairs_dir).unwrap();
     env.set("CAS_ROOT", &cas_dir);
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);

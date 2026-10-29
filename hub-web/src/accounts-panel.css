@@ -1,4 +1,6 @@
 .accounts-sheet { width: min(56rem, calc(100vw - var(--space-6))); max-height: calc(100dvh - var(--space-6)); overflow: auto; background: var(--look-glass-strong); color: var(--ink); }
+/* Beat the shell dialog[open] overflow rule so every account is reachable. */
+.accounts-sheet[open] { overflow: auto; }
 .accounts-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .accounts-heading h2 { margin: 0; }
 .accounts-heading p, .accounts-notice, .accounts-readonly { color: var(--ink-mid); }

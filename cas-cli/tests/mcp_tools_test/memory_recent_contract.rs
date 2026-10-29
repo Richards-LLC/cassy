@@ -65,11 +65,6 @@ async fn recent_declares_and_applies_stable_id_tie_break() {
                 1
             );
         }
-        // RED control: historical assumption; remove for the GREEN seed sweep.
-        assert!(
-            second_id > first_id,
-            "seed {seed}: fixture IDs must be ascending: {first_id}, {second_id}"
-        );
         assert_ne!(first_id, second_id);
         let mut expected = [&first_id, &second_id];
         expected.sort_unstable();

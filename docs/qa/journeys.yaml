@@ -117,9 +117,12 @@ invariants:
     check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist. Verify old, current and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
   HUB-J4-GOAL:
     statement: I can read what was said before, back to the start
-    check: 'Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
+    check: 'Run the render-before-scroll regression in conversation-view.test.ts with a pending tail pin;
+      scrolling up to Load earlier must survive an intervening render. Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: history pages come from
       the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`'
+    bug:
+      task: cas-eaef
   HUB-J4-VISUAL-SANDBOX:
     statement: A supervisor's HTML page shows inline and in its own tab, and a hostile page can't run script, reach Commander's storage, leave its frame or call out to another host
     check: 'Run the cas-3aff parts of hub-web/e2e/journeys/read-history.journey.ts at desktop and phone, whose double serves the policy file the hub embeds, and the hub route test visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets. Threat model: docs/design/hub-web/visual-replies-threat-model.md.'

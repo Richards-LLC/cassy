@@ -5,6 +5,7 @@ import os
 import re
 import importlib.util
 import json
+import hashlib
 import sys
 from pathlib import Path
 import shutil
@@ -118,7 +119,7 @@ class FastRows(unittest.TestCase):
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
-                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "fast-rows-exception.py", "release-train-announce.py",
                        "release-diary-thread.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
@@ -813,9 +814,55 @@ sleep 2
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no release-notes draft change",
                       (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
-        self.refused_at_park("release-notes-draft",
-                             {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
+        other = "docs/release-notes/another-history-slack.md"
+        overlong = draft.replace(punch, punch + " Every operator shell launches again today.")
+        self.refused_at_park("release-notes-draft", {path: overlong, other: overlong},
                              "dev-top-level top-level punch exceeds 25 words")
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        receipt = self.repo / f".git/cas/fast-rows/{head}.pass"
+        scoped_files = {line.removeprefix("SCOPE release-notes-draft ")
+                        for line in receipt.read_text().splitlines() if line.startswith("SCOPE release-notes-draft ")}
+        self.assertEqual(scoped_files, {path, other})
+        failed = receipt.read_bytes()
+        record = dict(schema=1, task_id="cas-fixture", head=head, check="release-notes-draft",
+                      files=sorted([path, other]), approver="registered-supervisor", reason="Preserve historical bodies",
+                      failure_sha256=hashlib.sha256(failed).hexdigest())
+        approval = receipt.with_name(f"{head}.cas-fixture.exception.json")
+        validate = (sys.executable, "scripts/fast-rows-exception.py", str(receipt.parent), head)
+        # An issued approval must match every bound field; an env skip and an
+        # overrides.log entry alone are already covered by the push regression.
+        for key, wrong in (("head", "0" * 40), ("check", "test-env"), ("files", [path]),
+                           ("failure_sha256", "0" * 64), ("approver", ""), ("reason", ""), ("task_id", "")):
+            with self.subTest(field=key):
+                approval.write_text(json.dumps(dict(record, **{key: wrong})))
+                self.assertNotEqual(command(self.repo, *validate).returncode, 0)
+        approval.write_text(json.dumps(record))
+        self.assertEqual(command(self.repo, *validate).returncode, 0)
+        receipt.write_bytes(failed.replace(b"rows=release-notes-draft", b"rows=release-notes-draft,test-env"))
+        self.assertNotEqual(command(self.repo, *validate).returncode, 0)
+        receipt.write_bytes(failed)
+        pushed = command(self.repo, "bash", "scripts/fast-rows-pre-push.sh", "origin", "unused",
+                         input=f"refs/heads/factory/lane {head} refs/heads/factory/lane {'0' * 40}\n")
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertIn("approved fast-row exception", pushed.stderr)
+        self.assertEqual(receipt.read_bytes(), failed)
+
+        # A missing checker alongside known wording failures is not a draft
+        # exception. Every failed file must have a genuine lint result.
+        diary = "docs/release-notes/broken-harness-diary-slack.md"
+        self.write(diary, "# Historical diary\n")
+        (self.repo / "scripts/release-diary-thread.py").unlink()
+        self.commit()
+        self.assertNotEqual(self.fast().returncode, 0)
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        receipt = receipt.with_name(f"{head}.pass")
+        failed = receipt.read_bytes()
+        unscoped = {line.removeprefix("UNSCOPED release-notes-draft ")
+                    for line in failed.decode().splitlines() if line.startswith("UNSCOPED release-notes-draft ")}
+        self.assertEqual(unscoped, {diary})
+        record.update(head=head, failure_sha256=hashlib.sha256(failed).hexdigest())
+        receipt.with_name(f"{head}.cas-fixture.exception.json").write_text(json.dumps(record))
+        self.assertNotEqual(command(self.repo, *validate[:-1], head).returncode, 0)
 
     def test_harness_diary_draft_uses_the_thread_rubric_at_park(self):
         path = "docs/release-notes/2026-10-14-harness-diary-sweep-slack.md"

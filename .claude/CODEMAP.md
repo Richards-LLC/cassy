@@ -87,6 +87,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep modules.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited replacement delivery branches.
+- `cas-cli/src/mcp/tools/core/task/fast_rows_exception.rs`, `scripts/fast-rows-exception.py` - supervisor-issued draft exception receipts, validated by push and park against the original failed result.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
 
 ## QA, storage and Commander

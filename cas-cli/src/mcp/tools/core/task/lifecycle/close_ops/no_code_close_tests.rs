@@ -1203,11 +1203,46 @@ async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
     let notes = serde_json::json!({"action":"notes", "id":id, "note_type":"decision", "notes":format!("fast-rows-approved: {approval}")});
     let rejected = f.worker.task(Parameters(serde_json::from_value(notes.clone()).unwrap())).await;
     assert!(rejected.is_err(), "a worker cannot self-approve a failed check");
-    call(&f.supervisor, notes).await;
+    for (field, wrong) in [
+        ("head", serde_json::json!("0".repeat(40))),
+        ("check", serde_json::json!("test-env")),
+        ("files", serde_json::json!(["docs/release-notes/another-slack.md"])),
+        ("reason", serde_json::json!("")),
+        ("approver", serde_json::json!("claimed-supervisor")),
+    ] {
+        let mut wrong_approval = approval.clone();
+        wrong_approval[field] = wrong;
+        let mut wrong_note = notes.clone();
+        wrong_note["notes"] = format!("fast-rows-approved: {wrong_approval}").into();
+        let result = f.supervisor.task(Parameters(serde_json::from_value(wrong_note).unwrap())).await;
+        assert!(result.is_err(), "approval with invalid {field} must be refused");
+    }
+    call(&f.supervisor, notes.clone()).await;
+    // The real hook's reader must accept the record issued by the real MCP
+    // handler, so the two languages cannot silently drift apart.
+    let hook_reader = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/fast-rows-exception.py")))
+        .arg(&receipts).arg(&tip).output().unwrap();
+    assert!(hook_reader.status.success(), "{:?}", hook_reader);
+    let issued_path = receipts.join(format!("{tip}.{id}.exception.json"));
+    let issued = std::fs::read_to_string(&issued_path).unwrap();
+    let mut foreign: serde_json::Value = serde_json::from_str(&issued).unwrap();
+    foreign["task_id"] = "cas-other-task".into();
+    std::fs::write(&issued_path, foreign.to_string()).unwrap();
+    assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    std::fs::write(&issued_path, issued).unwrap();
 
     // A changed failure set on the same SHA invalidates the approval too.
-    std::fs::write(&receipt, failed.replace("rows=release-notes-draft", "rows=release-notes-draft,test-env")).unwrap();
-    assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    for changed in [
+        failed.replace("rows=release-notes-draft", "rows=release-notes-draft,test-env"),
+        format!("{failed}UNSCOPED release-notes-draft docs/release-notes/unreadable-slack.md\n"),
+    ] {
+        std::fs::write(&receipt, changed).unwrap();
+        assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+        let rejected = f.supervisor.task(Parameters(serde_json::from_value(notes.clone()).unwrap())).await;
+        assert!(rejected.is_err(), "partial failure scope cannot be approved");
+    }
     std::fs::write(&receipt, &failed).unwrap();
     let parked = call(&f.worker, close).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");

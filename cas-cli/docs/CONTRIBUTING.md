@@ -1577,6 +1577,34 @@ produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
 REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
 waive these refusals or the merge queue's final-tree proof.
 
+### Approved historical draft exceptions
+
+A reason-bearing `CAS_SKIP_FAST_ROWS` push remains logged, but does not authorize
+park. When an archived Slack body must retain explicitly reviewed wording, a
+live registered supervisor in the assigned worker's factory session can add a
+`decision` task note whose body starts with `fast-rows-approved:` followed by a
+space and:
+
+```json
+{"head":"<full delivery SHA>","check":"release-notes-draft","files":["docs/release-notes/history-slack.md"],"reason":"Preserve the exact reviewed historical Slack body"}
+```
+
+Run the fast rows first. The decision requires a FAIL receipt whose only failed
+row is `release-notes-draft`, with complete file scope. The requested files must
+name every failed draft exactly; unscoped historical receipts must be regenerated.
+Cassy authenticates the caller, checks the task's current delivery branch tip,
+and records the approver, task, SHA, check, files, reason and failed-receipt digest
+in the task timeline and `<git-common-dir>/cas/fast-rows/<sha>.<task>.exception.json`.
+This uses the existing `task action=notes` MCP handler and adds no tool action.
+
+The pre-push hook and park read this contract without rewriting FAIL as PASS.
+A different SHA, failed result, check or file set invalidates it. Caller-supplied
+approver fields, ordinary note text and `overrides.log` cannot issue approval.
+Other failed rows, missing tools, changed-crate test receipts and merge-queue
+requirements retain their existing gates. These local receipts share the trust
+boundary of the existing Git-local PASS receipts; they are not a separate Unix
+user security boundary.
+
 ## Project capture configuration
 
 `cas config list --section qa.capture` lists the project capture settings.

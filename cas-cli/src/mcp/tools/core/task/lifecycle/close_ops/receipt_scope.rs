@@ -150,7 +150,8 @@ pub(super) fn park_refusal(
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
 /// `scripts/fast-rows-pre-push.sh` when no `fast-rows: PASS <tip>` receipt
 /// exists. That happens when the push skipped the hook through
-/// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed.
+/// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed. Only a
+/// supervisor-issued exception bound to that failed result can substitute.
 fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Option<String> {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -162,11 +163,12 @@ fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Op
     };
     git(&["cat-file", "-e", &format!("{head}:scripts/fast-rows-pre-push.sh")])?;
     let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-    let receipt = Path::new(String::from_utf8_lossy(&common.stdout).trim())
-        .join("cas/fast-rows")
-        .join(format!("{head}.pass"));
+    let directory = Path::new(String::from_utf8_lossy(&common.stdout).trim()).join("cas/fast-rows");
+    let receipt = directory.join(format!("{head}.pass"));
     let text = std::fs::read_to_string(&receipt).unwrap_or_default();
-    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
+    if text.starts_with(&format!("fast-rows: PASS {head} "))
+        || super::super::super::fast_rows_exception::approved(&directory, task_id, head, &text)
+    {
         return None;
     }
     let fixes: String = text

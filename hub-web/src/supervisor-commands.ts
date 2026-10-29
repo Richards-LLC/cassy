@@ -52,7 +52,7 @@ export class SlashCommands {
       if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
         event.preventDefault(); this.submit();
       }
-    });
+    }, { capture: true });
     this.panel.addEventListener("keydown", event => {
       if (event.key === "Escape") { event.preventDefault(); this.close(); input.focus(); return; }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -145,4 +145,63 @@ export function commandReceiptNode(receipt: CommandReceipt, step?: (key: Command
     }
   }
   return row;
+}
+
+interface SessionOptions {
+  unavailable(): string | undefined;
+  control(): Promise<void>;
+  send(message: unknown): boolean;
+  changed(): void;
+}
+/** One conversation owns its mutations and polls only for their outcomes. */
+export class SupervisorCommandSession {
+  readonly receipts = new Map<string, CommandReceipt>();
+  supported = false;
+  private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
+  constructor(private readonly options: SessionOptions) {}
+  async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
+    const reason = this.options.unavailable(); if (reason) throw new Error(reason);
+    if ([...this.receipts.values()].some(receipt => receipt.phase === "submitted" || receipt.interactive)) throw new Error("Wait for the current command or close its chooser first.");
+    await this.options.control();
+    const changed = this.options.unavailable(); if (changed) throw new Error(changed);
+    const ref = `cmd-${crypto.randomUUID()}`;
+    this.receipts.set(ref, { client_ref: ref, command, phase: "submitted", detail: "Command requested; harness execution is not confirmed yet.", output: "", interactive: false });
+    if (!this.options.send({ SupervisorCommand: { client_ref: ref, command, confirmed } })) {
+      this.receipts.delete(ref); throw new Error("The command was not sent. Try again once connected.");
+    }
+    this.options.changed(); this.poll(ref);
+  }
+  receive(receipt: CommandReceipt): void {
+    if (!this.receipts.has(receipt.client_ref)) return;
+    this.receipts.set(receipt.client_ref, receipt);
+    if (receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
+    this.options.changed();
+  }
+  reject(ref: string, detail: string): boolean {
+    const receipt = this.receipts.get(ref); if (!receipt) return false;
+    receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
+    this.stopPoll(ref); this.options.changed(); return true;
+  }
+  async step(ref: string, key: CommandKey): Promise<void> {
+    const receipt = this.receipts.get(ref); if (!receipt?.interactive) return;
+    await this.options.control();
+    if (!this.options.send({ SupervisorCommandStep: { client_ref: ref, key } })) throw new Error("The selection was not sent. Check the connection.");
+    receipt.phase = "submitted"; receipt.interactive = false; receipt.detail = "Selection requested; awaiting the harness's response.";
+    this.options.changed(); this.poll(ref);
+  }
+  private stopPoll(ref: string): void { clearTimeout(this.polls.get(ref)); this.polls.delete(ref); }
+  private poll(ref: string): void {
+    this.stopPoll(ref);
+    const started = Date.now();
+    const read = () => {
+      const receipt = this.receipts.get(ref);
+      if (!receipt || receipt.phase !== "submitted") { this.stopPoll(ref); return; }
+      if (Date.now() - started > 95_000) {
+        this.reject(ref, "Harness execution was not observed. Check Raw output before running another command."); return;
+      }
+      this.options.send({ SupervisorCommandStatus: { client_ref: ref } });
+      this.polls.set(ref, setTimeout(read, 1_000));
+    };
+    this.polls.set(ref, setTimeout(read, 1_000));
+  }
 }

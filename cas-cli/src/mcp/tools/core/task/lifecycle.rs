@@ -2221,9 +2221,11 @@ impl CasCore {
         };
         let agents = self.open_agent_store()?;
         let worker = agents.get(&agent_id).ok().filter(|a| a.role == cas_types::AgentRole::Worker);
-        let _start_lock = worker.as_ref().filter(|a| a.factory_session.is_some())
-            .map(|worker| crate::worker_task_queue::worker_lock(&self.cas_root, worker, "start"))
-            .transpose()?;
+        let _start_lock = if queued_start { None } else {
+            worker.as_ref().filter(|a| a.factory_session.is_some())
+                .map(|worker| crate::worker_task_queue::worker_lock(&self.cas_root, worker, "start"))
+                .transpose()?
+        };
         let task_store = self.open_task_store()?;
 
         if let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {

@@ -43,7 +43,7 @@ pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Resul
 }
 
 /// Only this module can construct a start principal on behalf of a worker.
-pub(crate) struct QueueStartPrincipal(Agent);
+pub(crate) struct QueueStartPrincipal(Agent, File);
 impl QueueStartPrincipal {
     pub(crate) fn agent(&self) -> &Agent {
         &self.0
@@ -110,6 +110,10 @@ impl CasCore {
             .expect("validated session");
         let queues = SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?;
         let lock = worker_lock(&self.cas_root, &worker, "queue")?;
+        let start_fence = task_ids
+            .as_ref()
+            .map(|_| worker_lock(&self.cas_root, &worker, "start"))
+            .transpose()?;
         let mut queue = queues.get(session, &worker.name).map_err(error)?;
         let changed = task_ids.is_some();
         if let Some(ids) = task_ids {
@@ -150,10 +154,20 @@ impl CasCore {
                 .save(session, &worker.name, &mut queue)
                 .map_err(error)?;
         }
-        let idle = queue.current_task.is_none();
+        let predecessor = queue.current_task.clone();
+        let idle = predecessor.as_deref().is_none_or(|id| {
+            self.open_task_store()
+                .ok()
+                .and_then(|tasks| tasks.get(id).ok())
+                .is_some_and(|task| {
+                    matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                })
+        });
+        drop(start_fence);
         drop(lock);
         if changed && idle {
-            self.advance_worker_task_queue(&worker.name, None).await?;
+            self.advance_worker_task_queue(&worker.name, predecessor.as_deref())
+                .await?;
             queue = queues.get(session, &worker.name).map_err(error)?;
         }
         Ok(render(&worker.name, &queue))
@@ -223,11 +237,22 @@ impl CasCore {
             return Ok(None);
         }
         let retrying = queue.starting && queue.dispatch_from.as_deref() == predecessor;
-        if !retrying && queue.current_task.as_deref() != predecessor {
-            return Ok(None);
-        }
         let tasks = self.open_task_store()?;
         let agents = self.open_agent_store()?;
+        let completed_cursor = queue.current_task.as_deref().is_some_and(|id| {
+            tasks.get(id).ok().is_some_and(|task| {
+                matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                    && !task.deliverables.merge_conflicted
+            }) && agents
+                .get_lease(id)
+                .ok()
+                .flatten()
+                .is_none_or(|lease| lease.status != cas_types::LeaseStatus::Active)
+        });
+        if !retrying && queue.current_task.as_deref() != predecessor && !completed_cursor {
+            return Ok(None);
+        }
+        let start_fence = worker_lock(&self.cas_root, &worker, "start")?;
         if tasks
             .list(Some(TaskStatus::InProgress))
             .map_err(error)?
@@ -350,7 +375,7 @@ impl CasCore {
                         brief: Some(true),
                         force: None,
                     },
-                    QueueStartPrincipal(worker.clone()),
+                    QueueStartPrincipal(worker.clone(), start_fence),
                 )
                 .await?;
             let committed = tasks.get(&id).map_err(error)?;

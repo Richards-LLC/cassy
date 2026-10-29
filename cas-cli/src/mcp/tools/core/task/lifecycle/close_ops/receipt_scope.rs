@@ -357,7 +357,7 @@ fn is_changelog_template_value(value: &str) -> bool {
     let value = value.trim();
     value.eq_ignore_ascii_case("title")
         || value.eq_ignore_ascii_case("what changed.")
-        || (value.starts_with('<') && value.ends_with('>'))
+        || (value.starts_with('<') && value.strip_suffix('.').unwrap_or(value).ends_with('>'))
 }
 
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
@@ -988,6 +988,7 @@ mod tests {
         for entry in [
             "### Added — <area>\n\n- **Commander shows session state** — The status line follows live events.",
             "### Added — Commander\n\n- **Title** — What changed.",
+            "### Added — Commander\n\n- **Session state stays current** — <What changed>.",
         ] {
             let repo = changelog_fixture();
             std::fs::write(

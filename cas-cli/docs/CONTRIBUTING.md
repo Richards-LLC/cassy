@@ -15,6 +15,23 @@ paired device controls the terminal. Raw terminal input still requires both
 `pane:input` and that device's active session lease. Message permission never
 grants terminal input authority.
 
+## Selected-session stores and live phase freshness
+
+Bridge and hub session routes resolve the selected session's `project_dir`
+with `find_cas_root_ignoring_env`. A process-wide `CAS_ROOT` can belong to the
+project that launched a multi-project hub, so it cannot select another session's
+stores. This applies to inbox peek/poll/ack/count, ping, activity, messages,
+status and SSE, and artifact URLs. The bridge's explicit `--cas-root` is a
+fallback only when session metadata has no resolvable project; without either,
+resolution fails. This is a shared session-store policy, not a phase-only override.
+
+Commander commits only the newest requested status for each machine/session;
+older successes and failures cannot replace it. Native compaction starts expire
+after five minutes without a newer lifecycle, including a cancelled compaction
+whose completion hook never fires. Expiry drops the phase without claiming
+completion or reviving a tool that preceded it. Later native evidence, including
+a real completion boundary, remains visible normally.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history

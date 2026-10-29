@@ -441,7 +441,8 @@ fn native_phase_uses_scoped_hook_identity_and_compaction_boundaries() {
     let compacting = phase().unwrap();
     assert_eq!(compacting.lifecycle.phase.as_deref(), Some("compacting"));
     assert_eq!(compacting.lifecycle.started_at.as_deref(), Some("2026-10-27T12:00:02+00:00"));
-    assert!(phase_at(now + chrono::Duration::minutes(5)).is_none(),
+    assert_eq!(phase_at(now + chrono::Duration::seconds(298)).unwrap().lifecycle.phase.as_deref(), Some("compacting"));
+    assert!(phase_at(now + chrono::Duration::seconds(299)).is_none(),
         "an unmatched/cancelled compaction must stop reporting activity after five minutes, without reviving an older tool");
     write_lines(&log, &[hook("session_start_fired", &at(4), "compact")]);
     let compacted = phase().unwrap();

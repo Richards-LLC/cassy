@@ -19,6 +19,10 @@ pub(crate) fn resolve_session_by_name(
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found"))
 }
 
+/// Resolve every session-scoped store from the selected project's metadata.
+/// Ambient CAS_ROOT belongs to the bridge/hub process and may name another
+/// project. An explicit fallback applies only without a resolvable project.
+/// This policy covers queue, activity, status, SSE and artifact consumers alike.
 pub(crate) fn cas_root_for_session_with_fallback(
     session: &crate::ui::factory::SessionInfo,
     fallback: Option<&std::path::Path>,

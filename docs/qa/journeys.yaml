@@ -11,6 +11,12 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  live-phase-status-freshness:
+    title: Older status responses cannot replace a newer phase and unmatched compaction starts expire without reviving older work
+    found: '2026-10-29'
+    tasks: [cas-d17e]
+    invariants: [HUB-J25-GOAL]
+    journeys: [HUB-J25]
   pairing-revoked-before-welcome:
     title: Every authentication failure must replace a pending conversation attach with immediate named Re-pair recovery, including expired credentials on a phone
     found: '2026-10-29'
@@ -32,6 +38,7 @@ owner_groups:
       CSS, composition and fixture hunks.
     globs:
     - hub-web/src/main.ts
+    - hub-web/src/status-refresh.ts
     - hub-web/src/styles.css
     - hub-web/src/types.ts
     - hub-web/src/terminal*

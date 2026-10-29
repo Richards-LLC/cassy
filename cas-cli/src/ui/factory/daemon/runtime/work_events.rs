@@ -1291,10 +1291,20 @@ fn supervisor_phase_for_session_at(
         if let Some(oldest) = oldest { indexes.remove(&oldest); }
     }
     let transcript_phase = indexes.entry(key).or_default().supervisor_phase(&scope, &resolve);
-    match (transcript_phase, hooks.phase) {
+    let phase = match (transcript_phase, hooks.phase) {
         (Some(native), Some(hook)) => Some(if hook.at() > native.at() { hook } else { native }),
         (native, hook) => native.or(hook),
-    }
+    }?;
+    // PreCompact has no cancellation hook. After five minutes without a
+    // newer native lifecycle, stop claiming that compaction is still active.
+    // Filter after choosing the newest evidence so an older tool cannot revive.
+    const COMPACTION_MAX_SECONDS: i64 = 5 * 60;
+    let expired = phase.lifecycle.phase.as_deref() == Some("compacting")
+        && phase.lifecycle.stage != "end"
+        && phase.lifecycle.started_at.as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .is_some_and(|at| now.signed_duration_since(at).num_seconds() >= COMPACTION_MAX_SECONDS);
+    (!expired).then_some(phase)
 }
 
 /// Per-daemon transcript indexes, kept across requests so paging and

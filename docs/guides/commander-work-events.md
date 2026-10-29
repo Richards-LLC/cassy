@@ -164,8 +164,9 @@ SessionStart with `source=compact` supplies its end. Matching native session IDs
 recover the duration. A boundary without a start still has no duration. A new
 or cleared context drops the preceding compaction phase. These hook facts are
 read from bounded current/prior-day log tails; missing records stay unknown.
-Commander can display this while Show work is off, through the existing status
-event invalidation. Its local clock advances from the observed server duration,
+Commander can display this while Show work is off. The existing five-second
+machine health heartbeat refreshes the open session's status even without a
+fleet event, independently of catalog reads. Its local clock advances from the observed server duration,
 freezes for stale/disconnected snapshots and stops at an explicit end. A missing
 start reports no duration; a completed compaction boundary never becomes a live
 compaction interval. An explicit unresolved operator ask can show Waiting on you

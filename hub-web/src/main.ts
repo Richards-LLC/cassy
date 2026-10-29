@@ -824,6 +824,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // machine is a recovery.
       if (state.phase === "live" && !wasLive && lastLiveAt.has(machine.id) && machine.id === selectedMachineId) countUsage("connection.recovered");
       connectionStates.set(machine.id, state);
+      // Native lifecycle changes need no fleet mutation or Show work reader.
+      // The existing health heartbeat refreshes the open session's status,
+      // independently of a slow catalog read and without subscribing to output.
+      if (state.phase === "live" && selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       // A refused pairing is terminal truth, even between animation frames.
       // Clear stale working ink with the same state change as Needs pairing.
       if (state.authFailure) {

@@ -28,7 +28,7 @@ impl SupervisorCommand {
             (Codex, Self::Usage) => Some("/status"),
             (Claude | Codex, Self::Exit) => Some("/exit"),
             (Claude, Self::Finish) => Some("/finish"),
-            (Codex, Self::Finish) => Some("$finish"),
+            (Codex, Self::Finish) => Some("$finish "),
             _ => None,
         }
     }

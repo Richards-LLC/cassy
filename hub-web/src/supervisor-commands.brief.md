@@ -29,3 +29,15 @@ A submission progresses through submitted, observed, refused or unconfirmed. Nat
 ## Design provenance
 
 Uses hub-web/DESIGN.md, hub-web/src/tokens.css and hub-web/src/glass.css. Reuses the current header action, composer, dialog and receipt vocabulary in both schemes.
+
+## Critique
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Native command names and qualified outcome receipts sit inside the existing Glass conversation. |
+| Fit to argument | 5 | One shared palette addresses the named supervisor; requested input and observed harness effects have separate receipts. |
+| Hierarchy | 4 | The short action list leads above the composer; destructive consequence text replaces it for confirmation. |
+| Craft | 4 | Strict 1280×800 and 390×844 light/dark live-DOM polish passed with zero findings; all six choices fit on the phone. |
+| Accessibility | 4 | Keyboard selection and confirmation return focus; the existing Raw output skip route is preserved. Forced-colors, reduced-motion and more-contrast captures are in the task bundle. |
+
+Scored by the implementation worker on 2026-10-28. Token sources: `tokens.css` and `glass.css`; real-build preview, four-view before/after captures and HUB-J26 provide evidence.

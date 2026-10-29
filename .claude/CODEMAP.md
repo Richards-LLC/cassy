@@ -129,6 +129,8 @@
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - Commander startup, conversation state and reply grants.
 - `hub-web/src/project-navigation.ts`, `hub-web/src/conversation-list.ts` - project cards across machines, decision shortcuts, filters, device collapse and keyed supervisor rows.
 - `hub-web/src/machine-version.ts` - reported runtime badges, stable release comparison and the hourly cached public release lookup; the Web footer uses build-time client release metadata.
+- `hub-web/src/supervisor-commands.ts` - composer slash palette, destructive confirmation, native chooser controls and keyed command receipts.
+- `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - semantic command IDs, harness mappings, guarded dispatch and independent outcome evidence.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - machine streams, recovery and session subscriptions.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - paged history, receipt progress, unopened conversation previews and windowed thread rendering.
 - `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts` - lazy safe Markdown diagrams and unified diffs.

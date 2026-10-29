@@ -396,6 +396,35 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
 }
 
+#[test]
+fn cas_619c_in_progress_pushed_green_tip_without_worker_ready_is_not_merge_ready() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = None;
+    task.notes.clear();
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: "merge-w".into(),
+        branch: "factory/merge-w".into(),
+        base_sha: git(f.repo.path(), &["rev-parse", "epic/test"]),
+    });
+    store.update(&task).unwrap();
+    let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
+    assert_eq!(tip, git(f.repo.path(), &["rev-parse", "origin/factory/merge-w"]));
+    f.ci(Some("success"));
+
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()),
+        "an ordinary in-progress task has not declared completion merely by pushing green CI");
+
+    task.notes = format!("[2026-10-29 09:07] 📝 PROGRESS status: ready\ntip: {tip}");
+    store.update(&task).unwrap();
+    assert_eq!(f.relay().iter().filter(|prompt| prompt.is_merge_ready()).count(), 1,
+        "the worker's exact-tip ready contract must still enable the pre-park signal");
+}
+
 /// Green lane CI can omit the newly failing test; only the worker can mark
 /// this test-first checkpoint complete. Exercise producer, cache and release.
 #[test]

@@ -70,9 +70,11 @@ impl AttentionInputs {
         let mut decisions = HashMap::new();
         let spawns = open_spawn_queue_store(&self.cas_dir).ok();
         for row in rows {
+            let replacement_pending = self.replacement_workers.contains(&row.target)
+                || spawns.as_ref().and_then(|store|
+                    store.has_pending_spawn(&row.target, Some(&self.session_name)).ok()).unwrap_or(true);
             if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents, &self.replacement_workers)
-                && spawns.as_ref().and_then(|store|
-                    store.has_pending_spawn(&row.target, Some(&self.session_name)).ok()) == Some(false)
+                && !replacement_pending
             {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
@@ -137,7 +139,11 @@ impl AttentionInputs {
                 continue;
             };
             if recipient.status == cas_types::AgentStatus::Shutdown {
-                decisions.insert(row.id, MessageAttention::Satisfied);
+                decisions.insert(row.id, if replacement_pending {
+                    MessageAttention::Needed
+                } else {
+                    MessageAttention::Satisfied
+                });
                 continue;
             }
             let cited_note = notes.iter().any(|event| {

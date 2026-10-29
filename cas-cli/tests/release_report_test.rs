@@ -741,12 +741,19 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
     assert_eq!(grouped.lines().filter(|line| line.starts_with("### ")).count(), 7);
     assert_eq!(grouped.lines().filter(|line| line.starts_with("- **")).count(), 27);
     let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n\n### Added — Violet push-wake\n\n- Mentions wake the supervisor.\n- Watched channels are read periodically.\n- **Behavior change:** push-wake is on by default.\n\n### Added — remote supervisors\n\nSetup guide and walkthrough.\n\n- **Peer discovery** lists supervisors.\n- **Peer messaging** reaches them.\n";
+    // Select the published source by its stable entry, then use a reserved
+    // fixture version so release bumps cannot change this regression's input.
+    let historical = cas::history::changelog::parse_sections(include_str!("../../CHANGELOG.md"))
+        .into_iter()
+        .find(|section| section.body.contains("**Team refresh after reassignment**"))
+        .expect("historical release with known limits");
+    let historical = format!("## [9.99.8] - 2026-10-29\n\n{}", historical.body);
     for (version, body, expected, retained_titles, excluded_titles) in [
         ("9.99.1", grouped, 27, &[][..], &[][..]),
         ("9.99.1", legacy, 5, &["Factory reminder probes", "Task coordination", "Violet push-wake", "Peer discovery", "Peer messaging"][..], &[][..]),
         // Exercise the historical source through acquisition, front matter,
         // Markdown assembly and the renderer, rather than a hand-built table.
-        ("3.88.0", include_str!("../../CHANGELOG.md"), 40, &[][..], &["Team refresh after reassignment", "Codex Clear can stay unconfirmed"][..]),
+        ("9.99.8", historical.as_str(), 40, &[][..], &["Team refresh after reassignment", "Codex Clear can stay unconfirmed"][..]),
         ("9.99.1", "## [9.99.1] - 2026-10-29\n\n### Fixed — runtime behavior\n- **Worker resumes** — Now: the worker resumes.\n\n### Documentation — release records\n- **Prior release record** — Now: the report is committed.\n\n### Tests — regression checks\n- **Readiness regression** — Now: tests await readiness.\n\n### Known limits — outstanding work\n- **Refresh flicker** — Still occurs.\n\n### Changed\n- **Clear receipts** — Now: receipts confirm completion.\n", 2, &[][..], &["Prior release record", "Readiness regression", "Refresh flicker"][..]),
     ] {
         fs::write(
@@ -765,7 +772,7 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
         let source = fs::read_to_string(project.path().join(format!("docs/release-reports/v{version}.md"))).unwrap();
         // pin: generated reports retain the renderer's YAML front-matter contract.
         assert!(source.starts_with(&format!("---\nversion: {version}\n")), "real report front matter: {source}");
-        if version == "3.88.0" {
+        if version == "9.99.8" {
             // pin: published 3.88 filed two docs/test entries under Fixed; do not reinterpret history.
             assert!(source.contains("| Changes shipped | 40 | 8 added, 26 fixed, 6 changed;"), "{source}");
             for title in ["Previous-release records are complete", "Regression checks follow the current interface"] {

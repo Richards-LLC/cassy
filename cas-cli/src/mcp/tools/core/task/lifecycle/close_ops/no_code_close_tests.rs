@@ -1171,6 +1171,51 @@ async fn park_reads_the_pre_push_fast_rows_receipt_cas_eac2() {
     assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
 }
 
+/// A logged skip is not approval. Only a live supervisor can approve the
+/// exact failed draft result, and that approval never becomes a PASS receipt.
+#[tokio::test]
+async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.cas_dir().join("worktrees").join(WORKER);
+    let file = "docs/release-notes/history-slack.md";
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::create_dir_all(repo.join("docs/release-notes")).unwrap();
+    std::fs::write(repo.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
+    std::fs::write(repo.join(file), "Historical wording\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "fix(cas-e63e): archive approved wording"]);
+    git(&repo, &["push", "-q", "--no-verify", "origin", LANE]);
+    let id = "cas-e63e";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let tip = git(&repo, &["rev-parse", "HEAD"]);
+    let receipts = PathBuf::from(git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+        .join("cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    let failed = format!("fast-rows: FAIL {tip} rows=release-notes-draft base=main\nSCOPE release-notes-draft {file}\nFIX release-notes-draft: historical wording\n");
+    let receipt = receipts.join(format!("{tip}.pass"));
+    std::fs::write(&receipt, &failed).unwrap();
+    std::fs::write(receipts.join("overrides.log"), format!("{tip} skipped fast rows: approved\n")).unwrap();
+    let close = serde_json::json!({"action":"close", "id":id, "reason":"Archived approved bodies"});
+    assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    let approval = serde_json::json!({"head":tip, "check":"release-notes-draft", "files":[file], "reason":"Preserve the exact historical Slack body"});
+    let notes = serde_json::json!({"action":"notes", "id":id, "note_type":"decision", "notes":format!("fast-rows-approved: {approval}")});
+    let rejected = f.worker.task(Parameters(serde_json::from_value(notes.clone()).unwrap())).await;
+    assert!(rejected.is_err(), "a worker cannot self-approve a failed check");
+    call(&f.supervisor, notes).await;
+
+    // A changed failure set on the same SHA invalidates the approval too.
+    std::fs::write(&receipt, failed.replace("rows=release-notes-draft", "rows=release-notes-draft,test-env")).unwrap();
+    assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    std::fs::write(&receipt, &failed).unwrap();
+    let parked = call(&f.worker, close).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), failed);
+    assert!(f.task(id).notes.contains("nocode-supervisor-session"));
+}
+
 /// Release preparation used a suffixed promotion branch, while the worker's
 /// plain lane still holds another task. The canonical task branch never existed.
 fn promotion_receipt(f: &Fixture, id: &str) -> (String, String) {

@@ -10806,6 +10806,96 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
+    fn worker_git_push_hook_bypass_is_refused_but_supervisor_is_unaffected() {
+        let repo = make_git_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let switched = std::process::Command::new("git")
+            .args(["switch", "-c", "factory/guard-test"])
+            .current_dir(repo.path())
+            .output()
+            .expect("create a worker branch");
+        assert!(switched.status.success());
+
+        let variants = [
+            "git push --no-verify origin factory/guard-test".to_string(),
+            "git push -n origin factory/guard-test".to_string(),
+            "git -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test".to_string(),
+            format!(
+                "git -C '{repo_path}' -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test"
+            ),
+        ];
+
+        for role in ["worker", "reviewer"] {
+            let _env = TestEnvGuard::with_optional_vars(&[
+                ("CAS_AGENT_ROLE", Some(role)),
+                ("CAS_FACTORY_MODE", Some("1")),
+                ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+                ("CAS_AGENT_NAME", Some("guard-test")),
+            ]);
+            for command in &variants {
+                let mut input = hook_git_write_input(&repo_path, command);
+                input.agent_role = Some(role.to_string());
+                let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+                let value = serde_json::to_value(output).expect("serialize hook result");
+                let hook_output = &value["hookSpecificOutput"];
+                assert_eq!(
+                    hook_output["permissionDecision"], "deny",
+                    "{role}: {command}: {value}"
+                );
+                let reason = hook_output["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(
+                    reason.contains("supervisor-approved") && reason.contains("plain git push"),
+                    "the refusal must point to the exception route: {reason}"
+                );
+            }
+        }
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+            ("CAS_AGENT_NAME", Some("factory-supervisor")),
+        ]);
+        let mut input = hook_git_write_input(&repo_path, "git push --no-verify origin factory/guard-test");
+        input.agent_role = Some("supervisor".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("supervisor pre-tool hook");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "supervisors retain the approved exception route: {value}"
+        );
+    }
+
+    #[test]
+    fn plain_worker_git_push_remains_allowed() {
+        let repo = make_git_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let switched = std::process::Command::new("git")
+            .args(["switch", "-c", "factory/guard-test"])
+            .current_dir(repo.path())
+            .output()
+            .expect("create a worker branch");
+        assert!(switched.status.success());
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+            ("CAS_AGENT_NAME", Some("guard-test")),
+        ]);
+        let mut input = hook_git_write_input(&repo_path, "git push origin factory/guard-test");
+        input.agent_role = Some("worker".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "plain worker push remains allowed: {value}"
+        );
+    }
+
+    #[test]
     fn pre_tool_allows_git_c_commit_in_linked_factory_worktree() {
         let repo = make_git_repo();
         let linked = tempfile::tempdir().expect("linked worktree path");

@@ -1908,7 +1908,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         {
             let mut guarded = Command::new("python3");
             guarded.env("PYTHONDONTWRITEBYTECODE", "1");
-            guarded.arg("-I").arg("-c").arg(include_str!("../../scripts/worker-proof-guards.py"))
+            guarded.args(["-I", "-B", "-c"]).arg(include_str!("../../scripts/worker-proof-guards.py"))
                 .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
                 .arg("--verified-script").arg(verified)
                 .arg("--cargo").arg(cargo)
@@ -1918,7 +1918,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             guarded
         } else {
             let mut plain = Command::new("python3");
-            plain.arg("-I").arg("-c").arg(stability::SCRIPT)
+            plain.args(["-I", "-B", "-c"]).arg(stability::SCRIPT)
                 .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
                 .arg("--verified-script").arg(verified)
                 .arg("--cargo").arg(cargo)

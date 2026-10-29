@@ -629,6 +629,11 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
             &f.cas_dir(), &f.worker_path, &tested_tip, "widget", filter,
         );
     }
+    let base = git(&f.worker_path, &["rev-parse", "origin/main"]);
+    crate::factory_worker_check::record_stability_for_tests(
+        &f.cas_dir(), &f.worker_path, &tested_tip, &base, "widget", "test(gear)",
+        "crates/widget/tests/gear.rs::gear_turns",
+    );
     std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();
     std::fs::write(f.worker_path.join(doc_path), "Updated operator guidance.\n").unwrap();
     git(&f.worker_path, &["add", doc_path]);

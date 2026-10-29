@@ -746,15 +746,15 @@ impl CasCore {
         if requested.is_none()
             && eligibility.is_eligible()
             && let Some(window) =
-                crate::rapid_response::active_for_task_at(&self.cas_root, task, changed.as_deref())
-        {
-            crate::rapid_response::record_skip(
+                crate::rapid_response::active_for_delivery(&self.cas_root, repo, task, changed.as_deref())
+            && crate::rapid_response::record_skip(
                 &self.cas_root,
                 &window,
                 &task.id,
                 "independent-qa",
                 &eligibility.reasons.join("; "),
-            );
+            )
+        {
             eligibility.reasons.clear();
         }
         if let Some(reason) = requested.map(str::trim).filter(|reason| !reason.is_empty()) {
@@ -1277,15 +1277,15 @@ impl CasCore {
         // cas-1b4d: no round was opened because a rapid-response window
         // skipped it; the ledger owes it, not this close.
         if passes.is_empty()
-            && let Some(window) = crate::rapid_response::active_for_task_at(&self.cas_root, task, None)
-        {
-            crate::rapid_response::record_skip(
+            && let Some(window) = crate::rapid_response::active_for_delivery(&self.cas_root, repo, task, None)
+            && crate::rapid_response::record_skip(
                 &self.cas_root,
                 &window,
                 &task.id,
                 "independent-qa",
                 "closed without an independent QA round",
-            );
+            )
+        {
             return QaCloseGate::Clear;
         }
         let branch = task.assignee.as_deref().map(|implementer| {
@@ -3058,6 +3058,43 @@ mod stale_anchor_rebind_tests_cas_00eb {
             passes[0].bound_head, f.tip,
             "bound_head equals the branch tip"
         );
+    }
+
+    /// cas-1b4d: inside an operator's rapid-response window the same
+    /// user-facing park opens no round (the test above is the no-window
+    /// control) and the skip is ledgered for back-fill.
+    #[test]
+    fn rapid_response_window_skips_dispatching_an_independent_round_cas_1b4d() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        let cas = repo.join(".cas");
+        let tasks = open_task_store(&cas).unwrap();
+        let mut parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(), &f.task, repo, "main", Some(WORKER_TASK_BRANCH), Some(&f.tip),
+        );
+        parking.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+            assignee: "worker".into(),
+            branch: WORKER_TASK_BRANCH.into(),
+            base_sha: git(repo, &["merge-base", "main", &f.tip]),
+        });
+        let mut epic = Task::new("cas-ep1c".into(), "Hotfix".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        tasks
+            .add_dependency(&cas_types::Dependency::new(
+                f.task.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild,
+            ))
+            .unwrap();
+        let window = crate::rapid_response::enable(
+            &cas, tasks.as_ref(), &epic.id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
+        )
+        .unwrap();
+        let dispatch = f.core.dispatch_independent_qa(&parking, repo, "main", Some(&f.tip));
+        assert!(!dispatch.as_deref().unwrap_or("").contains("INDEPENDENT QA DISPATCHED"), "{dispatch:?}");
+        assert!(cas_store::list_qa_passes(&cas, &f.task.id).unwrap().is_empty());
+        assert_eq!(crate::rapid_response::ledger(&cas, &window)[0].check, "independent-qa");
     }
 
     /// cas-4171: the worker rebased after the commit-time anchor was recorded.

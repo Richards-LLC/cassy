@@ -29,6 +29,13 @@ pub enum RapidResponseCommand {
     },
     /// Close an epic's window now (operator only); its back-fill runs next
     Disable { epic: String },
+    /// Record your human review of a task's migration (operator only)
+    ReviewMigration {
+        task: String,
+        /// What you checked; recorded on the task
+        #[arg(long)]
+        note: String,
+    },
     /// Show open and closed windows
     Status,
 }
@@ -66,6 +73,12 @@ pub fn execute(args: &RapidResponseArgs, cas_root: Option<&Path>) -> Result<()> 
             } else {
                 println!("No open rapid-response window for {epic}.");
             }
+        }
+        RapidResponseCommand::ReviewMigration { task, note } => {
+            operator()?;
+            let store = crate::store::open_task_store(root)?;
+            crate::rapid_response::record_migration_review(root, store.as_ref(), task, note, now)?;
+            println!("Migration review recorded for {task}; its close may proceed through the normal gates.");
         }
         RapidResponseCommand::Status => {
             let state = crate::rapid_response::load(root)?;

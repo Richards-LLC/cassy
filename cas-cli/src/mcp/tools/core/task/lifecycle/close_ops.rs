@@ -9355,25 +9355,40 @@ impl CasCore {
         // verdict before close; light tasks skip it entirely. For `Deep`/unset
         // (`!depth_light`) the condition is unchanged, so the jail arms exactly
         // as today.
+        // cas-1b4d: a migration delivery under an open rapid-response window
+        // keeps every gate and also needs the operator's human review.
+        if close_disposition.requires_delivery_gates()
+            && let Some(refusal) = crate::rapid_response::migration_review_refusal(&self.cas_root, &task)
+        {
+            return Ok(Self::tool_error(refusal));
+        }
         // cas-1b4d: in an operator's rapid-response window close verification
-        // is sampled; an unsampled task's verification back-fills when the
-        // window closes. Data-state guards below are unaffected.
+        // is sampled: an unsampled task does not dispatch a new verifier, and
+        // the skip back-fills when the window closes. A verdict or typed
+        // dispatch already on record keeps the block below (its VERIFICATION
+        // FAILED refusal and dispatch authority). Data-state guards are
+        // unaffected.
+        let no_verification_on_record = exact_dispatch_allows_skip
+            && cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id)
+                .is_ok_and(|dispatch| dispatch.is_none())
+            && self
+                .open_verification_store()
+                .is_ok_and(|store| store.get_latest_for_task(&task.id).is_ok_and(|latest| latest.is_none()));
         let rapid_unsampled = verification_enabled
             && !skip_verification
             && !depth_light
+            && no_verification_on_record
             && task.task_type != TaskType::Epic
             && !crate::rapid_response::verification_sampled(&task.id)
-            && crate::rapid_response::active_for_task_at(&self.cas_root, &task, None)
-                .inspect(|window| {
-                    crate::rapid_response::record_skip(
-                        &self.cas_root,
-                        window,
-                        &task.id,
-                        "verification",
-                        "close verification not sampled (one task in four runs it)",
-                    );
-                })
-                .is_some();
+            && crate::rapid_response::active_for_task_at(&self.cas_root, &task, None).is_some_and(|window| {
+                crate::rapid_response::record_skip(
+                    &self.cas_root,
+                    &window,
+                    &task.id,
+                    "verification",
+                    "close verification not sampled (one task in four runs it)",
+                )
+            });
         if verification_enabled
             && !skip_verification
             && !depth_light

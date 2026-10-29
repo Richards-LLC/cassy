@@ -1103,6 +1103,7 @@ mod tests {
             "--verbose factory -w 2",
             "qa rapid-response enable cas-ep1c --for 2h --reason outage --rollback revert",
             "qa rapid-response disable cas-ep1c",
+            "qa rapid-response review-migration cas-de11 --note checked",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),

@@ -22,10 +22,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   per-task independent QA is skipped, close verification runs for one task in four,
   evidence is needed only for journeys whose own files changed, fixes close without
   waiting for a batch QA receipt, and the post-release check watches instead of
-  gating. Build, touched-test and evidence secret checks still refuse, and changes
-  that touch migrations keep every gate. Each skipped check is recorded, and when
-  the window closes the factory files one back-fill task under the epic and tells
-  the supervisor.
+  gating. Build, touched-test and evidence secret checks still refuse. A change
+  whose diff has a secret-shaped line, or whose diff cannot be read, keeps every
+  gate; a change that touches a migration keeps every gate and also waits for the
+  operator's `cas qa rapid-response review-migration`. A task with a verifier
+  verdict on record keeps that verdict. Each skipped check is recorded under
+  `.cas/operator/`, and when the window closes the factory files one back-fill task
+  under the epic and tells the supervisor.
 
 ## [3.89.0] - 2026-10-29
 

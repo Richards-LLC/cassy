@@ -595,11 +595,20 @@ struct Fixture {
 /// Two idle, clean workers (one Claude, one Codex) and a shutdown row the
 /// daemon has already dequeued: `processed_at` is set, nothing has run yet.
 fn processed_but_unexecuted_shutdown() -> Fixture {
+    processed_but_unexecuted_shutdown_with_dead_worker(false)
+}
+
+fn processed_but_unexecuted_shutdown_with_dead_worker(include_dead: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon(&cas_dir);
     let mut pids = Vec::new();
     let mut names = Vec::new();
+    if include_dead {
+        register_idle_worker(&cas_dir, "already-dead");
+        open_agent_store(&cas_dir).unwrap().graceful_shutdown("agent-already-dead").unwrap();
+        names.push("already-dead".to_string());
+    }
     for (name, harness) in [
         ("idle-claude", cas_mux::SupervisorCli::Claude),
         ("idle-codex", cas_mux::SupervisorCli::Codex),
@@ -761,18 +770,10 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
 #[tokio::test(flavor = "current_thread")]
 async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let Fixture { _dir, mut daemon, pids, .. } = processed_but_unexecuted_shutdown();
+    let Fixture { _dir, mut daemon, request_id: request, pids } = processed_but_unexecuted_shutdown_with_dead_worker(true);
     let cas_dir = daemon.app.cas_dir().to_path_buf();
-    register_idle_worker(&cas_dir, "already-dead");
     let agents = open_agent_store(&cas_dir).unwrap();
-    agents.graceful_shutdown("agent-already-dead").unwrap();
-    // Put the dead target ahead of the live controls in the actual queued
-    // handler, rather than calling the single-worker helper directly.
-    daemon.pending_spawns.clear();
-    let queue = open_spawn_queue_store(&cas_dir).unwrap();
     let names = vec!["already-dead".to_string(), pids[0].0.clone(), pids[1].0.clone()];
-    let request = queue.enqueue_shutdown(None, &names, false, Some(SESSION)).unwrap();
-    daemon.enqueue_spawn_requests().unwrap();
     let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();

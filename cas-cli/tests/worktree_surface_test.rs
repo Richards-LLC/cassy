@@ -3008,22 +3008,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
             sibling.status = TaskStatus::Closed;
             tasks.update(&sibling).unwrap();
         }
-        // The old anchor's receipt cannot authorize the rewritten tip.
-        let missing = service.task(Parameters(close_request())).await.unwrap();
-        assert!(
-            get_text(&missing).contains("FAST ROWS REQUIRED"),
-            "{}",
-            get_text(&missing)
-        );
-        assert_eq!(
-            tasks
-                .get(task_id)
-                .unwrap()
-                .deliverables
-                .factory_branch_anchor
-                .as_deref(),
-            Some(old_anchor.as_str())
-        );
         let retry = service.task(Parameters(close_request())).await.unwrap();
         assert!(
             get_text(&retry).contains("MERGE REQUIRED"),

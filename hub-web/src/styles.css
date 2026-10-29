@@ -2115,7 +2115,7 @@ dialog form > *,
 .thread .evi-scroll:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
 .thread .evi-body { width: 100%; border-collapse: collapse; }
 .thread .evi-row { font: var(--weight-regular) var(--fs-meta)/var(--line-ui) var(--font-ui); }
-.thread .evi-row > :is(th, td) { padding: var(--space-1) 0 var(--space-1) var(--space-3); vertical-align: top; text-align: left; overflow-wrap: anywhere; word-break: normal; font-weight: var(--weight-regular); }
+.thread .evi-row > :is(th, td) { padding: var(--space-1) 0 var(--space-1) var(--space-3); vertical-align: top; text-align: left; overflow-wrap: normal; word-break: normal; font-weight: var(--weight-regular); }
 .thread .evi-row > :first-child { padding-left: 0; }
 .thread .evi :is(.markdown-inline-code, .markdown-link) { overflow-wrap: anywhere; word-break: normal; }
 .thread .evi-row > .evi-number { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }

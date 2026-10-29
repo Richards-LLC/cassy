@@ -1713,8 +1713,11 @@ impl PtyConfig {
             supervisor_name,
         );
 
+        // The worker recipe is forwarded at spawn by
+        // `forward_codex_mcp_environment`, which honours late `env_remove`
+        // entries; forwarding it here too would leak a removed recipe.
         for (key, value) in &env {
-            if matches!(key.as_str(), "CAS_FACTORY_SUPERVISOR_MODEL" | "CAS_FACTORY_SUPERVISOR_EFFORT" | "CAS_FACTORY_WORKER_MODEL" | "CAS_FACTORY_WORKER_EFFORT") {
+            if matches!(key.as_str(), "CAS_FACTORY_SUPERVISOR_MODEL" | "CAS_FACTORY_SUPERVISOR_EFFORT") {
                 args.extend(["-c".into(), format!("mcp_servers.cs.env.{key}={}", serde_json::to_string(value).expect("model metadata string"))]);
             }
         }

@@ -312,7 +312,7 @@ export function renderConnectionSurfaceInto(
     };
     if (!snapshot.authFailure) addAction("Retry", actions.retry);
     addAction("Diagnose", actions.diagnose);
-    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing") {
+    if (snapshot.authFailure) {
       addAction("Re-pair", actions.repair, options.repairLabel);
     }
     if (actionRow.childElementCount > 0) target.append(actionRow);

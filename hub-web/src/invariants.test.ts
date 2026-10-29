@@ -829,15 +829,14 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
       "/v1/health", "/v1/machine",
     ]);
-    const [main, connectionView] = await Promise.all([
-      readSource("main.ts"),
-      readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
-    ]);
+    const main = await readSource("main.ts");
     // cas-a6f0 (journey F8): every refused pairing, revoked included, is headed
     // as the header names it.
     expect(main).toContain('headline: "Machine needs pairing",');
     expect(main).not.toContain('"Authentication blocked"');
-    expect(connectionView).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
+    // Recovery actions are exercised through the DOM for every auth failure
+    // by connection-state-view.test.ts, rather than pinning an enumeration
+    // that omitted expired credentials (cas-8e01).
     supervisor.stop();
   });
 

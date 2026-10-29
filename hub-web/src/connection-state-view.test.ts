@@ -198,17 +198,18 @@ describe("the attach surface opens calmly (journey F3)", () => {
   });
 
   it("offers named repair immediately when pairing fails before the conversation opens (cas-3286)", () => {
-    for (const authFailure of ["revoked", "scope-mismatch", "needs-pairing"] as const) {
+    for (const authFailure of ["revoked", "scope-mismatch", "needs-pairing", "expired"] as const) {
       const target = card();
       let repairs = 0;
       renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "failed", stage: "auth", authFailure }), {
         retry: () => { throw new Error("a blocked pairing cannot retry"); },
+        diagnose: () => {},
         repair: () => { repairs += 1; },
       }, startedAt + 100, { quietOpening: true, repairLabel: "Re-pair Atlas · Linux" });
       expect(target.textContent).toContain("Connection failed — re-pair required.");
       expect(target.querySelector(".terminal-connecting-actions")?.textContent).not.toContain("Retry");
       const repair = target.querySelector<HTMLButtonElement>('button[aria-label="Re-pair Atlas · Linux"]');
-      expect(repair).not.toBeNull();
+      expect(repair, `named Re-pair for ${authFailure}`).not.toBeNull();
       repair!.click();
       expect(repairs).toBe(1);
     }

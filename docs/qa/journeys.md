@@ -845,13 +845,20 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Steps
 
-1. Type `/us`, navigate to Usage by keyboard, and run it once; ordinary message sends stay empty.
-2. Read the pending receipt before the observed native outcome; output is escaped text and no mutation is replayed.
-3. Open the same list from the header, cancel Clear, then explicitly confirm Exit for the named supervisor.
-4. Without pane input, read the permission reason and send no command; adjacent Raw output stays readable and Escape returns focus.
+1. Choose Usage from the slash palette with the keyboard
+2. Read the observed native result without resending the command
+3. Cancel Clear, then confirm Exit for the named supervisor
+4. Open the quick controls and read the permission explanation
+5. Read adjacent Raw output and return by keyboard
 
 #### Expected experience
 
 - Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
 - Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
 - Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.
+
+#### Edge paths
+
+- An unsupported harness offers no choices, and a pairing without input rights sees its permission reason.
+- Busy panes and operator drafts refuse injection; uncertain outcomes never automatically replay mutations.
+- A destructive confirmation can be cancelled without a command frame, and Raw output keeps its existing keyboard route.

@@ -142,7 +142,11 @@ pub(crate) fn build_status_json(
 
     let task_store =
         status_task_store(cas_root).ok_or_else(|| anyhow::anyhow!("task store unavailable"))?;
-    let agents = session_agents(session, cas_root, task_store.as_ref())?;
+    // Staffing and task rows must describe the same decoded snapshot. A
+    // second status-filtered read can omit a supported legacy status spelling
+    // or observe a reassignment after the rows above were loaded.
+    let held: Vec<_> = data.in_progress_tasks.iter().chain(&data.ready_tasks).collect();
+    let agents = session_agents(session, cas_root, task_store.as_ref(), &held)?;
 
     let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, Some(task_store.as_ref()));
 
@@ -177,6 +181,7 @@ fn session_agents(
     session: &crate::ui::factory::SessionInfo,
     root: &std::path::Path,
     tasks: &dyn cas_store::TaskStore,
+    held: &[&cas_factory::TaskSummary],
 ) -> Result<Vec<AgentSummaryJson>> {
     use crate::mcp::tools::service::factory_ops::{
         dedupe_authoritative_agents, worker_liveness_for_agent,
@@ -193,20 +198,6 @@ fn session_agents(
         })
         .collect();
     let (agents, _) = dedupe_authoritative_agents(registrations.clone());
-    // Work in progress or newly assigned work wins over a prior delivery.
-    // A registration ID and the friendly name are both valid assignees.
-    let held: Vec<_> = [
-        TaskStatus::InProgress,
-        TaskStatus::AwaitingMerge,
-        TaskStatus::Blocked,
-        TaskStatus::Open,
-    ]
-    .into_iter()
-    .map(|state| tasks.list(Some(state)))
-    .collect::<std::result::Result<Vec<_>, _>>()?
-    .into_iter()
-    .flatten()
-    .collect();
     let events = SqliteEventStore::open(root)?;
     let stall_secs = crate::config::Config::load(root)
         .unwrap_or_default()
@@ -244,7 +235,10 @@ fn session_agents(
                         std::cmp::Reverse(task.updated_at),
                     )
                 });
-            let (task_started_at, recent_trail) = worker_task_facts(root, &events, task)?;
+            // Full records supply lifecycle receipts only. Missing details
+            // cannot erase the assignment already present in this response.
+            let full_task = task.and_then(|task| tasks.get(&task.id).ok());
+            let (task_started_at, recent_trail) = worker_task_facts(root, &events, full_task.as_ref())?;
             Ok(AgentSummaryJson {
                 role: agent.role.to_string(),
                 harness: agent.metadata.get("worker_cli").cloned(),

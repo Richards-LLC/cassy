@@ -1179,9 +1179,9 @@ struct PhaseHooks {
     phase: Option<SupervisorPhase>,
 }
 
-fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str) -> PhaseHooks {
+fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str, now: DateTime<Utc>) -> PhaseHooks {
     use std::io::Read;
-    let today = Utc::now().date_naive();
+    let today = now.date_naive();
     let mut rows = Vec::new();
     for date in [today.pred_opt().unwrap_or(today), today] {
         let path = cas_dir.join("logs").join(format!("factory-session-{date}.log"));
@@ -1252,6 +1252,16 @@ pub(crate) fn supervisor_phase_for_session(
     session: &str,
     supervisor: &str,
 ) -> Option<SupervisorPhase> {
+    supervisor_phase_for_session_at(cas_dir, project_path, session, supervisor, Utc::now())
+}
+
+fn supervisor_phase_for_session_at(
+    cas_dir: &Path,
+    project_path: &Path,
+    session: &str,
+    supervisor: &str,
+    now: DateTime<Utc>,
+) -> Option<SupervisorPhase> {
     type Cache = HashMap<(PathBuf, String), WorkEventIndex>;
     static INDEXES: std::sync::LazyLock<Mutex<Cache>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
     let agents = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?.into_iter()
@@ -1259,7 +1269,7 @@ pub(crate) fn supervisor_phase_for_session(
     let (agents, _) = crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents);
     let mut scope = WorkEventScope::from_agents(session, &agents);
     scope.supervisors.retain(|source| source.agent_name == supervisor);
-    let hooks = phase_hooks(cas_dir, session, supervisor);
+    let hooks = phase_hooks(cas_dir, session, supervisor, now);
     if let Some((source, _)) = &hooks.transcript {
         // The native hook names this exact factory and supervisor; do not
         // combine it with a lagging pre-/clear registration or parse it twice.

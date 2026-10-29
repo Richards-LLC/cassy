@@ -24,7 +24,7 @@
 .accounts-identity strong { font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
 .accounts-badges { display: inline-flex; gap: var(--space-1); margin-inline-start: auto; }
 .accounts-badges:empty { display: none; }
-.accounts-badge { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/22px var(--font-ui); }
+.accounts-badge { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/22px var(--font-ui); }
 .accounts-alias { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); }
 .accounts-where { color: var(--ink-mid); font-size: var(--fs-meta); }
 .accounts-where code { color: var(--ink); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }

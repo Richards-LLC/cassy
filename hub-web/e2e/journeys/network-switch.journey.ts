@@ -784,6 +784,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   const row = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
   const studioRow = list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row"));
   const footer = page.locator(".hub-footer-meta");
+  const expectFooter = async (count: string) => {
+    await expect(footer.locator(":scope > span").first()).toHaveText(count);
+    await expect(footer.getByTitle("Web client release and build")).toHaveText(/^Web \S/);
+  };
   const empty = page.getByText(/No live supervisors listed/);
   const outages = [
     ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
@@ -799,7 +803,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       if (down.length === 1) await expect(studioRow).not.toContainText("last known");
       else await expect(studioRow).toContainText("last known");
       await expect(empty).toHaveCount(0);
-      await expect(footer).toContainText(new RegExp(`^${count}Hub `));
+      await expectFooter(count);
     });
     await journey.stage(down.length === 1
       ? "Atlas reconnects — the full conversation count is live again"
@@ -808,7 +812,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       await clock.advance(10_000);
       await expect(header).toHaveText(" · Live");
       await expect(list).not.toContainText("last known");
-      await expect(footer).toContainText(/^2 conversationsHub /);
+      await expectFooter("2 conversations");
     });
   }
   await journey.stage("The machines answer with no live supervisors: the list is empty", async () => {
@@ -818,7 +822,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
     await expect(row).toHaveCount(0);
     await expect(studioRow).toHaveCount(0);
     await expect(empty).toBeVisible();
-    await expect(footer).toContainText(/^0 conversationsHub /);
+    await expectFooter("0 conversations");
   });
 });
 

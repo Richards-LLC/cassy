@@ -172,6 +172,10 @@ invariants:
     statement: A send whose live ACK is lost across reconnect is matched to its durable history by client_ref and reaches its confirmed state once, without another Retry or merging a different send with identical text.
     check: Run the cas-d17f pending-sends client regression and cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history Rust regression; batch real-hub proof drops the live ACK, reconnects, and reads back one queue row and one supervisor inbox delivery for that client_ref.
     bug: {task: cas-d17f}
+  HUB-J12-CATALOG-FOOTER:
+    statement: During total or partial machine outages, the footer reports the exact conversation count and last-known share independently of the Web client version label; recovery and an empty catalog remove stale last-known claims.
+    check: Run the outage-past-catalog-freshness case in network-switch.journey.ts against committed dist and assert the count and titled Web version segments separately in total outage, partial outage, recovery and empty states.
+    bug: {task: cas-3100}
   HUB-J13-GOAL:
     statement: I start a supervisor on a project from my phone, without SSH, and land in its conversation
     check: 'Walk HUB-J13 in hub-web/e2e/journeys/launch-session.journey.ts; verify the expected experience and edge
@@ -1246,6 +1250,7 @@ journeys:
   - HUB-J12-DURABLE-SEND-REF
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS
+  - HUB-J12-CATALOG-FOOTER
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null

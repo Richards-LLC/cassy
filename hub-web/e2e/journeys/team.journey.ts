@@ -19,9 +19,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       const hub = await journey.hub({ machines: [machine], paired: [ATLAS.id], fleet: { [PELICAN]: fleet } });
       await journey.stage("Open Team beside the supervisor conversation", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
         await expect(page.locator("#team-panel")).toBeHidden();
         await expect(page.locator(".team-lane")).toHaveCount(0);
+        await page.getByRole("textbox", { name: "Your message" }).fill("Keep my draft while checking the team");
         const tab = page.getByRole("tab", { name: "Conversation", exact: true });
         await tab.focus(); await page.keyboard.press("ArrowRight");
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeFocused();
@@ -50,6 +51,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await page.getByRole("tab", { name: "Conversation", exact: true }).click();
         await expect(page.locator("#team-panel")).toBeHidden();
         await expect(page.locator("#conversation-composer-slot")).toBeVisible();
+        await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("Keep my draft while checking the team");
       });
     });
   });

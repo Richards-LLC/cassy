@@ -26,6 +26,10 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(page.locator(".supervisor-command-receipt")).toContainText("not confirmed");
         expect(hub.sends).toHaveLength(0);
         await expect(input).toBeFocused();
+        expect(await page.evaluate(() => {
+          const days: Record<string, Record<string, number>> = JSON.parse(localStorage.getItem("commander.usage.v1") ?? "{}").days ?? {};
+          return Object.values(days).reduce((sum, day) => sum + (day["supervisor.command"] ?? 0), 0);
+        })).toBe(1);
       });
       await journey.stage("Read the observed native result without resending the command", async () => {
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Model: GPT-6.1-Sol\nContext window: 93% left\n<untrusted>", interactive: false } } });

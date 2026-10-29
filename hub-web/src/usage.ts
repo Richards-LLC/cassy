@@ -34,6 +34,7 @@ export const USAGE_ACTIONS = {
   "session.end": "HUB-J16",
   "fleet.operation": "HUB-J17",
   "supervisor.control": "HUB-J18",
+  "supervisor.command": "HUB-J27",
   "inbox.open": "HUB-J19",
   "write-grant": "HUB-J20",
   "app-switch.explorer": "HUB-J21",

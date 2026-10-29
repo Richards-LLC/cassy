@@ -185,7 +185,10 @@ function bindSlashCommands(input: HTMLTextAreaElement): void {
     harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
     unavailable: () => supervisorCommandUnavailable(machineId, session),
     label: () => supervisorPhrase(machineId, session),
-    run: (command, confirmed) => supervisorCommandSession(machineId, session).run(command, confirmed),
+    run: async (command, confirmed) => {
+      await supervisorCommandSession(machineId, session).run(command, confirmed);
+      countUsage("supervisor.command");
+    },
   });
   slashCommands = { input, thread, palette };
 }

@@ -616,6 +616,35 @@ mod focused_epic_tests {
     }
 
     #[test]
+    fn selected_session_phase_ignores_another_projects_ambient_root() {
+        use cas_store::AgentStore;
+        use cas_types::{Agent, AgentRole};
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, session) = fixture();
+        let other = tempfile::tempdir().unwrap();
+        let other_root = crate::store::init_cas_dir(other.path()).unwrap();
+        let account = tempfile::tempdir().unwrap();
+        let rollouts = account.path().join("sessions/2026/10/29");
+        std::fs::create_dir_all(&rollouts).unwrap();
+        let started = "2026-10-29T06:04:27Z";
+        std::fs::write(rollouts.join("rollout-phase.jsonl"), format!("{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"cwd":session.metadata.project_dir,"originator":"codex_cli_rs","source":"cli"}}),
+            serde_json::json!({"timestamp":started,"type":"response_item","payload":{"type":"function_call","call_id":"native-call","name":"exec_command","arguments":"{\"cmd\":\"private command\"}"}}),
+        )).unwrap();
+        let mut supervisor = Agent::new_with_role("codex-supervisor".into(), "supervisor".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some(session.name.clone());
+        supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
+        supervisor.metadata.insert("supervisor_account_dir".into(), account.path().to_string_lossy().into_owned());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        env.set("CAS_ROOT", other_root.to_str().unwrap());
+        let selected = cas_root_for_session_with_fallback(&session, None).unwrap();
+        let status = serde_json::to_value(build_status_json(&session, &selected, 20).unwrap()).unwrap();
+        assert_eq!(status["supervisor_phase"]["kind"], "tool", "selected session must read its own registered native source: {status}");
+        assert_eq!(status["supervisor_phase"]["lifecycle"]["started_at"], "2026-10-29T06:04:27+00:00");
+        assert!(!status["supervisor_phase"].to_string().contains("private command"));
+    }
+
+    #[test]
     fn status_projects_selected_session_worker_from_worker_status_evidence() {
         use cas_store::AgentStore;
         use cas_types::{Agent, AgentRole, Task, TaskStatus};

@@ -1241,7 +1241,7 @@ mod tests {
             ("factory.worker_denied_clis", ""),
             ("factory.worker_denied_mcp_tools", ""),
             ("qa.evidence_gate", "false"),
-            ("qa.mode", "batch"),
+            ("qa.mode", "per_task"),
             ("release.claude_account_allowlist", "agent@example.com"),
             ("peers.same_repo_scope", "own"),
         ] {

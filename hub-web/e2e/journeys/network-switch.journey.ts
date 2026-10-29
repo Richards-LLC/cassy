@@ -1162,6 +1162,14 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     await chooseConversation(page);
     await expect(header).toHaveText(" · Live");
     const before = [hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)];
+    // cas-c971: replaying another session must not fan out status/lease reads
+    // for the open conversation (over 2,000 requests in the original trace).
+    await clock.advance(1);
+    const controlReads: string[] = [];
+    page.on("request", request => {
+      const path = new URL(request.url()).pathname;
+      if (path === `/v1/sessions/${PELICAN}/status` || path === `/v1/sessions/${PELICAN}/lease`) controlReads.push(path);
+    });
     atlas.sessions = [...ATLAS.sessions];
     hub.hold(peer);
     hub.drop(peer);
@@ -1185,6 +1193,14 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
       await expect(header).toHaveText(" · Live");
       expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
     }
+    expect(controlReads.length, "peer replay must not reload the open session's controls").toBe(0);
+    // The selected session's live event must still refresh both controls.
+    await page.evaluate(session => {
+      (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number })
+        .__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "pane_added", session }));
+    }, PELICAN);
+    await clock.advance(1);
+    expect(controlReads.sort()).toEqual([`/v1/sessions/${PELICAN}/lease`, `/v1/sessions/${PELICAN}/status`]);
     // A route hint and repeated event-only loss must not condemn either
     // recently speaking terminal. Empty output preserves the visible frame.
     hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });

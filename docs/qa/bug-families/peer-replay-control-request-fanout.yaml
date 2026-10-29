@@ -1,0 +1,4 @@
+title: Retained peer session events do not reload the open conversation's status and lease
+tasks: [cas-c971]
+invariants: [HUB-J12-GOAL]
+journeys: [HUB-J12, HUB-J24]

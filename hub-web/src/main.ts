@@ -993,8 +993,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
         void upsertMachineEventAttention(machine, event);
       }
-      if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
-      if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
+      // A retained peer-session burst does not change this conversation's
+      // controls. Reading them for each peer event floods the signed HTTP lane
+      // (cas-c971). Events without a session still invalidate machine-wide state.
+      if (selectedMachineId === machine.id && selectedSession &&
+          (typeof event.session !== "string" || event.session === selectedSession)) {
+        void loadStatus(machine.id, selectedSession);
+        void loadLease(machine.id, selectedSession);
+      }
     },
     onSessionState: (session, state, scrollback) => {
       void renderSessionState(machine.id, session, state, scrollback);

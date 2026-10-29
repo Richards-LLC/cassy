@@ -962,7 +962,10 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
         let parked = fx.close("cas-bq03").await;
         let passes = cas_store::list_qa_passes(&root, "cas-bq03").unwrap();
         assert_eq!(passes.len(), index + 2, "rejected={rejected}: {parked}");
-        let latest = passes.iter().max_by_key(|pass| pass.round).unwrap();
+        // A moved pending review keeps its rejection-based round number;
+        // the active pass, not the largest ordinal, identifies the successor.
+        let latest = passes.iter().find(|pass| pass.state == cas_types::QaPassState::Pending)
+            .expect("re-park must leave a pending review");
         assert_eq!(latest.bound_head, head, "rejected={rejected}: {parked}");
         assert_eq!(latest.state, cas_types::QaPassState::Pending, "rejected={rejected}: {parked}");
     }

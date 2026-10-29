@@ -20600,6 +20600,27 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     repo_path: &std::path::Path,
     options: EpicStatusOptions,
 ) -> EpicStatusCollection {
+    collect_epic_branch_statuses_cached(subtasks, parent_branch, repo_path, options, false)
+}
+
+/// Read-only projections also resume completed proofs of active children.
+/// Their cache is isolated from the terminal-only close-gate evidence.
+pub(crate) fn collect_epic_projection_statuses(
+    subtasks: &[Task],
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    options: EpicStatusOptions,
+) -> EpicStatusCollection {
+    collect_epic_branch_statuses_cached(subtasks, parent_branch, repo_path, options, true)
+}
+
+fn collect_epic_branch_statuses_cached(
+    subtasks: &[Task],
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    options: EpicStatusOptions,
+    projection: bool,
+) -> EpicStatusCollection {
     // Ref/cache metadata has its own bound; host load during this prelude must
     // not consume the entire proof budget before any child can start.
     let _measurement_scope = epic_measurement::Scope::new(if options.summary {
@@ -20622,6 +20643,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     // first child. Summary rows are ancestry-only and are never cached.
     let mut verdict_cache = if options.summary || total_children == 0 {
         epic_verdict_cache::EpicVerdictCache::disabled()
+    } else if projection {
+        epic_verdict_cache::EpicVerdictCache::load_projection(repo_path)
     } else {
         epic_verdict_cache::EpicVerdictCache::load(repo_path)
     };
@@ -20793,6 +20816,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 &fallback_branches,
                 &git_snapshot,
                 subtasks,
+                projection,
             )
         });
         if let Some(cached) = cache_key.as_deref().and_then(|key| verdict_cache.get(key)) {
@@ -20825,6 +20849,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     &fallback_branches,
                     &git_snapshot,
                     subtasks,
+                    projection,
                 ));
             }
             if epic_measurement::expired() {

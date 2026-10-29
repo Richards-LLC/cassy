@@ -338,7 +338,7 @@ fn project_deliveries(
     store: Option<&dyn cas_store::TaskStore>,
 ) {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
-        EpicStatusOptions, collect_epic_branch_statuses_with_options, last_commit_unix,
+        EpicStatusOptions, collect_epic_projection_statuses, last_commit_unix,
     };
     let Some(store) = store else { return };
     let started = std::time::Instant::now();
@@ -437,7 +437,7 @@ fn project_deliveries(
             .into_iter()
             .filter(|task| task.status != cas_types::TaskStatus::Cancelled)
             .collect();
-        let collection = collect_epic_branch_statuses_with_options(
+        let collection = collect_epic_projection_statuses(
             &children,
             target,
             repo,
@@ -523,7 +523,7 @@ fn project_deliveries(
         }) else {
             continue;
         };
-        let collection = collect_epic_branch_statuses_with_options(
+        let collection = collect_epic_projection_statuses(
             std::slice::from_ref(&record),
             &context.target_branch,
             &context.repo_root,

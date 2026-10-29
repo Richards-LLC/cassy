@@ -230,7 +230,18 @@ fn session_agents(
                 .filter(|task| {
                     task.assignee.as_deref().is_some_and(|owner| aliases.contains(owner))
                 })
-                .min_by_key(|task| {
+                .map(|task| {
+                    // A batch note or merge receipt changes updated_at without
+                    // assigning new work. Use the same start evidence as the
+                    // visible trail; creation is a stable legacy fallback.
+                    let work_at = task_start_event(&events, &task.id)?
+                        .map(|event| event.created_at)
+                        .or_else(|| tasks.get(&task.id).ok().map(|record| record.created_at));
+                    Ok((*task, work_at))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .min_by_key(|(task, work_at)| {
                     (
                         match task.status {
                             TaskStatus::InProgress => 0,
@@ -238,9 +249,11 @@ fn session_agents(
                             TaskStatus::Blocked => 2,
                             _ => 3,
                         },
-                        std::cmp::Reverse(task.updated_at),
+                        std::cmp::Reverse(*work_at),
+                        task.id.clone(),
                     )
-                });
+                })
+                .map(|(task, _)| task);
             // Full records supply lifecycle receipts only. Missing details
             // cannot erase the assignment already present in this response.
             let full_task = task.and_then(|task| tasks.get(&task.id).ok());
@@ -274,6 +287,13 @@ fn session_agents(
         .collect()
 }
 
+/// Shared, bounded task-start evidence for current-work ordering and its trail.
+fn task_start_event(events: &dyn EventStore, id: &str) -> Result<Option<Event>> {
+    Ok(events.list_for_entity(cas_types::EventEntityType::Task, id, 200)?
+        .into_iter()
+        .find(|event| event.event_type == cas_types::EventType::TaskStarted))
+}
+
 /// Only durable lifecycle records become Team marks. Bounded event history can
 /// omit a start; registration/heartbeat and arbitrary notes never stand in for it.
 fn worker_task_facts(
@@ -281,17 +301,14 @@ fn worker_task_facts(
     events: &dyn EventStore,
     task: Option<&cas_types::Task>,
 ) -> Result<(Option<String>, Vec<AgentTrailJson>)> {
-    use cas_types::{EventEntityType, EventType, MergeCiAdmission, VerificationStatus};
+    use cas_types::{MergeCiAdmission, VerificationStatus};
     let Some(task) = task else {
         return Ok((None, Vec::new()));
     };
-    let history = events.list_for_entity(EventEntityType::Task, &task.id, 200)?;
-    let started = history
-        .iter()
-        .find(|event| event.event_type == EventType::TaskStarted);
-    let start_at = started.map(|event| event.created_at.to_rfc3339());
+    let started = task_start_event(events, &task.id)?;
+    let start_at = started.as_ref().map(|event| event.created_at.to_rfc3339());
     let mut trail = Vec::new();
-    if let Some(event) = started {
+    if let Some(event) = started.as_ref() {
         trail.push(AgentTrailJson {
             step: "started",
             at: start_at.clone(),

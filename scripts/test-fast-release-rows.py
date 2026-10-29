@@ -823,6 +823,7 @@ sleep 2
         scoped_files = {line.removeprefix("SCOPE release-notes-draft ")
                         for line in receipt.read_text().splitlines() if line.startswith("SCOPE release-notes-draft ")}
         self.assertEqual(scoped_files, {path, other})
+        self.assertTrue(receipt.read_text().endswith("scope complete count=2\n"), receipt.read_text())
         failed = receipt.read_bytes()
         record = dict(schema=1, task_id="cas-fixture", head=head, check="release-notes-draft",
                       files=sorted([path, other]), approver="registered-supervisor", reason="Preserve historical bodies",
@@ -838,6 +839,15 @@ sleep 2
                 self.assertNotEqual(command(self.repo, *validate).returncode, 0)
         approval.write_text(json.dumps(record))
         self.assertEqual(command(self.repo, *validate).returncode, 0)
+        for partial in (failed.replace(b"scope complete count=2\n", b""),
+                        failed.replace(b"scope complete count=2", b"scope complete count=1"),
+                        failed + b"SCOPE release-notes-draft docs/release-notes/later-slack.md\n"):
+            receipt.write_bytes(partial)
+            record["failure_sha256"] = hashlib.sha256(partial).hexdigest()
+            approval.write_text(json.dumps(record))
+            self.assertNotEqual(command(self.repo, *validate).returncode, 0)
+        record["failure_sha256"] = hashlib.sha256(failed).hexdigest()
+        approval.write_text(json.dumps(record))
         receipt.write_bytes(failed.replace(b"rows=release-notes-draft", b"rows=release-notes-draft,test-env"))
         self.assertNotEqual(command(self.repo, *validate).returncode, 0)
         receipt.write_bytes(failed)

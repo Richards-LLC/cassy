@@ -11255,7 +11255,10 @@ impl FactoryDaemon {
                             std::slice::from_ref(warning),
                         );
                     }
-                    let task_id_for_finish = pending_task_id.clone();
+                    let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                        .and_then(|queues| queues.get(&self.session_name, &pending_name))
+                        .map(|queue| queue.revision > 0).unwrap_or(true);
+                    let task_id_for_finish = if queued_spawn { None } else { pending_task_id.clone() };
                     // cas-2a49: `finish_worker_spawn` starts the PTY and then
                     // does store and git bookkeeping, so the canary floor is
                     // taken before the call, not after it returns.
@@ -11532,7 +11535,10 @@ impl FactoryDaemon {
                         // codex+isolate async gaps cannot skip pre-assign.
                         // finish_worker_spawn confirms; failure/cancel paths
                         // release via release_preassign_if_bound.
-                        if let Some(ref tid) = task_id {
+                        let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                            .and_then(|queues| queues.get(&self.session_name, &worker_name))
+                            .map(|queue| queue.revision > 0).unwrap_or(true);
+                        if !queued_spawn && let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
                                 self.app.cas_dir(),
                                 tid,
@@ -11620,7 +11626,10 @@ impl FactoryDaemon {
                             }
                         }
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
-                        if let Some(ref tid) = task_id {
+                        let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                            .and_then(|queues| queues.get(&self.session_name, &worker_name))
+                            .map(|queue| queue.revision > 0).unwrap_or(true);
+                        if !queued_spawn && let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
                                 self.app.cas_dir(),
                                 tid,

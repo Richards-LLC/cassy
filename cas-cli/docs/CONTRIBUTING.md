@@ -1512,8 +1512,9 @@ behavior.
 
 Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
 Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
-The first task controls the spawn base. Registration binds the remaining queue
-by factory session and worker name, so re-registration does not lose it.
+The first task controls the spawn base. Provisioning durably binds the queue
+by factory session and worker name. Registration selects its first eligible task;
+a head blocked, closed or assigned elsewhere during boot cannot strand the tail.
 
 For an existing worker, `task action=update assignee=<worker> task_ids=["cas-b","cas-c"]`
 replaces pending work. If `id` is supplied, it must name the first entry. This
@@ -1532,9 +1533,11 @@ A successful close or park releases the preceding lease, then starts the next
 eligible task through the normal start gates as that worker. It cuts the next
 task's branch from its own declared target and preserves the previous delivery
 ref. Repeated closes cannot consume another entry. Reassigned, missing,
-terminal, blocked and hard-start-gated entries are skipped with a durable note.
-A checkout/start failure retains the selected entry and records a deferred
-reason; inspect the queue and retry the preceding close after resolving it.
+terminal, blocked, foreign-leased and hard-start-gated entries are skipped with a
+durable note. A checkout/start failure retains the selected entry and records a
+deferred reason. The daemon reconciles durable cursors off its control loop,
+retrying after lock contention, restart or an unavailable brief recipient.
+Inspect and resolve the deferred cause; no repeated close is required.
 Queue dispatch never changes process identity or environment variables.
 
 ### MCP mutation timeout receipts

@@ -1885,7 +1885,7 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     })).await;
     let reordered = queue_control(&f, Some(vec!["cas-8488-two","cas-8488-one"])).await;
     assert!(reordered.contains("cas-8488-two -> cas-8488-one"), "{reordered}");
-    let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "summary":true})).unwrap();
+    let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "summary_mode":true})).unwrap();
     let status = f.supervisor.factory(Parameters(request)).await.unwrap();
     let status = format!("{status:?}");
     assert!(status.contains("cas-8488-two -> cas-8488-one"), "{status}");

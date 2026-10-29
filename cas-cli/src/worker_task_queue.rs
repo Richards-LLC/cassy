@@ -175,14 +175,28 @@ impl CasCore {
 
     pub(crate) fn task_has_worker_queue(&self, id: &str) -> Result<bool, McpError> {
         let task = self.open_task_store()?.get(id).map_err(error)?;
-        let Some(assignee) = task.assignee.as_deref() else { return Ok(false) };
+        let Some(assignee) = task.assignee.as_deref() else {
+            return Ok(false);
+        };
         let agents = self.open_agent_store()?;
-        let Some(worker) = agents.list(None).map_err(error)?.into_iter()
+        let Some(worker) = agents
+            .list(None)
+            .map_err(error)?
+            .into_iter()
             .filter(|a| a.role == AgentRole::Worker && (a.name == assignee || a.id == assignee))
-            .max_by_key(|a| a.registered_at) else { return Ok(false) };
-        let Some(session) = worker.factory_session.as_deref() else { return Ok(false) };
-        Ok(SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?
-            .get(session, &worker.name).map_err(error)?.revision > 0)
+            .max_by_key(|a| a.registered_at)
+        else {
+            return Ok(false);
+        };
+        let Some(session) = worker.factory_session.as_deref() else {
+            return Ok(false);
+        };
+        Ok(SqliteWorkerTaskQueueStore::open(&self.cas_root)
+            .map_err(error)?
+            .get(session, &worker.name)
+            .map_err(error)?
+            .revision
+            > 0)
     }
 
     /// Called after either close or park commits, including immutable receipts.
@@ -244,7 +258,9 @@ impl CasCore {
     // Only authenticated RPCs or the private, session-validated daemon repair
     // below can reach this seam. Never rebind an MCP caller to a worker.
     async fn advance_queue_for_worker(
-        &self, worker: Agent, predecessor: Option<&str>,
+        &self,
+        worker: Agent,
+        predecessor: Option<&str>,
     ) -> Result<Option<String>, McpError> {
         let session = worker
             .factory_session
@@ -273,6 +289,26 @@ impl CasCore {
             return Ok(None);
         }
         let start_fence = worker_lock(&self.cas_root, &worker, "start")?;
+        // A process can die after the terminal write and before close releases
+        // its lease. Repair only the exact owning generation of terminal work.
+        if let Some(previous) = predecessor
+            && tasks.get(previous).is_ok_and(|task| {
+                matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                    && !task.deliverables.merge_conflicted
+            })
+            && let Some(lease) = agents.get_lease(previous).map_err(error)?
+            && lease.agent_id == worker.id
+            && lease.status == cas_types::LeaseStatus::Active
+        {
+            agents
+                .release_lease_if_owner_epoch(
+                    previous,
+                    &worker.id,
+                    lease.epoch,
+                    "Queue repair after completed delivery",
+                )
+                .map_err(error)?;
+        }
         if tasks
             .list(Some(TaskStatus::InProgress))
             .map_err(error)?
@@ -322,10 +358,13 @@ impl CasCore {
                     {
                         Some("assigned elsewhere".into())
                     }
-                    Ok(_) if agents.get_lease(&id).map_err(error)?.is_some_and(|lease|
-                        lease.status == cas_types::LeaseStatus::Active
-                            && lease.expires_at > chrono::Utc::now()
-                            && lease.agent_id != worker.id) => {
+                    Ok(_)
+                        if agents.get_lease(&id).map_err(error)?.is_some_and(|lease| {
+                            lease.status == cas_types::LeaseStatus::Active
+                                && lease.expires_at > chrono::Utc::now()
+                                && lease.agent_id != worker.id
+                        }) =>
+                    {
                         Some("leased elsewhere".into())
                     }
                     Ok(task) if matches!(task.task_type, TaskType::Epic | TaskType::Gate) => {
@@ -364,16 +403,20 @@ impl CasCore {
             }
             Err(cause) => return Err(error(cause)),
         };
-        let foreign_lease = agents.get_lease(&id).map_err(error)?.is_some_and(|lease|
+        let foreign_lease = agents.get_lease(&id).map_err(error)?.is_some_and(|lease| {
             lease.status == cas_types::LeaseStatus::Active
-                && lease.expires_at > chrono::Utc::now() && lease.agent_id != worker.id);
-        if foreign_lease || selected_task.as_ref().is_none_or(|task| {
-            !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
-                || task
-                    .assignee
-                    .as_deref()
-                    .is_some_and(|a| a != worker.name && a != worker.id)
-        }) {
+                && lease.expires_at > chrono::Utc::now()
+                && lease.agent_id != worker.id
+        });
+        if foreign_lease
+            || selected_task.as_ref().is_none_or(|task| {
+                !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
+                    || task
+                        .assignee
+                        .as_deref()
+                        .is_some_and(|a| a != worker.name && a != worker.id)
+            })
+        {
             let note = format!("Task queue skipped {id}: changed ownership or status before start");
             queue.notes.push(note.clone());
             if let Some(previous) = predecessor {
@@ -403,14 +446,22 @@ impl CasCore {
             }
             // Reserve ownership atomically before assignment or Git. A
             // concurrent claimant must never leave us stealing its assignee.
-            match agents.try_claim(&id, &worker.id,
-                i64::from(self.load_config().lease().default_duration_mins) * 60,
-                Some("Queued task start reservation")).map_err(error)? {
+            match agents
+                .try_claim(
+                    &id,
+                    &worker.id,
+                    i64::from(self.load_config().lease().default_duration_mins) * 60,
+                    Some("Queued task start reservation"),
+                )
+                .map_err(error)?
+            {
                 cas_types::ClaimResult::Success(lease) => reserved_epoch = Some(lease.epoch),
-                cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == worker.id => {},
+                cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == worker.id => {}
                 other => return Err(error(format!("Queue reservation refused: {other:?}"))),
             }
-            if task.status == TaskStatus::Open {
+            if task.status == TaskStatus::Open
+                && task.assignee.as_deref() != Some(worker.name.as_str())
+            {
                 let expected = task.clone();
                 let assignee = self
                     .validate_task_assignee(
@@ -457,10 +508,15 @@ impl CasCore {
             Ok(())
         }
         .await;
-        if result.is_err() && let Some(epoch) = reserved_epoch
-            && tasks.get(&id).is_ok_and(|task| task.status != TaskStatus::InProgress) {
-            agents.release_lease_if_owner_epoch(&id, &worker.id, epoch,
-                "Queued start did not commit").map_err(error)?;
+        if result.is_err()
+            && let Some(epoch) = reserved_epoch
+            && tasks
+                .get(&id)
+                .is_ok_and(|task| task.status != TaskStatus::InProgress)
+        {
+            agents
+                .release_lease_if_owner_epoch(&id, &worker.id, epoch, "Queued start did not commit")
+                .map_err(error)?;
         }
         match result {
             Ok(()) => {
@@ -471,9 +527,15 @@ impl CasCore {
                 )
                 .map_err(error)?;
                 if notification.is_none() {
-                    let note = format!("Task queue deferred {id}: worker brief not queued; registration repair will retry");
-                    queue.notes.push(note.clone());
-                    queues.save(session, &worker.name, &mut queue).map_err(error)?;
+                    let note = format!(
+                        "Task queue deferred {id}: worker brief not queued; registration repair will retry"
+                    );
+                    if queue.notes.last() != Some(&note) {
+                        queue.notes.push(note.clone());
+                        queues
+                            .save(session, &worker.name, &mut queue)
+                            .map_err(error)?;
+                    }
                     return Ok(Some(note));
                 }
                 queue.starting = false;
@@ -484,12 +546,14 @@ impl CasCore {
             }
             Err(cause) => {
                 let note = format!("Task queue deferred {id}: {}", cause.message);
-                queue.notes.push(note.clone());
-                queues
-                    .save(session, &worker.name, &mut queue)
-                    .map_err(error)?;
-                if let Some(previous) = predecessor {
-                    tasks.append_note(previous, &note).map_err(error)?;
+                if queue.notes.last() != Some(&note) {
+                    queue.notes.push(note.clone());
+                    queues
+                        .save(session, &worker.name, &mut queue)
+                        .map_err(error)?;
+                    if let Some(previous) = predecessor {
+                        tasks.append_note(previous, &note).map_err(error)?;
+                    }
                 }
                 Ok(Some(note))
             }
@@ -518,57 +582,100 @@ pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
 /// spawn head. Called only by the factory daemon on its external job lane.
 /// This core has no model identity: the sealed principal supplies only start's
 /// worker identity after validating the live session and its owning supervisor.
-pub(crate) async fn reconcile_worker_task_queues(root: &Path, session: &str) -> Result<usize, McpError> {
+pub(crate) async fn reconcile_worker_task_queues(
+    root: &Path,
+    session: &str,
+) -> Result<usize, McpError> {
     let core = CasCore::with_daemon(root.to_path_buf(), None, None);
     let agents = core.open_agent_store()?;
-    let Some(owner) = crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
-        agents.as_ref(), Some(session)) else { return Ok(0) };
+    let Some(owner) =
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+            agents.as_ref(),
+            Some(session),
+        )
+    else {
+        return Ok(0);
+    };
     let supervisor = agents.get(&owner.agent_id).map_err(error)?;
     if supervisor.factory_session.as_deref() != Some(session)
         || !supervisor.is_alive()
         || (chrono::Utc::now() - supervisor.last_heartbeat).num_seconds()
-            > cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS {
+            > cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS
+    {
         return Ok(0);
     }
     let tasks = core.open_task_store()?;
     let queues = SqliteWorkerTaskQueueStore::open(root).map_err(error)?;
     let mut repaired = 0;
-    for worker in agents.list(None).map_err(error)?.into_iter().filter(|a|
-        a.role == AgentRole::Worker && a.factory_session.as_deref() == Some(session)
-            && a.is_alive() && (chrono::Utc::now() - a.last_heartbeat).num_seconds()
-                <= cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS) {
+    let mut registrations = std::collections::HashMap::<String, Agent>::new();
+    for agent in agents.list(None).map_err(error)? {
+        if agent.factory_session.as_deref() == Some(session) {
+            let entry = registrations
+                .entry(agent.name.clone())
+                .or_insert_with(|| agent.clone());
+            if agent.registered_at > entry.registered_at {
+                *entry = agent;
+            }
+        }
+    }
+    for worker in registrations.into_values().filter(|a| {
+        a.role == AgentRole::Worker
+            && a.factory_session.as_deref() == Some(session)
+            && a.is_alive()
+            && (chrono::Utc::now() - a.last_heartbeat).num_seconds()
+                <= cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS
+    }) {
         let lock = match worker_lock(root, &worker, "queue") {
             Ok(lock) => lock,
             Err(_) => continue, // The durable cursor stays due on the next pass.
         };
         let mut queue = queues.get(session, &worker.name).map_err(error)?;
-        if queue.revision == 0 { continue; }
+        if queue.revision == 0 {
+            continue;
+        }
         let predecessor = if queue.starting {
             queue.dispatch_from.clone()
         } else if let Some(id) = queue.current_task.clone() {
             let task = tasks.get(&id).ok();
-            if task.as_ref().is_some_and(|task| task.status == TaskStatus::InProgress
-                && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id)) {
+            if task.as_ref().is_some_and(|task| {
+                task.status == TaskStatus::InProgress
+                    && task
+                        .assignee
+                        .as_deref()
+                        .is_some_and(|a| a == worker.name || a == worker.id)
+            }) {
                 continue;
             }
-            if task.as_ref().is_some_and(|task|
+            if task.as_ref().is_some_and(|task| {
                 matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
-                    && !task.deliverables.merge_conflicted) {
+                    && !task.deliverables.merge_conflicted
+            }) {
                 Some(id)
             } else {
                 // A spawn head may have become blocked/reassigned before
                 // registration. Re-select it with the ordinary skip policy.
                 queue.pending.insert(0, id);
                 queue.current_task = None;
-                queues.save(session, &worker.name, &mut queue).map_err(error)?;
+                queues
+                    .save(session, &worker.name, &mut queue)
+                    .map_err(error)?;
                 None
             }
-        } else if queue.pending.is_empty() { continue; } else { None };
+        } else if queue.pending.is_empty() {
+            continue;
+        } else {
+            None
+        };
         drop(lock);
-        match core.advance_queue_for_worker(worker, predecessor.as_deref()).await {
+        match core
+            .advance_queue_for_worker(worker, predecessor.as_deref())
+            .await
+        {
             Ok(Some(_)) => repaired += 1,
-            Ok(None) => {},
-            Err(cause) => tracing::debug!(%cause, "worker queue repair deferred; durable cursor remains due"),
+            Ok(None) => {}
+            Err(cause) => {
+                tracing::debug!(%cause, "worker queue repair deferred; durable cursor remains due")
+            }
         }
     }
     Ok(repaired)

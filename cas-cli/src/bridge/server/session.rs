@@ -780,11 +780,20 @@ mod focused_epic_tests {
         git(&["config", "user.email", "fixture@example.test"]);
         git(&["config", "user.name", "Fixture"]);
         git(&["commit", "--allow-empty", "-m", "base"]);
-        std::fs::write(project.path().join("file"), "delivered\n").unwrap();
-        git(&["add", "file"]);
-        git(&["commit", "-m", "delivery"]);
-        let anchor = git(&["rev-parse", "HEAD"]);
-        git(&["branch", "factory/fresh-worker", &anchor]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let mut anchors = Vec::new();
+        for index in 0..35 {
+            if index == 34 {
+                git(&["checkout", "-b", "factory/pending"]);
+            }
+            let file = format!("delivery-{index}");
+            std::fs::write(project.path().join(&file), format!("delivery {index}\n")).unwrap();
+            git(&["add", &file]);
+            git(&["commit", "-m", &file]);
+            anchors.push(git(&["rev-parse", "HEAD"]));
+        }
+        git(&["checkout", "main"]);
+        git(&["branch", "factory/fresh-worker"]);
         git(&["branch", "historical"]);
         let agents = crate::store::open_agent_store(&root).unwrap();
         for (id, name, role) in [
@@ -803,7 +812,7 @@ mod focused_epic_tests {
         // These higher-priority historical epics precede the active release
         // in the project catalog. Trace actual Git reads rather than depending
         // on a particular machine exhausting the two-second budget.
-        for index in 0..300 {
+        for index in 0..296 {
             let mut historical = Task::new(format!("cas-history-{index}"), "Old release".into());
             historical.task_type = TaskType::Epic;
             historical.status = TaskStatus::Closed;
@@ -822,71 +831,51 @@ mod focused_epic_tests {
         epic.branch = Some("main".into());
         epic.epic_verification_owner = Some("supervisor-id".into());
         store.add(&epic).unwrap();
-        for (id, status, delivered) in [
-            ("cas-landed", TaskStatus::AwaitingMerge, true),
-            ("cas-landed-2", TaskStatus::AwaitingMerge, true),
-            ("cas-landed-3", TaskStatus::AwaitingMerge, true),
-            ("cas-open", TaskStatus::Open, false),
-            ("cas-active", TaskStatus::InProgress, false),
-            ("cas-cancel", TaskStatus::Cancelled, false),
+        let mut children = Vec::new();
+        for (index, anchor) in anchors.iter().enumerate() {
+            let id = if index == 0 { "cas-landed".into() } else { format!("cas-delivery-{index}") };
+            let mut child = Task::new(id, format!("Delivery {index}"));
+            child.status = TaskStatus::AwaitingMerge;
+            child.deliverables.factory_branch_anchor = Some(anchor.clone());
+            if index == 0 {
+                child.deliverables.merge_commit = Some(anchor.clone());
+            } else {
+                child.deliverables.green_merge_commit = Some(anchor.clone());
+                child.deliverables.merge_ci_admission = Some(if index == 1 {
+                    cas_types::MergeCiAdmission::Advisory
+                } else {
+                    cas_types::MergeCiAdmission::Green
+                });
+            }
+            children.push(child);
+        }
+        for (id, status, assignee) in [
+            ("cas-open", TaskStatus::Open, Some("fresh-worker")),
+            ("cas-active", TaskStatus::InProgress, Some("worker-id")),
+            ("cas-cancel", TaskStatus::Cancelled, None),
         ] {
             let mut child = Task::new(id.into(), id.into());
             child.status = status;
-            if id == "cas-open" {
-                child.assignee = Some("fresh-worker".into());
-            }
-            if id == "cas-active" {
-                child.assignee = Some("worker-id".into());
-            }
-            if delivered {
-                child.deliverables.factory_branch_anchor = Some(anchor.clone());
-                if id == "cas-landed" {
-                    child.deliverables.merge_commit = Some(anchor.clone());
-                } else {
-                    // Native factory merges record their receipt here.
-                    child.deliverables.green_merge_commit = Some(anchor.clone());
-                    child.deliverables.merge_ci_admission = Some(if id == "cas-landed-2" {
-                        cas_types::MergeCiAdmission::Green
-                    } else {
-                        cas_types::MergeCiAdmission::Advisory
-                    });
-                }
-                let branch = format!("factory/worker-{id}");
-                child.deliverables.parked_branch = Some(branch.clone());
-                git(&["branch", &branch, &anchor]);
-            }
-            store.add(&child).unwrap();
-            store
-                .add_dependency(&Dependency {
-                    from_id: id.into(),
-                    to_id: epic.id.clone(),
-                    dep_type: DependencyType::ParentChild,
-                    created_at: chrono::Utc::now(),
-                    created_by: None,
-                })
-                .unwrap();
+            child.assignee = assignee.map(str::to_string);
+            children.push(child);
+        }
+        for child in &children {
+            store.add(child).unwrap();
+            store.add_dependency(&Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id.clone(),
+                dep_type: DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            }).unwrap();
         }
         let trace = project.path().join("status-git.trace");
         home.set("GIT_TRACE", &trace);
-        // Native release children remain AwaitingMerge while their proofs cost
-        // more than one refresh's soft budget. Repeated real status builds
-        // must finish those live proofs, rather than restarting at child zero.
-        let load = crate::git_evidence::measurement::test_load::Guard::new(
-            std::time::Duration::from_millis(700),
-            std::time::Duration::from_secs(20),
-        );
-        let mut status = serde_json::Value::Null;
-        for _ in 0..2 {
-            status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
-            if status["epics"].as_array().unwrap().iter().any(|item| {
-                item["id"] == epic.id && item["progress"]["total"] == 5
-            }) {
-                break;
-            }
-        }
-        drop(load);
+        // Like the native snapshot: 297 epics, 35 distinct delivery anchors,
+        // and no focus. The first refresh must contain the current header.
+        let status = serde_json::to_value(build_status_json(&session, &root, 100).unwrap()).unwrap();
         assert!(status["focused_epic"].is_null());
-        assert_eq!(status["epics"].as_array().unwrap().len(), 301);
+        assert_eq!(status["epics"].as_array().unwrap().len(), 297);
         let reads = std::fs::read_to_string(trace).unwrap();
         let first_epic_read = reads
             .lines()
@@ -910,9 +899,9 @@ mod focused_epic_tests {
             .iter()
             .find(|item| item["id"] == epic.id)
             .unwrap()["progress"];
-        assert_eq!(progress["total"], 5);
-        assert_eq!(progress["merged"], 3);
-        assert_eq!(progress["merges_per_hour"], 2);
+        assert_eq!(progress["total"], 37);
+        assert_eq!(progress["merged"], 34);
+        assert_eq!(progress["merges_per_hour"], 33);
         assert!(
             chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok()
         );
@@ -940,13 +929,12 @@ mod focused_epic_tests {
             "projection proofs must stay out of the close cache"
         );
         // A moved delivery target must invalidate completed live proofs.
-        let base = git(&["rev-parse", "HEAD^"]);
         git(&["update-ref", "refs/heads/main", &base]);
         let changed = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
         let progress = &changed["epics"]
             .as_array().unwrap().iter()
             .find(|item| item["id"] == epic.id).unwrap()["progress"];
-        assert_eq!(progress["total"], 5);
+        assert_eq!(progress["total"], 37);
         assert_eq!(progress["merged"], 0, "moved refs must not reuse a live merge verdict");
         assert!(progress["last_merged_at"].is_null());
     }

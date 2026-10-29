@@ -433,10 +433,12 @@ pub(crate) mod test_support {
                     let source = std::fs::read_to_string(&path).expect("read Rust source");
                     for (line_index, line) in source.lines().enumerate() {
                         let mutates_sensitive_var =
-                            ["HOME", "XDG_CONFIG_HOME", "PATH"].iter().any(|key| {
-                                line.contains(&format!("std::env::set_var(\"{key}\""))
-                                    || line.contains(&format!("std::env::remove_var(\"{key}\""))
-                            });
+                            ["HOME", "XDG_CONFIG_HOME", "PATH", "CAS_AGENT_ROLE"]
+                                .iter()
+                                .any(|key| {
+                                    line.contains(&format!("std::env::set_var(\"{key}\""))
+                                        || line.contains(&format!("std::env::remove_var(\"{key}\""))
+                                });
                         let mutates_path_through_guard =
                             line.contains(".set(\"PATH\"") || line.contains(".remove(\"PATH\"");
                         if mutates_sensitive_var || mutates_path_through_guard {
@@ -454,9 +456,39 @@ pub(crate) mod test_support {
         );
         assert!(
             hits.is_empty(),
-            "HOME/XDG_CONFIG_HOME mutations must use TestEnvGuard, and lib tests must not mutate \
+            "HOME/XDG_CONFIG_HOME/CAS_AGENT_ROLE mutations must use TestEnvGuard, and lib tests must not mutate \
              process-global PATH; use per-Command environment instead: {hits:?}"
         );
+
+        // A grouped Cargo harness is one executable. Recompiling the guard
+        // in its source suites creates independent locks for the same env.
+        let root = crate::test_paths::crate_root();
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let harnesses: Vec<_> = manifest
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("path = \""))
+            .filter_map(|line| line.strip_suffix('"'))
+            .map(|path| root.join(path))
+            .collect();
+        let mut dirs = vec![root.join("tests")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    assert!(
+                        !source
+                            .lines()
+                            .any(|line| line.trim() == "mod test_env_guard;")
+                            || harnesses.contains(&path),
+                        "{} compiles a second environment lock; import the harness guard",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 }
 

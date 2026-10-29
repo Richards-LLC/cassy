@@ -11,30 +11,9 @@ use cas_store::{
 use cas_types::{Agent, AgentRole, AgentStatus};
 use tempfile::TempDir;
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: Option<&str>) -> Self {
-        let previous = std::env::var(key).ok();
-        match value {
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => unsafe { std::env::set_var(self.key, value) },
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
-}
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
 
 struct Stores {
     _temp: TempDir,
@@ -99,15 +78,22 @@ fn agent_ids(data: &DirectorData) -> Vec<String> {
     ids
 }
 
-fn load_director_for_session(cas_dir: &std::path::Path, factory_session: &str) -> DirectorData {
-    let _guard = EnvGuard::set("CAS_FACTORY_SESSION", Some(factory_session));
-    DirectorData::load_fast(cas_dir).expect("load director data")
+fn load_director_for_session(
+    env: &mut TestEnvGuard,
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+) -> DirectorData {
+    env.set("CAS_FACTORY_SESSION", factory_session);
+    let data = DirectorData::load_fast(cas_dir).expect("load director data");
+    env.remove("CAS_FACTORY_SESSION");
+    data
 }
 
 #[test]
 fn two_concurrent_factory_sessions_are_isolated_with_legacy_null_compatibility() {
-    let _clean_env = EnvGuard::set("CAS_FACTORY_SESSION", None);
+    let mut env = TestEnvGuard::temp_home();
     let stores = Stores::new();
+    env.set("CAS_ROOT", &stores.cas_dir);
 
     // 1. Spawn/shutdown queue isolation: a request tagged for A is invisible
     // to B, then visible to A. Legacy NULL rows remain processable by either.
@@ -191,12 +177,12 @@ fn two_concurrent_factory_sessions_are_isolated_with_legacy_null_compatibility()
     );
     stores.register_factory_agent("plain-id", "plain-agent", AgentRole::Standard, None);
 
-    let director_a = load_director_for_session(&stores.cas_dir, "session-a");
+    let director_a = load_director_for_session(&mut env, &stores.cas_dir, "session-a");
     assert_eq!(
         agent_ids(&director_a),
         vec!["supervisor-a-id".to_string(), "worker-a-id".to_string()]
     );
-    let director_b = load_director_for_session(&stores.cas_dir, "session-b");
+    let director_b = load_director_for_session(&mut env, &stores.cas_dir, "session-b");
     assert_eq!(
         agent_ids(&director_b),
         vec!["supervisor-b-id".to_string(), "worker-b-id".to_string()]
@@ -265,7 +251,8 @@ fn two_concurrent_factory_sessions_are_isolated_with_legacy_null_compatibility()
         )
         .expect("enqueue session-b direct prompt");
 
-    let director_a_with_messages = load_director_for_session(&stores.cas_dir, "session-a");
+    let director_a_with_messages =
+        load_director_for_session(&mut env, &stores.cas_dir, "session-a");
     let worker_a_summary = director_a_with_messages
         .agents
         .iter()
@@ -276,7 +263,8 @@ fn two_concurrent_factory_sessions_are_isolated_with_legacy_null_compatibility()
         "session-a same-name worker should count only session-a direct messages"
     );
 
-    let director_b_with_messages = load_director_for_session(&stores.cas_dir, "session-b");
+    let director_b_with_messages =
+        load_director_for_session(&mut env, &stores.cas_dir, "session-b");
     let worker_b_summary = director_b_with_messages
         .agents
         .iter()

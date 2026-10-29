@@ -2823,6 +2823,10 @@ fn matches_keywords(tool: &Tool, keywords: &[String]) -> bool {
 }
 
 #[cfg(test)]
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rmcp::model::Tool;
@@ -3818,6 +3822,7 @@ for line in sys.stdin:
 
     #[test]
     fn imported_http_headers_and_literal_or_env_auth_are_forwarded_as_raw_bearer_tokens() {
+        let mut env = crate::test_env_guard::TestEnvGuard::new();
         let config = http_transport_config(
             "https://example.invalid/mcp",
             Some("literal-token"),
@@ -3840,14 +3845,13 @@ for line in sys.stdin:
             SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let env_secret = "env-backed-token";
-        unsafe { std::env::set_var(&env_name, env_secret) };
+        env.set(&env_name, env_secret);
         let env_config = http_transport_config(
             "https://example.invalid/mcp",
             Some(&format!("env:{env_name}")),
             &HashMap::new(),
         )
         .expect("valid env-backed auth");
-        unsafe { std::env::remove_var(&env_name) };
 
         assert_eq!(
             env_config.auth_header.as_deref(),
@@ -3867,12 +3871,13 @@ for line in sys.stdin:
 
     #[test]
     fn stdio_values_expand_environment_placeholders_and_defaults() {
+        let mut env = crate::test_env_guard::TestEnvGuard::new();
         let env_name = format!(
             "CAS_PROXY_EXPANSION_TEST_{}_{}",
             std::process::id(),
             SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
-        unsafe { std::env::set_var(&env_name, "from-process") };
+        env.set(&env_name, "from-process");
         let missing = format!(
             "CAS_PROXY_EXPANSION_MISSING_{}_{}",
             std::process::id(),
@@ -3888,7 +3893,6 @@ for line in sys.stdin:
         ))
         .unwrap();
 
-        unsafe { std::env::remove_var(&env_name) };
         assert_eq!(expanded_arg, "prefix-from-process-fallback-from-process");
         assert_eq!(expanded_env, "env-prefix-from-process-env-fallback");
     }

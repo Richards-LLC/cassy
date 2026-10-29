@@ -18630,18 +18630,9 @@ effort = "high"
 
     #[test]
     fn default_grok_sessions_dir_honors_grok_home_override() {
-        let _lock = crate::hooks::test_env_lock();
-        let old = std::env::var("GROK_HOME").ok();
-        unsafe {
-            std::env::set_var("GROK_HOME", "/custom/grok/home");
-        }
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("GROK_HOME", "/custom/grok/home");
         let got = default_grok_sessions_dir();
-        unsafe {
-            match &old {
-                Some(v) => std::env::set_var("GROK_HOME", v),
-                None => std::env::remove_var("GROK_HOME"),
-            }
-        }
         assert_eq!(
             got,
             Some(std::path::PathBuf::from("/custom/grok/home/sessions"))
@@ -18785,18 +18776,9 @@ effort = "high"
 
     #[test]
     fn default_codex_sessions_dir_honors_codex_home_override() {
-        let _lock = crate::hooks::test_env_lock();
-        let old = std::env::var("CODEX_HOME").ok();
-        unsafe {
-            std::env::set_var("CODEX_HOME", "/custom/codex/home");
-        }
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CODEX_HOME", "/custom/codex/home");
         let got = default_codex_sessions_dir();
-        unsafe {
-            match &old {
-                Some(v) => std::env::set_var("CODEX_HOME", v),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
-        }
         assert_eq!(
             got,
             Some(std::path::PathBuf::from("/custom/codex/home/sessions"))
@@ -19040,26 +19022,17 @@ effort = "high"
     /// cwd-aware resolver, so that production path must return it too.
     #[test]
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
-        let _lock = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let clone = "/home/pippenz/Petrastella/ozer/.cas/worktrees/worker-android";
         let rel =
             "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
         let (tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
-        let old = std::env::var("CODEX_HOME").ok();
-        unsafe {
-            std::env::set_var("CODEX_HOME", tmp.path());
-        }
+        env.set("CODEX_HOME", tmp.path());
         let got = worker_status_transcript_path(
             Some(clone),
             "codex-worker-android-2f828ac6-deadbeefcafe",
             cas_mux::SupervisorCli::Codex,
         );
-        unsafe {
-            match old {
-                Some(value) => std::env::set_var("CODEX_HOME", value),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
-        }
         assert_eq!(got, Some(sessions.join(rel)));
     }
 
@@ -19258,7 +19231,7 @@ effort = "high"
     fn worker_status_activity_does_not_latch_onto_active_exec_rollout() {
         use std::io::Write;
 
-        let _lock = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let clone = "/tmp/codex-worker-active-exec";
         let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
         let exec_rel = "2026/07/28/rollout-2026-07-28T08-03-58-active-exec.jsonl";
@@ -19282,22 +19255,13 @@ effort = "high"
         )
         .unwrap();
 
-        let old = std::env::var("CODEX_HOME").ok();
-        unsafe {
-            std::env::set_var("CODEX_HOME", tmp.path());
-        }
+        env.set("CODEX_HOME", tmp.path());
         let path = worker_status_transcript_path(
             Some(clone),
             "codex-worker-cas-session",
             cas_mux::SupervisorCli::Codex,
         )
         .expect("the worker rollout must resolve despite the active exec child");
-        unsafe {
-            match old {
-                Some(value) => std::env::set_var("CODEX_HOME", value),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
-        }
         assert_eq!(path, worker, "worker_status must not latch onto codex_exec");
 
         let events = vec![make_event(
@@ -19379,7 +19343,7 @@ effort = "high"
 
     #[test]
     fn worker_status_transcript_path_preserves_grok_fast_path_behavior() {
-        let _lock = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let session = "grok-session-0000-0000-000000000000";
         let (tmp, sessions) =
             fake_grok_sessions_dir(&[("%2Fhome%2Falice%2Fworkspace", &[session])]);
@@ -19387,10 +19351,7 @@ effort = "high"
             .join("%2Fhome%2Falice%2Fworkspace")
             .join(session)
             .join("updates.jsonl");
-        let old = std::env::var("GROK_HOME").ok();
-        unsafe {
-            std::env::set_var("GROK_HOME", tmp.path());
-        }
+        env.set("GROK_HOME", tmp.path());
 
         // This test name is retained from cas-fa69, where AC7 deliberately
         // pinned Grok's then-unreviewed fast-path behavior to `None`.
@@ -19408,12 +19369,6 @@ effort = "high"
             session,
             cas_mux::SupervisorCli::Grok,
         );
-        unsafe {
-            match old {
-                Some(value) => std::env::set_var("GROK_HOME", value),
-                None => std::env::remove_var("GROK_HOME"),
-            }
-        }
 
         assert_eq!(
             worker_status_path,

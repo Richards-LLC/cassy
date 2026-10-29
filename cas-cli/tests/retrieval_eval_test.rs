@@ -64,8 +64,7 @@ use cas::retrieval_eval::{
 };
 use sha2::{Digest, Sha256};
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
+use crate::test_env_guard;
 use test_env_guard::TestEnvGuard;
 
 fn fixture() -> EvalFixture {

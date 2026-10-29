@@ -410,6 +410,58 @@ fn v2_tool_payloads_use_explicit_inputs_and_results() {
 }
 
 #[test]
+fn native_phase_uses_scoped_hook_identity_and_compaction_boundaries() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(project.path()).unwrap();
+    let path = project.path().join("native.jsonl");
+    let logs = root.join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let log = logs.join(format!("factory-session-{}.log", Utc::now().date_naive()));
+    let hook = |event: &str, at: &str, source: &str| json!({"event":event,"timestamp":at,
+        "factory_session":"native-phase","agent":"actual-supervisor","role":"supervisor",
+        "session_id":"real-native-session","harness":"claude","transcript_path":path,"source":source});
+    // Native SessionStart owns the identity even when an older auto-registration
+    // in the project store still has a different name/account/session ID.
+    write_lines(&path, &[json!({"type":"assistant","timestamp":at(1),"message":{"content":[
+        {"type":"tool_use","id":"native-tool","name":"Bash","input":{"command":"private input"}}
+    ]}})]);
+    write_lines(&log, &[hook("session_start_fired", &at(0), "startup")]);
+    let phase = || supervisor_phase_for_session(&root, project.path(), "native-phase", "actual-supervisor");
+    let running = phase().expect("native hook identity reaches the real transcript without a matching registration");
+    assert_eq!(running.kind, WorkEventKind::Tool);
+    assert_eq!(running.lifecycle.started_at.as_deref(), Some("2026-10-27T12:00:01+00:00"));
+    assert!(!serde_json::to_string(&running).unwrap().contains("private input"));
+    write_lines(&log, &[
+        hook("pre_compact_fired", &at(2), "manual"),
+        json!({"event":"pre_compact_fired","timestamp":at(3),"factory_session":"foreign","agent":"actual-supervisor","role":"supervisor","session_id":"foreign"}),
+    ]);
+    let compacting = phase().unwrap();
+    assert_eq!(compacting.lifecycle.phase.as_deref(), Some("compacting"));
+    assert_eq!(compacting.lifecycle.started_at.as_deref(), Some("2026-10-27T12:00:02+00:00"));
+    write_lines(&log, &[hook("session_start_fired", &at(4), "compact")]);
+    let compacted = phase().unwrap();
+    assert_eq!(compacted.lifecycle.phase.as_deref(), Some("compacted"));
+    assert_eq!(compacted.lifecycle.started_at, compacting.lifecycle.started_at);
+    assert_eq!(compacted.lifecycle.ended_at.as_deref(), Some("2026-10-27T12:00:04+00:00"));
+    // A completed boundary without its start must remain without a duration.
+    std::fs::write(&log, format!("{}\n", hook("session_start_fired", &at(4), "compact"))).unwrap();
+    assert!(phase().unwrap().lifecycle.started_at.is_none());
+    // A later real tool start supersedes the historical compaction boundary.
+    write_lines(&path, &[json!({"type":"assistant","timestamp":at(5),"message":{"content":[
+        {"type":"tool_use","id":"next-tool","name":"Read","input":{"file_path":"src/lib.rs"}}
+    ]}})]);
+    assert_eq!(phase().unwrap().lifecycle.id, "next-tool");
+    let cleared_path = project.path().join("cleared.jsonl");
+    std::fs::write(&cleared_path, "").unwrap();
+    let mut cleared = hook("session_start_fired", &at(6), "clear");
+    cleared["transcript_path"] = json!(cleared_path);
+    cleared["session_id"] = json!("cleared-native-session");
+    write_lines(&log, &[cleared]);
+    assert!(phase().is_none(), "a new empty context must not inherit its old tool/compaction phase");
+}
+
+#[test]
 fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("rollout.jsonl");

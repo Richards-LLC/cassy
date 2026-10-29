@@ -213,7 +213,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
       await journey.stage("Compacting changes live; waiting has no moving dots", async () => {
         world.supervisor_phase!.lifecycle.phase = "compacting";
-        await refresh(); await expect(line).toContainText("Compacting", { timeout: 5_000 });
+        // Native lifecycle changes need no unrelated fleet event, and Show
+        // work is still off. The existing machine heartbeat owns refresh.
+        await page.clock.runFor(5_000);
+        await expect(line).toContainText("Compacting", { timeout: 5_000 });
         await page.emulateMedia({ reducedMotion: "reduce", forcedColors: "active" });
         expect(await line.locator(".dots i").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
         await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });

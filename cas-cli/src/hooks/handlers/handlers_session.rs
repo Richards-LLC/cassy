@@ -48,6 +48,8 @@ pub fn handle_session_start(
             "session_start_fired",
             &[
                 ("session_id", input.session_id.as_str()),
+                ("transcript_path", input.transcript_path.as_deref().unwrap_or("")),
+                ("harness", crate::harness_policy::own_harness_from_env().backend().name()),
                 ("source", input.source.as_deref().unwrap_or("unknown")),
                 ("tool_prefix", crate::harness_policy::own_tool_prefix()),
                 (
@@ -993,6 +995,7 @@ mod large_artifact_staging_tests {
         env.set("CAS_AGENT_NAME", "d4-worker");
         let mut input = session_input(tmp.path().to_str().unwrap());
         input.source = Some("compact".into());
+        input.transcript_path = Some("/private/native-session.jsonl".into());
         let _ = handle_session_start(&input, Some(tmp.path()));
         let logs: String = std::fs::read_dir(tmp.path().join("logs"))
             .expect("factory session log dir")
@@ -1006,6 +1009,9 @@ mod large_artifact_staging_tests {
         assert!(fired.contains("\"source\":\"compact\""), "{fired}");
         assert!(fired.contains("\"role\":\"worker\""), "{fired}");
         assert!(fired.contains("\"agent\":\"d4-worker\""), "{fired}");
+        let record: serde_json::Value = serde_json::from_str(fired).unwrap();
+        assert_eq!(record["transcript_path"], "/private/native-session.jsonl");
+        assert_eq!(record["harness"], "claude");
         assert!(
             fired.contains("\"session_id\":\"staging-session\""),
             "{fired}"

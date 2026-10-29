@@ -249,10 +249,55 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     // rather than making a second host dispatch the same review again.
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let blobs = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::BTreeMap::<String, (serde_json::Value, Vec<u8>)>::new()));
+    let storage = blobs.clone();
+    let endpoint = server.uri();
+    Mock::given(wiremock::matchers::path_regex("^/(api/artifacts|objects)"))
+        .respond_with(move |request: &wiremock::Request| {
+            let route = request.url.path();
+            let mut blobs = storage.lock().unwrap();
+            if route == "/api/artifacts/begin" {
+                let metadata: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let id = format!("blob-{}", blobs.len());
+                blobs.insert(id.clone(), (metadata, Vec::new()));
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": id, "upload_url": format!("{endpoint}/objects/{id}"),
+                    "required_headers": {}
+                }));
+            }
+            if let Some(id) = route.strip_prefix("/objects/") {
+                let (_, bytes) = blobs.get_mut(id).unwrap();
+                if request.method == "PUT" { *bytes = request.body.clone(); }
+                return ResponseTemplate::new(200).set_body_bytes(bytes.clone());
+            }
+            let id = route.split('/').nth(3).unwrap();
+            let (metadata, _) = blobs.get(id).unwrap();
+            if route.ends_with("/url") {
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": id, "url": format!("{endpoint}/objects/{id}"),
+                    "name": metadata["name"], "mime": metadata["mime"],
+                    "size_bytes": metadata["size_bytes"]
+                }));
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null}))
+        }).mount(&server).await;
+    let artifact_store = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let published_bundle = cas::artifacts::publish(&cas::artifacts::PublishContext {
+        store: &artifact_store,
+        roots: cas::artifacts::paths::PublishRoots::new(&cas_dir, &fx.artifacts, TASK),
+        task_id: TASK.into(),
+        cloud: Some(cas::artifacts::cloud::ArtifactUploadClient::new(&server.uri(), "test-token")),
+    }, &producer).unwrap();
+    assert!(published_bundle.disposition.is_committed(), "{:?}", published_bundle.disposition);
+    // A peer cannot see any producer files. Merely fetching bundle.json is
+    // insufficient: its trace and all relative evidence must travel too.
+    let hidden = producer.parent().unwrap().with_extension("source-only");
+    std::fs::rename(producer.parent().unwrap(), &hidden).unwrap();
     let mut published = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
     published.origin_project = Some("qa-peer-project".into());
     published.updated_at += chrono::Duration::hours(1);
-    let server = MockServer::start().await;
     for endpoint in ["/api/sync/pull", "/api/teams/qa-peer-team/sync/pull"] {
         Mock::given(method("GET")).and(path(endpoint))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -265,8 +310,11 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         let root = peer.path().join(".cas");
         std::fs::write(root.join("config.toml"), format!(
             "[project]\ncanonical_id = \"qa-peer-project\"\n[verification]\nenabled = false\n[factory]\nartifacts_root = {:?}\n[qa]\nindependent_pass = true\n",
-            fx.artifacts.display().to_string()
+            peer.path().join("artifacts").display().to_string()
         )).unwrap();
+        std::fs::write(root.join("cloud.json"), serde_json::json!({
+            "endpoint": server.uri(), "token": "test-token"
+        }).to_string()).unwrap();
         git(peer.path(), &["init", "-q", "-b", "main"]);
         git(peer.path(), &["fetch", "-q", fx.repo.to_str().unwrap(), "main"]);
         git(peer.path(), &["reset", "-q", "--hard", "FETCH_HEAD"]);
@@ -302,6 +350,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         assert_eq!(rounds[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
     }
 
+    std::fs::rename(&hidden, producer.parent().unwrap()).unwrap();
     env.set("CAS_ROOT", &cas_dir);
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);

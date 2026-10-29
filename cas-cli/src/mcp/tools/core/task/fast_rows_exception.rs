@@ -74,6 +74,13 @@ fn scope(text: &str, head: &str) -> Option<Vec<String>> {
     let files = lines
         .filter_map(|line| line.strip_prefix("SCOPE release-notes-draft "))
         .collect::<BTreeSet<_>>();
+    let complete = format!("scope complete count={}", files.len());
+    if text.lines().last() != Some(complete.as_str())
+        || text.lines().filter(|line| line.starts_with("scope complete count=")).count() != 1
+        || text.lines().filter(|line| line.starts_with("SCOPE release-notes-draft ")).count() != files.len()
+    {
+        return None;
+    }
     (!files.is_empty() && files.iter().all(|file| draft_path(file)))
         .then(|| files.into_iter().map(str::to_owned).collect())
 }

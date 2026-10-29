@@ -298,6 +298,7 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
     conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
     conn.execute_batch(PROMPT_QUEUE_SESSION_HISTORY_INDEX)?;
+    conn.execute_batch(PROMPT_QUEUE_MAINTENANCE_INDEXES)?;
     for statement in OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
         conn.execute_batch(statement)?;
     }

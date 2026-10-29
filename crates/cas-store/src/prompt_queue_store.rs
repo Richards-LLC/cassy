@@ -867,6 +867,21 @@ CREATE INDEX IF NOT EXISTS idx_prompt_queue_legacy_pending
     WHERE processed_at IS NULL AND factory_session IS NULL;
 "#;
 
+/// QueueSelect runs these maintenance queries even when there is no delivery.
+/// Bound QA lookup to its pending source, and shutdown lookup to outstanding
+/// recipients. Shutdown deliberately includes processed/transported unread rows.
+/// Keep predicates identical to the selectors below so terminal history stays
+/// outside their indexes (cas-d9b5).
+const PROMPT_QUEUE_MAINTENANCE_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_qa_route
+    ON prompt_queue(factory_session, source)
+    WHERE origin_kind = 'daemon' AND processed_at IS NULL AND acked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_shutdown_unread
+    ON prompt_queue(target, factory_session)
+    WHERE acked_at IS NULL
+      AND COALESCE(highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned');
+"#;
+
 const QA_REJECTION_ROUTES_SQL: &str = "SELECT q.id, q.target,
                             CASE WHEN t.status IN ('closed', 'cancelled') THEN NULL
                                  ELSE COALESCE((SELECT a.name FROM agents a WHERE a.id = t.assignee),

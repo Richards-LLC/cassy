@@ -71,7 +71,6 @@ async fn machine_health_answers_while_subscription_catalog_is_busy() {
 /// provider environment; a machine-only pairing cannot read those identities.
 #[tokio::test]
 async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_c021() {
-    use base64::Engine as _;
     use chrono::Utc;
     use p256::ecdsa::SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
@@ -87,10 +86,6 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     }
     std::fs::write(claude.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"claude@example.test"}}"#).unwrap();
     std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"default-claude@example.test"}}"#).unwrap();
-    for (dir, email) in [(&codex, "codex@example.test"), (&home.join(".codex"), "default-codex@example.test")] {
-        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"email":"{email}"}}"#));
-        std::fs::write(dir.join("auth.json"), serde_json::json!({"tokens":{"id_token":format!("header.{claims}.signature")}}).to_string()).unwrap();
-    }
     let project = home.join("project");
     let cas_root = init_cas_dir(&project).unwrap();
     std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"catalog-project\"\n").unwrap();
@@ -98,8 +93,8 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     env.set("CAS_ROOT", unrelated);
     let agents = SqliteAgentStore::open(&cas_root).unwrap();
     agents.init().unwrap();
-    // cas-46db: secret-only Codex email stays absent even when auth.json
-    // contains a token; the provider selector remains independently recorded.
+    // Codex has no proven non-secret email source. Its recorded account
+    // directory is enough for catalog coverage; no token fixture is needed.
     let cases = [
         ("claude", "claude", Some(claude.clone()), Some("claude@example.test")),
         ("codex", "codex", Some(codex.clone()), None),

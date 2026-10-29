@@ -456,6 +456,11 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
     }
     let notes = task_qa_notes(&paths, task, &artifacts_dir);
+    let notes = match crate::artifacts::qa::restore(cas_root, task, &notes, &artifacts_dir)
+        .map_err(|error| format!("QA EVIDENCE REJECTED: cannot restore published bundle: {error}"))? {
+        Some(bundle) => std::borrow::Cow::Owned(format!("{notes}\nqa-bundle: {}", bundle.display())),
+        None => notes,
+    };
     let ctx = EvidenceContext {
         task_id: &task.id,
         task_artifacts_dir: &artifacts_dir,

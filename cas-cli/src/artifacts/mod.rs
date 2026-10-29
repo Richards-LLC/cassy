@@ -23,6 +23,7 @@
 pub mod cloud;
 pub mod paths;
 pub mod proof;
+pub(crate) mod qa;
 pub mod retention;
 pub mod slack;
 
@@ -338,6 +339,8 @@ pub fn publish(
         });
     }
 
+    let closure = qa::prepare(context, &source).map_err(|error| PublishError::Read(error.to_string()))?;
+
     let name = source
         .file_name()
         .and_then(|value| value.to_str())
@@ -385,11 +388,13 @@ pub fn publish(
         }
     }
 
-    Ok(PublishOutcome {
-        artifact,
-        disposition,
-        source,
-    })
+    let mut outcome = PublishOutcome { artifact, disposition, source };
+    if outcome.disposition.is_committed() && let Some((_temp, archive)) = closure {
+        if let Err(error) = qa::record(context, &outcome, &archive) {
+            outcome.disposition = PublishDisposition::CommittedMetadataUnavailable { reason: error.to_string() };
+        }
+    }
+    Ok(outcome)
 }
 
 /// The three cloud steps, advancing the row as each one lands.

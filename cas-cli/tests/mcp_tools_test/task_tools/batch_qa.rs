@@ -812,6 +812,23 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
     })).unwrap();
     let status = extract_text(fx.supervisor.verification(Parameters(status)).await.unwrap());
     assert!(status.contains("Batch QA PASS"), "{status}");
+
+    // History identifies the old delivery; it must not let its approval cover
+    // a new correction that has not acquired a current parked anchor yet.
+    std::fs::write(fx.repo.join("cas-bq01.css"), "body{gap:16px}\n").unwrap();
+    git(&fx.repo, &["add", "cas-bq01.css"]);
+    git(&fx.repo, &["commit", "-qm", "cas-bq01: unreviewed correction after restart"]);
+    let corrected = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["branch", "-f", "main", &corrected]);
+    let correction = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq01", "commit_receipt":corrected, "reason":"New correction needs its own review"
+    })).unwrap();
+    let refused = extract_text(fx.core.cas_task_close(Parameters(correction)).await.unwrap());
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed,
+        "historical approval must not cover the new correction: {refused}");
+    assert!(refused.contains("waiting for batch receipt"), "{refused}");
+    git(&fx.repo, &["reset", "--hard", &fx.staging]);
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     let closed = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
     assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{closed}");
 }

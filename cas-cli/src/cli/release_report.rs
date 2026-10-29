@@ -1270,12 +1270,14 @@ fn plain_change_title(title: &str) -> String {
 
 /// The shipped changes in one CHANGELOG section. A titled heading
 /// (`### Fixed — what changed (refs)`) is one change unless top-level
-/// bold-titled entries identify it as a group. Under a group or an untitled
-/// heading each bullet is one change, titled by its bold lead-in.
+/// bold-titled entries starting with the first entry identify it as a group.
+/// Under a group or an untitled heading each bullet is one change, titled
+/// by its bold lead-in.
 fn changelog_changes(body: &str) -> Vec<ShippedChange> {
     let mut changes = Vec::new();
     let mut kind = "Changes".to_string();
     let mut titled: Option<(String, String)> = None;
+    let mut titled_has_entry = false;
     let mut bullet: Option<String> = None;
     let bold_title = Regex::new(r"^\*\*([^*]+)\*\*").expect("bold change title regex");
     let flush_bullet = |bullet: &mut Option<String>, kind: &str, changes: &mut Vec<ShippedChange>| {
@@ -1302,10 +1304,11 @@ fn changelog_changes(body: &str) -> Vec<ShippedChange> {
     };
     for line in body.lines() {
         let trimmed = line.trim();
-        // A group's title is context, not an extra shipped change. Only a
-        // top-level titled entry switches modes; nested bold details retain
-        // the legacy single-change heading above them.
+        // A group's title is context, not an extra shipped change. Only the
+        // first top-level entry can switch modes; a later bold detail retains
+        // the legacy single-change heading and its earlier plain entries.
         if titled.is_some()
+            && !titled_has_entry
             && line.strip_prefix("- ").is_some_and(|entry| bold_title.is_match(entry))
         {
             titled = None;
@@ -1322,9 +1325,11 @@ fn changelog_changes(body: &str) -> Vec<ShippedChange> {
                 continue;
             }
             titled = title.map(|title| (title.to_string(), String::new()));
+            titled_has_entry = false;
         } else if is_test_or_docs_category(&kind) {
             continue;
         } else if let Some((_, text)) = titled.as_mut() {
+            titled_has_entry |= line.starts_with("- ");
             text.push(' ');
             text.push_str(trimmed);
         } else if let Some(value) = line.trim_start().strip_prefix("- ") {

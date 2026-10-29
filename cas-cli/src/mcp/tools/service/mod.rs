@@ -1418,7 +1418,7 @@ impl CasService {
 
                 // ---- Factory domain ----
                 "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
-                | "worker_status" | "worker_activity"
+                | "worker_status" | "worker_activity" | "worker_queue"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"

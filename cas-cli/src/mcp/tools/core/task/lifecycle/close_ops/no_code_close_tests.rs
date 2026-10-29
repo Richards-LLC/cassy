@@ -1804,9 +1804,22 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         }
         let close = serde_json::json!({"action":"close", "id":first.id,"reason":"Delivered"});
         let closer = if park { &f.worker } else { &f.supervisor };
+        let queue_lock = park.then(|| crate::worker_task_queue::worker_lock(
+            &f.cas_dir(), &agents.get("nocode-worker-session").unwrap(), "queue").unwrap());
         let response = call(closer, close.clone()).await;
         assert_eq!(f.task(&first.id).status,
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
+        if park {
+            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            // The real park committed during another queue operation. Its
+            // durable cursor survives the failed immediate handoff and restart.
+            crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            drop(queue_lock);
+            crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "other-session").await.unwrap();
+            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        }
         let next = f.task("cas-8488-b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));
@@ -1892,7 +1905,13 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
 async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
     let f = queue_control_fixture(&mut env);
-    let _ = queue_control(&f, Some(vec!["cas-8488-one","cas-8488-two","cas-8488-three"])).await;
+    let mut leased = assigned("cas-8488-leased", TaskType::Task, "main");
+    leased.status = TaskStatus::Open;
+    leased.assignee = None;
+    f.put(&leased);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    assert!(agents.try_claim(&leased.id, "nocode-supervisor-session", 3600, None).unwrap().is_success());
+    let _ = queue_control(&f, Some(vec!["cas-8488-one","cas-8488-two","cas-8488-three", "cas-8488-leased"])).await;
     for (id, status, assignee) in [
         ("cas-8488-one", TaskStatus::Open, Some("another-worker")),
         ("cas-8488-two", TaskStatus::Closed, None),
@@ -1912,6 +1931,26 @@ async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
         assert!(notes.contains(&format!("Task queue skipped {id}:")), "{notes}");
         assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease(id).unwrap().is_none());
     }
+    assert!(notes.contains("Task queue skipped cas-8488-leased: leased elsewhere"), "{notes}");
+    assert!(f.task(&leased.id).assignee.is_none());
+    assert_eq!(agents.get_lease(&leased.id).unwrap().unwrap().agent_id, "nocode-supervisor-session");
     let state = queue_control(&f, None).await;
     assert!(state.contains("Pending: none"), "{state}");
+
+    // Registration may find a spawn head blocked after provisioning. The
+    // durable registration repair applies the skip policy and starts its tail.
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    let mut queue = queues.get("queue-session", WORKER).unwrap();
+    queue.current_task = Some("cas-8488-three".into());
+    let mut tail = assigned("cas-8488-spawn-tail", TaskType::Task, "main");
+    tail.status = TaskStatus::Open;
+    tail.assignee = None;
+    f.put(&tail);
+    queue.pending = vec![tail.id.clone()];
+    queues.save("queue-session", WORKER, &mut queue).unwrap();
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&tail.id).status, TaskStatus::InProgress);
+    let queue = queues.get("queue-session", WORKER).unwrap();
+    assert!(queue.notes.iter().any(|note| note.contains("cas-8488-three: status blocked")), "{queue:?}");
+    assert!(!queue.starting);
 }

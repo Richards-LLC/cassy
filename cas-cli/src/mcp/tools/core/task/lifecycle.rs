@@ -203,6 +203,7 @@ fn checkout_task_beside_parked_delivery(
     worker: &str,
     task_id: &str,
     target: &str,
+    require_fresh_base: bool,
 ) -> Result<String, String> {
     let git = GitOperations::new(checkout.to_path_buf());
     let status = std::process::Command::new("git")
@@ -214,6 +215,17 @@ fn checkout_task_beside_parked_delivery(
         return Err("Cannot start task beside a parked delivery: commit or stash tracked changes before switching branches.".into());
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
+    if require_fresh_base {
+        let base = git.resolve_fresh_base(target)
+            .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?;
+        let expected = git.resolve_commit(&base.branch_ref);
+        for reference in [format!("refs/heads/{branch}"), format!("origin/{branch}")] {
+            if let Some(existing) = git.resolve_commit(&reference)
+                && Some(existing) != expected {
+                return Err(format!("Queued branch {branch} differs from its current target {target}; inspect the prior preparation before retrying"));
+            }
+        }
+    }
     if git.resolve_commit(&format!("refs/heads/{branch}")).is_none() {
         let remote = format!("origin/{branch}");
         let base = if git.resolve_commit(&remote).is_some() {
@@ -2258,6 +2270,8 @@ impl CasCore {
             data: None,
         })?;
 
+        let mut queued_start_snapshot = queued_start.then(|| task.clone());
+
         // cas-a0d2: an unattributed row is adopted into this project here. The
         // in-progress write below persists it, so the repair survives and every
         // later ownership check (claim, mine, board filters) agrees.
@@ -2302,6 +2316,16 @@ impl CasCore {
         if !qa_claim_note.is_empty()
             && let Ok(fresh) = task_store.get(&req.id)
         {
+            if let Some(expected) = queued_start_snapshot.as_mut() {
+                let mut comparable = fresh.clone();
+                comparable.notes = expected.notes.clone();
+                comparable.updated_at = expected.updated_at;
+                if serde_json::to_value(&comparable).ok() != serde_json::to_value(&*expected).ok() {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "Queued task changed during QA preflight; retry before preparing Git"));
+                }
+                *expected = fresh.clone();
+            }
             task.notes = fresh.notes;
         }
 
@@ -2317,14 +2341,14 @@ impl CasCore {
             )
         };
 
-        let queued_start_snapshot = if queued_start {
-            let snapshot = task_store.get(&req.id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+        if let Some(snapshot) = queued_start_snapshot.as_ref() {
+            let fresh = task_store.get(&req.id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
             if snapshot.status != TaskStatus::Open || snapshot.assignee.as_deref()
-                != worker.as_ref().map(|a| a.name.as_str()) {
+                != worker.as_ref().map(|a| a.name.as_str())
+                || serde_json::to_value(snapshot).ok() != serde_json::to_value(&fresh).ok() {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, "Queued task changed before start; no Git or lease mutation was applied"));
             }
-            Some(snapshot)
-        } else { None };
+        }
 
         let declared_repo_context = task
             .deliverables
@@ -2485,6 +2509,7 @@ impl CasCore {
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
                             worker_checkout, &worker.name, &task.id, target_branch,
+                            task.deliverables.factory_branch_start.is_none(),
                         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         Some(format!("\nTask queue preserved {previous}; starting on {worker_branch}."))
                     } else if task.status == TaskStatus::Open {
@@ -2498,7 +2523,7 @@ impl CasCore {
                             .map(|parked| {
                                 let preserved = worker_branch.clone();
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch,
+                                    worker_checkout, &worker.name, &task.id, target_branch, false,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Ok::<_, McpError>(format!(
                                     "\n\n🔀 PARKED BRANCH PRESERVED: {} stays on {preserved} at {}. This task uses {worker_branch}.",

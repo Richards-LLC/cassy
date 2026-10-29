@@ -813,6 +813,11 @@ fn provenance_writer() -> &'static ProvenanceWriter {
 /// semantic-message implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CommanderControl {
+    SupervisorCommand {
+        request: crate::ui::factory::supervisor_commands::SupervisorCommandRequest,
+        client_ref: String,
+        attribution: crate::ui::factory::protocol::MessageAttribution,
+    },
     InterruptPane {
         pane_id: String,
     },
@@ -834,6 +839,7 @@ impl CommanderControl {
     pub(super) fn error_prefix(&self) -> &'static str {
         match self {
             Self::InterruptPane { .. } => "targeted interrupt failed",
+            Self::SupervisorCommand { .. } => "supervisor command failed",
             Self::SendMessage { .. } => "semantic message enqueue failed",
         }
     }
@@ -842,6 +848,7 @@ impl CommanderControl {
         match self {
             Self::SendMessage { client_ref, .. } => client_ref.as_deref(),
             Self::InterruptPane { .. } => None,
+            Self::SupervisorCommand { client_ref, .. } => Some(client_ref),
         }
     }
 }
@@ -860,6 +867,19 @@ pub(super) fn commander_control_from_message(
     use crate::ui::factory::protocol::ClientMessage;
 
     match message {
+        ClientMessage::SupervisorCommand { client_ref, attribution, .. }
+        | ClientMessage::SupervisorCommandStatus { client_ref, attribution }
+        | ClientMessage::SupervisorCommandStep { client_ref, attribution, .. } => {
+            use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
+            let request = match message {
+                ClientMessage::SupervisorCommand { command, confirmed, .. } => Request::Run { command: *command, confirmed: *confirmed },
+                ClientMessage::SupervisorCommandStep { key, .. } => Request::Step { key: *key },
+                _ => Request::Status,
+            };
+            let mut attribution = attribution.clone();
+            attribution.operator_verified &= relay_trusted;
+            Some(CommanderControl::SupervisorCommand { request, client_ref: client_ref.clone(), attribution })
+        }
         ClientMessage::InterruptPane { pane_id } => Some(CommanderControl::InterruptPane {
             pane_id: pane_id.clone(),
         }),
@@ -944,6 +964,7 @@ impl FactoryDaemon {
         control: CommanderControl,
     ) -> anyhow::Result<Option<crate::ui::factory::DaemonMessage>> {
         match control {
+            CommanderControl::SupervisorCommand { request, client_ref, attribution } => self.dispatch_supervisor_command(request, client_ref, attribution).await.map(Some),
             CommanderControl::InterruptPane { pane_id } => {
                 self.interrupt_pane_turn(&pane_id).await?;
                 Ok(None)
@@ -2141,6 +2162,15 @@ mod tests {
             let row = stored(untrusted);
             assert_eq!(row.operator.as_ref().map(|stamp| stamp.verified), Some(false));
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Unattributed));
+        }
+
+        let command = ClientMessage::SupervisorCommand {
+            command: crate::ui::factory::supervisor_commands::SupervisorCommand::Finish,
+            client_ref: "cmd-finish".into(), confirmed: true, attribution: commander_attribution(),
+        };
+        for relay in [false, true] {
+            let Some(CommanderControl::SupervisorCommand { attribution, .. }) = commander_control_from_message(&command, relay) else { panic!("command control expected") };
+            assert_eq!(attribution.operator_verified, relay, "Finish must retain only authenticated operator provenance");
         }
 
         // The hub relay's authenticated connection keeps the hub's verdict.

@@ -66,6 +66,8 @@ export type ProtocolTime = {
 type ComposerUpload = { machine: string; session: string; id: string; mime: string; body: Buffer };
 
 export type DoubleOptions = {
+  /** Sessions whose hub and daemon both advertise structured supervisor commands. */
+  commands?: string[];
   /** Actual /v1/machine reports for the version-badge journey. */
   versions?: Record<string, string>;
   /** Durable local uploads, shared with a separately paired device's hub double. */
@@ -986,7 +988,7 @@ export class HubDouble {
     if (path === "/v1/machine") {
       this.machineProbes.set(machineId, (this.machineProbes.get(machineId) ?? 0) + 1);
       this.observed();
-      const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
+      const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.commands?.length ? ["supervisor_commands"] : []), ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
       const defaultCli = this.options.launch?.[machineId]?.defaultCli;
       return route.fulfill({ json: { schema_version: 1, version: this.options.versions?.[machineId] ?? "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
     }
@@ -1320,7 +1322,7 @@ export class HubDouble {
       Welcome: {
         state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
         protocol_version: 3,
-        capabilities: ["conversation_history", "paged_scrollback", ...(this.options.work?.[session] ? ["work_events", ...(this.options.work[session]!.live === false ? [] : ["work_events_live"])] : [])],
+        capabilities: ["conversation_history", "paged_scrollback", ...(this.options.commands?.includes(session) ? ["supervisor_commands"] : []), ...(this.options.work?.[session] ? ["work_events", ...(this.options.work[session]!.live === false ? [] : ["work_events_live"])] : [])],
         // cas-f285: the pane's rows are paged, not replayed as bytes.
         pane_bootstrap: [{ pane_id: "supervisor", epoch: PANE_EPOCH, cols: 100, rows: 28, scrollback_start_row: 0, scrollback_end_row: PANE_ROWS.length }],
       },

@@ -249,6 +249,8 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         | ClientMessage::OperatorNoticePersisted { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),
+        ClientMessage::SupervisorCommand { .. } | ClientMessage::SupervisorCommandStep { .. } => Some(Scope::PaneInput),
+        ClientMessage::SupervisorCommandStatus { .. } => Some(Scope::PaneRead),
         ClientMessage::SpawnWorkers { .. }
         | ClientMessage::ShutdownWorkers { .. }
         | ClientMessage::Inject { .. }

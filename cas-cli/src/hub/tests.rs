@@ -2730,6 +2730,21 @@ fn hub_audit_group_commit_rotates_and_bounds_retention() {
 }
 
 #[test]
+fn supervisor_commands_are_a_closed_leased_control_without_freeform_input() {
+    let known: ClientMessage = serde_json::from_value(serde_json::json!({
+        "SupervisorCommand": { "command": "compact", "client_ref": "cmd-1", "confirmed": false }
+    })).expect("an allowlisted supervisor command is exposed");
+    assert_eq!(required_scope(&known), Some(Scope::PaneInput));
+    assert!(!super::server::is_pane_read_message(&known));
+    for command in ["/compact", "compact; exit", "unknown", "model gpt-anything", "exit\nwhoami"] {
+        let frame = serde_json::json!({"SupervisorCommand": {
+            "command": command, "client_ref": "cmd-2", "confirmed": true
+        }});
+        assert!(serde_json::from_value::<ClientMessage>(frame).is_err(), "arbitrary command accepted: {command}");
+    }
+}
+
+#[test]
 fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidden() {
     use crate::ui::factory::MessageAttribution;
 

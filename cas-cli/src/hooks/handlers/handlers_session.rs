@@ -48,6 +48,7 @@ pub fn handle_session_start(
             "session_start_fired",
             &[
                 ("session_id", input.session_id.as_str()),
+                ("source", input.source.as_deref().unwrap_or("unknown")),
                 ("tool_prefix", crate::harness_policy::own_tool_prefix()),
                 (
                     "custom_config_dir",
@@ -990,7 +991,8 @@ mod large_artifact_staging_tests {
         let mut env = staging_env("worker");
         env.set("CAS_FACTORY_SESSION", "d4-session");
         env.set("CAS_AGENT_NAME", "d4-worker");
-        let input = session_input(tmp.path().to_str().unwrap());
+        let mut input = session_input(tmp.path().to_str().unwrap());
+        input.source = Some("compact".into());
         let _ = handle_session_start(&input, Some(tmp.path()));
         let logs: String = std::fs::read_dir(tmp.path().join("logs"))
             .expect("factory session log dir")
@@ -1001,6 +1003,7 @@ mod large_artifact_staging_tests {
             .lines()
             .find(|line| line.contains("\"session_start_fired\""))
             .unwrap_or_else(|| panic!("no session_start_fired record: {logs}"));
+        assert!(fired.contains("\"source\":\"compact\""), "{fired}");
         assert!(fired.contains("\"role\":\"worker\""), "{fired}");
         assert!(fired.contains("\"agent\":\"d4-worker\""), "{fired}");
         assert!(
@@ -1186,7 +1189,8 @@ mod large_artifact_staging_tests {
             "Honor non-goals and layer boundaries",
             "Never block the pane",
             "Checkpoint, never compact",
-            "verification required",
+            "cas qa ledger init",
+            "cas qa ledger check",
             "MERGE REQUIRED",
         ] {
             assert!(

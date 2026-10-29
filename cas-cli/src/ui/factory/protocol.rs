@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use cas_types::ArtifactRef;
+use super::supervisor_commands::{SupervisorCommand, SupervisorCommandKey, SupervisorCommandReceipt};
 
 /// Original daemon protocol version used before explicit negotiation existed.
 pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
@@ -27,6 +28,7 @@ pub enum ProtocolCapability {
     /// Local framed Unix GUI control only; never advertised by WS/relay.
     BindingIntakeControlV1,
     TargetedInterrupt,
+    SupervisorCommands,
     AttributedSendMessage,
     /// A pane can be initialized from terminal state instead of a raw-byte tail.
     AuthoritativePaneKeyframes,
@@ -58,6 +60,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::MessageClientRefDedupe,
         ProtocolCapability::WorkEvents,
         ProtocolCapability::WorkEventsLive,
+        ProtocolCapability::SupervisorCommands,
     ]
 }
 
@@ -107,7 +110,7 @@ where
 /// H3 transports and persists these values but does not authenticate them; H2 owns
 /// that boundary. Every field is required on the wire. `null` means explicitly
 /// unavailable and is never interpreted as supervisor or MCP identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageAttribution {
     pub device_id: Option<String>,
     pub credential_id: Option<String>,
@@ -519,6 +522,29 @@ pub enum ClientMessage {
     /// deliberately distinct from legacy focused-pane Ctrl+C `Interrupt`.
     InterruptPane { pane_id: String },
 
+    /// Closed allowlist. The actual supervisor pane and mapping belong to the daemon.
+    SupervisorCommand {
+        command: SupervisorCommand,
+        client_ref: String,
+        #[serde(default)]
+        confirmed: bool,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+    /// Read the original command receipt; this never sends a second command.
+    SupervisorCommandStatus {
+        client_ref: String,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+    /// Navigate only the original caller's currently open native chooser.
+    SupervisorCommandStep {
+        client_ref: String,
+        key: SupervisorCommandKey,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+
     /// Enqueue an attributed semantic message through the durable coordination
     /// delivery path (inbox + wake / urgent interrupt-and-redirect machinery).
     SendMessage {
@@ -664,6 +690,8 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pane_bootstrap: Vec<PaneBootstrap>,
     },
+
+    SupervisorCommandReceipt { receipt: SupervisorCommandReceipt },
 
     /// A supervisor reply addressed to one authenticated Commander device.
     /// The queue row remains the retry/receipt authority until this frame is

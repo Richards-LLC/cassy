@@ -70,6 +70,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         urgent_injects: Default::default(),
         operator_refresh_requested: false,
         send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
+        supervisor_commands: Default::default(),
         normal_delivery_probes: HashMap::new(),
         last_pane_output_bytes: HashMap::new(),
         pane_silent_since: HashMap::new(),

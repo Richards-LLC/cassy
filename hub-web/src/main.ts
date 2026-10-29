@@ -1,3 +1,4 @@
+import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
 import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
@@ -144,6 +145,55 @@ const pairingOperations = new PairingOperationCoordinator();
 // Which cancellation, if any, owns the "could not finish cancelling" step.
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const supervisorCommands = new Map<string, SupervisorCommandSession>();
+let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
+function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
+  const key = sessionKey(machineId, session);
+  let commands = supervisorCommands.get(key);
+  if (!commands) {
+    commands = new SupervisorCommandSession({
+      unavailable: () => supervisorCommandUnavailable(machineId, session),
+      control: async () => {
+        const reason = supervisorCommandUnavailable(machineId, session); if (reason) throw new Error(reason);
+        if (!leases.get(key)?.held_by_me) {
+          const lease = await requestPaneControl(machineId, session);
+          if (!lease.held_by_me) throw new Error(lease.controller_label ? `${lease.controller_label} controls this session. Wait until it releases control.` : "Could not take control of this session.");
+        }
+      },
+      send: message => connections.get(machineId)?.send(session, message) ?? false,
+      changed: () => updateConversationViews(),
+    });
+    supervisorCommands.set(key, commands);
+  }
+  return commands;
+}
+function supervisorCommandUnavailable(machineId: string, session: string): string | undefined {
+  const machine = machines.get(machineId);
+  if (!machine || selectedMachineId !== machineId || selectedSession !== session) return "Open this conversation to run a command.";
+  if (sessions.get(machineId)?.find(item => item.name === session)?.ended) return "This session ended. Start or resume a supervisor from New session.";
+  if (!hubSupports(machineId, "supervisor_commands") || !supervisorCommands.get(sessionKey(machineId, session))?.supported) return "Commands need an updated hub and supervisor session.";
+  if (!machine.scopes.includes("pane-input")) return "This browser was paired without command control. Pair again with pane:input.";
+  if (conversationConnection(machineId, session)?.phase !== "live") return "Commands work once the conversation is connected.";
+  return undefined;
+}
+function bindSlashCommands(input: HTMLTextAreaElement): void {
+  const machineId = selectedMachineId; const session = selectedSession;
+  if (!machineId || !session) return;
+  const thread = sessionKey(machineId, session);
+  if (slashCommands?.input === input && slashCommands.thread === thread) return;
+  slashCommands?.palette.dispose();
+  const palette = new SlashCommands(input, {
+    harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
+    unavailable: () => supervisorCommandUnavailable(machineId, session),
+    label: () => supervisorPhrase(machineId, session),
+    run: async (command, confirmed) => {
+      await supervisorCommandSession(machineId, session).run(command, confirmed);
+      countUsage("supervisor.command");
+    },
+  });
+  slashCommands = { input, thread, palette };
+}
+
 bindKeyboardViewport(window);
 // The keyboard coming up or going away resizes the window: the pinned question folds or opens with it (cas-16eed).
 window.addEventListener("resize", () => syncComposing());
@@ -501,6 +551,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The header's own state: a send that expired waiting for the session
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
+      commandReceipts: () => [...supervisorCommandSession(threadMachineId, threadSession).receipts.values()],
+      commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
       // and says to take control once it is released, as the composer does.
@@ -923,7 +975,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
-      for (const item of items) connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
+      for (const item of items) {
+        connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
+        if (item.ended) supervisorCommands.get(sessionKey(machine.id, item.name))?.ended(item.ended.reason);
+      }
       retireEndedSessionNotices(machine.id, items);
       // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
@@ -972,6 +1027,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onMessageRejected: async (session, clientRef, detail, rejection) => {
+      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail)) return;
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the
       // message never arrived there. It waits in the thread and goes out once
@@ -1010,6 +1066,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       }
       updateConversationViews(); renderConversationList();
     },
+    onSupervisorCommandSupport: (session, supported) => { supervisorCommandSession(machine.id, session).supported = supported; slashCommands?.palette.sync(); },
+    onSupervisorCommandReceipt: (session, receipt) => supervisorCommandSession(machine.id, session).receive(receipt),
     onOperatorReply: (session, reply, frameFence) => {
       // A notice belongs only to attention, including its durable resolution.
       if (isOperatorNotice(reply)) { void applyOperatorNotice(machine, session, reply, frameFence); return; }
@@ -3178,7 +3236,7 @@ function bindSpeechComposer(): void {
   // nothing: the keypress only added a newline, in observe and control mode
   // alike.
   composer.onkeydown = (event) => {
-    if (!sendsOnEnter(event)) return;
+    if (event.defaultPrevented || !sendsOnEnter(event)) return;
     event.preventDefault();
     void submitSupervisorMessage();
   };
@@ -3192,6 +3250,7 @@ function bindSpeechComposer(): void {
   // Deferred: focus passing to Send or the mic and straight back must not flicker the question open.
   composer.onblur = () => { window.setTimeout(syncComposing, COMPOSING_BLUR_MS); };
   mic.onclick = () => speechController?.toggle();
+  bindSlashCommands(composer);
   syncSpeechComposer();
   if (speechDetectionStarted) return;
   speechDetectionStarted = true;
@@ -3974,6 +4033,7 @@ async function loadComposerUploads(): Promise<typeof import("./composer-uploads"
 async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
+  if (!quick && composer.value.startsWith("/")) { bindSlashCommands(composer); slashCommands?.palette.submit(); return; }
   const renderedThread = composer.dataset.threadKey;
   if (renderedThread) await acceptingUploads.get(renderedThread);
   const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
@@ -5478,6 +5538,11 @@ function bindEvents(): void {
     if (selectedMachineId) commitSelection({ machineId: selectedMachineId });
     render();
     queueMicrotask(() => returnToConversationRow(opened));
+  };
+  const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
+  if (commands) commands.onclick = () => {
+    const input = document.querySelector<HTMLTextAreaElement>("#message-text");
+    if (input) { bindSlashCommands(input); slashCommands?.palette.show(); }
   };
   const interrupt = document.querySelector<HTMLButtonElement>("#conversation-interrupt");
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };

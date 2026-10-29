@@ -70,3 +70,5 @@ pub(crate) mod poison_sweep_jobs;
 
 #[cfg(test)]
 mod supervisor_single_turn_tests;
+
+pub(crate) mod supervisor_commands;

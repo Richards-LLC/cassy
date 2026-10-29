@@ -829,6 +829,67 @@ mod focused_epic_tests {
     }
 
     #[test]
+    fn newer_parked_work_wins_over_an_older_integrated_delivery_after_a_note() {
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType, EventEntityType, EventType, Task, TaskStatus, TaskType};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (project, root, session) = fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["commit", "--allow-empty", "-m", "Integrated older delivery"]);
+        let integrated = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "factory/pending"]);
+        git(&["commit", "--allow-empty", "-m", "Newer parked delivery"]);
+        let pending = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "main"]);
+        let mut worker = Agent::new_with_role("worker-id".into(), "worker-a".into(), AgentRole::Worker);
+        worker.factory_session = Some(session.name.clone());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = Task::new("cas-release".into(), "Release".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("main".into());
+        tasks.add(&epic).unwrap();
+        let now = chrono::Utc::now();
+        let events = SqliteEventStore::open(&root).unwrap();
+        for (id, title, anchor, minutes, updated) in [
+            ("cas-old-parked", "Older integrated delivery", integrated.as_str(), 90, now),
+            ("cas-new-parked", "Latest parked work", pending.as_str(), 15, now - chrono::Duration::minutes(10)),
+        ] {
+            let mut task = Task::new(id.into(), title.into());
+            task.created_at = now - chrono::Duration::minutes(minutes + 10);
+            task.updated_at = updated;
+            task.status = TaskStatus::AwaitingMerge;
+            task.assignee = Some(worker.name.clone());
+            task.deliverables.factory_branch_anchor = Some(anchor.into());
+            if minutes == 90 { task.deliverables.merge_commit = Some(integrated.clone()); }
+            tasks.add(&task).unwrap();
+            tasks.add_dependency(&Dependency { from_id:id.into(), to_id:epic.id.clone(), dep_type:DependencyType::ParentChild, created_at:now, created_by:None }).unwrap();
+            let mut start = Event::new(EventType::TaskStarted, EventEntityType::Task, id, "Started assigned work");
+            start.created_at = now - chrono::Duration::minutes(minutes);
+            events.record(&start).unwrap();
+        }
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let old = status.tasks_in_progress.iter().find(|task| task.id == "cas-old-parked").unwrap();
+        assert_eq!(old.delivery_state, Some("merged"), "real Git proves the old delivery is integrated");
+        let current = status.agents.iter().find(|agent| agent.name == worker.name).unwrap();
+        assert_eq!(current.current_task.as_deref(), Some("cas-new-parked"));
+        let row = status.tasks_in_progress.iter().find(|task| Some(task.id.as_str()) == current.current_task.as_deref()).unwrap();
+        assert_eq!(row.title, "Latest parked work", "lane task identity and title agree");
+        let mut active = Task::new("cas-still-active".into(), "In-progress work".into());
+        active.assignee = Some(worker.name.clone());
+        active.status = TaskStatus::InProgress;
+        tasks.add(&active).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some(active.id.as_str()));
+    }
+
+    #[test]
     fn team_trail_requires_recorded_delivery_and_current_approved_verdict() {
         let _home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (_project, root, _session) = fixture();

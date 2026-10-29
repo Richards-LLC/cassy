@@ -22,6 +22,7 @@ export class AccountsSheet {
   private pending = false;
   private edit?: { machine: AccountsMachine; account: AccountRow; operation: AccountOperation };
   private generation = 0;
+  private focusTarget?: { machine: string; account: string; operation: string };
   constructor(private readonly host: AccountsHost, private readonly doc: Document = document) {}
 
   open(): void {
@@ -96,15 +97,16 @@ export class AccountsSheet {
         const attrs = `data-machine="${escapeHtml(machine.id)}" data-account="${escapeHtml(account.key)}"`;
         const state = ({ logged_in: "Logged in", logged_out: "Logged out", never_logged_in: "Not logged in", stale_login: "Stale login", unknown: "Login unknown" })[account.login_state];
         const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
-        const actions = manage ? `<div class="accounts-actions" aria-label="Actions for ${escapeHtml(account.display_name)}">${operations.map(op => `<button type="button" ${attrs} data-operation="${op}"${account.capabilities[op] !== null ? ` disabled title="${escapeHtml(account.capabilities[op] ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`).join("")}</div>` : "";
+        const actions = manage && account.provider !== "grok" ? `<div class="accounts-actions" aria-label="Actions for ${escapeHtml(account.display_name)}">${operations.map(op => `<button type="button" ${attrs} data-operation="${op}"${this.pending || account.capabilities[op] !== null ? ` disabled title="${escapeHtml(account.capabilities[op] ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`).join("")}</div>` : "";
         const login = account.login_state !== "logged_in" && account.provider !== "grok" ? `<div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy login command</button></div>` : "";
-        return `<li class="accounts-row"><div class="accounts-identity"><strong>${escapeHtml(account.display_name)}</strong><span class="accounts-alias">${escapeHtml(account.key)}</span><span>${state}${account.disabled ? " · Disabled" : ""}${account.duplicate_of ? ` · Duplicate of ${escapeHtml(account.duplicate_of)}` : ""}</span><span class="accounts-badges">${account.is_default ? '<span>Default</span>' : ""}${account.recommendation ? '<span title="' + escapeHtml(account.recommendation) + '">Recommended</span>' : ""}</span></div><div class="accounts-capacity">${accountCapacity(account.windows, account.usage_observed_at).map(text => `<p>${escapeHtml(text)}</p>`).join("")}</div>${account.provider === "grok" ? '<p class="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>' : ""}${login}${actions}</li>`;
+        return `<li class="accounts-row"><div class="accounts-identity"><strong>${escapeHtml(account.display_name)}</strong><span class="accounts-alias">${escapeHtml(account.key)}</span><span>${state}${account.disabled ? " · Disabled" : ""}${account.duplicate_of ? ` · Duplicate of ${escapeHtml(account.duplicate_of)}` : ""}</span><span class="accounts-badges">${account.is_default ? '<span>Default</span>' : ""}${account.recommendation ? '<span title="' + escapeHtml("Based on current capacity and reset times.") + '">Recommended</span>' : ""}</span></div><div class="accounts-capacity">${accountCapacity(account.windows, account.usage_observed_at).map(text => `<p>${escapeHtml(text)}</p>`).join("")}</div>${account.provider === "grok" ? '<p class="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>' : ""}${login}${account.provider !== "grok" && account.capabilities.remove ? `<p class="accounts-readonly">${escapeHtml(account.capabilities.remove)}</p>` : ""}${account.capabilities.rename && account.capabilities.rename !== account.capabilities.remove ? `<p class="accounts-readonly">${escapeHtml(account.capabilities.rename)}</p>` : ""}${actions}</li>`;
       }).join("")}</ul>`;
     }).join("")}`;
   }
 
   private begin(machine: AccountsMachine, account: AccountRow, operation: AccountOperation): void {
     if (!machine.scopes.includes("factory-manage") || account.capabilities[operation] !== null) return;
+    this.focusTarget = { machine: machine.id, account: account.key, operation };
     if (operation === "enable" || operation === "set_default") { void this.mutate(machine, { operation, account: account.key }); return; }
     this.edit = { machine, account, operation };
     const form = this.editor(); form.hidden = false;
@@ -136,7 +138,11 @@ export class AccountsSheet {
     catch { /* A refusal may follow a partial disk change: always invalidate. */ }
     this.host.changed(machine.id);
     this.pending = false;
-    if (generation !== this.generation || !this.dialog?.open) return;
+    this.editor().querySelectorAll<HTMLButtonElement>("button").forEach(button => button.disabled = false);
+    if (generation !== this.generation || !this.dialog?.open) {
+      if (this.dialog?.open) for (const current of this.host.machines()) void this.load(current);
+      return;
+    }
     this.edit = undefined; this.editor().hidden = true;
     this.editor().querySelectorAll<HTMLButtonElement>("button").forEach(button => button.disabled = false);
     this.notice(success ? "Account updated." : "Could not verify the complete change. The list has been refreshed; check the account on the machine before trying again.");
@@ -147,5 +153,8 @@ export class AccountsSheet {
     }
     await this.load(machine); this.focusRow();
   }
-  private focusRow(): void { this.$<HTMLButtonElement>("[data-accounts-close]").focus(); }
+  private focusRow(): void {
+    const target = [...this.dialog!.querySelectorAll<HTMLButtonElement>("[data-operation]")].find(button => !button.disabled && button.dataset.machine === this.focusTarget?.machine && button.dataset.account === this.focusTarget?.account && button.dataset.operation === this.focusTarget?.operation);
+    (target ?? this.$<HTMLButtonElement>("[data-accounts-close]")).focus();
+  }
 }

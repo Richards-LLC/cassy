@@ -981,7 +981,9 @@ export function commandTokensMarkup(command: string): string {
 
 function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {
   const name = escapeHtml(profile.name);
-  const recommendation = profile.recommendation ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(profile.recommendation)}</small>` : profile.exclusion ? `<small class="launch-row-path">${escapeHtml(profile.exclusion)}</small>` : "";
+  const reason = profile.windows && profile.recommendation ? "Based on the capacity and reset times below." : profile.recommendation;
+  const exclusion = profile.windows && profile.exclusion?.startsWith("resets later than ") ? "Other accounts reset sooner." : profile.exclusion;
+  const recommendation = reason ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(reason)}</small>` : exclusion ? `<small class="launch-row-path">${escapeHtml(exclusion)}</small>` : "";
   const usage = (profile.windows ? accountCapacity(profile.windows, profile.usage_observed_at) : profile.usage?.split("; ") ?? []).map(window => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("");
   const tag = recommendation + usage + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
   if (profile.logged_in) {

@@ -26,13 +26,13 @@ A body-mounted AccountsSheet owns open state, per-machine loading/errors, curren
 
 ## Interface direction
 
-Use GET /v1/accounts and POST /v1/accounts/operations with typed operations and provider-qualified aliases, never caller-supplied filesystem paths. Preserve /v1/launch/profiles as a compatibility projection. Snapshot rows carry structured usage windows, observation/reset instants, independent state flags, recommendation/default and supported-operation reasons. Remove requires the typed account identifier; Disable requires confirmation; the server validates both. Mutations return a fresh snapshot or an honest partial-failure refusal, and authorization/audit admission precedes changes.
+Use GET /v1/accounts and POST /v1/accounts/operations with typed operations and provider-qualified aliases, never caller-supplied filesystem paths. Preserve /v1/launch/profiles as a compatibility projection. Snapshot rows carry structured usage windows, observation/reset instants, independent state flags, recommendation/default and supported-operation reasons. Remove requires the typed account identifier; Disable requires confirmation; the server validates both. Mutations return a receipt or an honest partial-failure refusal; the client then reloads that machine and invalidates New session, and authorization/audit admission precedes changes.
 
 Three independent read-only proposals explored a two-entry-point interface, an extensible capability-bearing interface and the common UI caller. The coherent choice is the small two-endpoint interface with explicit per-provider capabilities and one client invalidation hook. Separate provider-specific public endpoints lose shared authorization/audit locality; a global browser account store adds synchronization ownership that two existing sheets do not need. The local implementation must earn its seam by hiding discovery, guards and policy writes rather than forwarding arbitrary commands.
 
-## Unresolved constraints before implementation
+## Resolved provider and authorization constraints
 
-The existing registry opens Codex auth.json and decodes an ID token for metadata; the task prohibits credential-content reads. Supervisor clarification was requested before choosing a safe snapshot source. The existing lifecycle engine supports Claude/Codex only; Grok currently has a singleton environment, no named-profile lifecycle, and no cas grok login subcommand. Report supported capabilities honestly while resolving that gap. The hub has machine:read and factory:manage, but no machine:manage scope; use existing scope vocabulary only after the supervisor confirms the intended management right.
+Supervisor decision (2026-10-28): listing requires machine:read and mutations require factory:manage. Reuse the existing registry without adding a credential reader; its existing Codex metadata read is tracked separately. Grok appears as a single read-only row, with unknown login and capacity and explicit unsupported-operation reasons. It has no named lifecycle or fabricated login command. Claude/Codex mutations reuse the CLI lifecycle, including active-account, main-account and shared-base protections. Requested and outcome audit surround mutations; an uncertain outcome forces a refresh and never claims rollback.
 
 ## Acceptance and proof
 

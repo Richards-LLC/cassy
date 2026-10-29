@@ -4325,6 +4325,51 @@ mod tests {
         tmp
     }
 
+    fn make_parked_delivery_push_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let repo_tmp = make_git_repo_for_hook_test();
+        let repo = repo_tmp.path();
+        let remote_tmp = tempfile::tempdir().expect("remote tempdir");
+        let remote = remote_tmp.path().join("origin.git");
+        let cas_root = tempfile::tempdir().expect("isolated CAS root");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            output
+        };
+        git(&["init", "--bare", "-q", remote.to_str().unwrap()]);
+        git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&["checkout", "-q", "-b", "factory/w"]);
+        std::fs::write(repo.join("delivery.txt"), "parked delivery\n").unwrap();
+        git(&["add", "delivery.txt"]);
+        git(&["commit", "-q", "-m", "feat(cas-a0a0): parked delivery"]);
+        TeamsManager::install_worker_pre_commit_hook(repo).expect("install worker push hook");
+        let initial = std::process::Command::new("git")
+            .args(["push", "-q", "-u", "origin", "factory/w"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(initial.status.success(), "initial push: {}", String::from_utf8_lossy(&initial.stderr));
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.join("target.txt"), "target update\n").unwrap();
+        git(&["add", "target.txt"]);
+        git(&["commit", "-q", "-m", "feat(cas-b0b0): target update"]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["checkout", "-q", "factory/w"]);
+        (repo_tmp, remote_tmp, cas_root)
+    }
+
     /// `WORKER_PRE_COMMIT_HOOK` must contain the guard marker so the idempotent
     /// install check recognises an already-installed hook.
     #[test]
@@ -4943,6 +4988,73 @@ mod tests {
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)
             .output();
+    }
+
+    #[test]
+    fn worker_pre_push_hook_refuses_rewriting_a_parked_delivery_anchor() {
+        let (repo_tmp, remote_tmp, cas_root) = make_parked_delivery_push_fixture();
+        let repo = repo_tmp.path();
+        let remote = remote_tmp.path().join("origin.git");
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
+        };
+        let parked = String::from_utf8_lossy(
+            &git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout,
+        ).trim().to_string();
+        let rebase = git(repo, &["rebase", "-q", "main"]);
+        assert!(rebase.status.success(), "rebase: {}", String::from_utf8_lossy(&rebase.stderr));
+        let rewritten = String::from_utf8_lossy(&git(repo, &["rev-parse", "HEAD"]).stdout)
+            .trim().to_string();
+        assert_ne!(parked, rewritten, "the fixture must rewrite the parked commit SHA");
+
+        let push = std::process::Command::new("git")
+            .args(["push", "--force", "origin", "factory/w"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        assert!(!push.status.success(), "a rewritten delivery must be refused: {stderr}");
+        assert!(stderr.contains("Cassy PUSH GUARD"), "{stderr}");
+        assert!(stderr.contains("merge the target in, don't rebase"), "{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout).trim(),
+            parked,
+            "refusal must leave the published delivery anchor unchanged"
+        );
+    }
+
+    #[test]
+    fn worker_pre_push_hook_allows_a_merge_in_that_preserves_the_parked_anchor() {
+        let (repo_tmp, remote_tmp, cas_root) = make_parked_delivery_push_fixture();
+        let repo = repo_tmp.path();
+        let remote = remote_tmp.path().join("origin.git");
+        let merge = std::process::Command::new("git")
+            .args(["merge", "--no-ff", "-q", "main", "-m", "merge target into delivery"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(merge.status.success(), "merge target: {}", String::from_utf8_lossy(&merge.stderr));
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/w"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(push.status.success(), "merge-in push: {}", String::from_utf8_lossy(&push.stderr));
+        let local_tip = String::from_utf8_lossy(
+            &std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap().stdout,
+        ).trim().to_string();
+        let remote_tip = String::from_utf8_lossy(
+            &std::process::Command::new("git").args(["rev-parse", "refs/heads/factory/w"]).current_dir(&remote).output().unwrap().stdout,
+        ).trim().to_string();
+        assert_eq!(remote_tip, local_tip, "the preserved delivery merge should publish normally");
     }
 
     /// cas-73b8: while `factory/<name>` is frozen for a parked delivery, the

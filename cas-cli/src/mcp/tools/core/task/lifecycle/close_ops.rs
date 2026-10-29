@@ -36787,6 +36787,64 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         );
     }
 
+    #[test]
+    fn awaiting_merge_repark_advances_to_pushed_merge_that_restores_recorded_anchor() {
+        use cas_store::TaskStore;
+
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let branch = "factory/worker-cas-a0a0";
+        git(p, &["branch", "-m", branch]);
+        std::fs::write(p.join("delivery.rs"), "// task delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-a0a0): original delivery"]);
+        let recorded = rev_parse_local(p, "HEAD");
+
+        let remote_dir = tempfile::tempdir().unwrap();
+        let remote = remote_dir.path().join("origin.git");
+        git_command(remote_dir.path(), &["init", "--bare", "-q", remote.to_str().unwrap()])
+            .status()
+            .expect("initialize bare origin");
+        git(p, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(p, &["push", "-q", "-u", "origin", "main"]);
+        git(p, &["push", "-q", "-u", "origin", branch]);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target.rs"), "// target update\n").unwrap();
+        git(p, &["add", "target.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-b0b0): target update"]);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        git(p, &["checkout", "-q", branch]);
+        git(p, &["rebase", "-q", "main"]);
+        let rewritten = rev_parse_local(p, "HEAD");
+        assert_ne!(recorded, rewritten, "rebasing must rewrite the original delivery SHA");
+        git(p, &["merge", "-q", "--no-ff", &recorded, "-m", "restore cas-a0a0 parked anchor"]);
+        let restored_tip = rev_parse_local(p, "HEAD");
+        assert_ne!(recorded, restored_tip);
+        git(p, &["push", "-q", "origin", branch]);
+        git(p, &["fetch", "-q", "origin"]);
+
+        let mut parked = worker_task("worker");
+        parked.id = "cas-a0a0".to_string();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.delivery_mode = cas_types::DeliveryMode::PushBranch;
+        parked.deliverables.parked_branch = Some(branch.to_string());
+        parked.deliverables.factory_branch_anchor = Some(recorded);
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&restored_tip))
+            .unwrap();
+
+        assert_eq!(
+            store.get(&parked.id).unwrap().deliverables.factory_branch_anchor,
+            Some(restored_tip),
+            "the new pushed tip should replace the old anchor after restoring it as a merge parent"
+        );
+    }
+
     /// Characterization of the false reject: evaluating *only* the stale
     /// pre-rebase anchor (primary ancestry path) reports stranded after a
     /// successful rebase+integrate of A'. Pins the bug class so the full

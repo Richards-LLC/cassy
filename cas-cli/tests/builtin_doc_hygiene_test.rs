@@ -1001,6 +1001,7 @@ fn every_test_earns_its_place_is_one_identical_block_in_tdd_and_qa_craft() {
                 .content
         };
         let rules = block(skill("skills/cas-tdd/SKILL.md"));
+        // pin: one shared rule block; the two skills must never drift apart.
         assert_eq!(rules, block(skill("skills/cas-qa-craft/SKILL.md")), "{harness:?}");
         // pin: park's waiver notes and the hook's red-control prefix.
         for token in [

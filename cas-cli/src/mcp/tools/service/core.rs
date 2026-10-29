@@ -407,6 +407,12 @@ impl CasService {
 
     pub(super) async fn task_update(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         if let Some(ids) = req.task_ids.as_ref() {
+            let fields = serde_json::to_value(&req).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            if fields.as_object().is_some_and(|fields| fields.iter().any(|(key, value)|
+                !value.is_null() && !["action", "id", "assignee", "task_ids", "expected_generation"].contains(&key.as_str()))) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Queue assignment accepts only assignee, task_ids, optional id and expected_generation; apply other task updates separately"));
+            }
             let worker = req.assignee.as_deref().ok_or_else(|| Self::error(
                 ErrorCode::INVALID_PARAMS, "task update with task_ids requires assignee=<worker>"))?;
             if req.id.as_ref().is_some_and(|id| ids.first() != Some(id)) {

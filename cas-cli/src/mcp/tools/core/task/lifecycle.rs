@@ -2303,6 +2303,15 @@ impl CasCore {
             )
         };
 
+        let queued_start_snapshot = if queued_start {
+            let snapshot = task_store.get(&req.id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            if snapshot.status != TaskStatus::Open || snapshot.assignee.as_deref()
+                != worker.as_ref().map(|a| a.name.as_str()) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, "Queued task changed before start; no Git or lease mutation was applied"));
+            }
+            Some(snapshot)
+        } else { None };
+
         let declared_repo_context = task
             .deliverables
             .work_target
@@ -3212,7 +3221,7 @@ impl CasCore {
         // cas-d5f4: there is no await between acquiring the local lease and
         // persisting InProgress. A response deadline can cancel before this
         // local transition or after it, never between its two writes.
-        let start_update = match split_start_snapshot.as_ref() {
+        let start_update = match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
             Some(expected) => task_store.update_if_current(&task, expected),
             None => task_store.update(&task),
         };

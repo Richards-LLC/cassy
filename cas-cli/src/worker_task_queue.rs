@@ -6,7 +6,7 @@ use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
 use fs2::FileExt;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 
-use crate::{mcp::CasCore, mcp::tools::types::TaskStartRequest};
+use crate::{mcp::CasCore, mcp::tools::TaskStartRequest};
 
 fn error(message: impl std::fmt::Display) -> McpError {
     CasCore::error(ErrorCode::INVALID_PARAMS, message.to_string())
@@ -71,7 +71,9 @@ impl CasCore {
         if !supervisor_only && caller.id == worker.id {
             return Ok(worker);
         }
-        let supervisor = self.resolve_live_supervisor_authority().map_err(error)?;
+        let supervisor = self
+            .resolve_live_supervisor_authority()
+            .map_err(|_| error("Worker queues require a live owning supervisor"))?;
         let owner =
             crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
                 agents.as_ref(),
@@ -298,33 +300,43 @@ impl CasCore {
             selected
         };
         let Some(id) = selected else { return Ok(None) };
-        let mut task = tasks.get(&id).map_err(error)?;
-        if task.status == TaskStatus::Open {
-            let expected = task.clone();
-            let assignee = self
-                .validate_task_assignee(
-                    tasks.as_ref(),
-                    &task,
-                    &worker.name,
-                    TaskStatus::Open,
-                    false,
-                    None,
-                    &mut None,
-                    &mut Vec::new(),
-                )
-                .map_err(error)?;
-            task.assignee = Some(assignee);
-            tasks.update_if_current(&task, &expected).map_err(error)?;
-        }
-        // Recovery after a successful start does not repeat its lease/Git work.
-        let started = task.status == TaskStatus::InProgress
-            && task.assignee.as_deref() == Some(worker.name.as_str())
-            && agents.get_lease(&id).map_err(error)?.is_some_and(|lease| {
-                lease.agent_id == worker.id && lease.status == cas_types::LeaseStatus::Active
-            });
-        let result = if started {
-            Ok(())
-        } else {
+        let result = async {
+            let mut task = tasks.get(&id).map_err(error)?;
+            if task
+                .assignee
+                .as_deref()
+                .is_some_and(|a| a != worker.name && a != worker.id)
+                || !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
+            {
+                return Err(error(
+                    "Selected task changed ownership or status; no start was applied",
+                ));
+            }
+            if task.status == TaskStatus::Open {
+                let expected = task.clone();
+                let assignee = self
+                    .validate_task_assignee(
+                        tasks.as_ref(),
+                        &task,
+                        &worker.name,
+                        TaskStatus::Open,
+                        false,
+                        None,
+                        &mut None,
+                        &mut Vec::new(),
+                    )
+                    .map_err(error)?;
+                task.assignee = Some(assignee);
+                tasks.update_if_current(&task, &expected).map_err(error)?;
+            }
+            let started = task.status == TaskStatus::InProgress
+                && task.assignee.as_deref() == Some(worker.name.as_str())
+                && agents.get_lease(&id).map_err(error)?.is_some_and(|lease| {
+                    lease.agent_id == worker.id && lease.status == cas_types::LeaseStatus::Active
+                });
+            if started {
+                return Ok(());
+            }
             self.task_start_for_queue(
                 TaskStartRequest {
                     id: id.clone(),
@@ -335,7 +347,8 @@ impl CasCore {
             )
             .await
             .map(|_| ())
-        };
+        }
+        .await;
         match result {
             Ok(()) => {
                 queue.starting = false;

@@ -21,4 +21,12 @@ No new status badge, palette, component or animation: the existing evidence rend
 Design: `hub-web/DESIGN.md@3c25c3fb3`. Existing semantic roles, body/mono families, Cassy mark and plain voice apply. No new visual tokens or markup.
 
 ## Critique
-Pending rendered desktop/phone light/dark and native clipboard proof.
+Scored 2026-10-28 from native candidate screenshots at 1280×800 and 390×844 in light/dark. Strict visual QA of the exported native-rendered table: PASS, four views, zero findings. This isolated polish check covers the table; native route screenshots and queue/clipboard/AX readback cover the interaction.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Existing Glass evidence surface, restrained cells and paired copy actions carry the short update. |
+| Fit | 5 | Names and values stay in native columns; both reusable formats retain their contents. |
+| Hierarchy | 4 | The update heading and table are visible together; adjacent plain progress keeps the quiet line. |
+| Craft | 4 | Four native views retain whole cells and visible controls without page overflow; strict exported-table inspection has zero findings. |
+| Accessibility | 4 | Native headers/cells and keyboard CSV copy pass; reload preserves the table. Physical screen-reader testing remains outside this proof. |

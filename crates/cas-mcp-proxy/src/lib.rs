@@ -4473,6 +4473,43 @@ for line in sys.stdin:
             "both optional upstreams must start before either handler is released"
         );
         assert_eq!(snapshot.degraded, 2);
+
+        // Also keep the startup timeout contract: neither upstream responds,
+        // so the engine must return with two classified timeouts. Releasing
+        // the handlers only after engine construction makes missing timeout
+        // handling fail at the generous outer guard instead of hanging the
+        // test process.
+        let (timeout_started_tx, _timeout_started_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let (first, first_release, first_server) =
+            gated_http_upstream("timeout-first", timeout_started_tx.clone());
+        let (second, second_release, second_server) =
+            gated_http_upstream("timeout-second", timeout_started_tx);
+        let engine = tokio::time::timeout(
+            Duration::from_secs(10),
+            ProxyEngine::from_configs_with_timeout(
+                HashMap::from([("first".to_string(), first), ("second".to_string(), second)]),
+                Duration::from_millis(400),
+                None,
+            ),
+        )
+        .await
+        .expect("unresponsive optional upstreams time out within the startup guard")
+        .unwrap();
+        first_release.send(()).unwrap();
+        second_release.send(()).unwrap();
+        first_server.join().unwrap();
+        second_server.join().unwrap();
+
+        let snapshot = engine.health_snapshot().await;
+        assert_eq!(snapshot.degraded, 2);
+        assert!(
+            snapshot
+                .servers
+                .iter()
+                .all(|server| server.last_error_code.as_deref() == Some("timeout")),
+            "both unresponsive optional upstreams retain timeout classification"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -36,28 +36,10 @@ impl CasInstance {
         Connection::open(self.cas_dir.join("cas.db")).expect("Failed to open CAS database")
     }
 
-    /// Generate a task ID in `cas-XXXX` format (4 hex chars)
-    fn gen_task_id() -> String {
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let n: u16 = rng.random();
-        format!("cas-{n:04x}")
-    }
-
-    /// Generate an entry ID in `YYYY-MM-DD-N` format
-    fn gen_entry_id() -> String {
-        use rand::Rng;
-        let now = chrono::Utc::now();
-        let n: u16 = rand::rng().random_range(1..=999);
-        format!("{}-{}", now.format("%Y-%m-%d"), n)
-    }
-
-    /// Generate a rule ID in `rule-XXX` format
-    fn gen_rule_id() -> String {
-        use rand::Rng;
-        let n: u16 = rand::rng().random_range(1..=999);
-        format!("rule-{n:03x}")
-    }
+    // RED control: force the repeated draws possible in the old finite ID spaces.
+    fn gen_task_id() -> String { "cas-0001".into() }
+    fn gen_entry_id() -> String { "2026-01-01-1".into() }
+    fn gen_rule_id() -> String { "rule-001".into() }
 
     /// Get current timestamp in RFC3339 format
     fn now() -> String {
@@ -323,6 +305,27 @@ pub(crate) fn extract_rule_id(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::fixtures::cas_instance::{extract_entry_id, extract_rule_id, extract_task_id};
+
+    #[test]
+    fn fixture_allocates_distinct_ids_through_sqlite_inserts() {
+        let mut failures = Vec::new();
+        for (kind, insert) in [
+            ("memory", super::CasInstance::add_memory as fn(&super::CasInstance, &str) -> String),
+            ("task", super::CasInstance::create_task),
+            ("rule", super::CasInstance::create_rule),
+        ] {
+            let cas = super::new_cas_instance();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let first = insert(&cas, "first fixture row");
+                let second = insert(&cas, "second fixture row");
+                assert_ne!(first, second, "{kind} IDs must be distinct");
+            }));
+            if result.is_err() {
+                failures.push(kind);
+            }
+        }
+        assert!(failures.is_empty(), "fixture insert collisions: {failures:?}");
+    }
 
     #[test]
     fn test_extract_entry_id() {

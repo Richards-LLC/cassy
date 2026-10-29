@@ -329,7 +329,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = daemon.app.supervisor_name().to_owned();
-        daemon.app.mux.get_mut(&name).unwrap().feed(b"\x1bc\x1b[20;1HREADY\r\n›").unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1HREADY\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let submitted = daemon.dispatch_supervisor_command(
             Request::Run { command: Command::Clear, confirmed: true }, "cmd-clear".into(), owner.clone(),
@@ -339,7 +339,7 @@ mod tests {
             while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
         }).await.unwrap();
         daemon.app.mux.get_mut(&name).unwrap().feed(
-            b"\x1bc\x1b[1;1HOpenAI Codex (v0.165.0)\r\nTip: Use the desktop app.\r\n\x1b[20;1H› Ask Codex to do anything",
+            "\x1bc\x1b[1;1HOpenAI Codex (v0.165.0)\r\nTip: Use the desktop app.\r\n\x1b[20;1H› Ask Codex to do anything".as_bytes(),
         ).unwrap();
         let observed = daemon.dispatch_supervisor_command(Request::Status, "cmd-clear".into(), owner).await.unwrap();
         assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt }

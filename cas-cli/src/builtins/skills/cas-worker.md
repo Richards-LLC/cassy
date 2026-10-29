@@ -36,7 +36,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
    Park reads the exact-tip fast-rows and capped test receipts, never runs checks.
    Add milestones with `task action=notes note_type=progress`.
-4. Read [verify-before-claim](../verify-before-claim/SKILL.md) and
+4. Use `cas qa ledger init --task <id>` for evidence and
+   `cas qa ledger check <path> --task <id>` before close. Malformed ledgers
+   refuse locally before verification dispatch. Read [verify-before-claim](../verify-before-claim/SKILL.md) and
    [close-gate.md](references/close-gate.md); close with `task action=close reason="PASS <sha>: <proof>"`
    on a clean tree at that HEAD. When close says verification required, quote its
    guidance in `need:`; retry close after verification completes.

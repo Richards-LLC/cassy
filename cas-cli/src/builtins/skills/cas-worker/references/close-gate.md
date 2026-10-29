@@ -23,6 +23,14 @@ Read [discipline.md](discipline.md) before check/test work. Rust assembly belong
 to the supervisor; name unexecuted obligations. Run affected non-Rust checks and
 record their exit status and actual test count. A zero-test success is no proof.
 
+## Ledger preflight
+
+Create required evidence with `cas qa ledger init --task <id>`; it prints the
+project-scoped path and preserves existing evidence. Fill it from the real
+walk, then run `cas qa ledger check <path> --task <id>`. Fix every line/row
+diagnostic. Close uses that check before verification dispatch, including
+existing no-code ledgers. A structural PASS does not judge captures.
+
 ## Merge and freshness
 
 Close requires the delivered work on the named target. On MERGE REQUIRED:

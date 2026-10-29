@@ -965,7 +965,9 @@ async fn request_changes_accepts_only_pushed_correction_api_evidence_cas_9e60() 
     let write_ledger = |head: &str| {
         std::fs::write(artifacts.join("LEDGER.md"), format!(
             "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
-             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n\
+             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | LEDGER.md | - |\n\
              request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
         )).unwrap();
         std::fs::write(artifacts.join("contracts.diff"), "").unwrap();
@@ -1411,6 +1413,9 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
         );
         let task_dir = fx.artifacts.join(TASK);
         std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::create_dir_all(task_dir.join("qa")).unwrap();
+        std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
+        std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
         std::fs::write(
             task_dir.join("LEDGER.md"),
             ledger_rows(&"| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n"),
@@ -1464,6 +1469,9 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
         );
         let task_dir = fx.artifacts.join(TASK);
         std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::create_dir_all(task_dir.join("qa")).unwrap();
+        std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
+        std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
         let ledger = task_dir.join("LEDGER.md");
         std::fs::write(
             &ledger,
@@ -1506,6 +1514,7 @@ async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
     );
     let task_dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
     std::fs::write(
         task_dir.join("LEDGER.md"),
         ledger_rows(&"| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n"),
@@ -1893,7 +1902,7 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
     std::fs::create_dir_all(dir.join("qa")).unwrap();
     std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
     for owner in ["unregistered", "test-agent"] {
-        std::fs::write(dir.join("LEDGER.md"), format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n")).unwrap();
+        std::fs::write(dir.join("LEDGER.md"), ledger_rows(&format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n"))).unwrap();
         let refused = close_text(&fx.core, TASK).await;
         assert!(
             refused.contains("must identify one registered supervisor"),

@@ -53,7 +53,7 @@ impl CasCore {
         {
             return Ok(());
         }
-        super::super::qa_evidence_gate::ledger_preflight(&self.cas_root, task)
+        super::super::qa_evidence_gate::ledger_preflight(&self.cas_root, task, true)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let anchors = super::super::repository_proof::delivered_anchor_commits(
             repo,

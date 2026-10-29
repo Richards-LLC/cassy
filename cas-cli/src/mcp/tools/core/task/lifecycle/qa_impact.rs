@@ -1,7 +1,7 @@
 //! Automatic predicted/delivered journey context and the G8 ledger check.
 use super::close_ops;
 use crate::mcp::tools::core::imports::*;
-use crate::qa_impact;
+use crate::qa_impact::{self, Change};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::path::Path;

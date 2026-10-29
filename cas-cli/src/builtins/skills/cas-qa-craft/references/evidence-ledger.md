@@ -1,27 +1,22 @@
 # Evidence ledger
 
-Store the file at `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The header names the
-build revision (for a served app, the backend and frontend SHAs at walk start
-and end, and any mixed build: [map the build](../SKILL.md#walk-rules)),
-one-line scope, surface, 30-minute budget, headline counts for
-cells/PASS/FAIL/NOT EXERCISED, the evidence-label split, and the telemetry
-sweep state (`sweep: configured — <path>` or the exact line
-`sweep: not configured`).
+Create the task ledger with `cas qa ledger init --task <id>`. It prints the
+project-scoped path, includes predicted live journeys, and preserves existing
+evidence. No-code deliveries start with route exclusions; live routes start
+unexercised. Edit the scaffold as you walk.
 
-Use this exact row grammar so the verifier can consume it:
+Run `cas qa ledger check <path> --task <id>` before close or review. The CLI,
+close gate and verifier share one parser for fields, counts, labels, breadth,
+defect ownership and readable PASS captures. Repair each line/row diagnostic.
+The executable owns the grammar; use its scaffold instead of a copied table.
+A passing check proves structure and readability, not the expected user outcome.
 
-```text
-| id | cell | expected | observed | verdict | label | evidence path | defect task |
-```
-
-Every row uses one label: `source-inferred` (code read only; proves nothing
-user-facing), `fixture` (harness, emulator, or mock), `real-build` (the actual
-binary or site), `eyewitness` (a human report recorded verbatim), or
-`eyewitness/telemetry` (one valid finding emitted by the configured read-only
-sweep). A weaker label than the cell requires is `NOT EXERCISED`, never `PASS`;
-`partial` is not a verdict. Each run cell has one screenshot or terminal
-capture and a short observed result. Telemetry rows use the saved sweep stdout
-as their evidence path and include all six parsed fields in `observed`.
+Name the build revision, scope, surface and budget. For a served app, record
+backend and frontend SHAs at walk start and end, including mixed builds
+([map the build](../SKILL.md#walk-rules)). Capture each exercised cell and
+describe what happened. Label evidence by how it was obtained; source reading
+and fixtures do not prove the real build. Telemetry findings cite saved sweep
+stdout and include all six parsed fields in the observed result.
 
 A `real-build` row that drives a compiled binary needs a binary of the build
 revision, and the header names it: path, `--version` output and SHA-256. Three

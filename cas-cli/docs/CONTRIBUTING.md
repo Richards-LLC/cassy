@@ -1612,6 +1612,16 @@ A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
+## QA ledger preflight
+
+`cas qa ledger init --task <id>` writes an honest scaffold in the project's task
+artifact directory, with predicted live journeys and no-code route exclusions.
+It preserves existing evidence. Edit rows after exercising the named build,
+then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
+parser checks structure, counts, labels, defect ownership and readable PASS
+captures; it does not judge what a capture proves. Close applies its diagnostics
+before either verification dispatch path mutates state.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

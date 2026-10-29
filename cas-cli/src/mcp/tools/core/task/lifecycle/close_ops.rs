@@ -8867,6 +8867,9 @@ impl CasCore {
                     &evidence_repo, &resolved_parent_branch, window, Some(&head),
                 )
             });
+            if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
+                return Ok(Self::tool_error(message));
+            }
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
@@ -9505,7 +9508,7 @@ impl CasCore {
                     }
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
-                        if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task) {
+                        if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, true) {
                             return Ok(Self::tool_error(message));
                         }
 

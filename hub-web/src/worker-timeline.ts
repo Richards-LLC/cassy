@@ -6,7 +6,7 @@
  * `textContent`.
  */
 import { workerState, type WorkEventStream } from "./work-events";
-import { refocus, workRow, type WorkRowsContext } from "./work-rows-view";
+import { refocus, workRows, type WorkRowsContext } from "./work-rows-view";
 
 export interface WorkerTimelineSubject {
   readonly worker: string;
@@ -74,11 +74,10 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   else if (!stream || !rows || (!stream.loaded && stream.loading)) children.push(note("Loading this worker's activity…"));
   else if (stream.events.length === 0) children.push(note("No activity recorded for this worker yet."));
   else {
-    const list = document.createElement("ol");
-    list.className = "work-rows worker-timeline-rows";
-    list.setAttribute("aria-label", `${subject.worker}'s recent activity, newest first`);
     const repaint = (focusKey: string): void => { renderWorkerTimeline(dialog, subject, stream, rows, handlers); refocus(dialog, focusKey); };
-    for (const event of [...stream.events].reverse()) list.append(workRow(document, event, rows, repaint, { time: true }));
+    const list = workRows(document, [...stream.events].reverse(), rows, repaint, { time: true, noticesKey: "timeline:turns" });
+    list.classList.add("worker-timeline-rows");
+    list.setAttribute("aria-label", `${subject.worker}'s recent activity, newest first`);
     children.push(list);
     if (stream.hasEarlier) {
       const older = document.createElement("button"); older.type = "button"; older.className = "worker-timeline-older"; older.dataset.focusKey = "older";

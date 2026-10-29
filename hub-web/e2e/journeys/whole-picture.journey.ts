@@ -3,13 +3,14 @@ import { test, expect, journeyPart, type Journey } from "./journey";
 import { journeyStamp } from "./clock";
 import type { FleetWorld, Machine, WorkEventWire, WorkWorld } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
+import type { WorkTool, WorkLifecycle } from "../../src/work-events";
 
 // cas-ff22 (hub-web/whole-picture.brief.md): Show work puts the supervisor's
 // thinking, tool calls and task events between its replies, collapsed by
 // default, and each worker's timeline is a tap away in Tasks & progress.
 
 const WORKER = "swift-lark-3";
-const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> = {}): WorkEventWire =>
+const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> & { tool?: WorkTool; lifecycle?: WorkLifecycle } = {}): WorkEventWire =>
   ({ id, kind, session: PELICAN, agent: PELICAN, at: journeyStamp(offsetMs), label, has_detail: kind !== "task", ...extra });
 
 const work = (): WorkWorld => ({
@@ -18,7 +19,7 @@ const work = (): WorkWorld => ({
     event("t:sup:1:0", "thinking", "Checking the lane", -170_000),
     event("t:sup:2:0", "tool", "Bash: Run the tests", -160_000, { error: true }),
     event("q:7", "task", "cas-42 parked for merge: Ship the stream", -150_000, { agent: WORKER }),
-    event("t:w:1:0", "tool", "Read: src/limits.rs", -140_000, { agent: WORKER }),
+    event("t:w:1:0", "tool", "Read: src/limits.rs", -400, { agent: WORKER }),
   ],
   // Agent text is data: the markup in this detail must read as text.
   details: { "t:sup:2:0": "Bash\n\nInput:\ncargo test <b>-p cas</b>\n\nResult (error):\n1 failed" },
@@ -105,6 +106,42 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         hub.appendWork(PELICAN, event("t:sup:3:0", "tool", "Bash: Merge the lane", -1_000));
         await expect(page.locator(".work-turn").last()).toContainText("Ran 1 tool");
         expect(await reply.evaluate((node) => (node as HTMLElement & { journeyMark?: boolean }).journeyMark === true), "the earlier reply is the same node").toBe(true);
+      });
+
+      await journey.stage("Read typed work scope", async () => {
+        const typed = [
+          event("typed-start", "notice", "Turn started", -900, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
+          event("typed-read", "tool", "Read files", -800, { tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
+          event("typed-search", "tool", "Find the renderer", -700, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
+          event("typed-command", "tool", "Check the build", -600, { tool: { name: "Bash", operation: "command", targets: [], command: "npm run check", cwd: "/project", exit_code: 2 }, lifecycle: { id: "check", stage: "end", outcome: "error" } }),
+          event("typed-edit", "tool", "Update the renderer", -500, { tool: { name: "Edit", operation: "edit", targets: ["src/a.ts", "src/b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
+          event("typed-other", "tool", "functions.exec: inspect the work", -400, { tool: { name: "functions.exec", operation: "other", targets: [] } }),
+          event("typed-end", "notice", "Turn completed", -300, { has_detail: false, lifecycle: { id: "typed-turn", stage: "end", outcome: "unknown" } }),
+        ];
+        const exact = "Read\n\nInput:\n{\"file\":\"src/a.ts\"}\n\nResult:\nexport const literal = '<script>neverRun()</script>';";
+        for (const row of typed) hub.appendWork(PELICAN, row, row.id === "typed-read" ? exact : `${row.label}\n\nInput:\nraw arguments\n\nResult:\nexact ${row.id} output`);
+        const block = blocks.last();
+        await block.locator(".work-summary").click();
+        await expect(block.getByRole("button", { name: "Read · 3 files", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "Search · 7 matches", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "Ran command · exit 2 failed", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "Edited 2 files", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "functions.exec: inspect the work", exact: true })).toBeVisible();
+        await expect(block).not.toContainText("Turn started");
+        await expect(block).not.toContainText("Turn completed");
+        const read = block.getByRole("button", { name: "Read · 3 files", exact: true });
+        await read.focus(); await page.keyboard.press("Enter");
+        await expect(read).toBeFocused();
+        const detail = block.locator('[data-event-id="typed-read"] .work-detail');
+        await expect(detail.locator(".work-targets li")).toHaveText(["src/a.ts", "src/b.ts", "src/c.ts"]);
+        await expect(detail.locator(".work-record")).toHaveText(exact);
+        await expect(detail.locator("script")).toHaveCount(0);
+        // The same event ID receives new metadata while its detail is open.
+        await detail.focus();
+        hub.appendWork(PELICAN, { ...typed[1]!, tool: { name: "Read", operation: "read", targets: ["src/a.ts"], counts: { files: 1 } } } as WorkEventWire, exact);
+        await expect(block.getByRole("button", { name: "Read · 1 file", exact: true })).toHaveAttribute("aria-expanded", "true");
+        await expect(detail).toBeFocused();
+        await expect(detail.locator(".work-record")).toHaveText(exact);
       });
 
       await journey.stage("Show work stays as set on this device", async () => {

@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkEventStream, workEventSupport, workEventsPage } from "./work-events";
 import { WorkPicture, type WorkEventTransport } from "./work-picture";
-import { renderWork } from "./work-rows-view";
+import { renderWork, workSignature } from "./work-rows-view";
 
 const wire = (id: string, second: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", session: "s", at: `2026-10-27T12:00:${String(second).padStart(2, "0")}Z`, label: id, has_detail: true, ...extra });
 
@@ -83,20 +83,57 @@ describe("work events (cas-ff22)", () => {
     expect(forA(), "a repaint of the same thread reads nothing").toBe(2);
   });
 
-  it("sets agent text as text and loads a row's detail only when it opens", () => {
-    const open = new Set<string>();
+  it("renders typed work evidence safely, lazily and without losing disclosure or focus", () => {
+    const open = new Set<string>(["work:read"]);
     const requested: string[] = [];
-    const context = { detail: () => undefined, requestDetail: (id: string) => void requested.push(id), isOpen: (key: string) => open.has(key), setOpen: (key: string, on: boolean) => void (on ? open.add(key) : open.delete(key)) };
-    const node = document.createElement("div");
-    const label = '<img src=x onerror="alert(1)">';
-    const event = workEventsPage({ request_id: "x", events: [wire("t:1", 1, { label, error: true })], has_earlier: false })!.events[0]!;
-    open.add("work:t:1");
-    renderWork(node, { type: "work", key: "work:t:1", events: [event] }, context, "cas-src supervisor");
+    const details = new Map<string, { state: "ready"; text: string; truncated: boolean }>();
+    const context = { detail: (id: string) => details.get(id), requestDetail: (id: string) => void requested.push(id), isOpen: (key: string) => open.has(key), setOpen: (key: string, on: boolean) => void (on ? open.add(key) : open.delete(key)) };
+    const node = document.createElement("div"); document.body.append(node);
+    const raw = '<img src=x onerror="alert(1)">\n\nResult:\nexact output';
+    const events = workEventsPage({ request_id: "x", schema_version: 2, events: [
+      wire("start", 0, { kind: "notice", label: "Turn started", has_detail: false, lifecycle: { id: "turn", stage: "start" } }),
+      wire("read", 1, { tool: { name: "Read", operation: "read", targets: ["a.ts", "b.ts", "c.ts"], counts: { files: 3 } } }),
+      wire("search", 2, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
+      wire("command", 3, { tool: { name: "Bash", operation: "command", targets: [], command: "npm test <b>", cwd: "/project", exit_code: 2 }, lifecycle: { id: "cmd", stage: "end", outcome: "error" } }),
+      wire("edit", 4, { tool: { name: "Edit", operation: "edit", targets: ["a.ts", "b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
+      wire("other", 5, { label: raw, tool: { name: "functions.exec", operation: "other", targets: [] } }),
+      wire("end", 6, { kind: "notice", label: "Turn completed", has_detail: false, lifecycle: { id: "turn", stage: "end", outcome: "unknown" } }),
+      wire("failed-turn", 7, { kind: "notice", label: "Turn failed", has_detail: false, lifecycle: { id: "failed", stage: "end", outcome: "error" } }),
+    ], has_earlier: false })!.events;
+    const item = { type: "work" as const, key: "work:read", events };
+    renderWork(node, item, context, "cas-src supervisor");
+    expect([...node.querySelectorAll(".work-row-text")].map(row => row.textContent)).toEqual(["Read · 3 files", "Search · 7 matches", "Ran command · exit 2", "Edited 2 files", raw, "Turn failed"]);
     expect(node.querySelector("img")).toBeNull();
-    expect(node.querySelector(".work-row-text")!.textContent).toBe(label);
+    expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("failed");
+    expect(node.textContent).not.toContain("Turn started");
     expect(requested).toEqual([]);
-    node.querySelector<HTMLButtonElement>(".work-row-toggle")!.click();
-    expect(requested).toEqual(["t:1"]);
-    expect(node.querySelector(".work-detail")!.textContent).toBe("Loading…");
+    for (const id of ["read", "search", "command", "edit", "other"]) {
+      const toggle = node.querySelector<HTMLButtonElement>(`[data-event-id="${id}"] .work-row-toggle`)!;
+      toggle.focus(); toggle.click();
+      expect(requested.at(-1)).toBe(id);
+      expect(node.querySelector(`[data-event-id="${id}"] .work-detail`)!.textContent).toBe("Loading…");
+      details.set(id, { state: "ready", text: raw, truncated: false });
+      renderWork(node, item, context, "cas-src supervisor");
+      expect(document.activeElement?.getAttribute("data-focus-key")).toBe(`row:${id}`);
+      expect(node.querySelector(`[data-event-id="${id}"] [aria-expanded="true"]`)).not.toBeNull();
+    }
+    expect(node.querySelector('[data-event-id="read"] .work-targets')!.textContent).toBe("a.tsb.tsc.ts");
+    expect(node.querySelector('[data-event-id="search"] .work-detail')!.textContent).toContain("7 matches");
+    expect(node.querySelector('[data-event-id="command"] .work-command')!.textContent).toBe("npm test <b>");
+    expect(node.querySelector('[data-event-id="command"] .work-detail')!.textContent).toContain("/project");
+    expect(node.querySelector('[data-event-id="edit"] .work-targets')!.textContent).toBe("a.tsb.ts");
+    expect(node.querySelector('[data-event-id="other"] pre')!.textContent).toBe(raw);
+    expect(node.querySelectorAll("img, b")).toHaveLength(0);
+    const before = workSignature(item, context);
+    const updated = { ...item, events: events.map(event => event.id === "command" ? { ...event, tool: { ...event.tool!, exit_code: 0 }, lifecycle: { id: "cmd", stage: "end", outcome: "success" } } : event) };
+    expect(workSignature(updated, context)).not.toBe(before);
+    node.querySelector<HTMLElement>('[data-event-id="command"] .work-detail')!.focus();
+    renderWork(node, updated, context, "cas-src supervisor");
+    expect(document.activeElement?.getAttribute("data-focus-key")).toBe("detail:command");
+    expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("Ran command · exit 0");
+    expect(node.querySelector('[data-event-id="command"] .work-row-failed')).toBeNull();
+    node.querySelector<HTMLButtonElement>(".work-turn-notices > button")!.click();
+    expect(node.textContent).toContain("Turn started"); expect(node.textContent).toContain("Turn completed");
+    node.remove();
   });
 });

@@ -293,6 +293,9 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the work-event stream is
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
+  HUB-J25-TYPED-TOOL-EVIDENCE:
+    statement: A work row names its read, search, command or edit scope, makes failures explicit, and opens operation-specific metadata with exact readable raw evidence; unknown tools remain raw and live updates preserve focus and expansion.
+    check: Run the typed work renderer case in work-picture.test.ts and the Read typed work scope stage of HUB-J25 against the production bundle; open each operation and an unknown tool by keyboard and verify metadata, exact output, named failure and stable focus through a same-ID update.
   HUB-J22-GOAL:
     statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
@@ -2028,6 +2031,7 @@ journeys:
     and markup in it reads as text
   - New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the
     earlier reply keeps its node
+  - Read typed work scope — read, search, command and edit rows name their v2 scope; failures remain explicit, exact output stays readable, and live metadata updates preserve focus and expansion
   - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
     only
   - Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the
@@ -2041,6 +2045,7 @@ journeys:
   - hub-web/src/work-events.ts
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
+  - hub-web/src/work-rows.brief.md
   - hub-web/src/worker-timeline.ts
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-view.ts
@@ -2051,6 +2056,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-J25-TYPED-TOOL-EVIDENCE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

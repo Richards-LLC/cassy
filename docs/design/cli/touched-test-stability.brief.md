@@ -12,6 +12,16 @@ Target: Cassy worker evidence and task park. design: DESIGN.md@b43940e43.
 
 ## Verification
 
-Candidate-based terminal capture and critique are pending. The existing task-close
-transport owns wrapping and JSON envelopes; this change supplies its refusal text.
-Do not infer a capture or passing UI receipt from source inspection.
+Supervisor-built candidate `82b1f3f7e862a693f724ce66e58961df26fe157a`
+(`cas 3.89.0 (82b1f3f)`) exercised a disposable Rust project with isolated
+HOME, XDG config and CAS_ROOT. An untouched-test receipt refused park with the
+changed source identity; the real worker node then ran five concurrent copies
+with zero retries. Independent timestamps show all five test bodies overlapped.
+Park accepted the bound receipt and stored AwaitingMerge with its exact anchor.
+The task artifact contains `candidate-fixture/{park-refusal,park-acceptance}.txt`,
+worker logs, the immutable receipt and its read-back.
+
+The existing task-close transport owns wrapping and JSON envelopes. This change
+adds internal receipt policy and its cause/remedy text; it adds no terminal
+renderer. Changes under `ui/factory` are fixture setup in test functions only.
+No terminal appearance or interaction is claimed from the protocol evidence.

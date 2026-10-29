@@ -1508,6 +1508,35 @@ assignment or lease changes. The original branch is preserved as handoff
 history. Omitting `adopt_branch` keeps the existing assignment-only transfer
 behavior.
 
+### Ordered worker task queues
+
+Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
+Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
+The first task controls the spawn base. Registration binds the remaining queue
+by factory session and worker name, so re-registration does not lose it.
+
+For an existing worker, `task action=update assignee=<worker> task_ids=["cas-b","cas-c"]`
+replaces pending work. If `id` is supplied, it must name the first entry. This
+form accepts queue fields only; apply title/status/other task edits separately.
+An idle worker starts the first eligible entry immediately. Future entries
+stay unassigned until selected.
+
+Inspect with `factory action=worker_queue id=<worker>`; `worker_status` also
+shows the current task, ordered pending tasks and last queue decision. Replace
+or reorder with `factory action=worker_queue id=<worker> task_ids=["cas-c","cas-b"]`.
+Clear pending work with `task_ids=[]`. Add `expected_generation=<revision>` to
+reject a stale queue replacement. Queue edits require the worker's live owning
+supervisor in the same factory session; they preserve the current execution.
+
+A successful close or park releases the preceding lease, then starts the next
+eligible task through the normal start gates as that worker. It cuts the next
+task's branch from its own declared target and preserves the previous delivery
+ref. Repeated closes cannot consume another entry. Reassigned, missing,
+terminal, blocked and hard-start-gated entries are skipped with a durable note.
+A checkout/start failure retains the selected entry and records a deferred
+reason; inspect the queue and retry the preceding close after resolving it.
+Queue dispatch never changes process identity or environment variables.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured

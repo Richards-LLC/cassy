@@ -93,8 +93,10 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
 fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let store = crate::store::open_agent_store(cas_dir).ok()?;
-    let agent = store.get(supervisor).ok()?;
-    if agent.factory_session.as_deref() != Some(session) { return None; }
+    let agent = store.list(None).ok()?.into_iter().find(|agent|
+        (agent.name == supervisor || agent.id == supervisor)
+            && agent.role == cas_types::AgentRole::Supervisor
+            && agent.factory_session.as_deref() == Some(session))?;
     let path = crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
         cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
         agent.metadata.get("supervisor_account_dir").map(String::as_str))?;

@@ -19,6 +19,13 @@ struct EvidenceProof {
     source_path: String,
     manifest: PublishedArtifact,
     closure: PublishedArtifact,
+    // Old archives placed the manifest at the archive root.
+    #[serde(default = "default_manifest_path")]
+    manifest_path: PathBuf,
+}
+
+fn default_manifest_path() -> PathBuf {
+    "bundle.json".into()
 }
 
 pub(crate) fn valid_proof(line: &str, task: &str) -> bool {
@@ -32,6 +39,7 @@ fn parse(line: &str) -> Option<EvidenceProof> {
 fn validate(proof: &EvidenceProof, task: &str) -> anyhow::Result<()> {
     super::proof::validate(&proof.manifest, task)?;
     super::proof::validate(&proof.closure, task)?;
+    relative(&proof.manifest_path)?;
     anyhow::ensure!(
         Path::new(&proof.source_path).is_absolute(),
         "QA source path must be absolute"
@@ -52,23 +60,88 @@ fn relative(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn add_strings(value: &serde_json::Value, paths: &mut BTreeSet<PathBuf>) {
-    match value {
-        serde_json::Value::String(path) => {
+// Only declared path fields travel. files.parts also carries titles,
+// labels and project names; treating arbitrary strings as paths breaks publish.
+fn declared_files(value: &serde_json::Value) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for key in [
+        "trace",
+        "trace_actions",
+        "receipt",
+        "aria_yaml",
+        "aria_json",
+        "visual_qa",
+        "visual_qa_json",
+        "visual_qa_stdout",
+        "visual_qa_baseline_json",
+        "critique",
+    ] {
+        if let Some(path) = value[key].as_str().filter(|path| !path.is_empty()) {
             paths.insert(path.into());
         }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                add_strings(value, paths);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values() {
-                add_strings(value, paths);
-            }
-        }
-        _ => {}
     }
+    for key in ["cells", "a11y", "polish_screenshots"] {
+        for path in value[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+        {
+            paths.insert(path.into());
+        }
+    }
+    for part in value["parts"].as_array().into_iter().flatten() {
+        for key in [
+            "receipt",
+            "aria_yaml",
+            "aria_json",
+            "trace",
+            "trace_actions",
+        ] {
+            if let Some(path) = part[key].as_str().filter(|path| !path.is_empty()) {
+                paths.insert(path.into());
+            }
+        }
+    }
+    paths
+}
+
+// The validator allows the pairs manifest anywhere inside the task, while
+// regular bundle files and pair captures remain inside their own directory.
+fn contained_file(root: &Path, candidate: &Path) -> anyhow::Result<PathBuf> {
+    let resolved = candidate.canonicalize()?;
+    let path = resolved
+        .strip_prefix(root)
+        .map_err(|_| anyhow::anyhow!("QA evidence escapes its containing directory"))?;
+    // Also reject symlinks in the original spelling, before canonicalization.
+    let mut current = PathBuf::new();
+    for part in candidate.components() {
+        current.push(part.as_os_str());
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(&current)?
+                .file_type()
+                .is_symlink(),
+            "QA evidence cannot contain symlinks"
+        );
+    }
+    checked_file(root, path)
+}
+
+fn archive_root(context: &PublishContext<'_>, source: &Path) -> anyhow::Result<PathBuf> {
+    for root in [
+        &context.roots.task_artifacts_dir,
+        &context.roots.legacy_task_artifacts_dir,
+    ] {
+        if let Ok(root) = root.canonicalize() {
+            if source.starts_with(&root) {
+                return Ok(root);
+            }
+        }
+    }
+    source
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("QA manifest has no directory"))
 }
 
 /// Build before any upload, and include only declared files (plus captures
@@ -100,29 +173,42 @@ pub(crate) fn prepare(
     let root = source
         .parent()
         .ok_or_else(|| anyhow::anyhow!("QA manifest has no directory"))?;
+    let task_root = archive_root(context, source)?;
     let mut paths = BTreeSet::new();
-    add_strings(&manifest["files"], &mut paths);
+    for path in declared_files(&manifest["files"]) {
+        let file = contained_file(root, &root.join(path))?;
+        paths.insert(file.strip_prefix(&task_root)?.to_path_buf());
+    }
+    if let Some(path) = manifest["deployed"]["deployment_proof"].as_str() {
+        let file = contained_file(root, &root.join(path))?;
+        paths.insert(file.strip_prefix(&task_root)?.to_path_buf());
+    }
     if let Some(pair_path) = manifest["files"]["pairs"].as_str() {
-        let path = Path::new(pair_path);
-        relative(path)?;
-        let pair_file = checked_file(root, path)?;
+        let pair_file = contained_file(&task_root, &root.join(pair_path))?;
         anyhow::ensure!(
             std::fs::metadata(&pair_file)?.len() <= ARTIFACT_MAX_BYTES,
             "QA pairs file exceeds artifact limit"
         );
-        let pairs: serde_json::Value = serde_json::from_reader(std::fs::File::open(pair_file)?)?;
-        for phase in ["before", "after"] {
-            for cell in pairs[phase].as_array().into_iter().flatten() {
+        let pairs: serde_json::Value = serde_json::from_reader(std::fs::File::open(&pair_file)?)?;
+        let pair_dir = pair_file
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("QA pairs has no directory"))?;
+        for cell in ["pairs", "unpaired"]
+            .into_iter()
+            .flat_map(|key| pairs[key].as_array().into_iter().flatten())
+        {
+            for phase in ["before", "after"] {
                 for key in ["png", "jpg"] {
-                    if let Some(capture) = cell[key].as_str() {
-                        relative(Path::new(capture))?;
-                        paths.insert(path.parent().unwrap_or(Path::new("")).join(capture));
+                    if let Some(capture) = cell[phase][key].as_str() {
+                        let file = contained_file(pair_dir, &pair_dir.join(capture))?;
+                        paths.insert(file.strip_prefix(&task_root)?.to_path_buf());
                     }
                 }
             }
         }
+        paths.insert(pair_file.strip_prefix(&task_root)?.to_path_buf());
     }
-    paths.insert("bundle.json".into());
+    paths.insert(source.strip_prefix(&task_root)?.to_path_buf());
     anyhow::ensure!(
         paths.len() <= MAX_FILES,
         "QA evidence exceeds {MAX_FILES} files"
@@ -139,7 +225,7 @@ pub(crate) fn prepare(
     let mut archive = tar::Builder::new(encoder);
     let mut size = 0u64;
     for path in paths {
-        let file = checked_file(root, &path)?;
+        let file = checked_file(&task_root, &path)?;
         size = size
             .checked_add(std::fs::metadata(&file)?.len())
             .ok_or_else(|| anyhow::anyhow!("QA evidence too large"))?;
@@ -185,6 +271,10 @@ pub(crate) fn record(
         source_path: manifest.source.display().to_string(),
         manifest: manifest.artifact.clone(),
         closure: closure.artifact,
+        manifest_path: manifest
+            .source
+            .strip_prefix(archive_root(context, &manifest.source)?)?
+            .into(),
     };
     validate(&proof, &context.task_id)?;
     crate::store::open_task_store(&context.roots.project_root.join(".cas"))?.append_trusted_note(
@@ -251,7 +341,10 @@ pub(crate) fn restore(
             "QA closure exceeds extraction limits"
         );
         let file = temp.path().join(path);
-        std::fs::create_dir_all(file.parent().unwrap())?;
+        let parent = file
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("QA closure file has no directory"))?;
+        std::fs::create_dir_all(parent)?;
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -264,11 +357,32 @@ pub(crate) fn restore(
         output.flush()?;
         output.set_times(std::fs::FileTimes::new().set_modified(modified))?;
     }
-    let manifest = temp.path().join("bundle.json");
+    let manifest = temp.path().join(&proof.manifest_path);
     let (sha, size) = super::digest_file(&manifest)?;
     anyhow::ensure!(
         sha == proof.manifest.sha256 && size == proof.manifest.size_bytes,
         "QA closure has another manifest"
     );
-    Ok(Some(temp.keep().join("bundle.json")))
+    // One retained directory per immutable closure. Verify cached bytes and
+    // timestamps against this freshly verified archive before reusing it.
+    let cached = destination.join(format!("qa-restored-{}", proof.closure.sha256));
+    if cached.try_exists()? {
+        anyhow::ensure!(
+            std::fs::symlink_metadata(&cached)?.is_dir(),
+            "QA restore cache is not a directory"
+        );
+        for path in paths {
+            let old = checked_file(&cached, &path)?;
+            let fresh = checked_file(temp.path(), &path)?;
+            anyhow::ensure!(
+                super::digest_file(&old)? == super::digest_file(&fresh)?
+                    && std::fs::metadata(old)?.modified()?
+                        == std::fs::metadata(fresh)?.modified()?,
+                "QA restore cache differs from published evidence"
+            );
+        }
+    } else {
+        std::fs::rename(temp.path(), &cached)?;
+    }
+    Ok(Some(cached.join(&proof.manifest_path)))
 }

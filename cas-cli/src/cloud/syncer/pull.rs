@@ -639,7 +639,10 @@ impl CloudSyncer {
             let orphan = prior.is_some_and(|row| {
                 row.operation == SyncOperation::Upsert
                     && row.last_reason.as_deref() == Some("orphan_dependency")
-                    && row.last_error.as_deref().is_some_and(|error|error.contains("orphan_dependency"))
+                    && row
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("orphan_dependency"))
             });
             if snapshot.live.contains_key(&entity_id) {
                 if orphan {
@@ -729,7 +732,11 @@ impl CloudSyncer {
                         refusal = Some("dependency_endpoint_unavailable");
                         continue;
                     }
-                    Err(error) => return Err(CasError::Other(format!("Cannot read dependency endpoint {id}: {error}"))),
+                    Err(error) => {
+                        return Err(CasError::Other(format!(
+                            "Cannot read dependency endpoint {id}: {error}"
+                        )));
+                    }
                 };
                 if task.scope != crate::types::Scope::Project
                     || quarantined.contains(id)
@@ -1022,7 +1029,8 @@ pub(crate) fn record_pulled_accepted_proposal(
         return;
     }
     let Some(provenance) = raw.get("proposal_provenance").and_then(|value| {
-        serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(value.clone()).ok()
+        serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(value.clone())
+            .ok()
     }) else {
         return;
     };
@@ -1479,20 +1487,31 @@ fn reconcile_web_close(
 /// Proof has its own immutable/monotonic authority. A newer task body must
 /// not discard an owner's review verdict or published bytes on another host.
 fn restore_task_proofs(
-    root: Option<&std::path::Path>, store: &dyn TaskStore, remote: &Task,
-    incoming_is_owner: bool, proofs: &[String], qa: &[String],
+    root: Option<&std::path::Path>,
+    store: &dyn TaskStore,
+    remote: &Task,
+    incoming_is_owner: bool,
+    proofs: &[String],
+    qa: &[String],
 ) -> Result<(), CasError> {
-    if !incoming_is_owner { return Ok(()); }
+    if !incoming_is_owner {
+        return Ok(());
+    }
     let local = store.get(&remote.id)?;
-    if local.origin_project != remote.origin_project { return Ok(()); }
-    for proof in proofs { store.append_trusted_note(&remote.id, proof)?; }
+    if local.origin_project != remote.origin_project {
+        return Ok(());
+    }
+    for proof in proofs {
+        store.append_trusted_note(&remote.id, proof)?;
+    }
+    if crate::qa_evidence::cited_bundle_path(&local.notes).is_none()
+        && let Some(cited) = crate::qa_evidence::cited_bundle_path(&remote.notes)
+    {
+        store.append_note(&remote.id, &format!("qa-bundle: {cited}"))?;
+    }
     if let Some(root) = root {
         crate::qa_pass::sync::import(root, remote, qa)
             .map_err(|error| CasError::Other(format!("QA snapshot import failed: {error}")))?;
-    }
-    if crate::qa_evidence::cited_bundle_path(&local.notes).is_none()
-        && let Some(cited) = crate::qa_evidence::cited_bundle_path(&remote.notes) {
-        store.append_note(&remote.id, &format!("qa-bundle: {cited}"))?;
     }
     Ok(())
 }
@@ -1538,7 +1557,10 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
 fn rejects_delivery_regression(local: &Task, remote: &Task) -> bool {
     let regresses = (local.is_terminal() && !remote.is_terminal())
         || (local.status == crate::types::TaskStatus::AwaitingMerge
-            && matches!(remote.status, crate::types::TaskStatus::Open | crate::types::TaskStatus::InProgress));
+            && matches!(
+                remote.status,
+                crate::types::TaskStatus::Open | crate::types::TaskStatus::InProgress
+            ));
     regresses && !has_explicit_remote_reopen(local, remote)
 }
 
@@ -1553,15 +1575,19 @@ fn lifecycle_audit_note(note: &str) -> Option<(chrono::DateTime<chrono::Utc>, &s
 /// explicit transition/recovery reason. Previously observed actions cannot
 /// undo a later park, even if a replica uploads them under a newer row clock.
 fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
-    let local_boundary = local.notes.split("\n\n").filter_map(|block| {
-        let (at, event) = lifecycle_audit_note(block)?;
-        let is_boundary = if local.is_terminal() {
-            event.starts_with(audit::CLOSED) || event.starts_with(audit::CANCELLED)
-        } else {
-            event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE)
-        };
-        is_boundary.then_some((at, block.trim()))
-    }).max_by_key(|(at, _)| *at);
+    let local_boundary = local
+        .notes
+        .split("\n\n")
+        .filter_map(|block| {
+            let (at, event) = lifecycle_audit_note(block)?;
+            let is_boundary = if local.is_terminal() {
+                event.starts_with(audit::CLOSED) || event.starts_with(audit::CANCELLED)
+            } else {
+                event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE)
+            };
+            is_boundary.then_some((at, block.trim()))
+        })
+        .max_by_key(|(at, _)| *at);
     // A prior cycle can leave closed_at on a reset row. Only a terminal
     // state uses it; a current park is anchored to its own lifecycle note.
     // CAS_SYNC_STATUS is apply provenance and never establishes a new park.
@@ -1569,36 +1595,54 @@ fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
         .or(local_boundary.map(|(at, _)| at))
         .unwrap_or(local.updated_at);
     remote.notes.split("\n\n").any(|block| {
-        let Some((at, event)) = lifecycle_audit_note(block) else { return false; };
-        if local.notes.split("\n\n").any(|known| known.trim() == block.trim()) {
+        let Some((at, event)) = lifecycle_audit_note(block) else {
+            return false;
+        };
+        if local
+            .notes
+            .split("\n\n")
+            .any(|known| known.trim() == block.trim())
+        {
             return false;
         }
         let reopen = [audit::REOPENED, audit::REVIEW_SCOPE_RESET, audit::UNBLOCKED]
-            .into_iter().find_map(|prefix| event.strip_prefix(prefix))
+            .into_iter()
+            .find_map(|prefix| event.strip_prefix(prefix))
             .and_then(|audit| audit.trim().strip_prefix("actor="))
             .and_then(|audit| audit.split_once(" reason="))
             .is_some_and(|(actor, reason)| !actor.trim().is_empty() && !reason.trim().is_empty());
-        let request_changes = event.strip_prefix(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
+        let request_changes = event
+            .strip_prefix(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
             .is_some_and(|reason| !reason.trim().is_empty());
-        let reset = event.strip_prefix(audit::RESET)
+        let reset = event
+            .strip_prefix(audit::RESET)
             .and_then(|audit| audit.split_once("→Open (prior assignee: "))
             .and_then(|(_, audit)| audit.split_once(") — "))
             .is_some_and(|(_, reason)| !reason.trim().is_empty());
-        let scope_fix = event.strip_prefix(audit::PROOF_SCOPE_FIX)
+        let scope_fix = event
+            .strip_prefix(audit::PROOF_SCOPE_FIX)
             .is_some_and(|decision| !decision.trim().is_empty());
         let merge_recovery = remote.status == crate::types::TaskStatus::InProgress
-            && event.strip_prefix(audit::MERGE_RECOVERY)
+            && event
+                .strip_prefix(audit::MERGE_RECOVERY)
                 .is_some_and(|decision| !decision.trim().is_empty());
         if !(reopen || request_changes || reset || scope_fix || merge_recovery) {
             return false;
         }
         // Notes have minute precision. At an equal minute require causal
         // ordering in the remote timeline, rather than an arbitrary grace.
-        match at.timestamp().div_euclid(60).cmp(&boundary.timestamp().div_euclid(60)) {
+        match at
+            .timestamp()
+            .div_euclid(60)
+            .cmp(&boundary.timestamp().div_euclid(60))
+        {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
             std::cmp::Ordering::Equal => local_boundary.is_some_and(|(_, prior)| {
-                remote.notes.find(prior).zip(remote.notes.find(block.trim()))
+                remote
+                    .notes
+                    .find(prior)
+                    .zip(remote.notes.find(block.trim()))
                     .is_some_and(|(prior, action)| prior < action)
             }),
         }
@@ -1913,7 +1957,9 @@ impl CloudSyncer {
             remote,
             "local_mutation_or_delivery_or_live_execution",
         )?;
-        Ok(UpsertResult::Skipped("local_mutation_or_delivery_or_live_execution"))
+        Ok(UpsertResult::Skipped(
+            "local_mutation_or_delivery_or_live_execution",
+        ))
     }
 
     fn record_task_lifecycle_conflict(
@@ -1938,7 +1984,11 @@ impl CloudSyncer {
         )
     }
 
-    fn record_delivery_regression_conflict(&self, local: &Task, remote: &Task) -> Result<(), CasError> {
+    fn record_delivery_regression_conflict(
+        &self,
+        local: &Task,
+        remote: &Task,
+    ) -> Result<(), CasError> {
         if local.is_terminal() {
             self.record_terminal_regression_conflict(local, remote)
         } else {
@@ -1969,11 +2019,15 @@ impl CloudSyncer {
             let guard: GuardedTask = match serde_json::from_str(&row) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    result.errors.push(format!("Task {id}: lifecycle guard journal error: {error}"));
+                    result
+                        .errors
+                        .push(format!("Task {id}: lifecycle guard journal error: {error}"));
                     continue;
                 }
             };
-            if guard.local.status != TaskStatus::AwaitingMerge || !guard.rejected_remote.is_terminal() {
+            if guard.local.status != TaskStatus::AwaitingMerge
+                || !guard.rejected_remote.is_terminal()
+            {
                 continue;
             }
             let current = match task_store.get(&id) {
@@ -2308,7 +2362,12 @@ impl CloudSyncer {
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
             let remote_entry = self.prepare_pulled_entry(
-                store, remote_entry, remote_updated_at, current_project_id, None, row_origin.as_deref(),
+                store,
+                remote_entry,
+                remote_updated_at,
+                current_project_id,
+                None,
+                row_origin.as_deref(),
             )?;
             let remote_entry_id = remote_entry.id.clone();
             match self.upsert_entry_lww(
@@ -2393,7 +2452,8 @@ impl CloudSyncer {
             let trusted_provenance =
                 take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
             let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
-                &mut remote_task.notes, &remote_task.id,
+                &mut remote_task.notes,
+                &remote_task.id,
             );
             let qa_receipts = crate::qa_pass::sync::take(&mut remote_task.notes, &remote_task.id);
             // cas-7a63: a row without its own origin cannot be attributed.
@@ -2432,8 +2492,20 @@ impl CloudSyncer {
                 )
             };
             if task_outcome.is_ok() {
-                restore_task_proofs(self.push_cas_root.as_deref(), task_store, &remote_task,
-                    incoming_is_owner, &trusted_proofs, &qa_receipts)?;
+                if let Err(error) = restore_task_proofs(
+                    self.push_cas_root.as_deref(),
+                    task_store,
+                    &remote_task,
+                    incoming_is_owner,
+                    &trusted_proofs,
+                    &qa_receipts,
+                ) {
+                    // A rejected proof stays rejected without discarding other
+                    // task rows in this authenticated incremental batch.
+                    result
+                        .errors
+                        .push(format!("task {} proof restore: {error}", remote_task.id));
+                }
             }
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
@@ -2734,7 +2806,9 @@ impl CloudSyncer {
         self.reassert_quarantine();
 
         if let Err(error) = self.report_guarded_peer_closes(task_store, &mut result) {
-            result.errors.push(format!("Could not report guarded peer closes: {error}"));
+            result
+                .errors
+                .push(format!("Could not report guarded peer closes: {error}"));
         }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
@@ -3007,7 +3081,9 @@ impl CloudSyncer {
                 store.update(&remote)?;
                 Ok(UpsertResult::Updated)
             }
-            ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
+            ConflictAction::UseLocal | ConflictAction::Skip => {
+                Ok(UpsertResult::Skipped("local_conflict"))
+            }
         }
     }
 
@@ -3058,7 +3134,9 @@ impl CloudSyncer {
                             },
                         )
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
+                    ConflictAction::UseLocal | ConflictAction::Skip => {
+                        Ok(UpsertResult::Skipped("local_conflict"))
+                    }
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
@@ -3114,7 +3192,9 @@ impl CloudSyncer {
                         store.update(&rule)?;
                         Ok(UpsertResult::Updated)
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
+                    ConflictAction::UseLocal | ConflictAction::Skip => {
+                        Ok(UpsertResult::Skipped("local_conflict"))
+                    }
                 }
             }
             Err(cas_store::StoreError::RuleNotFound(_)) => {
@@ -3184,7 +3264,9 @@ impl CloudSyncer {
                         store.update(&skill)?;
                         Ok(UpsertResult::Updated)
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
+                    ConflictAction::UseLocal | ConflictAction::Skip => {
+                        Ok(UpsertResult::Skipped("local_conflict"))
+                    }
                 }
             }
             // Keep team and personal pulls aligned: a fresh local store may
@@ -3503,7 +3585,12 @@ impl CloudSyncer {
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
             let remote_entry = self.prepare_pulled_entry(
-                store, remote_entry, remote_updated_at, current_project_id, Some(team_id), row_origin.as_deref(),
+                store,
+                remote_entry,
+                remote_updated_at,
+                current_project_id,
+                Some(team_id),
+                row_origin.as_deref(),
             )?;
             let remote_entry_id = remote_entry.id.clone();
             match self.upsert_entry_lww(
@@ -3597,7 +3684,8 @@ impl CloudSyncer {
             let trusted_provenance =
                 take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
             let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
-                &mut remote_task.notes, &remote_task.id,
+                &mut remote_task.notes,
+                &remote_task.id,
             );
             let qa_receipts = crate::qa_pass::sync::take(&mut remote_task.notes, &remote_task.id);
             // cas-7a63: a row without its own origin cannot be attributed.
@@ -3628,8 +3716,20 @@ impl CloudSyncer {
                 "team_pull",
             );
             if task_outcome.is_ok() {
-                restore_task_proofs(self.push_cas_root.as_deref(), task_store, &remote_task,
-                    incoming_is_owner, &trusted_proofs, &qa_receipts)?;
+                if let Err(error) = restore_task_proofs(
+                    self.push_cas_root.as_deref(),
+                    task_store,
+                    &remote_task,
+                    incoming_is_owner,
+                    &trusted_proofs,
+                    &qa_receipts,
+                ) {
+                    // A rejected proof stays rejected without discarding other
+                    // task rows in this authenticated incremental batch.
+                    result
+                        .errors
+                        .push(format!("task {} proof restore: {error}", remote_task.id));
+                }
             }
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
@@ -3790,7 +3890,9 @@ impl CloudSyncer {
             result.record_conflict_detail(conflict);
         }
         if let Err(error) = self.report_guarded_peer_closes(task_store, &mut result) {
-            result.errors.push(format!("Could not report guarded peer closes: {error}"));
+            result
+                .errors
+                .push(format!("Could not report guarded peer closes: {error}"));
         }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
@@ -4497,8 +4599,15 @@ mod web_close_tests {
         let mut local = Task::new("cas-conflict".to_string(), "local title".to_string());
         local.notes = "[2026-08-09 09:00] 📝 PROGRESS local first".to_string();
         store.add(&local).unwrap();
-        store.append_trusted_note(&local.id, "[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted").unwrap();
-        store.append_note(&local.id, "[2026-08-09 11:00] 📝 PROGRESS local last").unwrap();
+        store
+            .append_trusted_note(
+                &local.id,
+                "[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted",
+            )
+            .unwrap();
+        store
+            .append_note(&local.id, "[2026-08-09 11:00] 📝 PROGRESS local last")
+            .unwrap();
         let local = store.get(&local.id).unwrap();
         queue
             .enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None)
@@ -4519,7 +4628,12 @@ mod web_close_tests {
             merged.notes,
             "[2026-08-09 09:00] 📝 PROGRESS local first\n\n[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted\n\n[2026-08-09 10:30] 📝 PROGRESS remote note\n\n[2026-08-09 11:00] 📝 PROGRESS local last"
         );
-        assert!(merged.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+        assert!(
+            merged
+                .notes
+                .lines()
+                .any(|line| line == "ARTIFACT_PROOF: trusted")
+        );
         let conflicts = queue.list_conflicts(1).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].winner_side, "merged");

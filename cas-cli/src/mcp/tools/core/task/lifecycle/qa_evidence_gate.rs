@@ -189,7 +189,11 @@ pub(crate) fn ledger_preflight(cas_root: &Path, task: &Task, require_missing: bo
     let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
     let dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
     let ledger = dir.join("LEDGER.md");
-    if !ledger.exists() && (!require_missing || !config.qa().evidence_gate || task.demo_statement.trim().is_empty()) { return Ok(()); }
+    // Batch proof is owned by the existing shared-receipt gate, not an
+    // individual ledger. Existing ledgers still undergo the same format check.
+    if !ledger.exists() && (!require_missing || !config.qa().evidence_gate
+        || config.qa().mode == crate::config::QaMode::Batch
+        || task.demo_statement.trim().is_empty()) { return Ok(()); }
     if dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none() {
         return Err("QA LEDGER REJECTED: task artifact directory escapes its project namespace".into());
     }

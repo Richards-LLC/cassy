@@ -23,5 +23,39 @@ NO_COLOR and locale captures require the actual candidate before critique.
 
 ## Critique
 
-Pending implementation and candidate terminal-qa execution. No output or
-mechanical PASS is claimed by this concept brief.
+Candidate: `cas 3.87.0 (6709dce 2026-10-29)`, supervisor-built at
+`6709dced8d73cb24f7f4b5cd4c3b6ad8d33c259b`, SHA-256
+`81e20c004910fc5fabf9206c9cdcef0f4282bea0a32921bb120cc06dee3fedc2`.
+
+Receipt prefixes (complete reports and paths live in the task evidence bundle):
+
+- `terminal-qa: PASS qa-ledger-valid · 12 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS qa-ledger-invalid · 12 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS qa-ledger-init · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+Each covers 80/120 columns on four palettes, pipe, NO_COLOR, C locale and JSON.
+The expected invalid-ledger exit is 1; its JSON stdout remains one document.
+An initial init capture harness incorrectly assumed that the generated artifact
+path belonged under the fixture repository. It belongs under the isolated
+fixture HOME; correcting that ownership assertion produced the init PASS.
+The original failed harness captures remain in the evidence bundle.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Line one names valid/invalid and its count; line two prints the repair command. |
+| Fit | 5 | Valid output collapses to one line; invalid output expands only the named line, row and field. |
+| Craft | 4 | Hanging diagnostic indents fit 80 columns; init offers JSON for its full path. |
+| Theme safety | 5 | All four palette captures, NO_COLOR and C locale passed with no allowances. |
+| Machine contract | 5 | Valid and invalid checks plus init emit one JSON document; failure retains exit 1. |
+
+Read the 80-column light/dark HTML and pipe captures, then inspected the
+[four-palette render](qa-ledger/palettes.png). The browser MCP launcher could
+not start its host sandbox; a disposable headless Chrome profile rendered the
+same local report successfully. [Valid](qa-ledger/valid.txt) and
+[invalid](qa-ledger/invalid.txt) captures are committed with this critique.
+
+The real candidate walk also checked predicted FLOW-J1 scaffolding, the
+no-code route default, check/init round trip, refusal to overwrite evidence,
+and row/line diagnostics for an unowned FAIL. The final critique/capture
+commit changes only these documentation files; evaluated production, builtin
+and test inputs stay identical to the candidate revision.

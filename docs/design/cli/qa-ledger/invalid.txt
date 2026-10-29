@@ -1,0 +1,6 @@
+Invalid ledger: 1 diagnostics
+Repair rows; rerun: cas qa ledger check <path> --task <id>
+line 7 row M01 [defect task]
+  FAIL has no cas-* defect task
+  file the defect and put its task id in this row
+✗ ledger validation failed

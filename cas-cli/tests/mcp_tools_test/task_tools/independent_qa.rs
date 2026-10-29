@@ -246,7 +246,10 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
             .unwrap().unwrap().state.is_active());
     }
     std::fs::write(&ledger,
-        "| Journey | Verdict |\n| --- | --- |\n| SEND | NOT EXERCISED: sandbox unavailable |\n| REPLY | PASS — persisted reply read back |\n").unwrap();
+        "cells=2; PASS=1; FAIL=0; NOT EXERCISED=1\nlabels: source-inferred=1; real-build=1\n\
+         | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+         | SEND | compose | sent | sandbox unavailable | NOT EXERCISED: sandbox unavailable | source-inferred | - | - |\n\
+         | REPLY | reply | saved | persisted reply read back | PASS | real-build | LEDGER.md | - |\n").unwrap();
     let result = extract_text(service.verification(request()).await.unwrap());
     assert!(result.contains("APPROVAL"), "{result}");
     assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task_id(&cas_dir, &task_id)).unwrap().status,

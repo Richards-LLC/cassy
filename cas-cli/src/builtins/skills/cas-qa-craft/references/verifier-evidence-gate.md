@@ -38,26 +38,15 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    substitute for the ledger. If the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
    Record that rejection with `verification action=add` and stop.
-2. Parse the ledger's row grammar exactly:
-   `id | cell | expected | observed | verdict | label | evidence path | defect task`.
-   Ignore prose and the required Constants vs expectation, Contradictions, and
-   Honesty sections when counting rows. Trim cells before checking them.
-3. Run every check in this machine-checkable REJECT table before opening a
-   capture or making a user-outcome judgment. Any failed check rejects the
-   ledger; list every failed check, row ID, and observed count/value in the
-   verification summary, then stop.
+2. Run `cas qa ledger check <path> --task <id> --json`. The CLI, worker close
+   and verifier share this parser. A nonzero exit rejects the ledger before
+   capture judgment. List each returned line, row ID, field and message in the
+   verification summary, record rejection, and stop. Use the candidate
+   revision's command when reviewing a change to the parser itself.
+3. Keep the JSON report as proof of the structural check. The executable owns
+   grammar, counts, labels and task-derived breadth.
 
-   | Check | REJECT when |
-   | --- | --- |
-   | Required cells | Any data row has a blank `verdict` or `label` cell. |
-   | Source inference | A row has `label=source-inferred` and `verdict=PASS`. |
-   | Failed-cell ownership | A `verdict=FAIL` row has no non-blank `cas-*` defect task ID. |
-   | Forbidden verdict | The standalone word `partial` occurs in any verdict cell, case-insensitively. |
-   | Matrix breadth | Fewer than three data rows exist after the demo statement's happy-path row (the first matrix row). |
-   | Headline counts | Header counts for `cells`, `PASS`, `FAIL`, or `NOT EXERCISED` do not equal the parsed row totals. |
-   | PASS evidence | A `PASS` row has no evidence path, or its referenced capture is absent or unreadable. |
-
-4. If the REJECT table passes, open every capture referenced by a `PASS` row
+4. If the shared check passes, open every capture referenced by a `PASS` row
    with the available image-capable or terminal-capture reader. Judge the
    capture itself, not its filename, ledger prose, or source code. For each row
    answer whether a user performing that cell would see the stated `expected`
@@ -68,7 +57,7 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    never as `PASS`.
 5. `NOT EXERCISED` rows are owed work, not failures. List each such row in the
    verification summary with every row's final verdict, label, capture
-   judgment, and the REJECT-table result.
+   judgment, and the shared-check result.
 6. Only after this evidence gate passes may you read the close reason and
    compare it with the acceptance criteria. A capture-downgraded row or a
    ledger `FAIL` is incomplete evidence even if the close reason says the task

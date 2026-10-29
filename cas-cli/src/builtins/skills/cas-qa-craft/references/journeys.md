@@ -35,15 +35,13 @@ row starts at its entry and ends at its goal.
 
 ## Journey rows
 
-Write one ledger row per live journey the impact lists, with the journey id as
-the row's `id` cell and one verdict: `PASS`, `FAIL`, `NOT A ROUTE`, or
-`NOT EXERCISED: <reason>`. `verification action=qa_record status=approved`
-refuses a ledger missing a row once a registry exists (G8). Prove a dark
-journey stays unreachable; a dead one is `NOT A ROUTE`. Example:
-
-```text
-| B2-home-signup | / → Get started → workspace | one claimed workspace | INV-ONE-WORKSPACE read back: 1 row, claimed_at set | PASS | real-build | qa/J03.png | - |
-```
+Run `cas qa ledger init --task <id>` to prefill predicted live journey IDs,
+then compare them with the parked impact (`cas qa impact --task <id>`) for
+this review round. Add missing journey IDs and walk each from entry to goal.
+Prove dark routes stay unreachable and record dead routes honestly. Run
+`cas qa ledger check <path> --task <id>` before recording the verdict.
+G8 consumes the same typed rows and refuses a missing live journey once a
+registry exists. The scaffold and check own the row grammar.
 
 ## Escape vocabulary
 

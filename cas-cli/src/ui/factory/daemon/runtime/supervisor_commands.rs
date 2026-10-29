@@ -43,6 +43,8 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
     let lower = current.to_lowercase();
     let fresh = |marker: &str| lower.contains(marker) && !before.to_lowercase().contains(marker);
     match command {
+        Command::Compact if fresh("compacted (ctrl+o") || fresh("context compacted ·") =>
+            Some(("Context compaction confirmed by the supervisor's harness.".into(), false)),
         Command::Model if fresh("select model") || fresh("select a model")
             || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
         Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
@@ -166,6 +168,7 @@ impl FactoryDaemon {
             anyhow::ensure!(native_observation(record.receipt.command, "", &current).is_some_and(|(_, open)| open), "The native chooser is no longer open.");
             pane.deliver_user_input(key.bytes(), cas_mux::UserInputKind::KeyStream).await?;
             record.before = current;
+            record.started = Instant::now();
             record.last_key = Some(key);
             record.receipt.phase = Phase::Submitted;
             record.receipt.interactive = false;
@@ -237,6 +240,7 @@ mod tests {
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
         assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯").is_none());
+        assert!(native_observation(Command::Compact, "›", "• Context compacted · 44s\n›").is_some());
         assert!(native_observation(Command::Model, "Set model to Sonnet\n❯", "Set model to Sonnet\n❯ /model").is_none());
         let opened = native_observation(Command::Model, "❯", "Select model\nOpus\nSonnet").unwrap();
         assert!(opened.1);

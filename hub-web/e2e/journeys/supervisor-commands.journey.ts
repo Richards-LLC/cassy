@@ -1,6 +1,7 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { SCOPES } from "./hub-double";
+import { journeyStamp } from "./clock";
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test.describe(`${viewport.width}`, () => {
@@ -54,6 +55,23 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => mutations().length).toBe(2);
         expect(mutations()[1].body).toMatchObject({ command: "exit", confirmed: true });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+      });
+      await journey.stage("Settle Exit from the ended catalog after its status request loses the daemon", async () => {
+        const request = mutations()[1].body as { client_ref: string };
+        const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/exit" });
+        hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
+        await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
+        const session = machine.sessions[0]!;
+        session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: [...session.workers], orphans: [], unverified: [] };
+        session.liveness = "stale_metadata"; session.workers = [];
+        await hub.announceCatalog(machine.id);
+        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        await expect(receipt).toContainText("Session ended after Exit");
+        await expect(receipt).not.toContainText("not sent");
+        await expect(receipt).not.toContainText("Retry");
+        await expect(page.locator("#conversation-connection")).toContainText("Ended");
+        await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/usage" })).toHaveAttribute("data-phase", "observed");
+        expect(mutations()).toHaveLength(2);
       });
     });
   });

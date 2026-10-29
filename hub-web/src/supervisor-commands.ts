@@ -183,6 +183,7 @@ export class SupervisorCommandSession {
   readonly receipts = new Map<string, CommandReceipt>();
   supported = false;
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly endedCommands = new Map<string, string>();
   constructor(private readonly options: SessionOptions) {}
   async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
@@ -197,27 +198,41 @@ export class SupervisorCommandSession {
     this.options.changed(); this.poll(ref);
   }
   receive(receipt: CommandReceipt): void {
-    if (!this.receipts.has(receipt.client_ref)) return;
+    const current = this.receipts.get(receipt.client_ref);
+    if (!current || current.command !== receipt.command) return;
     this.receipts.set(receipt.client_ref, receipt);
+    const ended = this.endedCommands.get(receipt.client_ref);
+    if (ended !== undefined) this.settleEnded(receipt, ended);
     if (receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
     this.options.changed();
   }
   /** Only the authenticated catalog's ended receipt may settle a vanished pane. */
   ended(reason: string): void {
     for (const receipt of this.receipts.values()) {
-      if (receipt.phase !== "submitted" && !receipt.interactive) continue;
-      receipt.phase = receipt.command === "exit" ? "observed" : "unconfirmed";
-      receipt.interactive = false;
-      receipt.detail = receipt.command === "exit"
-        ? `Session ended after Exit (${reason}). See the session-ended receipt.`
-        : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
-      this.stopPoll(receipt.client_ref);
+      if (!this.canSettleEnded(receipt)) continue;
+      this.endedCommands.set(receipt.client_ref, reason);
+      this.settleEnded(receipt, reason);
     }
     this.options.changed();
   }
+  private canSettleEnded(receipt: CommandReceipt): boolean {
+    return receipt.phase === "submitted" || receipt.phase === "unconfirmed" || receipt.interactive;
+  }
+  private settleEnded(receipt: CommandReceipt, reason: string): void {
+    if (!this.canSettleEnded(receipt)) return;
+    receipt.phase = receipt.command === "exit" ? "observed" : "unconfirmed";
+    receipt.interactive = false;
+    receipt.detail = receipt.command === "exit"
+      ? `Session ended after Exit (${reason}). See the session-ended receipt.`
+      : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
+    this.stopPoll(receipt.client_ref);
+  }
   reject(ref: string, detail: string): boolean {
     const receipt = this.receipts.get(ref); if (!receipt) return false;
+    if (receipt.phase === "observed" || receipt.phase === "refused") return true;
     receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
+    const ended = this.endedCommands.get(ref);
+    if (ended !== undefined) this.settleEnded(receipt, ended);
     this.stopPoll(ref); this.options.changed(); return true;
   }
   async step(ref: string, key: CommandKey): Promise<void> {

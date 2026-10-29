@@ -875,8 +875,9 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 1. Choose Usage from the slash palette with the keyboard
 2. Read the observed native result without resending the command
 3. Cancel Clear, then confirm Exit for the named supervisor
-4. Open the quick controls and read the permission explanation
-5. Read adjacent Raw output and return by keyboard
+4. Settle Exit from the ended catalog after its status request loses the daemon (cas-7f2a); require an observed Exit, no contradictory not-sent/retry claim and no replay, while the earlier Usage receipt stays observed.
+5. Open the quick controls and read the permission explanation
+6. Read adjacent Raw output and return by keyboard
 
 #### Expected experience
 

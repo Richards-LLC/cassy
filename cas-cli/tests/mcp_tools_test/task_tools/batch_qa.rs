@@ -956,12 +956,15 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
         git(&fx.repo, &["add", "cas-bq03.css"]);
         git(&fx.repo, &["commit", "-qm", "fix(cas-bq03): correct spacing"]);
         let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+        // Fx::close sends the stored delivery anchor as commit_receipt.
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        tasks.update(&task).unwrap();
         let parked = fx.close("cas-bq03").await;
         let passes = cas_store::list_qa_passes(&root, "cas-bq03").unwrap();
         assert_eq!(passes.len(), index + 2, "rejected={rejected}: {parked}");
         let latest = passes.iter().max_by_key(|pass| pass.round).unwrap();
-        assert_eq!(latest.bound_head, head);
-        assert_eq!(latest.state, cas_types::QaPassState::Pending);
+        assert_eq!(latest.bound_head, head, "rejected={rejected}: {parked}");
+        assert_eq!(latest.state, cas_types::QaPassState::Pending, "rejected={rejected}: {parked}");
     }
 
 }

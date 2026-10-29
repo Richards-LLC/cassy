@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS hosts can now install published releases automatically through the
+  existing `scripts/install-on-publish.sh --install` command. A per-user
+  LaunchAgent checks every minute with native macOS locking and timestamps;
+  release notes record installation only after the version check succeeds.
+
 ## [3.88.0] - 2026-10-29
 
 ### Added — Commander controls and a clearer picture of progress

@@ -2873,10 +2873,15 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    This job cannot delay main or release publication. If it fails after
    publication, rerun the failed job; do not republish the existing release.
 7. The supervisor host installs on publish: `scripts/install-on-publish.sh
-   --install` sets up a systemd user timer once per host. Every minute it
+   --install` sets up a systemd user timer on Linux or a LaunchAgent on
+   macOS once per host. While the user session is active, every minute it
    compares the latest release with `cas --version`, runs
    `cas update --yes --version x.y.z` when it is newer, and completes the
-   release timer in the notes: PR opened to installed, the one latency figure.
+   release timer in the notes after verifying the installed version: PR
+   opened to the first host's actual installation, the one latency figure.
+   On macOS, inspect `launchctl print gui/$(id -u)/dev.cassy.install-on-publish`
+   and `~/.local/state/cassy/install-on-publish.log` (under `XDG_STATE_HOME`
+   when set); `--uninstall` unloads and removes the per-user scheduler.
 8. Derive announcement digests from the published bytes with
    `./scripts/release-published-receipt.sh vx.y.z`; it fails closed while
    either asset is missing or a digest disagrees with GitHub.

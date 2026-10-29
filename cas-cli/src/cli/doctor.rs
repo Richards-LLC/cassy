@@ -6578,7 +6578,7 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = env.home().join("project");
         fs::create_dir_all(&project).unwrap();
-        let root = crate::store::init_cas_dir(&project).unwrap();
+        let root = env.bind_store_root(crate::store::init_cas_dir(&project).unwrap());
         env.set_current_dir(&project);
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         conn.execute_batch(

@@ -30,6 +30,15 @@ for this lint. A direct guard parameter is an ownership witness; an optional
 parameter or a fallible/optional returned guard is insufficient. `Command.env`, `env_remove`, and `current_dir` affect
 a child process and are outside this check.
 
+`TestEnvGuard::temp_home()` pins `CAS_ROOT` to an empty store under the
+temporary HOME, and that override wins over the current directory. A test that
+holds such a guard, enters a directory with `set_current_dir(X)` and builds its
+store with `init_cas_dir(X)` must bind that store with `bind_store_root` (or
+start from `TestEnvGuard::for_store`). Otherwise root-resolving readers read the
+empty store instead of the fixture (cas-08e6). The lint reports that shape as
+`unbound-store-root`. Tests that pass store paths explicitly, without entering
+the project directory, are outside this rule.
+
 The scanner recognizes unit-test attributes, `cfg(test)` modules, integration
 tests, test-support paths, and named helpers reached from tests. It follows
 qualified helpers across files in the same crate and imported aliases. Bare

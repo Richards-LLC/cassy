@@ -124,6 +124,20 @@
       "path": "cas-cli/src/fixture.rs",
       "source": "// test-env: subprocess-only \u2014 missing isolated child contract\n#[test] fn ordinary() { unsafe { std::env::set_var(\"HOME\", \"other\"); } }",
       "violation": true
+    },
+    {
+      "name": "temp-home-store-root-mismatch",
+      "path": "cas-cli/src/ui/factory/daemon/runtime/shutdown_tests.rs",
+      "source": "#[tokio::test] async fn long_transcript_recycle() { let mut env = crate::test_env_guard::TestEnvGuard::temp_home(); let dir = tempfile::tempdir().unwrap(); let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap(); env.set_current_dir(dir.path()); let mut daemon = daemon(&cas_dir); }",
+      "violation": true,
+      "incident": "cas-08e6"
+    },
+    {
+      "name": "temp-home-store-root-bound",
+      "path": "cas-cli/src/ui/factory/daemon/runtime/shutdown_tests.rs",
+      "source": "#[tokio::test] async fn long_transcript_recycle() { let mut env = crate::test_env_guard::TestEnvGuard::temp_home(); let dir = tempfile::tempdir().unwrap(); let cas_dir = env.bind_store_root(crate::store::init_cas_dir(dir.path()).unwrap()); env.set_current_dir(dir.path()); let mut daemon = daemon(&cas_dir); }",
+      "violation": false,
+      "incident": "cas-08e6"
     }
   ]
 }

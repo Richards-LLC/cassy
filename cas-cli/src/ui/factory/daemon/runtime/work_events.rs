@@ -1152,6 +1152,16 @@ impl WorkEventStores {
 /// Finds a supervisor's transcript.
 pub(crate) type TranscriptResolver<'a> = &'a dyn Fn(&SupervisorSource) -> Option<PathBuf>;
 
+/// The status endpoint's allowlisted lifecycle projection, with no work text.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct SupervisorPhase {
+    pub(crate) event_id: String,
+    pub(crate) kind: WorkEventKind,
+    pub(crate) lifecycle: WorkLifecycle,
+    pub(crate) observed_at: String,
+    pub(crate) stale: bool,
+}
+
 /// Per-daemon transcript indexes, kept across requests so paging and
 /// detail reads never re-parse a transcript.
 #[derive(Default)]
@@ -1163,6 +1173,14 @@ pub(crate) struct WorkEventIndex {
 }
 
 impl WorkEventIndex {
+    pub(crate) fn supervisor_phase(
+        &mut self,
+        _scope: &WorkEventScope,
+        _resolve: TranscriptResolver<'_>,
+    ) -> Option<SupervisorPhase> {
+        None
+    }
+
     fn refresh(
         &mut self,
         scope: &WorkEventScope,

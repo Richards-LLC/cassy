@@ -741,8 +741,11 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
     let grouped = include_str!("fixtures/changelog_grouped_387.md");
     assert_eq!(grouped.lines().filter(|line| line.starts_with("### ")).count(), 7);
     assert_eq!(grouped.lines().filter(|line| line.starts_with("- **")).count(), 27);
-    let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n";
-    for (body, expected) in [(grouped, 27), (legacy, 2)] {
+    let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n\n### Added — Violet push-wake\n\n- Mentions wake the supervisor.\n- Watched channels are read periodically.\n- **Behavior change:** push-wake is on by default.\n\n### Added — remote supervisors\n\nSetup guide and walkthrough.\n\n- **Peer discovery** lists supervisors.\n- **Peer messaging** reaches them.\n";
+    for (body, expected, retained_titles) in [
+        (grouped, 27, &[][..]),
+        (legacy, 5, &["Factory reminder probes", "Task coordination", "Violet push-wake", "Peer discovery", "Peer messaging"][..]),
+    ] {
         fs::write(project.path().join("CHANGELOG.md"), format!("# Changelog\n\n{body}")).unwrap();
         let output = cas_cmd(&project)
             .env("GH_BIN", &fake_gh)
@@ -753,5 +756,9 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
         assert_eq!(report["issue_count"], 2, "official GitHub count is independent: {report}");
         let html = fs::read_to_string(project.path().join("docs/release-reports/v9.99.1.html")).unwrap();
         assert_eq!(html.matches("data-change=\"").count(), expected, "one rendered mark per shipped change");
+        for title in retained_titles {
+            // pin: the report must retain the legacy heading as its plotted change title.
+            assert!(html.contains(&format!("<title>{title}</title>")), "missing legacy change title: {title}");
+        }
     }
 }

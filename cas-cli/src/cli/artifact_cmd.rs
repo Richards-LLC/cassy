@@ -215,7 +215,7 @@ fn print_publish(outcome: &PublishOutcome) {
             for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
-            if matches!(outcome.disposition, PublishDisposition::CommittedMetadataUnavailable { .. }) {
+            if matches!(outcome.disposition.storage_disposition(), PublishDisposition::CommittedMetadataUnavailable { .. }) {
                 println!("  -> cas cloud sync");
             } else {
                 println!("  -> cas artifact show {}", artifact.id);

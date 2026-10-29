@@ -4316,7 +4316,7 @@ async fn acquire_lease<R: SessionReadModel>(
             return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({
                 "error": "scope_denied",
                 "required_scope": Scope::PaneInput.as_str(),
-                "message": PaneInputPermissionRequired.to_string(),
+                "message": ClientPermissionRequired::PaneInput.to_string(),
             }))).into_response(), &headers);
         }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),

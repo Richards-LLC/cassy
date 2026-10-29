@@ -2202,7 +2202,41 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskStartRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.start_task_with_principal(req, None).await
+    }
+
+    pub(crate) async fn task_start_for_queue(
+        &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
+    ) -> Result<CallToolResult, McpError> {
+        self.start_task_with_principal(req, Some(principal)).await
+    }
+
+    async fn start_task_with_principal(
+        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+    ) -> Result<CallToolResult, McpError> {
+        let queued_start = principal.is_some();
+        let agent_id = match principal.as_ref() {
+            Some(principal) => principal.agent().id.clone(),
+            None => self.get_agent_id()?,
+        };
+        let agents = self.open_agent_store()?;
+        let worker = agents.get(&agent_id).ok().filter(|a| a.role == cas_types::AgentRole::Worker);
+        let _start_lock = worker.as_ref().filter(|a| a.factory_session.is_some())
+            .map(|worker| crate::worker_task_queue::worker_lock(&self.cas_root, worker, "start"))
+            .transpose()?;
         let task_store = self.open_task_store()?;
+
+        if let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {
+            if task_store.list(Some(TaskStatus::InProgress)).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .iter().any(|task| task.id != req.id
+                    && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
+                    && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
+                || agents.list_active_leases().map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                    .iter().any(|lease| lease.agent_id == worker.id && lease.task_id != req.id) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Cannot start another task while this worker has active work; close or park it first"));
+            }
+        }
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
@@ -2246,7 +2280,7 @@ impl CasCore {
 
         // cas-619f: a QA work item may never be started by the implementer of
         // the delivery it reviews; starting it claims the round.
-        let qa_claim_note = self.claim_qa_round_on_start(&task)?.unwrap_or_default();
+        let qa_claim_note = self.claim_qa_round_on_start(&task, principal.as_ref().map(|p| p.agent().id.as_str()))?.unwrap_or_default();
         // cas-31a3: the QA preflight (cas-d5c1) appends its report to this
         // task's notes in the store. The start writes `task` back below, so
         // take the notes as they are now; the copy read above would overwrite
@@ -2318,9 +2352,7 @@ impl CasCore {
             };
         }
 
-        // Auto-claim the task with a lease
-        let agent_id = self.get_agent_id()?;
-
+        // The caller or validated queue principal owns this execution lease.
         let agent_store = self.open_agent_store()?;
 
         // A supervisor may grant exactly this registration one start. Check
@@ -2421,7 +2453,13 @@ impl CasCore {
                         });
                     // GH #1353: both the reusable and per-task parked refs
                     // must remain stable while the next task starts.
-                    let parked_branch_note = if task.status == TaskStatus::Open {
+                    let parked_branch_note = if queued_start && task.status == TaskStatus::Open {
+                        let previous = worker_branch.clone();
+                        worker_branch = checkout_task_beside_parked_delivery(
+                            worker_checkout, &worker.name, &task.id, target_branch,
+                        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        Some(format!("\nTask queue preserved {previous}; starting on {worker_branch}."))
+                    } else if task.status == TaskStatus::Open {
                         crate::mcp::tools::worktree_head(worker_checkout)
                             .and_then(|tip| crate::mcp::tools::parked_delivery_at_tip(
                                 task_store.as_ref(), &worker.name, &tip,

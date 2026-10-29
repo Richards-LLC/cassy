@@ -80,7 +80,7 @@ pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>>
     }
     let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(worker);
     let prefix = cli.backend().capabilities().tool_prefix;
-    let text = format!(
+    let mut text = format!(
         "You have been assigned a new task:\nTask ID: {}\nTitle: {}\n\n\
          View full details: {prefix}task action=show id={}\n\
          Start working: {prefix}task action=start id={} brief=true\n\
@@ -94,6 +94,9 @@ pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>>
         task.id,
         WORKER_ASSIGNMENT_TEST_POLICY,
     );
+    if task.status == TaskStatus::InProgress {
+        text = format!("Task {} was started automatically from your queue. Continue this task on its allocated branch; no assignment ACK is needed.\n\n{}\n\nWhile working, post progress notes with {prefix}task action=notes id={}.", task.id, WORKER_ASSIGNMENT_TEST_POLICY, task.id);
+    }
     let key = format!("task-assignment:{}:{}", task.id, worker.id);
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
     let result = queue.enqueue_idempotent(

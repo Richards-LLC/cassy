@@ -7494,6 +7494,31 @@ impl CasCore {
 
     pub async fn cas_task_close_with_dispositions(
         &self,
+        Parameters(req): Parameters<TaskCloseRequest>,
+        completion_receipt: Option<String>,
+        external_verification_receipt: Option<String>,
+        negative_result: Option<NegativeResultCloseRequest>,
+        evidence_only: Option<EvidenceOnlyCloseRequest>,
+        inline_external_ref: Option<String>,
+        inline_execution_note: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = req.id.clone();
+        let mut result = self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
+            external_verification_receipt, negative_result, evidence_only,
+            inline_external_ref, inline_execution_note).await;
+        let note = self.advance_queue_after_delivery(&id).await;
+        match note {
+            Ok(Some(note)) => if let Ok(result) = result.as_mut() {
+                result.content.push(rmcp::model::Content::text(note));
+            },
+            Err(error) => tracing::warn!(task_id=%id, %error, "worker task queue advancement deferred"),
+            Ok(None) => {},
+        }
+        result
+    }
+
+    async fn close_task_with_dispositions_inner(
+        &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
         external_verification_receipt: Option<String>,

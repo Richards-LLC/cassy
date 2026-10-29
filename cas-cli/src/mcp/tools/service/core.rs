@@ -406,6 +406,15 @@ impl CasService {
     }
 
     pub(super) async fn task_update(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        if let Some(ids) = req.task_ids.as_ref() {
+            let worker = req.assignee.as_deref().ok_or_else(|| Self::error(
+                ErrorCode::INVALID_PARAMS, "task update with task_ids requires assignee=<worker>"))?;
+            if req.id.as_ref().is_some_and(|id| ids.first() != Some(id)) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, "id must match the first task_ids entry; omit id to clear the queue"));
+            }
+            return self.inner.configure_worker_task_queue(worker, Some(ids.clone()), req.expected_generation)
+                .await.map(Self::success);
+        }
         use crate::mcp::tools::TaskUpdateRequest;
         if req.task_type.is_some() {
             return Err(Self::error(

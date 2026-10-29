@@ -6466,6 +6466,15 @@ impl FactoryDaemon {
     ) {
         match ensure_worker_preassignment(self.app.cas_dir(), task_id, worker) {
             Ok(title) => {
+                if let Some(request_id) = request_id {
+                    let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                        .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, worker));
+                    if let Err(error) = bound {
+                        tracing::error!(%worker, %error, "spawn task queue binding failed; retry registration repair");
+                        return;
+                    }
+                }
+
                 tracing::info!(
                     worker = %worker,
                     task_id = %task_id,

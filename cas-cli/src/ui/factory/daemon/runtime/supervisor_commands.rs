@@ -44,7 +44,7 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
     let fresh = |marker: &str| lower.contains(marker) && !before.to_lowercase().contains(marker);
     match command {
         Command::Model if fresh("select model") || fresh("select a model")
-            || fresh("select reasoning effort") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
+            || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
         Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
         Command::Usage if fresh("current session") && (lower.contains("current week") || lower.contains("resets"))
             || command == Command::Usage && fresh("context window") && lower.contains("model:") =>
@@ -53,8 +53,51 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
     }
 }
 
-fn finish_turn_handled(_rows: &[serde_json::Value], _cli: cas_mux::SupervisorCli, _after: DateTime<Utc>) -> bool {
+/// A recorded request alone is still only submission. Observe its own native
+/// turn end; never interpret the model's prose as proof of a successful wrap-up.
+fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> bool {
+    let mut requested = false;
+    for row in rows {
+        if row["isSidechain"] == true || !row["timestamp"].as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok()).is_some_and(|at| at >= after) { continue; }
+        match cli {
+            cas_mux::SupervisorCli::Claude => {
+                if row["type"] == "user" && row["isMeta"] != true {
+                    if let Some(text) = row.pointer("/message/content").and_then(|v| v.as_str()) {
+                        requested = text.contains("<command-name>/finish</command-name>");
+                    }
+                }
+                if requested && row["type"] == "assistant" && row.pointer("/message/stop_reason").is_some_and(|v| v == "end_turn") { return true; }
+            }
+            cas_mux::SupervisorCli::Codex => {
+                if row["type"] == "response_item" && row["payload"]["type"] == "message" && row["payload"]["role"] == "user" {
+                    let text = row["payload"]["content"].as_array().map(|blocks| blocks.iter()
+                        .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                    requested = text.trim() == "$finish";
+                }
+                if requested && row["type"] == "event_msg" && row["payload"]["type"] == "task_complete" { return true; }
+            }
+            _ => return false,
+        }
+    }
     false
+}
+
+fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let store = crate::store::open_agent_store(cas_dir).ok()?;
+    let agent = store.get(supervisor).ok()?;
+    if agent.factory_session.as_deref() != Some(session) { return None; }
+    let path = crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
+        cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
+        agent.metadata.get("supervisor_account_dir").map(String::as_str))?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let start = file.metadata().ok()?.len().saturating_sub(512 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new(); file.take(512 * 1024).read_to_end(&mut bytes).ok()?;
+    let rows = String::from_utf8_lossy(&bytes).lines().skip(usize::from(start > 0))
+        .filter_map(|line| serde_json::from_str(line).ok()).collect::<Vec<_>>();
+    finish_turn_handled(&rows, cli, after).then(|| "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.".into())
 }
 
 /// The hook is an independent source: SessionStart(source=compact|clear) says
@@ -87,6 +130,12 @@ impl FactoryDaemon {
         anyhow::ensure!(!client_ref.is_empty() && client_ref.len() <= 128 && client_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "Invalid command reference.");
         let owner = (device.to_owned(), client_ref.clone());
         if let Request::Run { command, confirmed } = &request {
+            for record in self.supervisor_commands.records.values_mut() {
+                if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
+                    record.receipt.phase = Phase::Unconfirmed;
+                    record.receipt.detail = "The harness outcome was not observed. Check Raw output before sending another command.".into();
+                }
+            }
             if let Some(record) = self.supervisor_commands.records.get(&owner) {
                 anyhow::ensure!(record.receipt.command == *command, "Command reference already belongs to another command.");
                 return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
@@ -146,11 +195,15 @@ impl FactoryDaemon {
                     record.receipt.phase = Phase::Observed;
                     record.receipt.detail = detail;
                 }
-            } else if record.hook.is_none() && matches!(record.receipt.command, Command::Compact | Command::Clear) {
+            } else if record.hook.is_none() && matches!(record.receipt.command, Command::Compact | Command::Clear | Command::Finish) {
                 let root = self.app.cas_dir().to_path_buf();
                 let session = self.session_name.clone(); let supervisor = self.app.supervisor_name().to_owned();
                 let command = record.receipt.command; let after = record.at;
-                record.hook = Some(tokio::task::spawn_blocking(move || hook_observation(&root, &session, &supervisor, command, after)));
+                let cli = pane.harness();
+                record.hook = Some(tokio::task::spawn_blocking(move || {
+                    if command == Command::Finish { finish_observation(&root, &session, &supervisor, cli, after) }
+                    else { hook_observation(&root, &session, &supervisor, command, after) }
+                }));
             }
             if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
                 record.receipt.phase = Phase::Unconfirmed;
@@ -172,7 +225,7 @@ mod tests {
         for (cli, prompt, done) in [
             (Claude, json!({"type":"user","timestamp":at,"message":{"content":"<command-message>finish</command-message>\n<command-name>/finish</command-name>"}}),
                 json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}})),
-            (Codex, json!({"type":"event_msg","timestamp":at,"payload":{"type":"user_message","message":"$finish"}}),
+            (Codex, json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$finish"}]}}),
                 json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete"}})),
         ] {
             assert!(!finish_turn_handled(&[prompt.clone()], cli, at));

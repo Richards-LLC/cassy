@@ -1,6 +1,6 @@
 # Task completion reminder investigation — GH #1406
 
-The task-filtered reminder failure has existing fixes in **3.81.0**, retained in **3.84.0 and 3.86.0**. No additional runtime change is justified by the supplied incident. The reported 3613-second lifecycle delay remains historically unconfirmed; version skew alone does not establish its precise cause.
+The task-filtered reminder failure has existing fixes in **3.81.0**, retained in **3.84.0 and 3.86.0**. No additional runtime change is justified by the supplied incident. The reported 3613-second lifecycle delay remains historically unconfirmed; version skew alone does not establish its precise cause. A live **3.88.0** control below measured stored-task reconciliation and receipt within an active supervisor turn, with explicit daemon/MCP epochs. It did not exercise an independent idle wake.
 
 ## Incident and version boundary
 
@@ -28,7 +28,7 @@ The installed CLI and this worker's `system action=version` both report `3.86.0 
 
 The original task's published proof `art-5605a3a6` records the existing MCP reminder regression failing before the fix (TTL 3600 versus expected 0), then passing with the same filter. Its original delivery passed 695 selected tests. The corrective proof `art-6d086982` supersedes it for orphan/cancellation/successor findings: its same two-test filter failed 0/2 before the correction, passed 2/2 afterward, then passed 612 affected lib/integration tests. Both artifacts were fetched and integrity-verified for this investigation. No duplicate regression was added.
 
-## Fresh validation
+## Prior validation — 3.86 investigation
 
 At source revision `d5405693d876de2ab77315f301f65a4e745d50ee`, the capped runner completed the following selection:
 
@@ -66,5 +66,67 @@ The originating reminder/relay trace is unavailable in this checkout: its local 
 | Exact original 3.66 supervisor latency/model action | NOT EXERCISED: originating trace unavailable; no wall-clock production latency guarantee inferred from fixture transport |
 | Browser/terminal rendering journey | NOT A ROUTE: documentation-only delivery |
 | GH1406 result comment | VERIFIED: [posted evidence and limits](https://github.com/Richards-LLC/cassy/issues/1406#issuecomment-6470675073), authenticated `gh issue comment` exit 0 |
+
+## Residual evidence — October 29, 3.88.0
+
+The follow-up `cas-e443` captures a real deployed control rather than another fixture run. Portable evidence **`art-3bdd6a22`**, `gh1406-current-control-reviewed.tar.gz`, contains the selected read-only store rows, daemon log excerpt, supervisor transcript excerpts, runtime epochs, ledger and `verify-control.py`. Fetch it with `cas artifact fetch --task cas-e443 art-3bdd6a22`, then run `python3 verify-control.py` from the extracted directory. No runtime change or duplicate Rust regression was added.
+
+### Original evidence availability
+
+`historical-unavailable.json` records the bounded search on this Mac at **11:32:47 AM ET, October 29**:
+
+- `task show cas-4791` returns task not found; the local task store has no such task and no reminder filter mentioning it.
+- `~/.cas/sessions/pantheon-wild-marten-14.json` and its factory log directory are absent. Exact-name context search and searches of local factory daemon logs and project October 27 logs found no incident matches.
+- This Mac's reminder #124 belongs to a different session, `cas-src-watchful-bear-58`, created September 24. The earlier investigation's August row came from its Linux checkout; numeric IDs do not identify the same reminder across stores.
+
+The originating daemon epoch and reminder/relay trace are **UNAVAILABLE HERE**. This does not establish whether the originating Linux host retained them. The original 3613-second cause remains **INCONCLUSIVE**; the missing evidence is not replaced by a version-skew inference.
+
+### Deployed runtime epochs
+
+Factory session: `watchful-shark-71`. Epoch values below are the stored process start tokens, checked alongside live `ps` PIDs/start times. Installed CLI, worker MCP and the supervisor's own `system action=version` all report **3.88.0 (b0bff67 2026-10-29)**. The supervisor version call was captured at **11:34:59 AM ET**, in the same live process epoch as the control.
+
+| Process | PID | Start epoch token | Evidence |
+| --- | --- | --- | --- |
+| Scanning factory daemon | 66473 | 1793281309443204 | Session metadata `daemon_build_hash=b0bff67`; live process started 9:41:49 AM ET; daemon lifecycle start record at 9:41:50.540883 AM ET |
+| Supervisor MCP | 66624 | 1793281311111918 | Agent `bf0b3599-4c6c-4ed2-81b4-0720ffc1ec09`; live process started 9:41:51 AM ET; direct version tool result in supervisor transcript |
+| Worker MCP | 6823 | Not independently sampled | Worker version tool result and live PID, started 11:29:44 AM ET; not substituted for the supervisor or scanner epoch |
+
+### Bounded task-completion control
+
+The supervisor registered reminder **#2378**, `task_completed`, filter `{"task_id":"cas-a161"}`, with explicit TTL **3600 seconds**. That task had already closed at **10:04:46.360198 AM ET**. Registration was at **11:31:24.153277 AM ET**, not the approximate 11:33 AM estimate in the initial supervisor message. Stored timestamps supersede that estimate.
+
+| Observation | Time, October 29, ET | Since registration |
+| --- | --- | --- |
+| Reminder created | 11:31:24.153277 AM | 0 |
+| Reminder marked fired | 11:31:24.895371 AM | 0.742094 seconds |
+| Daemon-origin prompt #549299 enqueued | 11:31:24.896306 AM | 0.743029 seconds |
+| Recipient hook transport recorded | 11:31:30.321073 AM | 6.167796 seconds |
+| Hook body appears in supervisor transcript | 11:31:30.327 AM | 6.173723 seconds |
+| Supervisor model authors control-result message | 11:31:39.728 AM | 15.574723 seconds |
+
+The prompt's dedupe key is `reminder-fired:2378`, origin is `daemon`, and acknowledgement is `hook_surfaced`. The live daemon log independently records the fire and the initial wake-policy hold: **“pane has not been silent long enough.”** The supervisor received the body on its next tool result while already working, then authored the control-result message. The transcript establishes that model action separately from the queue's transport fields.
+
+This exercises persisted Closed-state reconciliation through the real daemon and hook transport. [`reconcile_task_reminder`](../../cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs) synthesizes a matching task-completed edge from stored Closed state and calls `fire_reminder`; registration itself only persists the reminder. The trigger wording, “sharp-cardinal-9 completed task cas-a161,” therefore does not establish a fresh close during this measurement.
+
+The verifier prints these captured observations, exit **0**:
+
+```text
+fire: +0.742094s from registration
+transport: +6.167796s from registration
+hook transcript: +6.173723s from registration
+model receipt: +15.574723s from registration
+VERIFIED: live stored-state reconciliation and active-turn receipt
+NOT EXERCISED: new task close followed by an independent idle-supervisor model turn
+INCONCLUSIVE: original 3613-second cause; originating traces unavailable here
+```
+
+These are one control's measured intervals, not a latency guarantee or a before/after performance claim. No new-close interval, independent idle-supervisor model wake, default TTL, or historical delay was measured. Supervisor receipt #549321 explicitly retained the idle-wake limit and instructed that no additional idle experiment be staged. The control reminder is fired, with no pending control to cancel.
+
+| Follow-up acceptance | Verdict |
+| --- | --- |
+| Original daemon/trace evidence or explicit unavailable receipt | VERIFIED: scoped unavailable receipt in `art-3bdd6a22`; original cause remains INCONCLUSIVE |
+| Current task-completed timing under known daemon/MCP epochs | VERIFIED within the stated control: 0.742094 seconds to fire, 6.167796 seconds to hook transport, 15.574723 seconds to model-authored in-turn receipt |
+| New close followed by independent idle-supervisor wake | NOT EXERCISED: already-Closed task, active supervisor turn; no claim that transport proves this |
+| Runtime correction justified by this evidence | None: no current failure reproduced; no speculative fix |
 
 Design: `DESIGN.md@b43940e43`; plain Markdown evidence follows the project's factual voice. No product behavior, schema, gate, hook, configuration or builtin guidance changed.

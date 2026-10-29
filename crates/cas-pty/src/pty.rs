@@ -1064,12 +1064,16 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
-    /// Mirror non-secret paths into Codex's curated CAS MCP environment after
-    /// launch policy. The effective account home must reach spawn_workers;
+    /// Mirror non-secret paths and the recorded recipe into Codex's curated CAS
+    /// MCP environment after launch policy. The effective account home must reach spawn_workers;
     /// otherwise its availability check falls back to the default account.
     /// Literal overrides preserve operator `cs.env_vars` and late pane overrides.
     fn forward_codex_mcp_environment(&mut self) {
-        for name in std::iter::once("CODEX_HOME").chain(TOOL_CACHE_ENV.iter().copied()) {
+        let recipe_fields = ["CAS_FACTORY_WORKER_MODEL", "CAS_FACTORY_WORKER_EFFORT"];
+        for name in std::iter::once("CODEX_HOME")
+            .chain(TOOL_CACHE_ENV.iter().copied())
+            .chain(recipe_fields)
+        {
             if self.env_remove.iter().any(|removed| removed == name) {
                 continue;
             }
@@ -1079,10 +1083,17 @@ impl PtyConfig {
                 .rev()
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
-                .or_else(|| std::env::var(name).ok());
+                // Recipe fields belong to this resolved spawn. Inheriting a
+                // supervisor's model would fabricate evidence for an omitted
+                // worker selector and persist it through future recycles.
+                .or_else(|| {
+                    (!recipe_fields.contains(&name))
+                        .then(|| std::env::var(name).ok())
+                        .flatten()
+                });
             if let Some(value) = value.filter(|value| name != "CODEX_HOME" || !value.is_empty()) {
                 let value = serde_json::to_string(&value)
-                    .expect("serializing an MCP environment path string cannot fail");
+                    .expect("serializing an MCP environment string cannot fail");
                 self.args.extend([
                     "-c".to_string(),
                     format!("mcp_servers.cs.env.{name}={value}"),

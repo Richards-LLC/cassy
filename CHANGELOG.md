@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.88.0] - 2026-10-29
+
 ### Added — Commander controls and a clearer picture of progress
 
 - **Commands beside the conversation** — Was: compacting or clearing context,

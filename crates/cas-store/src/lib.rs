@@ -170,7 +170,7 @@ pub use qa_batch_store::{
     record_qa_batch_receipt,
 };
 pub use qa_pass_store::{
-    NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
+    import_qa_pass, NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
     claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
     open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer, release_qa_claim_for_task,
     resolve_qa_pass, satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task, waive_qa_pass,

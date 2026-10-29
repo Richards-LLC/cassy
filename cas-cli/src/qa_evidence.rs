@@ -447,6 +447,12 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
     notes
         .match_indices(BUNDLE_CITATION)
         .filter_map(|(index, token)| {
+            // Proof records carry quoted audit fields, not producer citations.
+            // A review summary mentioning qa-bundle must not shadow the note.
+            let line_start = notes[..index].rfind('\n').map_or(0, |offset| offset + 1);
+            if cas_store::task_note_markers::is_reserved_line(&notes[line_start..]) {
+                return None;
+            }
             let rest = &notes[index + token.len()..];
             let line = rest.lines().next()?;
             if line.contains("(independent QA round ") {

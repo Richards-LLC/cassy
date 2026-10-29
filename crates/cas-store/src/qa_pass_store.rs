@@ -880,6 +880,91 @@ fn list_filtered(cas_dir: &Path, task_id: &str, satisfying_only: bool) -> Result
     Ok(rows)
 }
 
+/// Import a trusted owner-scoped QA snapshot. This is deliberately separate
+/// from task verifications and from the ordinary task-note write interface.
+/// Immutable delivery identity and no-self-review also apply on a peer host.
+pub fn import_qa_pass(cas_dir: &Path, pass: &QaPass, changed_at: DateTime<Utc>) -> Result<()> {
+    if pass.id.is_empty() || pass.task_id.is_empty() || pass.bound_head.is_empty()
+        || pass.implementer_agent_id.is_empty() || pass.branch.is_empty() || pass.round == 0
+        || pass.reviewer_agent_id.as_deref() == Some(pass.implementer_agent_id.as_str())
+        || (matches!(pass.state, QaPassState::Passed | QaPassState::Failed)
+            && (pass.reviewer_agent_id.as_deref().is_none_or(str::is_empty)
+                || pass.ledger_path.as_deref().is_none_or(str::is_empty)
+                || pass.resolved_at.is_none()))
+        || (pass.state == QaPassState::Waived
+            && (pass.issuer_agent_id.as_deref().is_none_or(str::is_empty) || pass.resolved_at.is_none()))
+    {
+        return Err(StoreError::Parse("invalid independent QA snapshot".into()));
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let tx = ImmediateTx::new(&conn)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS qa_pass_sync_versions (
+        id TEXT PRIMARY KEY, changed_at TEXT NOT NULL)")?;
+    let previous = match by_id_with_conn(&tx, &pass.id) {
+        Ok(previous) => Some(previous),
+        Err(StoreError::NotFound(_)) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(previous) = &previous {
+        if previous.task_id != pass.task_id || previous.bound_head != pass.bound_head
+            || previous.branch != pass.branch || previous.implementer_agent_id != pass.implementer_agent_id
+            || previous.requested_at != pass.requested_at || previous.round != pass.round
+            || previous.deadline_at != pass.deadline_at
+            || (previous.qa_task_id.is_some() && previous.qa_task_id != pass.qa_task_id)
+        {
+            return Err(StoreError::Parse("QA snapshot changes immutable delivery identity".into()));
+        }
+        let version: Option<String> = tx.query_row(
+            "SELECT changed_at FROM qa_pass_sync_versions WHERE id = ?1", [&pass.id],
+            |row| row.get(0)).optional()?;
+        let old_time = version.map(parse_time).transpose()?.unwrap_or(
+            previous.resolved_at.unwrap_or(previous.requested_at));
+        // Terminal decisions never regress to an open round, including a
+        // stale source snapshot delivered after a local deadline transition.
+        if (!previous.state.is_active() && pass.state.is_active()) || changed_at < old_time
+            || previous.resolved_at > pass.resolved_at && !previous.state.is_active()
+        {
+            return Ok(());
+        }
+        if changed_at == old_time && previous != pass {
+            return Err(StoreError::Parse("conflicting independent QA snapshots".into()));
+        }
+    }
+    if let Some(active) = active_with_conn(&tx, &pass.task_id)?
+        && active.id != pass.id
+    {
+        // A source verdict replaces a duplicate peer dispatch for the same
+        // delivery. A stale active round cannot displace a newer dispatch.
+        if pass.state.is_active() && active.requested_at >= pass.requested_at {
+            return Ok(());
+        }
+        if pass.state.is_active() || active.bound_head == pass.bound_head {
+            set_state(&tx, &active.id, QaPassState::Superseded, Some(changed_at))?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO qa_passes (id, task_id, round, implementer_agent_id, branch, bound_head,
+         qa_task_id, reviewer_agent_id, state, summary, issues_json, ledger_path, issuer_agent_id,
+         requested_at, deadline_at, resolved_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+         ON CONFLICT(id) DO UPDATE SET qa_task_id=excluded.qa_task_id,
+         reviewer_agent_id=excluded.reviewer_agent_id, state=excluded.state,
+         summary=excluded.summary, issues_json=excluded.issues_json, ledger_path=excluded.ledger_path,
+         issuer_agent_id=excluded.issuer_agent_id, resolved_at=excluded.resolved_at",
+        params![pass.id, pass.task_id, pass.round, pass.implementer_agent_id, pass.branch,
+            pass.bound_head, pass.qa_task_id, pass.reviewer_agent_id, pass.state.as_str(),
+            pass.summary, pass.issues_json, pass.ledger_path, pass.issuer_agent_id,
+            pass.requested_at.to_rfc3339(), pass.deadline_at.to_rfc3339(),
+            pass.resolved_at.map(|time| time.to_rfc3339())],
+    )?;
+    tx.execute("INSERT INTO qa_pass_sync_versions VALUES (?1,?2)
+        ON CONFLICT(id) DO UPDATE SET changed_at=excluded.changed_at",
+        params![pass.id, changed_at.to_rfc3339()])?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,6 +987,35 @@ mod tests {
             QaPassOpen::Dispatched(pass) => pass,
             other => panic!("expected a dispatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn peer_snapshots_preserve_verdict_identity_and_do_not_revive_open_rounds() {
+        let source = TempDir::new().unwrap();
+        let peer = TempDir::new().unwrap();
+        let now = Utc::now();
+        let pending = dispatched(open_qa_pass(source.path(), &new("aaaa1111", now), now).unwrap());
+        set_qa_task(source.path(), &pending.id, "cas-review").unwrap();
+        let claimed = claim_qa_pass(source.path(), "cas-ui1", "reviewer", now).unwrap();
+        let passed = resolve_qa_pass(source.path(), "cas-ui1", "reviewer", QaVerdict::Approved,
+            "PASS", None, "/other/LEDGER.md", now + Duration::seconds(1)).unwrap();
+        for (index, pass) in [&pending, &claimed, &passed].into_iter().enumerate() {
+            import_qa_pass(peer.path(), pass, now + Duration::milliseconds(index as i64 * 500)).unwrap();
+        }
+        import_qa_pass(peer.path(), &claimed, now + Duration::hours(1)).unwrap();
+        assert_eq!(list_qa_passes(peer.path(), "cas-ui1").unwrap(), vec![passed.clone()]);
+        for kind in ["self-review", "head", "implementer", "task", "deadline"] {
+            let mut forged = passed.clone();
+            match kind {
+                "self-review" => forged.reviewer_agent_id = Some(forged.implementer_agent_id.clone()),
+                "head" => forged.bound_head = "other".into(),
+                "implementer" => forged.implementer_agent_id = "other".into(),
+                "task" => forged.task_id = "cas-other".into(),
+                _ => forged.deadline_at += Duration::hours(1),
+            }
+            assert!(import_qa_pass(peer.path(), &forged, now + Duration::hours(2)).is_err(), "{kind}");
+        }
+        assert_eq!(list_qa_passes(peer.path(), "cas-ui1").unwrap(), vec![passed]);
     }
 
     #[test]

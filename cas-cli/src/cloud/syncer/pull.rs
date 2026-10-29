@@ -2374,6 +2374,7 @@ impl CloudSyncer {
             let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
                 &mut remote_task.notes, &remote_task.id,
             );
+            let qa_receipts = crate::qa_pass::sync::take(&mut remote_task.notes, &remote_task.id);
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -2416,6 +2417,10 @@ impl CloudSyncer {
                     }
                     for proof in &trusted_proofs {
                         task_store.append_trusted_note(&remote_task.id, proof)?;
+                    }
+                    if incoming_is_owner && let Some(root) = self.push_cas_root.as_deref() {
+                        crate::qa_pass::sync::import(root, &remote_task, &qa_receipts)
+                            .map_err(|error| CasError::Other(format!("QA snapshot import failed: {error}")))?;
                     }
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
@@ -3576,6 +3581,7 @@ impl CloudSyncer {
             let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
                 &mut remote_task.notes, &remote_task.id,
             );
+            let qa_receipts = crate::qa_pass::sync::take(&mut remote_task.notes, &remote_task.id);
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -3609,6 +3615,10 @@ impl CloudSyncer {
                     }
                     for proof in &trusted_proofs {
                         task_store.append_trusted_note(&remote_task.id, proof)?;
+                    }
+                    if incoming_is_owner && let Some(root) = self.push_cas_root.as_deref() {
+                        crate::qa_pass::sync::import(root, &remote_task, &qa_receipts)
+                            .map_err(|error| CasError::Other(format!("QA snapshot import failed: {error}")))?;
                     }
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {

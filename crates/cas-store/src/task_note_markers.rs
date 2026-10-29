@@ -18,7 +18,9 @@ const PROVENANCE_BLOCKS: &[(&str, &str)] = &[
 ];
 
 pub fn is_reserved_line(line: &str) -> bool {
-    line.starts_with("ARTIFACT_PROOF:")
+    line.starts_with("QA_PASS_PROOF:")
+        || line.starts_with("QA_EVIDENCE_PROOF:")
+        || line.starts_with("ARTIFACT_PROOF:")
         || PROVENANCE_BLOCKS
             .iter()
             .any(|(begin, end)| line.starts_with(begin) || line.starts_with(end))

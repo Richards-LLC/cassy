@@ -123,6 +123,8 @@ impl CasService {
             now,
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
+        crate::qa_pass::sync::record(&cas_root, task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("QA sync receipt failed: {error}")))?;
         // cas-2ee2: the verdict turns the GitHub required check green or red.
         crate::qa_pass::github_gate::publish_pass_status(&cas_root, &pass);
 
@@ -403,6 +405,8 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        crate::qa_pass::sync::record(&self.inner.cas_root, task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let closed = withdrawn
             .as_ref()
             .map(|pass| self.close_withdrawn_qa_task(pass, reason))

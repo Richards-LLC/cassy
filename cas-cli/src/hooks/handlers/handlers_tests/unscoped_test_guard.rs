@@ -257,6 +257,7 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
             "cargo nextest run -p cas --test integration_factory -E 'test(worker)'",
             "cargo nextest run -p cas --lib -E 'test(one) | test(two)' > target/tests.log 2>&1 &",
             "cargo nextest run -p cas --lib -E 'test(one) & test(two)' > target/tests.log 2>&1 &",
+            "CAS_RED_CONTROL=revert-fix cargo nextest run -p cas --lib -E 'test(one)' > target/tests.log 2>&1 &",
         ].into_iter().chain(std::iter::once(isolated.as_str())) {
             let mut request = input(command, "worker");
             request.cwd = cwd.into();
@@ -276,6 +277,9 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
                 assert!(rewritten.contains(&format!("{cwd}/target/private-xdg")), "{rewritten}");
                 assert!(!rewritten.starts_with("env "), "runtime bootstrap must remain unmodified");
                 command.split_once(" cargo ").unwrap().1
+            } else if let Some(red) = command.strip_prefix("CAS_RED_CONTROL=revert-fix cargo ") {
+                assert!(rewritten.contains("--red-control revert-fix --"), "{rewritten}");
+                red
             } else {
                 command.strip_prefix("cargo ").unwrap()
             };

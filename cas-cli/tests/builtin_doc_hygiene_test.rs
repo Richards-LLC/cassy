@@ -974,3 +974,46 @@ fn no_builtin_presents_a_supervisor_restart_as_sparing_its_workers() {
         violations.join("\n")
     );
 }
+
+/// cas-56b9: cas-tdd and cas-qa-craft ship one identical "Every test earns
+/// its place" block in every harness, carrying the tokens park and the hook read.
+#[test]
+fn every_test_earns_its_place_is_one_identical_block_in_tdd_and_qa_craft() {
+    fn block(content: &str) -> &str {
+        let start = content
+            .find("## Every test earns its place\n")
+            .expect("rule block heading");
+        let rest = &content[start..];
+        rest[3..].find("\n## ").map_or(rest, |end| &rest[..end + 3])
+    }
+    for harness in [
+        cas_mux::SupervisorCli::Claude,
+        cas_mux::SupervisorCli::Codex,
+        cas_mux::SupervisorCli::Grok,
+        cas_mux::SupervisorCli::OpenCode,
+    ] {
+        let catalog = cas::builtins::skill_catalog_for_harness(harness);
+        let skill = |path: &str| {
+            catalog
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap_or_else(|| panic!("{harness:?} ships {path}"))
+                .content
+        };
+        let rules = block(skill("skills/cas-tdd/SKILL.md"));
+        assert_eq!(rules, block(skill("skills/cas-qa-craft/SKILL.md")), "{harness:?}");
+        // pin: park's waiver notes and the hook's red-control prefix.
+        for token in [
+            "Fails without the change",
+            "Deterministic",
+            "Cheapest layer",
+            "Within budget",
+            "Flakes",
+            "CAS_RED_CONTROL=<label>",
+            "test-waiver: fail-first <test id> - <reason>",
+            "test-waiver: budget <test id> - <reason>",
+        ] {
+            assert!(rules.contains(token), "{harness:?} rule block lacks {token:?}");
+        }
+    }
+}

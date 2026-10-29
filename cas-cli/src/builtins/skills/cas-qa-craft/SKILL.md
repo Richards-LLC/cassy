@@ -18,6 +18,14 @@ with a **60-minute** box. On a `qa-pass` task you review someone else's delivery
 below for API-only reasons; otherwise use [the independent pass](references/independent-pass.md).
 Record its verdict with `verification action=qa_record`, naming the round's `LEDGER.md`.
 
+## Every test earns its place
+
+- **Fails without the change.** Run it red before the fix: commit the test first, or revert the fix uncommitted and run `CAS_RED_CONTROL=<label> cargo nextest run ...`, which snapshots the mutation to `refs/cas/red/` and never pushes it. Park refuses a touched Rust test without a red receipt unless the task is `characterization-first` or notes `test-waiver: fail-first <test id> - <reason>`.
+- **Deterministic.** It passes five concurrent zero-retry runs under load; park reads that receipt.
+- **Cheapest layer.** Unit, then integration, then journey. A journey that only re-proves a unit test is waste.
+- **Within budget.** Unit under 1s, integration under 10s, journey under 60s. Over budget needs `test-waiver: budget <test id> - <reason>` in the task notes.
+- **Flakes.** Fix the pattern. Delete a test only when another covers the same behaviour. Never retry, never weaken.
+
 ## Procedure
 
 1. Read the active task with `task action=show`; name the binary version or commit SHA ([map the

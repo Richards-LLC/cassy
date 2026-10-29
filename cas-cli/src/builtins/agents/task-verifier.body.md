@@ -77,6 +77,7 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 - A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
 - Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
 - Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
+- Every added or changed test earns its place (cas-tdd): it sits at the cheapest layer that catches the defect (unit, then integration, then journey), and it is not bloat. Flag as `unnecessary_complexity` (a warning) a journey or integration test that only re-proves a unit test, a near-duplicate of an existing case, or a test restating the implementation. Park already enforces the red run, five-run determinism and runtime budget from receipts; review each `test-waiver:` note's reason.
 - Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`.
 
 ### Step 7: Honor the task's `execution_note`

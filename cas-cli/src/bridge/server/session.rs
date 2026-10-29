@@ -499,6 +499,8 @@ mod focused_epic_tests {
         // A real exited PID yields the same deterministic verdict in the hub
         // and worker_status. A fresh registry heartbeat cannot hide death.
         worker.pid = Some(i32::MAX as u32);
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("worker_model".into(), "gpt-6.1".into());
         crate::store::open_agent_store(&root)
             .unwrap()
             .register(&worker)
@@ -508,6 +510,10 @@ mod focused_epic_tests {
         task.status = TaskStatus::InProgress;
         task.assignee = Some(worker.id.clone());
         store.add(&task).unwrap();
+        let started = chrono::Utc::now() - chrono::Duration::minutes(42);
+        let mut event = Event::new(cas_types::EventType::TaskStarted, cas_types::EventEntityType::Task, &task.id, "Raw details must not leak");
+        event.created_at = started;
+        event.id = SqliteEventStore::open(&root).unwrap().record(&event).unwrap();
         let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
         let projected = status["agents"]
             .as_array()
@@ -516,6 +522,10 @@ mod focused_epic_tests {
             .find(|agent| agent["name"] == "worker-a")
             .expect("selected worker must be reported");
         assert_eq!(projected["current_task"], task.id);
+        assert_eq!(projected["harness"], "codex");
+        assert_eq!(projected["model"], "gpt-6.1");
+        assert_eq!(projected["task_started_at"], started.to_rfc3339());
+        assert_eq!(projected["recent_trail"], serde_json::json!([{"step":"started", "at": started.to_rfc3339(), "reference": format!("event:{}", event.id)}]));
         let expected = crate::mcp::tools::service::factory_ops::worker_liveness_for_agent(
             &root,
             &worker,

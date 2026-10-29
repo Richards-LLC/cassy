@@ -867,6 +867,33 @@ CREATE INDEX IF NOT EXISTS idx_prompt_queue_legacy_pending
     WHERE processed_at IS NULL AND factory_session IS NULL;
 "#;
 
+const QA_REJECTION_ROUTES_SQL: &str = "SELECT q.id, q.target,
+                            CASE WHEN t.status IN ('closed', 'cancelled') THEN NULL
+                                 ELSE COALESCE((SELECT a.name FROM agents a WHERE a.id = t.assignee),
+                                               NULLIF(t.assignee, '')) END AS owner
+                     FROM prompt_queue q
+                     JOIN qa_passes qa ON q.source = 'qa-verdict:' || qa.id || ':implementer'
+                     JOIN tasks t ON t.id = qa.task_id
+                     WHERE q.factory_session = ?1 AND q.origin_kind = 'daemon'
+                       AND (?2 IS NULL OR q.id = ?2)
+                       AND q.processed_at IS NULL AND q.acked_at IS NULL
+                       AND NOT EXISTS (
+                           SELECT 1 FROM prompt_queue_recipient_seen seen
+                           WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                             AND COALESCE(seen.source, 'inbox_poll') <> 'transport_delivered'
+                       )";
+
+const SHUTDOWN_UNREAD_IDS_SQL: &str = "SELECT q.id FROM prompt_queue q
+                     WHERE q.target = ?1
+                       AND (q.factory_session = ?2 OR q.factory_session IS NULL)
+                       AND q.acked_at IS NULL
+                       AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM prompt_queue_recipient_seen seen
+                           WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                             AND COALESCE(seen.source, 'inbox_poll') <> 'transport_delivered'
+                       )";
+
 /// Idempotent lifecycle outbox enqueue key (cas-ecff).
 const PROMPT_QUEUE_DEDUPE_KEY_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN dedupe_key TEXT;
@@ -8001,23 +8028,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // Join the trusted daemon notice to its durable QA pass, never
             // infer a task from caller-authored prose or a captured implementer.
             let routes = {
-                let mut stmt = tx.prepare_cached(
-                    "SELECT q.id, q.target,
-                            CASE WHEN t.status IN ('closed', 'cancelled') THEN NULL
-                                 ELSE COALESCE((SELECT a.name FROM agents a WHERE a.id = t.assignee),
-                                               NULLIF(t.assignee, '')) END AS owner
-                     FROM prompt_queue q
-                     JOIN qa_passes qa ON q.source = 'qa-verdict:' || qa.id || ':implementer'
-                     JOIN tasks t ON t.id = qa.task_id
-                     WHERE q.factory_session = ?1 AND q.origin_kind = 'daemon'
-                       AND (?2 IS NULL OR q.id = ?2)
-                       AND q.processed_at IS NULL AND q.acked_at IS NULL
-                       AND NOT EXISTS (
-                           SELECT 1 FROM prompt_queue_recipient_seen seen
-                           WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                             AND COALESCE(seen.source, 'inbox_poll') <> 'transport_delivered'
-                       )",
-                )?;
+                let mut stmt = tx.prepare_cached(QA_REJECTION_ROUTES_SQL)?;
                 stmt.query_map(params![factory_session, prompt_id], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -9530,18 +9541,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // No age or display cap: shutdown ends every outstanding direct
             // delivery, including old rows outside the normal inbox TTL.
             let ids = {
-                let mut stmt = tx.prepare_cached(
-                    "SELECT q.id FROM prompt_queue q
-                     WHERE q.target = ?1
-                       AND (q.factory_session = ?2 OR q.factory_session IS NULL)
-                       AND q.acked_at IS NULL
-                       AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
-                       AND NOT EXISTS (
-                           SELECT 1 FROM prompt_queue_recipient_seen seen
-                           WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                             AND COALESCE(seen.source, 'inbox_poll') <> 'transport_delivered'
-                       )",
-                )?;
+                let mut stmt = tx.prepare_cached(SHUTDOWN_UNREAD_IDS_SQL)?;
                 stmt.query_map(params![recipient, factory_session], |row| {
                     row.get::<_, i64>(0)
                 })?
@@ -11800,6 +11800,13 @@ mod tests {
         let broadcast = store
             .enqueue_with_session("sup", "all_workers", "broadcast", session)
             .unwrap();
+        // Repeated idle sweeps must not rescan this recipient's terminal history.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096)
+                INSERT INTO prompt_queue(source,target,prompt,factory_session,highest_stage,processed_at)
+                SELECT 'sup','worker','old cancelled mail','shutdown-session','suppressed','2026-01-01' FROM n;").unwrap();
+        }
         let detail = "cancelled by explicit worker shutdown";
         assert_eq!(
             store
@@ -11813,6 +11820,13 @@ mod tests {
                 .unwrap(),
             0
         );
+        {
+            let conn = store.conn.lock().unwrap();
+            let stmt = conn.prepare_cached(SHUTDOWN_UNREAD_IDS_SQL).unwrap();
+            let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+            assert!(steps > 0 && steps < 5_000,
+                "shutdown sweeps must skip terminal history: {steps} VM steps");
+        }
         for id in [unread, legacy, old] {
             let report = store.message_delivery_report(id).unwrap().unwrap();
             assert_eq!(report.stage, DeliveryStage::Suppressed);
@@ -11872,6 +11886,47 @@ mod tests {
                 .cancel_unread_for_shutdown("worker", Some(session), "")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn qa_retarget_skips_unrelated_queue_history_cas_d9b5() {
+        let (temp, store) = create_test_store();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-qa-history".into(), "QA current owner".into());
+        task.assignee = Some("new-worker".into());
+        tasks.add(&task).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch(crate::AGENT_SCHEMA).unwrap();
+            for sql in crate::qa_pass_store::QA_PASS_SCHEMA_STATEMENTS {
+                conn.execute_batch(sql).unwrap();
+            }
+            // Match the live incident's 670 historical QA passes and 313 queue
+            // rows. None of the unrelated sources is a QA rejection route.
+            conn.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<670)
+                INSERT INTO qa_passes(id,task_id,round,implementer_agent_id,branch,bound_head,state,requested_at,deadline_at)
+                SELECT 'qa-'||x,'cas-qa-history',x,'old-worker','factory/old','abc','failed','2026-01-01','2026-01-02' FROM n;
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<312)
+                INSERT INTO prompt_queue(source,target,prompt,factory_session,origin_kind)
+                SELECT 'unrelated-'||x,'worker','pending unrelated mail','qa-session','daemon' FROM n;").unwrap();
+        }
+        let id = match store.enqueue_idempotent(
+            "qa-verdict:qa-670:implementer", "old-worker", "fix QA",
+            Some("qa-session"), None, None, "qa-current-owner", Some(&QueueOrigin::Daemon),
+        ).unwrap() {
+            EnqueueIdempotentResult::Created(id) => id,
+            other => panic!("fresh QA route: {other:?}"),
+        };
+        assert_eq!(store.refresh_qa_rejection_targets("qa-session", None).unwrap(), vec![id]);
+        assert_eq!(store.queued_prompt(id).unwrap().unwrap().target, "new-worker");
+        let conn = store.conn.lock().unwrap();
+        // Inspect the cached statement actually executed by the real method;
+        // SQLite's VM counter survives reset/return to the statement cache.
+        let stmt = conn.prepare_cached(QA_REJECTION_ROUTES_SQL).unwrap();
+        let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+        assert!(steps > 0 && steps < 50_000,
+            "QA retarget must avoid a session scan per QA pass: {steps} VM steps");
     }
 
     #[test]

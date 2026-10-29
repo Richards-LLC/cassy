@@ -1839,6 +1839,13 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let _ = call(closer, close).await;
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         assert!(f.task("cas-8488-c").assignee.is_none());
+        let blocked = call(&f.worker, serde_json::json!({
+            "action":"update", "id":"cas-8488-b", "status":"blocked",
+        })).await;
+        assert_eq!(f.task("cas-8488-b").status, TaskStatus::Blocked, "{blocked}");
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open,
+            "An execution waiting on a blocked hold must not advance its pending queue");
     }
 }
 
@@ -1849,6 +1856,9 @@ fn queue_control_fixture(env: &mut TestEnvGuard) -> Fixture {
     for id in ["nocode-worker-session", "nocode-supervisor-session"] {
         let mut agent = agents.get(id).unwrap();
         agent.factory_session = Some("queue-session".into());
+        if agent.role == AgentRole::Worker {
+            agent.metadata.insert("clone_path".into(), f.cas_dir().join("worktrees").join(WORKER).display().to_string());
+        }
         agents.update(&agent).unwrap();
     }
     let mut current = assigned("cas-8488-current", TaskType::Task, "main");
@@ -1879,6 +1889,17 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
 async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
     let f = queue_control_fixture(&mut env);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let isolated = agents.get("nocode-worker-session").unwrap();
+    let mut shared = isolated.clone();
+    shared.metadata.insert("clone_path".into(), f.dir.path().display().to_string());
+    agents.update(&shared).unwrap();
+    let request = serde_json::from_value(serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":["cas-8488-one"],
+    })).unwrap();
+    assert!(f.supervisor.task(Parameters(request)).await.is_err(),
+        "Queue assignment must refuse a shared checkout before accepting a backlog");
+    agents.update(&isolated).unwrap();
     let _ = call(&f.supervisor, serde_json::json!({
         "action":"update", "assignee":WORKER,
         "task_ids":["cas-8488-one","cas-8488-two"],

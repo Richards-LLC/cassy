@@ -3123,7 +3123,12 @@ impl FactoryApp {
                     // Like a live-pane recycle, release only the old leases:
                     // task bindings and unread mail belong to the replacement.
                     for agent in matching {
-                        agent_store.graceful_shutdown(&agent.id)?;
+                        if let Err(error) = agent_store.graceful_shutdown(&agent.id) {
+                            defer_worker_retirement(self.cas_dir(), &agent.id, &error.to_string());
+                        }
+                        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(self.cas_dir(), agent) {
+                            tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
+                        }
                     }
                     self.last_db_fingerprint = None;
                     return Ok(Vec::new());

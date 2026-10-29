@@ -408,8 +408,8 @@ pub trait SpawnQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SpawnLifecycle>>;
 
-    /// Whether this name belongs to a nonterminal local spawn, including
-    /// provisioning requests already removed from the pending queue.
+    /// Whether this name belongs to a nonterminal local spawn or recycle,
+    /// including provisioning requests already removed from the pending queue.
     fn has_pending_spawn(&self, name: &str, factory_session: Option<&str>) -> Result<bool>;
 
     /// Get count of pending requests
@@ -899,7 +899,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT worker_names, spawn_worker FROM spawn_queue
-             WHERE action = 'spawn'
+             WHERE action IN ('spawn', 'recycle')
                AND COALESCE(spawn_state, 'queued') IN ('queued', 'provisioning', 'launched')
                AND (? IS NULL OR factory_session = ? OR factory_session IS NULL)",
         )?;

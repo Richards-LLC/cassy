@@ -18835,9 +18835,9 @@ effort = "high"
     }
 
     #[tokio::test]
-    async fn cas_070a_recycled_worker_with_fresh_transcript_and_stale_heartbeat_executes() {
+    async fn cas_070a_recycled_worker_with_unresolved_artifact_and_fresh_activity_executes() {
         let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
-        use cas_store::{AgentStore, SqliteAgentStore};
+        use cas_store::{AgentStore, EventStore, PromptQueueStore, SqliteAgentStore, SqliteEventStore, SqlitePromptQueueStore};
         use cas_types::{Agent, AgentRole};
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",
@@ -18846,6 +18846,9 @@ effort = "high"
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let store = SqliteAgentStore::open(&root).unwrap();
+        let events = SqliteEventStore::open(&root).unwrap();
+        let queue = SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
         let sessions = temp.path().join("account/sessions/2026/09/10");
         std::fs::create_dir_all(&sessions).unwrap();
         let now = chrono::Utc::now();
@@ -18871,6 +18874,7 @@ effort = "high"
             ("task_started", 1, false),
             ("task_started", 1800, false),
             ("task_started", 1, true),
+            ("task_started", 1, false),
         ]
         .into_iter()
         .enumerate()
@@ -18903,12 +18907,12 @@ effort = "high"
                 "worker_account_dir".into(),
                 temp.path().join("account").to_string_lossy().into(),
             );
-            if index == 2 {
+            if matches!(index, 2 | 3 | 5) {
                 agent.last_heartbeat = now - chrono::Duration::minutes(30);
                 agent.cc_session_id = Some("pre-recycle-session".into());
             }
             store.register(&agent).unwrap();
-            if index == 2 {
+            if matches!(index, 2 | 3 | 5) {
                 // A confirmed recycle replaces the transcript identity but
                 // must not need an MCP heartbeat before work is visible.
                 assert_eq!(
@@ -18916,14 +18920,22 @@ effort = "high"
                     ResetRegistration::Recorded,
                 );
                 assert_eq!(store.get(&agent.id).unwrap().last_heartbeat, agent.last_heartbeat);
-                let tool = serde_json::json!({
-                    "timestamp": now.to_rfc3339(), "type": "response_item",
-                    "payload": {"type": "function_call_output", "call_id": "after-recycle", "output": "ok"},
-                });
-                use std::io::Write;
-                writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{tool}").unwrap();
+                std::fs::remove_file(&path).unwrap();
+            }
+            // Terminal turns and confirmed exits still beat fresh activity.
+            // Row 3 has only expired own activity and fresh foreign activity.
+            if matches!(index, 0 | 2 | 3 | 4) {
+                events.record(&make_event(cas_types::EventType::WorkerActivity,
+                    &agent.id, if index == 3 { 1800 } else { 0 })).unwrap();
+            }
+            if index == 5 {
+                queue.enqueue_with_session(&agent.name, "supervisor", "working after recycle",
+                    "liveness-fixture-session").unwrap();
             }
         }
+        events.record(&make_event(cas_types::EventType::WorkerActivity, "foreign-worker", 0)).unwrap();
+        queue.enqueue_with_session("foreign-worker", "supervisor", "another worker is active",
+            "liveness-fixture-session").unwrap();
         drop(store);
         let core = CasCore::with_daemon(root, None, None);
         #[cfg(feature = "mcp-proxy")]
@@ -18938,7 +18950,7 @@ effort = "high"
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
         let liveness_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("liveness:")).collect();
-        assert_eq!(liveness_lines.len(), 5, "{output}");
+        assert_eq!(liveness_lines.len(), 6, "{output}");
         assert!(lines.iter().any(|line| line.starts_with("Factory MCP versions")), "{output}");
         assert!(
             lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
@@ -18947,7 +18959,7 @@ effort = "high"
         );
         assert!(
             lines[0].contains("Factory session: liveness-fixture-session")
-                && lines[0].contains("worker rows in scope: 5"),
+                && lines[0].contains("worker rows in scope: 6"),
             "summary must lead with its session scope: {output}"
         );
         for (index, expected) in [
@@ -18956,6 +18968,7 @@ effort = "high"
             "executing",
             "stalled",
             "dead",
+            "executing",
         ]
         .into_iter()
         .enumerate()
@@ -18970,10 +18983,10 @@ effort = "high"
         }
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "five-worker poll: {elapsed:?}"
+            "six-worker poll: {elapsed:?}"
         );
         if let Ok(dir) = proof_dir {
-            std::fs::write(std::path::Path::new(&dir).join("five-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n5 workers; 4 MiB rollout each; worker 2 recycled with stale heartbeat and fresh tool activity; local process lookup\n{output}\n")).unwrap();
+            std::fs::write(std::path::Path::new(&dir).join("six-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n6 workers; recycled workers have stale heartbeat and unresolved artifacts; worker 2 has fresh own activity; worker 5 has fresh outbound; worker 3 has expired own activity and fresh foreign activity; local process lookup\n{output}\n")).unwrap();
         }
     }
 

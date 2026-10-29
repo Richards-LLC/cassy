@@ -1857,6 +1857,45 @@ dialog form > *,
 .compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
 .compose-fab svg { width: 20px; height: 20px; display: block; flex: none; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.conversation-tabs { display: flex; flex: none; gap: var(--space-4); padding: 0 var(--space-4); border-bottom: 1px solid var(--line-subtle); background: var(--bg-panel); color: var(--ink); }
+.conversation-tabs [role="tab"] { border: 0; border-radius: 0; border-bottom: 2px solid transparent; padding: var(--space-3) var(--space-2); background: transparent; color: var(--ink-mid); min-height: 44px; }
+.conversation-tabs [aria-selected="true"] { color: var(--color-action); border-bottom-color: var(--color-action); }
+.conversation-tabs [role="tab"]:focus-visible { outline: 2px solid var(--color-action); outline-offset: -4px; }
+.conversation-main.team-open > .conversation-pane-slot, .conversation-main.team-open > #conversation-composer-slot { display: none; }
+.team-panel { flex: 1; overflow: auto; min-height: 0; padding: var(--space-4); background: var(--bg-panel); color: var(--ink); }
+.team-panel[hidden] { display: none; }
+.team-panel > h2 { font-family: var(--font-display); font-size: 24px; font-weight: 400; margin: 0 0 var(--space-2); }
+.team-freshness, .team-evidence-key, .team-elapsed { color: var(--ink-mid); font-size: 12px; }
+.team-panel .release-progress { margin-block: var(--space-4); }
+.team-needs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-block: var(--space-3); border-block: 1px solid var(--line-subtle); }
+.team-needs h3, .team-needs p { margin: 0; font-size: 13px; }
+.team-needs h3 { margin-right: var(--space-2); }
+.team-needs button { min-height: 44px; }
+.team-lanes { list-style: none; margin: 0; padding: 0; }
+.team-lane { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line-subtle); padding-block: var(--space-4); }
+.team-identity { min-width: 0; }
+.team-identity h3 { font: 600 13px var(--font-mono); overflow-wrap: anywhere; margin: 0 0 var(--space-1); }
+.team-model { color: var(--ink-mid); font: 12px var(--font-mono); overflow-wrap: anywhere; }
+.team-state { max-width: 100%; white-space: normal; }
+.team-task { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.team-elapsed { grid-column: 1 / -1; margin: 0; font-family: var(--font-mono); }
+.team-trail { grid-column: 1 / -1; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); padding: 0; margin: var(--space-2) 0 0; color: var(--ink-mid); font-size: 12px; }
+.team-trail li { display: flex; align-items: center; gap: var(--space-1); }
+.team-trail li::before { content: ""; width: 7px; height: 7px; border: 1px solid currentColor; border-radius: var(--radius-pill); }
+.team-trail [data-reported="true"] { color: var(--state-ok); }
+.team-trail [data-reported="true"]::before { background: currentColor; }
+@media (forced-colors: none) and (prefers-reduced-motion: no-preference) {
+  .team-state--changed { animation: team-state-arrives 160ms ease-out; }
+  @keyframes team-state-arrives { from { opacity: .55; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+}
+@media (max-width: 500px) {
+  .team-panel { padding: var(--space-3); }
+  .team-lane { grid-template-columns: minmax(0, 1fr); }
+  .team-state { justify-self: start; }
+}
+@media (forced-colors: active) {
+  .team-trail [data-reported="true"]::before { forced-color-adjust: none; background: CanvasText; border-color: CanvasText; }
+}
 /* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
@@ -3164,6 +3203,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
    buttons, fields and sheet controls clear the bands. With no inset (portrait,
    or a desktop tab) env() is 0 and nothing moves. */
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .conversation-tabs { padding-left: calc(var(--space-4) + env(safe-area-inset-left)); padding-right: calc(var(--space-4) + env(safe-area-inset-right)); }
+  .team-panel { padding-left: calc(var(--space-3) + env(safe-area-inset-left)); padding-right: calc(var(--space-3) + env(safe-area-inset-right)); }
   #conversation-list { padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
   .compose-fab { margin-left: calc(12px + env(safe-area-inset-left)); margin-right: calc(12px + env(safe-area-inset-right)); }
   .conversation-shell .conversation-sidebar > footer { padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }

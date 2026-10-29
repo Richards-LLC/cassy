@@ -4,7 +4,7 @@ import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
-import { statusClass, statusLabel, workerProgress, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
+import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -167,6 +167,7 @@ const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
 const statusPending = new Set<string>();
+const statusFailures = new Set<string>();
 const leases = new Map<string, LeaseState>();
 /** Conversation views mounted for a session's supervisor pane, by pane key (cas-f285). */
 const mountedThreads = new Set<string>();
@@ -2087,13 +2088,16 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     // cas-0546: a task waiting to merge, or blocked, is progress, not
     // something waiting on the operator. Tasks & progress shows its state;
     // only the supervisor's own asks and blockers wait on the operator.
+    statusFailures.delete(key);
     statuses.set(sessionKey(machineId, session), status);
     statusPending.delete(key);
     render();
   } catch {
     // The connection supervisor owns transport/auth reporting; the rail stops
     // holding a place for a status that is not coming.
-    if (statusPending.delete(key)) render();
+    statusFailures.add(key);
+    statusPending.delete(key);
+    render();
   }
 }
 
@@ -4352,6 +4356,7 @@ function renderRegions(context: RegionContext): void {
   renderStatus(context.status);
   syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
+  syncTeamView(context.status, context.liveRegions.staleNotice);
   if (context.selected && context.session && context.connectionSnapshot) {
     renderConnectionSurface(context.selected.id, context.session, context.connectionSnapshot);
   }
@@ -5119,6 +5124,70 @@ function fleetOpsSignature(): string {
   return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, writeGrant.stage, writeGrant.result?.text, [...fleetAskedFor(selectedMachineId, selectedSession)].map(([id, at]) => [id, relativeTimestamp(at)])]);
 }
 
+// Team owns presentation only. Existing status/event invalidation remains the
+// single remote-data owner; the only clock here updates elapsed text locally.
+let teamOpenKey: string | undefined;
+let teamModule: typeof import("./team-view") | undefined;
+let teamLoading: Promise<void> | undefined;
+let teamLoadFailed = false;
+let teamClock: number | undefined;
+function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
+  const panel = document.querySelector<HTMLElement>("#team-panel");
+  const conversation = document.querySelector<HTMLButtonElement>("#conversation-tab");
+  const team = document.querySelector<HTMLButtonElement>("#team-tab");
+  const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  if (teamOpenKey !== key) teamOpenKey = undefined;
+  const opened = Boolean(key && teamOpenKey === key);
+  window.clearInterval(teamClock); teamClock = undefined;
+  if (!panel || !conversation || !team) return;
+  panel.hidden = !opened;
+  const select = (wantTeam: boolean): void => {
+    if (wantTeam && teamOpenKey !== key) countUsage("team.open");
+    teamOpenKey = wantTeam ? key : undefined;
+    syncTeamView(status, stale);
+    (wantTeam ? team : conversation).focus();
+    scheduleConversationLayout();
+  };
+  for (const [button, selected] of [[conversation, !opened], [team, opened]] as const) {
+    button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1;
+    button.onclick = () => { if (button === team) teamLoadFailed = false; select(button === team); };
+    button.onkeydown = event => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault(); select(event.key === "End" || (event.key !== "Home" && button === conversation));
+    };
+  }
+  document.querySelector(".conversation-main")?.classList.toggle("team-open", opened);
+  if (!opened) return;
+  if (!teamModule) {
+    panel.textContent = teamLoadFailed ? "Couldn’t open Team. Select Team to retry." : "Loading Team…";
+    if (!teamLoading && !teamLoadFailed) {
+      teamLoading = import("./team-view").then(module => { teamModule = module; }).catch(() => { teamLoadFailed = true; }).finally(() => {
+        teamLoading = undefined;
+        // Load completion reads current selection/data, never its old closure.
+        render();
+      });
+    }
+    return;
+  }
+  const session = selectedMachineId ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
+  const agents = (status?.agents as FleetAgent[]) ?? [];
+  const tasks = [...new Map([...((status?.tasks_in_progress as ProgressTask[]) ?? []), ...((status?.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
+  teamModule.renderTeam(panel, {
+    roster: session?.workers, supervisor: session?.supervisor, agents, tasks,
+    epics: (status?.epics as ReleaseEpic[]) ?? [], focused: typeof status?.focused_epic === "string" ? status.focused_epic : null,
+    supervisors: [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name)),
+    asks: key ? waitingOnOperator(conversationHistories.get(key)) : 0,
+    stale: statusFailures.has(key!) ? "Staffing update failed. Showing the last state received." : stale,
+    unavailable: session?.ended ? "This session has ended." : !status ? statusFailures.has(key!) ? "Couldn’t load staffing." : "Waiting for project status…" : undefined,
+  }, () => select(false), openProgressSheet);
+  if (statusFailures.has(key!)) {
+    const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry staffing";
+    retry.onclick = () => { if (selectedMachineId && selectedSession) void loadStatus(selectedMachineId, selectedSession); };
+    if (!panel.querySelector("[data-team-retry]")) { retry.dataset.teamRetry = ""; panel.append(retry); }
+  }
+  teamClock = window.setInterval(() => { if (panel.isConnected && !panel.hidden) teamModule?.updateTeamElapsed(panel); }, 30_000);
+}
+
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
@@ -5279,7 +5348,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
-    line.append(identifier(worker.name), chip(metadata?.liveness ?? worker.agent?.status));
+    line.append(identifier(worker.name), chip(workerState(worker, tasks)));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {

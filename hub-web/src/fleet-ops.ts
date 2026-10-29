@@ -22,6 +22,11 @@ export interface FleetAgent {
   readonly latest_activity?: { readonly summary: string; readonly created_at_rfc3339: string };
   readonly last_heartbeat_rfc3339?: string;
   readonly current_task?: string | null;
+  readonly harness?: string | null;
+  readonly model?: string | null;
+  /** Task lifecycle timestamp, never worker registration or heartbeat. */
+  readonly task_started_at?: string | null;
+  readonly recent_trail?: readonly { readonly step: "started" | "pushed" | "ci_green" | "merged" | "verified"; readonly at?: string | null; readonly reference: string }[];
   /** The worker's spawn generation (cas-9b08), compared by the hub as-is. */
   readonly generation?: string | number | null;
   readonly started_at?: string | null;

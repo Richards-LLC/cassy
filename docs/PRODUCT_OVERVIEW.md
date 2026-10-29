@@ -80,3 +80,5 @@ The operator can paste text, screenshots or files into Commander: long text beco
 domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs"]
 watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
 -->
+
+Commander’s lazy Team tab sits beside a supervisor conversation. It uses the same scoped staffing and epic progress model as Tasks & progress: worker/task lanes, merge metrics, and a Needs you strip. The daemon reports harness/model, task start and durable lifecycle receipts; missing evidence stays unreported. Existing hub events refresh Team without an extra polling loop, while the browser updates elapsed text locally. The view includes keyboard tabs, phone stacking, forced colors and reduced motion, with no terminal or raw work output.

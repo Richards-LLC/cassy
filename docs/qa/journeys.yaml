@@ -302,6 +302,9 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+  HUB-J26-GOAL:
+    statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
+    check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
   HUB-J25-GOAL:
     statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and
       follow one worker's live timeline from Tasks & progress, without a terminal
@@ -2123,3 +2126,32 @@ journeys:
     basis: No per-journey usage instrumentation.
   spec: hub-web/e2e/journeys/history-window.journey.ts
   catalog_gaps: The hub double supplies cursor pages; frozen real-thread performance is measured separately.
+
+- id: HUB-J26
+  name: See live staffing beside a conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: open a supervisor conversation and select Team
+  steps:
+  - Open Team beside the supervisor conversation
+  - A lifecycle event updates staffing without reloading
+  - Read Team with forced colors and reduced motion
+  owner_groups: [commander_runtime]
+  owners:
+  - hub-web/src/team-view.ts
+  - hub-web/src/progress-model.ts
+  - hub-web/src/progress-view.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/main.ts
+  - hub-web/src/styles.css
+  - cas-cli/src/bridge/server/session.rs
+  - cas-cli/src/bridge/server/types.rs
+  - hub-web/e2e/journeys/team.journey.ts
+  invariants: [HUB-J26-GOAL]
+  traffic:
+    share_pct: null
+    basis: No per-journey usage instrumentation.
+  spec: hub-web/e2e/journeys/team.journey.ts
+  catalog_gaps: Protocol-double lifecycle changes supplement a separate read-only real-hub staffing comparison.

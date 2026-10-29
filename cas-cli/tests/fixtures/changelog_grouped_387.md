@@ -162,4 +162,3 @@
   released bundle after publication. A pinned deployment CLI receives no
   GitHub token, and transient post-promotion read failures are retried before
   rolling back a good deployment.
-

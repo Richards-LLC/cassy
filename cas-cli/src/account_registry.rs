@@ -100,7 +100,6 @@ fn json_file(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-
 fn string_at(value: &serde_json::Value, pointer: &str) -> Option<String> {
     value
         .pointer(pointer)?

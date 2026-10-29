@@ -5,9 +5,10 @@
 //! keeps only its login and runtime state; the shared configuration surface
 //! (commands, skills, agents, settings, project memory, ...) is a symlink into
 //! one base folder, `~/.cas/claude-base` or `~/.cas/codex-base`. The default
-//! directories (`~/.claude`, `~/.claude-alt`, `~/.codex`) stop being accounts:
-//! a login that duplicates a named account is retired into the backup, a
-//! unique one is renamed to its named directory.
+//! Claude defaults (`~/.claude`, `~/.claude-alt`) with non-secret login email
+//! metadata can be retired into the backup or renamed to their named directory.
+//! Codex aliases remain distinct because credential contents cannot establish
+//! their email or identity.
 //!
 //! The work is a [`Plan`] (read-only, what `cas accounts link --dry-run`
 //! prints) and [`apply`]. Apply never discards: every item it replaces is

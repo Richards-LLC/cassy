@@ -894,11 +894,11 @@ mod tests {
         .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["main", "grok", "operator@example.com", "alt", "work"]);
-        assert!(profiles[3].active);
+        assert_eq!(names, vec!["main", "alt", "grok", "operator@example.com", "work"]);
+        assert!(profiles[1].active);
         assert!(!profiles[0].active);
-        // The chooser offers each identity once and hides the never-used
-        // folder; the active duplicate's cursor moves to its canonical row.
+        // Token-only emails cannot establish identity: keep explicit aliases
+        // distinct and hide only the never-used folder.
         let rows: Vec<String> =
             profile_choices(&profiles, PickerStyle { glyphs: false, styled: false })
                 .iter()
@@ -908,7 +908,9 @@ mod tests {
             rows,
             [
                 "main  login unknown\n    weekly usage unknown (login unknown)",
+                "alt  logged in\n    weekly usage unknown",
                 "operator@example.com  login unknown\n    weekly usage unknown (login unknown)",
+                "work  login unknown\n    weekly usage unknown (login unknown)",
                 "+ Log in a new account",
             ]
         );

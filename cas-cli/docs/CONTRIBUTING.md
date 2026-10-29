@@ -1212,6 +1212,21 @@ override global policy; Commander uses global policy. `accounts.disabled` retain
 the absolute folder list managed by `cas accounts disable` / `enable` in
 `global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
+The shared account registry reads Claude email/account/organization metadata
+only from non-secret `.claude.json` `oauthAccount` fields. It never opens
+provider credential files for catalog metadata. Codex email, account and
+workspace identity stay absent: `auth.json` and its `id_token` are not metadata
+sources. Codex plan and capacity come from native rollout `rate_limits` fields;
+without those observations the plan stays unknown. Login state still comes
+from the official CLI status command.
+
+Codex folder aliases remain launch keys. Without a non-secret identity source,
+email-based lookup, automatic email renaming/retirement, login duplicate
+prompts and identity-based sharing of observations across distinct Codex
+folders are unavailable. Explicit aliases and physical symlink deduplication
+still work. Claude's non-secret identity behavior is preserved. The registry's
+optional fields and interface remain unchanged for Commander consumers.
+
 ### Operator credential stores are masked from workers
 
 Workers share the operator's uid and `$HOME`, so removing environment tokens

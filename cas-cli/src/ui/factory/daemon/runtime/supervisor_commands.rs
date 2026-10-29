@@ -313,7 +313,7 @@ mod tests {
         assert!(finish_observation(cas_dir, "another-session", &name, cas_mux::SupervisorCli::Claude, at).is_none());
         let (root, mut codex) = super::super::supervisor_single_turn_tests::fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = codex.app.supervisor_name().to_owned();
-        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H› Ask Codex to do anything".as_bytes()).unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
         let mut agent = store.get("single-sup").unwrap();
@@ -327,8 +327,19 @@ mod tests {
         codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
         assert_eq!(store.get("single-sup").unwrap().metadata.get("supervisor_model").map(String::as_str), Some("old-model"));
         codex.dispatch_supervisor_command(Request::Step { key: Key::Select }, "cmd-select".into(), owner.clone()).await.unwrap();
-        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H• Model changed to gpt-6.1-sol xhigh for this conversation\r\n›".as_bytes()).unwrap();
+        // The old chat history reappears after a failed save. It is not a new selection.
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n• Failed to save default model: denied\r\n›".as_bytes()).unwrap();
         codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
+        assert!(!store.get("single-sup").unwrap().metadata.contains_key("supervisor_effort"), "resurfaced history cannot invent a fresh observation");
+        codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while codex.app.mux.pane_inject_busy(&name) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\ngpt-6.1-sol").unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        codex.dispatch_supervisor_command(Request::Step { key: Key::Select }, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H• Model changed to gpt-6.1-sol xhigh for this conversation\r\n›".as_bytes()).unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select-2".into(), owner.clone()).await.unwrap();
         let observed = store.get("single-sup").unwrap();
         assert_eq!(observed.metadata.get("supervisor_model").map(String::as_str), Some("gpt-6.1-sol"));
         assert_eq!(observed.metadata.get("supervisor_effort").map(String::as_str), Some("xhigh"));

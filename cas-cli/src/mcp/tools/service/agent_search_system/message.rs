@@ -232,24 +232,21 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
     queued_message_provenance_at(message, chrono::Utc::now())
 }
 
-/// The only safe reply target for a verified Commander row is the operator
-/// lane. Keep this exact command beside the row so a supervisor never has to
-/// turn the human-readable `From:` label back into a routing target.
-pub(crate) fn commander_reply_command(message: &cas_store::QueuedPrompt) -> Option<String> {
-    matches!(operator_class(message), Some(OperatorClass::Verified { .. })).then(|| {
-        format!(
-            "coordination action=message target=operator in_reply_to={} summary=… message=…",
-            message.id
-        )
-    })
-}
-
 pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
     "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
 
-fn commander_reply_framing(message: &cas_store::QueuedPrompt) -> Option<String> {
-    commander_reply_command(message)
-        .map(|command| format!("Reply with: `{command}`\n{COMMANDER_REPLY_CONTRACT_POINTER}\n"))
+/// A verified question needs one answer. Completed supervisor pane replies
+/// already enter the durable Commander lane, including offline catch-up.
+/// Keep the explicit-routing exception in the shared reference, rather than
+/// printing a second-send command beside every mirrored question.
+pub(crate) fn commander_reply_framing(message: &cas_store::QueuedPrompt) -> Option<String> {
+    matches!(operator_class(message), Some(OperatorClass::Verified { .. })).then(|| {
+        format!(
+            "Reply once in this pane; completed supervisor answers mirror to Commander. \
+             For disabled or unmirrored delivery, follow the reply contract below.\n\
+             {COMMANDER_REPLY_CONTRACT_POINTER}\n"
+        )
+    })
 }
 
 /// These values are CAS-generated queue-source labels, never agent names.
@@ -7363,7 +7360,7 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     #[test]
-    fn verified_commander_rows_print_the_exact_operator_reply_command() {
+    fn verified_commander_rows_request_one_mirrored_pane_reply() {
         let mut row = cas_store::QueuedPrompt {
             reference_only: false,
             id: 3139,
@@ -7385,18 +7382,14 @@ mod cas_89e1_post_merge_message_type_tests {
             kind: None,
             attachments: Vec::new(),
         };
-        assert_eq!(
-            commander_reply_command(&row).as_deref(),
-            Some("coordination action=message target=operator in_reply_to=3139 summary=… message=…")
-        );
-        assert_eq!(
-            super::commander_reply_framing(&row).as_deref(),
-            Some(
-                "Reply with: `coordination action=message target=operator in_reply_to=3139 summary=… message=…`\nPhone reply contract: see `cas-supervisor/references/operator-reply.md`.\n",
-            )
+        let framing = super::commander_reply_framing(&row).expect("verified reply guidance");
+        assert!(framing.contains("Reply once in this pane"), "{framing}");
+        assert!(framing.contains(COMMANDER_REPLY_CONTRACT_POINTER), "{framing}");
+        assert!(
+            !framing.contains("coordination action=message target=operator"),
+            "mirrored questions must not request a second send: {framing}"
         );
         row.origin = None;
-        assert_eq!(commander_reply_command(&row), None);
         assert_eq!(super::commander_reply_framing(&row), None);
     }
 

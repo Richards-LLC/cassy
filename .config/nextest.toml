@@ -5,6 +5,9 @@
 # isolation for tests that change env/cwd, and schedules one global pool.
 # Plain cargo test must use -- --test-threads=1 for these shared harnesses.
 
+# 0.9.145 fixes macOS sibling capture-pipe inheritance: https://github.com/nextest-rs/nextest/pull/3553
+nextest-version = { recommended = "0.9.145" }
+
 [profile.default]
 # NO RETRIES, deliberately. A retry policy turns a deterministic failure into an
 # intermittent one and buys back exactly the "is it flaky or is it broken?"

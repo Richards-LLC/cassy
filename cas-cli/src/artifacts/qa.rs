@@ -60,8 +60,8 @@ fn relative(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Only declared path fields travel. files.parts also carries titles,
-// labels and project names; treating arbitrary strings as paths breaks publish.
+// Match the files the close gate's ManifestFiles reads. Per-part receipts and
+// traces are producer metadata; top-level aliases into parts/ still travel.
 fn declared_files(value: &serde_json::Value) -> BTreeSet<PathBuf> {
     let mut paths = BTreeSet::new();
     for key in [
@@ -88,19 +88,6 @@ fn declared_files(value: &serde_json::Value) -> BTreeSet<PathBuf> {
             .filter_map(|v| v.as_str())
         {
             paths.insert(path.into());
-        }
-    }
-    for part in value["parts"].as_array().into_iter().flatten() {
-        for key in [
-            "receipt",
-            "aria_yaml",
-            "aria_json",
-            "trace",
-            "trace_actions",
-        ] {
-            if let Some(path) = part[key].as_str().filter(|path| !path.is_empty()) {
-                paths.insert(path.into());
-            }
         }
     }
     paths
@@ -315,6 +302,14 @@ pub(crate) fn restore(
         super::proof::same_artifact(&record, &proof.closure),
         "QA closure conflicts with published proof"
     );
+    restore_archive(&proof, &archive, destination).map(Some)
+}
+
+fn restore_archive(
+    proof: &EvidenceProof,
+    archive: &Path,
+    destination: &Path,
+) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(destination)?;
     let temp = tempfile::Builder::new()
         .prefix("qa-restored-")
@@ -366,23 +361,128 @@ pub(crate) fn restore(
     // One retained directory per immutable closure. Verify cached bytes and
     // timestamps against this freshly verified archive before reusing it.
     let cached = destination.join(format!("qa-restored-{}", proof.closure.sha256));
-    if cached.try_exists()? {
-        anyhow::ensure!(
-            std::fs::symlink_metadata(&cached)?.is_dir(),
-            "QA restore cache is not a directory"
-        );
-        for path in paths {
-            let old = checked_file(&cached, &path)?;
-            let fresh = checked_file(temp.path(), &path)?;
-            anyhow::ensure!(
-                super::digest_file(&old)? == super::digest_file(&fresh)?
-                    && std::fs::metadata(old)?.modified()?
-                        == std::fs::metadata(fresh)?.modified()?,
-                "QA restore cache differs from published evidence"
-            );
+    let already_restored = cached.try_exists()?;
+    #[cfg(test)]
+    BEFORE_INSTALL.with(|barrier| {
+        if let Some(barrier) = barrier.borrow().as_ref() {
+            barrier.wait();
         }
-    } else {
-        std::fs::rename(temp.path(), &cached)?;
+    });
+    if !already_restored {
+        match std::fs::rename(temp.path(), &cached) {
+            Ok(()) => return Ok(cached.join(&proof.manifest_path)),
+            // A concurrent first restore may have installed this immutable
+            // closure after our existence check. Verify it below, just as on
+            // a cache hit; an unrelated rename error remains an error.
+            Err(_) if cached.try_exists()? => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    Ok(Some(cached.join(&proof.manifest_path)))
+    anyhow::ensure!(
+        std::fs::symlink_metadata(&cached)?.is_dir(),
+        "QA restore cache is not a directory"
+    );
+    for path in paths {
+        let old = checked_file(&cached, &path)?;
+        let fresh = checked_file(temp.path(), &path)?;
+        anyhow::ensure!(
+            super::digest_file(&old)? == super::digest_file(&fresh)?
+                && std::fs::metadata(old)?.modified()? == std::fs::metadata(fresh)?.modified()?,
+            "QA restore cache differs from published evidence"
+        );
+    }
+    Ok(cached.join(&proof.manifest_path))
+}
+
+#[cfg(test)]
+thread_local! {
+    // Synchronize after both callers observe an absent cache, without sleeps.
+    static BEFORE_INSTALL: std::cell::RefCell<Option<std::sync::Arc<std::sync::Barrier>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_first_restores_verify_the_winning_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let source = base.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let cas_root = base.join("project/.cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let manifest = source.join("bundle.json");
+        std::fs::write(&manifest, r#"{"schema":1,"producer":"journey","task_id":"cas-race","files":{"trace":"trace.zip"}}"#).unwrap();
+        std::fs::write(source.join("trace.zip"), "published evidence").unwrap();
+        let store = cas_store::SqliteArtifactStore::open(&cas_root).unwrap();
+        let context = PublishContext {
+            store: &store,
+            roots: super::super::paths::PublishRoots::new(
+                &cas_root,
+                &dir.path().join("artifacts"),
+                "cas-race",
+            ),
+            task_id: "cas-race".into(),
+            cloud: None,
+        };
+        let (_export, archive) = prepare(&context, &manifest).unwrap().unwrap();
+        let record = |id: &str, name: &str, file: &Path| {
+            let (sha256, size_bytes) = super::super::digest_file(file).unwrap();
+            PublishedArtifact {
+                id: id.into(),
+                task_id: "cas-race".into(),
+                name: name.into(),
+                mime: super::super::mime_for(file),
+                sha256,
+                size_bytes,
+                cloud_artifact_id: Some(id.into()),
+                status: "committed".into(),
+                cloud_url: None,
+                slack_permalink: None,
+                created_at: "2026-10-29T12:00:00Z".into(),
+            }
+        };
+        let proof = EvidenceProof {
+            source_path: manifest.display().to_string(),
+            manifest: record("art-manifest", "bundle.json", &manifest),
+            closure: record("art-closure", "qa-evidence.tar.gz", &archive),
+            manifest_path: "bundle.json".into(),
+        };
+        validate(&proof, "cas-race").unwrap();
+        let destination = dir.path().join("restored");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let restored = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        BEFORE_INSTALL.with(|slot| *slot.borrow_mut() = Some(barrier.clone()));
+                        restore_archive(&proof, &archive, &destination)
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| {
+                    thread
+                        .join()
+                        .unwrap()
+                        .expect("both first restores must succeed")
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(restored[0], restored[1]);
+        assert_eq!(
+            std::fs::read(restored[0].parent().unwrap().join("trace.zip")).unwrap(),
+            b"published evidence"
+        );
+        std::fs::write(restored[0].parent().unwrap().join("trace.zip"), "tampered").unwrap();
+        let error = restore_archive(&proof, &archive, &destination).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("differs from published evidence"),
+            "{error}"
+        );
+    }
 }

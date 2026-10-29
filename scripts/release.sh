@@ -14,7 +14,8 @@
 #   2. computes the next version from the base branch's version;
 #   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
 #      [Unreleased] to a dated [x.y.z] section, and names the release-notes
-#      draft docs/release-notes/<date>-v<x.y.z>-slack.md;
+#      draft docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
+#      embedded Commander bundle with the new version;
 #   4. commits "release: v<x.y.z>", pushes, opens the PR to the base branch
 #      (or retitles the open one), waits for the PR's one CI run (Scoped
 #      Validation) to go green, and only then enables auto-merge (cas-2aef).
@@ -24,7 +25,7 @@
 #
 # Landing on main is the release: the merge queue's run builds the archives
 # (release-prebuild.yml) and release.yml publishes them. Nothing here tags,
-# builds or publishes. The local train and gate scripts are not called.
+# builds Rust or publishes. The local train and gate scripts are not called.
 #
 # The draft: write the Slack draft before running, at the path printed by
 # --next-version, or anywhere with --notes <file>; `{{VERSION}}` in it becomes
@@ -183,7 +184,7 @@ sync_with_base() {
     mapfile -t conflicted < <(git diff --name-only --diff-filter=U)
     for file in "${conflicted[@]}"; do
         case "$file" in
-            CHANGELOG.md|Cargo.lock|cas-cli/Cargo.toml|crates/cas-*/Cargo.toml|docs/release-notes/*-slack.md) ;;
+            CHANGELOG.md|Cargo.lock|cas-cli/Cargo.toml|crates/cas-*/Cargo.toml|docs/release-notes/*-slack.md|hub-web/dist/*) ;;
             *) other+=("$file") ;;
         esac
     done
@@ -197,6 +198,17 @@ sync_with_base() {
     fi
     for file in "${conflicted[@]}"; do
         case "$file" in
+            hub-web/dist/*)
+                # Generated files may conflict when two releases change web
+                # inputs. Take the base output (including deletions); prepare
+                # regenerates it from the merged sources and bumped version.
+                if git cat-file -e "$remote/$base:$file" 2>/dev/null; then
+                    git restore --source="$remote/$base" --staged --worktree -- "$file"
+                else
+                    git rm --quiet -- "$file"
+                    continue # The deletion is staged; no path remains to add.
+                fi
+                ;;
             CHANGELOG.md)
                 git show ":3:$file" >"$scratch/base-changelog.md"
                 python3 "$script_dir/release_changelog.py" rebase "$scratch/ours-changelog.md" \
@@ -307,10 +319,16 @@ prepare() {
     local source
     source="$(draft_source "$version")"
     set_versions "$version"
+    # Vite embeds cas-cli's version. Build after the bump, before committing,
+    # so the merge queue sees exactly the bundle a fresh build will produce.
+    # Keep npm output off prepare's stdout, which carries only the version.
+    say "rebuilding Commander for v$version"
+    (cd hub-web && npm ci && npm run build) >&2 \
+        || die "Commander build failed; release was not committed"
     python3 "$script_dir/release_changelog.py" promote CHANGELOG.md "$version" "$(release_date)" "$base_version" \
         || die "CHANGELOG.md promotion failed"
     place_draft "$version" "$source"
-    git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}"
+    git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
     git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
         -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version."
     say "committed release v$version on $branch ($(git rev-parse --short HEAD))"
@@ -375,7 +393,7 @@ wait_for_pr_ci() {
 # Failing test names from CI logs: nextest, cargo test, Python unittest and
 # the scripts' own "FAIL <name>" lines, de-duplicated, at most 20.
 failing_tests() {
-    sed -E 's/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
+    sed -E $'s/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
         | sed -nE 's/^ *FAIL \[ *[0-9.]+s\] +(.*)$/\1/p; s/^test (.+) \.\.\. FAILED$/\1/p; s/^(FAIL|ERROR): (.+)$/\2/p; s/^FAIL (.+)$/\1/p' \
         | awk '!seen[$0]++' | head -20 | paste -sd ';' - | sed 's/;/; /g'
 }

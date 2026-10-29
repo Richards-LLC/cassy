@@ -765,6 +765,75 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
 }
 
 #[tokio::test]
+async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let parked = fx.close("cas-bq01").await;
+    let delivery = tasks.get("cas-bq01").unwrap();
+    let anchor = delivery.deliverables.factory_branch_anchor.clone().unwrap();
+    assert_eq!(delivery.status, TaskStatus::AwaitingMerge, "{parked}");
+    assert!(cas_store::has_qa_batch_deferral(&root, "cas-bq01").unwrap());
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+
+    // A supervisor restarts a shipped delivery only to correct its evidence.
+    // The real request_changes transition preserves history but retires the
+    // active anchor; starting again must not make batch QA impossible.
+    let request = serde_json::from_value(serde_json::json!({
+        "action":"request_changes", "id":"cas-bq01",
+        "reason":"Repackage the existing QA evidence; no product correction"
+    })).unwrap();
+    fx.supervisor.task(Parameters(request)).await.unwrap();
+    env.remove("CAS_AGENT_ROLE");
+    fx.core.cas_task_start(Parameters(cas::mcp::tools::IdRequest {
+        id: "cas-bq01".into(),
+    })).await.unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let restarted = tasks.get("cas-bq01").unwrap();
+    assert!(restarted.deliverables.factory_branch_anchor.is_none());
+    assert_eq!(restarted.deliverables.historical_factory_branch_anchors.last(), Some(&anchor));
+
+    let request = || serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq01", "commit_receipt":anchor, "reason":"Evidence-only recovery of the merged delivery"
+    })).unwrap();
+    let refused = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
+    assert!(refused.contains("waiting for batch receipt"), "{refused}");
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+    let recorded = fx.supervisor.verification(Parameters(fx.request())).await
+        .expect("the retained immutable delivery must be resolvable after restart");
+    assert!(extract_text(recorded).contains("Batch QA receipt"));
+    let receipt = cas_store::qa_batch_receipts_for_task(&root, "batch-project", "cas-bq01")
+        .unwrap().pop().unwrap();
+    assert_eq!(receipt.task_heads.get("cas-bq01"), Some(&anchor));
+    let status = serde_json::from_value(serde_json::json!({
+        "action":"qa_status", "task_id":"cas-bq01"
+    })).unwrap();
+    let status = extract_text(fx.supervisor.verification(Parameters(status)).await.unwrap());
+    assert!(status.contains("Batch QA PASS"), "{status}");
+
+    // History identifies the old delivery; it must not let its approval cover
+    // a new correction that has not acquired a current parked anchor yet.
+    std::fs::write(fx.repo.join("cas-bq01.css"), "body{gap:16px}\n").unwrap();
+    git(&fx.repo, &["add", "cas-bq01.css"]);
+    git(&fx.repo, &["commit", "-qm", "cas-bq01: unreviewed correction after restart"]);
+    let corrected = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["branch", "-f", "main", &corrected]);
+    let correction = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq01", "commit_receipt":corrected, "reason":"New correction needs its own review"
+    })).unwrap();
+    let refused = extract_text(fx.core.cas_task_close(Parameters(correction)).await.unwrap());
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed,
+        "historical approval must not cover the new correction: {refused}");
+    assert!(refused.contains("waiting for batch receipt"), "{refused}");
+    git(&fx.repo, &["reset", "--hard", &fx.staging]);
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let closed = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{closed}");
+}
+
+#[tokio::test]
 async fn batch_qa_default_defers_and_explicit_per_task_keeps_evidence_gate_cas_a56a() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
@@ -831,9 +900,28 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
     fx.reject(serde_json::json!({}), "configured target main")
         .await;
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let ledger = std::fs::read(&fx.ledger).unwrap();
     std::fs::write(&fx.ledger, "changed after publish\n").unwrap();
     fx.reject(serde_json::json!({}), "ledger bytes differ")
         .await;
+    std::fs::write(&fx.ledger, ledger).unwrap();
+    // Recovery is not a search through old approvals or mutable lane refs.
+    // A missing record, an invalid active anchor, or invalid newest history
+    // must fail even when a valid older delivery and staging are available.
+    let known = tasks.get("cas-bq01").unwrap().deliverables.factory_branch_anchor.unwrap();
+    for (name, active, history) in [
+        ("missing", None, vec![]),
+        ("active", Some("f".repeat(40)), vec![known.clone()]),
+        ("history", None, vec![known, "f".repeat(40)]),
+    ] {
+        let id = format!("cas-anchor-{name}");
+        let mut task = Task::new(id.clone(), "Invalid recovery boundary".into());
+        task.assignee = Some("test-agent".into());
+        task.deliverables.factory_branch_anchor = active;
+        task.deliverables.historical_factory_branch_anchors = history;
+        tasks.add(&task).unwrap();
+        fx.reject(serde_json::json!({"task_ids":[id]}), "no resolvable delivery anchor").await;
+    }
 }
 
 #[tokio::test]

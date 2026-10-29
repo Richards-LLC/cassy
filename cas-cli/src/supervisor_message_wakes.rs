@@ -652,6 +652,7 @@ mod tests {
                 supervisor_name: "wake-sup".into(),
                 worker_names: vec![],
                 dead_workers: Default::default(),
+                replacement_workers: Default::default(),
                 limit: 10,
                 operator_replies: false,
                 deferred_operator_replies: Default::default(),

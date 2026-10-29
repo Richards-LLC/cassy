@@ -11,6 +11,17 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  staffed-epic-delivery-budget:
+    title: Staffed release delivery reads precede idle history even after the last active worker parks
+    tasks: [cas-9d2a, cas-c5fa]
+    invariants: [HUB-J26-ACTIVE-EPIC-BUDGET]
+    journeys: [HUB-J26]
+  live-phase-status-freshness:
+    title: Older status responses cannot replace a newer phase and unmatched compaction starts expire without reviving older work
+    found: '2026-10-29'
+    tasks: [cas-d17e]
+    invariants: [HUB-J25-LIVE-PHASE]
+    journeys: [HUB-J25]
   pairing-revoked-before-welcome:
     title: Every authentication failure must replace a pending conversation attach with immediate named Re-pair recovery, including expired credentials on a phone
     found: '2026-10-29'
@@ -32,6 +43,7 @@ owner_groups:
       CSS, composition and fixture hunks.
     globs:
     - hub-web/src/main.ts
+    - hub-web/src/status-refresh.ts
     - hub-web/src/styles.css
     - hub-web/src/types.ts
     - hub-web/src/terminal*
@@ -114,6 +126,10 @@ invariants:
     check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts, including its short status and headerless status stages; read back both clipboard formats, verify quiet adjacent plain progress, commas and quotes, long paths at desktop/phone in both schemes, and empty cells. Run the answer/status clipboard regression in conversation-view.test.ts. Native proof queues a short kind=status table through a candidate hub and verifies live and reloaded headers/cells and copied contents.'
     task: cas-0952
     bug: {task: cas-2656}
+  HUB-J4-SAFE-CSV-COPY:
+    statement: Copy CSV prefixes formula-leading cells with an apostrophe while visible and Markdown text stay exact; successful copy feedback clears and a retry failure stays actionable.
+    check: 'Run the cas-4800 stage of the HUB-J4 table-copy journey and its two named Vitest cases; read back CSV and Markdown, verify all six leaders (=,+,-,@,tab,CR), and advance the fake clock across overlapping copy attempts and clipboard refusal.'
+    bug: {task: cas-4800}
   HUB-J4-MESSAGE-HIERARCHY:
     statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
@@ -215,6 +231,10 @@ invariants:
     statement: The shell Accounts panel lists each machine independently and scrolls through every account on a phone; only factory-manage pairings mutate named Claude/Codex accounts, destructive operations confirm and audit, Grok is read-only, and New session refreshes choices without reload with local 12-hour capacity times. The confirmation editor is not rendered for read-only pairings or after Cancel/completion, and dismissal clears its text and typed value.
     check: Run accounts_route_tests, accounts-panel and launch-session UI tests and the HUB-J13 shell Accounts journey; assert rendered editor visibility after Cancel/remove and for read-only pairings, and prove CLI parity and each audited mutation on disposable profiles against the exact-tip real hub candidate, with 1280/390 light/dark captures.
     bug: {task: cas-e5df}
+  HUB-J13-ACCOUNTS-ENTRY:
+    statement: The shell Accounts control has a visible user-group glyph, an Accounts accessible name and tooltip, and an intact action group with the design-system gap and panel inset at desktop and 390px in light and dark.
+    check: Walk the HUB-J13 shell Accounts part; measure the rendered glyph, gap and right inset before opening the dialog, then capture the header in all four viewport/scheme combinations.
+    bug: {task: cas-a9d3}
   HUB-J13-LAUNCH-STORE:
     statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
     check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.
@@ -327,8 +347,8 @@ invariants:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
   HUB-J26-ACTIVE-EPIC-BUDGET:
-    statement: An unpinned conversation measures its selected supervisor's staffed active epic before unrelated project history within the existing bounded status budget.
-    check: Run focused_epic_tests::cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics through the real status builder with 297 epics, 35 distinct delivery anchors and no focus; require the current epic's first Git read, one batched ancestry pass, and merged/total, merges/hour and last merge on the first refresh. Compare the native Team header with status and task-store/Git evidence on the same candidate. This ancestry-based display never substitutes for close-gate content and lost-work proofs.
+    statement: An unpinned conversation measures its selected supervisor's staffed active epic before unrelated project history within the existing bounded status budget, including after the last active worker parks.
+    check: Run focused_epic_tests::cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics through the native HTTP status endpoint with 297 epics, 35 current delivery anchors and no focus; require the current epic's first Git read and merged verdicts both during active work and after parking (cas-c5fa), one batched ancestry pass per release, and merged/total, merges/hour and last merge on the first refresh. Compare the native Team header with status and task-store/Git evidence on the same candidate. This ancestry-based display never substitutes for close-gate content and lost-work proofs.
     bug: {task: cas-9d2a}
   HUB-J25-GOAL:
     statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and
@@ -341,8 +361,8 @@ invariants:
     statement: A work row names its read, search, command or edit scope, makes failures explicit, and opens operation-specific metadata with exact readable raw evidence; unknown tools remain raw and live updates preserve focus and expansion.
     check: Run the typed work renderer case in work-picture.test.ts and the Read typed work scope stage of HUB-J25 against the production bundle; open each operation and an unknown tool by keyboard and verify metadata, exact output, named failure and stable focus through a same-ID update.
   HUB-J25-LIVE-PHASE:
-    statement: The conversation phase and duration come from the selected supervisor's v2 lifecycle. Waiting, stale, disconnected and completed boundaries never animate; missing start times never become guessed elapsed durations. Show work remains opt-in.
-    check: Run the live phase parts of HUB-J25 at desktop and390 with forced colors/reduced motion and compare the real candidate's phase/start/end with its transcript lifecycle; run native work_events tests and conversation-view tests. Missing harness phases stay unreported.
+    statement: The conversation phase and duration come from the selected supervisor's v2 lifecycle. Waiting, stale, disconnected and completed boundaries never animate; missing start times never become guessed elapsed durations. Older status reads cannot overwrite newer evidence and unmatched compaction starts expire after five minutes without reviving older work. Show work remains opt-in.
+    check: Run the live phase parts of HUB-J25 at desktop and390 with forced colors/reduced motion and compare the real candidate's phase/start/end with its transcript lifecycle; run native work_events tests, status-refresh deferred success/failure tests and conversation-view tests. Missing harness phases stay unreported. The native phase regression bounds cancelled compaction and bridge ping/inbox regression proves non-phase selected-project isolation.
   HUB-J22-GOAL:
     statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
@@ -699,6 +719,7 @@ journeys:
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-READABLE-PROSE-TABLES
   - HUB-J4-TABLE-COPY
+  - HUB-J4-SAFE-CSV-COPY
   - HUB-J4-MESSAGE-HIERARCHY
   traffic:
     share_pct: null
@@ -1400,6 +1421,7 @@ journeys:
   invariants:
   - HUB-J13-GOAL
   - HUB-J13-ACCOUNT-MANAGEMENT
+  - HUB-J13-ACCOUNTS-ENTRY
   - HUB-J13-NATIVE-CLAUDE-CAPACITY
   - HUB-J13-PROVIDER-CREDENTIAL-BOUNDARY
   - HUB-J13-LAUNCH-STORE
@@ -2177,6 +2199,7 @@ journeys:
   - hub-web/src/styles.css
   - cas-cli/src/bridge/server/session.rs
   - cas-cli/src/bridge/server/types.rs
+  - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
   invariants: [HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET]
   traffic:

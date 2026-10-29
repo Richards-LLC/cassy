@@ -1179,9 +1179,9 @@ struct PhaseHooks {
     phase: Option<SupervisorPhase>,
 }
 
-fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str) -> PhaseHooks {
+fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str, now: DateTime<Utc>) -> PhaseHooks {
     use std::io::Read;
-    let today = Utc::now().date_naive();
+    let today = now.date_naive();
     let mut rows = Vec::new();
     for date in [today.pred_opt().unwrap_or(today), today] {
         let path = cas_dir.join("logs").join(format!("factory-session-{date}.log"));
@@ -1252,6 +1252,16 @@ pub(crate) fn supervisor_phase_for_session(
     session: &str,
     supervisor: &str,
 ) -> Option<SupervisorPhase> {
+    supervisor_phase_for_session_at(cas_dir, project_path, session, supervisor, Utc::now())
+}
+
+fn supervisor_phase_for_session_at(
+    cas_dir: &Path,
+    project_path: &Path,
+    session: &str,
+    supervisor: &str,
+    now: DateTime<Utc>,
+) -> Option<SupervisorPhase> {
     type Cache = HashMap<(PathBuf, String), WorkEventIndex>;
     static INDEXES: std::sync::LazyLock<Mutex<Cache>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
     let agents = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?.into_iter()
@@ -1259,7 +1269,7 @@ pub(crate) fn supervisor_phase_for_session(
     let (agents, _) = crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents);
     let mut scope = WorkEventScope::from_agents(session, &agents);
     scope.supervisors.retain(|source| source.agent_name == supervisor);
-    let hooks = phase_hooks(cas_dir, session, supervisor);
+    let hooks = phase_hooks(cas_dir, session, supervisor, now);
     if let Some((source, _)) = &hooks.transcript {
         // The native hook names this exact factory and supervisor; do not
         // combine it with a lagging pre-/clear registration or parse it twice.
@@ -1281,10 +1291,20 @@ pub(crate) fn supervisor_phase_for_session(
         if let Some(oldest) = oldest { indexes.remove(&oldest); }
     }
     let transcript_phase = indexes.entry(key).or_default().supervisor_phase(&scope, &resolve);
-    match (transcript_phase, hooks.phase) {
+    let phase = match (transcript_phase, hooks.phase) {
         (Some(native), Some(hook)) => Some(if hook.at() > native.at() { hook } else { native }),
         (native, hook) => native.or(hook),
-    }
+    }?;
+    // PreCompact has no cancellation hook. After five minutes without a
+    // newer native lifecycle, stop claiming that compaction is still active.
+    // Filter after choosing the newest evidence so an older tool cannot revive.
+    const COMPACTION_MAX_SECONDS: i64 = 5 * 60;
+    let expired = phase.lifecycle.phase.as_deref() == Some("compacting")
+        && phase.lifecycle.stage != "end"
+        && phase.lifecycle.started_at.as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .is_some_and(|at| now.signed_duration_since(at).num_seconds() >= COMPACTION_MAX_SECONDS);
+    (!expired).then_some(phase)
 }
 
 /// Per-daemon transcript indexes, kept across requests so paging and

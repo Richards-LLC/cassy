@@ -37,7 +37,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Pane budget:** ~150 words, answer first: findings, rejections, measurements, merge receipts, pointers. Timelines, gates and lane history go to notes/artifacts; no narration/recap.
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).
-- **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`coordination action=message target=operator in_reply_to=N summary="..." message=…`).
+- **Commander answers:** reply once in the Claude/Codex pane. Web/phone receive the mirror, including offline catch-up. [Disabled or unmirrored supervisors](references/reference.md#verified-commander-messages) use explicit routing.
 - **No share before verification passes:** no Violet deliverable during open epic verification, even with caveats ([publication](references/reporting-and-routing.md#publication)).
 - **Unprompted operator updates:** `target=operator kind=status|receipt|ask|blocker`, optional `attachment=<artifact-id>`; no pane prose.
 

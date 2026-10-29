@@ -9,7 +9,6 @@
 use crate::store::{find_cas_root_from, find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};
 use cas_factory::{SessionState, SessionSummary, SessionType};
-use cas_types::{AgentStatus, AgentType};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
@@ -640,20 +639,25 @@ impl SessionInfo {
         let agent_store = open_agent_store(&cas_root).ok()?;
         let agents = agent_store.list(None).ok()?;
 
-        Some(
-            agents
-                .into_iter()
-                .filter(|agent| {
-                    agent.agent_type == AgentType::Worker
-                        && agent.factory_session.as_deref() == Some(self.name.as_str())
-                        && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
-                        && !agent.is_heartbeat_expired(
-                            crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
-                        )
-                })
-                .map(|agent| agent.name)
-                .collect(),
-        )
+        // A catalog poll uses the same heartbeat + harness-process evidence
+        // as worker_status. A quiet live harness is still a lane, not a
+        // transiently empty roster every time its heartbeat ages out.
+        let mut names: std::collections::BTreeSet<_> = agents
+            .iter()
+            .filter(|agent| {
+                agent.factory_session.as_deref() == Some(self.name.as_str())
+                    && crate::mcp::tools::service::agent_liveness::is_live_factory_worker(agent)
+            })
+            .map(|agent| agent.name.clone())
+            .collect();
+        // The daemon's actual pane roster spans the registration gap during
+        // a same-name recycle. A dead metadata PID cannot keep a lane alive.
+        names.extend(
+            self.metadata.workers.iter()
+                .filter(|worker| worker.pid.is_some_and(is_process_running))
+                .map(|worker| worker.name.clone()),
+        );
+        Some(names.into_iter().collect())
     }
 
     /// Get the number of live workers from the registry, falling back to
@@ -1340,6 +1344,16 @@ mod tests {
             3,
             "workers with stale heartbeats are not live"
         );
+
+        // A quiet but live harness must not disappear and return on catalog
+        // polls as its MCP heartbeat crosses the thirty-second boundary.
+        stale.pid = Some(std::process::id());
+        for seconds in (31..=91).step_by(5) {
+            stale.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(seconds);
+            agents.update(&stale).unwrap();
+            assert_eq!(session.worker_count(), 4, "live harness vanished at {seconds}s");
+            assert!(session.project_worker_names().contains(&stale.name));
+        }
 
         let fallback_metadata = create_metadata(
             "factory-registry-unavailable",

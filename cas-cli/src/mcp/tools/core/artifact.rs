@@ -196,7 +196,7 @@ fn upload_client(cas_root: &std::path::Path) -> Option<ArtifactUploadClient> {
 
 fn render_publish(outcome: &PublishOutcome) -> String {
     let artifact = &outcome.artifact;
-    let verdict = if outcome.disposition.is_committed() { "Published" } else { "Local-only artifact" };
+    let verdict = if outcome.disposition.qa_portability_error().is_some() { "QA bundle not portable" } else if outcome.disposition.is_committed() { "Published" } else { "Local-only artifact" };
     let mut out = format!(
         "{verdict} {}\n\nartifact_id: {}\nname: {}\nmime: {}\nsize_bytes: {}\nsha256: {}\nstatus: {}\nstorage: {}\nmetadata_state: {}\n",
         artifact.id,
@@ -212,12 +212,12 @@ fn render_publish(outcome: &PublishOutcome) -> String {
     if let Some(url) = &artifact.cloud_url {
         out.push_str(&format!("cloud_url: {url}\n"));
     }
-    if let PublishDisposition::UploadFailed { reason } = &outcome.disposition {
+    if let PublishDisposition::UploadFailed { reason } = outcome.disposition.storage_disposition() {
         out.push_str(&format!(
             "\nThe record is usable; the upload is not.\n{reason}\n"
         ));
     }
-    if let PublishDisposition::CommittedMetadataUnavailable { reason } = &outcome.disposition {
+    if let PublishDisposition::CommittedMetadataUnavailable { reason } = outcome.disposition.storage_disposition() {
         out.push_str(&format!("\nCloud committed the bytes, but the task reference was not recorded.\n{reason}\n"));
     }
     out

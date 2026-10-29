@@ -1387,13 +1387,18 @@ printf '%s' '[{"number":85,"title":"Release v3.85.0","headRefName":"epic/release
     std::fs::create_dir_all(&custom).unwrap();
     let custom_pdf = custom.join("v3.85.0.pdf");
     std::fs::write(&custom_pdf, bytes).unwrap();
-    std::fs::write(custom_pdf.with_extension("md"), "# Project v3.85.0\n\n## Evidence and scope\n").unwrap();
+    // Same front matter and title shape as `cas release report` emits.
+    std::fs::write(custom_pdf.with_extension("md"), concat!(
+        "---\nversion: 3.85.0\ndate: 2026-10-27\nareas: [\"Releases\"]\n---\n\n",
+        "# Project v3.85.0\n\n## Evidence and scope\n",
+    )).unwrap();
     let custom_hub = ScriptedHub::with(vec![file_receipt("F86", "v3.85.0.pdf", bytes)]);
     let (_, result) = run_cli_at(
         &["post", "--channel", "cas-internal", "--file", custom_pdf.to_str().unwrap()],
         &custom_hub, false, &gate, None, Some(&root),
     );
     result.expect("generated custom output retains the release identity");
+    assert_eq!(seen.borrow().last().unwrap()["epic_id"], "cas-released");
     // The released epic's own pending verification remains a hard gate.
     let mut released = store.get("cas-released").unwrap();
     released.pending_verification = true;
@@ -1407,4 +1412,37 @@ printf '%s' '[{"number":85,"title":"Release v3.85.0","headRefName":"epic/release
     assert_eq!(error.code, "publication_blocked");
     assert!(error.message.contains("cas-released"), "{error:?}");
     assert_eq!(blocked.connects(), 0);
+}
+
+#[test]
+fn release_report_pdf_upload_without_session_focus_skips_github_cas_9b5b() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[issues]\nrepo = \"example/project\"\n").unwrap();
+    env.set_current_dir(dir.path());
+    assert!(crate::ui::factory::preferred_epic_id_from_session_metadata().is_none());
+    let gh = dir.path().join("fake-gh");
+    let calls = dir.path().join("gh-called");
+    crate::test_paths::warm_stub(&gh, "#!/bin/sh\ntouch gh-called\nprintf '[]'\n");
+    env.set("GH_BIN", &gh);
+    let reports = dir.path().join("release-reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let pdf = reports.join("v3.85.0.pdf");
+    let bytes = b"%PDF-1.4\nfixture release report\n";
+    std::fs::write(&pdf, bytes).unwrap();
+    let gate = |post: &Value| {
+        crate::hooks::handlers::handlers_events::violet_publication_denial(
+            "violet_post", Some(post), Some(&root),
+        )
+    };
+    let hub = ScriptedHub::with(vec![file_receipt("F85", "v3.85.0.pdf", bytes)]);
+    let (_, result) = run_cli_at(
+        &["post", "--channel", "cas-internal", "--file", pdf.to_str().unwrap()],
+        &hub, false, &gate, None, Some(&root),
+    );
+    result.expect("without session focus the report needs no epic lookup");
+    assert_eq!(hub.calls().len(), 1);
+    assert!(!calls.exists(), "unfocused upload must not query GitHub");
 }

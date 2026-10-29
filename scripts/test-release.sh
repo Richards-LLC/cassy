@@ -83,7 +83,21 @@ write_tree() {
 - The base release.
 EOF2
     cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$root/scripts/"
+    # Real, dependency-free npm boundary: the fixture build embeds the crate
+    # version just as Commander's Vite config does. No npm/Git calls are mocked.
+    mkdir -p "$root/hub-web/dist"
+    printf 'base styles\n' >"$root/hub-web/dist/app.css"
+    printf '{"name":"release-web-fixture","version":"1.0.0","private":true,"scripts":{"build":"node build.cjs"}}\n' >"$root/hub-web/package.json"
+    printf '{"name":"release-web-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"release-web-fixture","version":"1.0.0"}}}\n' >"$root/hub-web/package-lock.json"
+    cat >"$root/hub-web/build.cjs" <<'JS'
+const fs = require('node:fs');
+const version = /^version = "([^"]+)"/m.exec(fs.readFileSync('../cas-cli/Cargo.toml', 'utf8'))[1];
+const sources = fs.readdirSync('..').filter(name => name.endsWith('.txt')).sort().map(name => ({ name, content: fs.readFileSync(`../${name}`, 'utf8') }));
+fs.mkdirSync('dist', { recursive: true });
+fs.writeFileSync('dist/app.js', `const version = "${version}";\nconst sources = ${JSON.stringify(sources)};\n`);
+JS
     echo base >"$root/app.txt"
+    (cd "$root/hub-web" && node build.cjs)
 }
 
 git init --quiet --bare -b main "$tmp/origin.git"
@@ -103,6 +117,7 @@ clone_epic() {
     git -C "$dir" checkout --quiet -b "$name"
     perl -0777 -i -pe "s/## \\[Unreleased\\]\\n/## [Unreleased]\\n\\n### Added — $entry\\n\\n- $entry shipped.\\n/" "$dir/CHANGELOG.md"
     echo "$entry" >"$dir/$entry.txt"
+    printf '%s styles\n' "$entry" >"$dir/hub-web/dist/app.css"
     git -C "$dir" add -A
     git -C "$dir" commit --quiet -m "$entry work"
 }
@@ -110,6 +125,35 @@ clone_epic() {
 clone_epic "$tmp/epic" epic/alpha alpha
 epic="$tmp/epic"
 run() { (cd "$1" && shift && ./scripts/release.sh "$@"); }
+
+# cas-56bbc: a dry patch release must commit the bundle built from the new
+# manifest, not leave the old embedded version for the merge queue to reject.
+dry_release_rebuilds_commander() {
+    local fixture="$tmp/web-release" committed
+    clone_epic "$fixture" epic/web-release web-release
+    printf 'Web release v{{VERSION}}\n' >"$tmp/web-draft.md"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/web-draft.md" >"$tmp/web-release.log" 2>&1 || return 1
+    committed="$(git -C "$fixture" show HEAD:hub-web/dist/app.js)"
+    (cd "$fixture/hub-web" && npm ci && npm run build) >>"$tmp/web-release.log" 2>&1 || return 1
+    [[ "$committed" == *'"9.99.1"'* ]] &&
+        git -C "$fixture" diff --quiet HEAD -- hub-web/dist &&
+        [[ -z "$(git -C "$fixture" status --porcelain)" ]] &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/web-release
+}
+check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
+
+commander_build_failure_stops_release() {
+    local fixture="$tmp/web-failure" before status=0
+    clone_epic "$fixture" epic/web-failure web-failure
+    printf 'process.exit(17);\n' >"$fixture/hub-web/build.cjs"
+    git -C "$fixture" commit --quiet -am 'broken web source'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/web-draft.md" >"$tmp/web-failure.log" 2>&1 || status=$?
+    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -q 'Commander build failed; release was not committed' "$tmp/web-failure.log" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/web-failure
+}
+check 'commander_build_failure_stops_release' 'a failed Commander build stops before the release commit or push'
 
 # 1. The version comes from the base branch.
 out="$(run "$epic" --next-version)"
@@ -134,7 +178,7 @@ git -C "$epic" add "$original_notes"
 git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
-head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ')"
+head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ' -)"
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
 check 'grep -q "^version = \"9.100.0\"" "$epic/cas-cli/Cargo.toml" && grep -q "^version = \"9.100.0\"" "$epic/crates/cas-mcp/Cargo.toml"' 'every release crate is bumped'
 check '[[ "$(grep -c "^version = \"9.100.0\"" "$epic/Cargo.lock")" -eq 6 ]] && grep -q "^version = \"0.1.0\"" "$epic/Cargo.lock"' 'Cargo.lock bumps the release packages and nothing else'
@@ -187,13 +231,16 @@ check 'rerun_after_repair' 'a repaired release requeues once with old/new notes 
 
 # 5. Another epic's release lands first with the same version: re-bump.
 clone_epic "$tmp/beta" epic/beta beta
+# cas-9cb3: base deletes a fixed-name generated file our branch modified.
+git -C "$tmp/beta" rm --quiet hub-web/dist/app.css
+git -C "$tmp/beta" commit --quiet -m 'drop obsolete generated styles'
 printf 'Beta v{{VERSION}}\n' >"$tmp/beta-draft.md"
 rm -f "$FAKE_GH_STATE/pr"
 run "$tmp/beta" --no-watch --notes "$tmp/beta-draft.md" 2>/dev/null
 git -C "$tmp/beta" push --quiet origin epic/beta:main
 rm -f "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
 : >"$FAKE_GH_LOG"
-run "$epic" --no-watch 2>"$tmp/rebump.err"
+run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
 check 'git -C "$epic" merge-base --is-ancestor origin/main HEAD' 'the base branch is merged in'
 check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A4 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
@@ -204,6 +251,8 @@ check '[[ "$(grep -c "^version = \"9.101.0\"" "$epic/Cargo.lock")" -eq 6 ]] && g
 check 'grep -q "Cassy v9.101.0" "$epic/docs/release-notes/2026-10-15-v9.101.0-slack.md" && grep -q "Beta v9.100.0" "$epic/docs/release-notes/2026-10-15-v9.100.0-slack.md"' 'our draft is renamed and the landed draft is untouched'
 check '[[ -f "$epic/beta.txt" && -f "$epic/alpha.txt" ]]' 'the landed code is merged'
 check 'grep -q "^pr edit 77 --title Release v9.101.0: epic/alpha" "$FAKE_GH_LOG" && grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'the open PR is retitled and auto-merge re-enabled'
+check 'grep -q "9.101.0" "$epic/hub-web/dist/app.js" && grep -q "alpha" "$epic/hub-web/dist/app.js" && grep -q "beta" "$epic/hub-web/dist/app.js" && git -C "$epic" diff --quiet HEAD -- hub-web/dist' 'a re-bump resolves generated bundle conflicts and commits the merged web sources with the new version'
+check '[[ ! -e "$epic/hub-web/dist/app.css" && -z "$(git -C "$epic" status --porcelain)" && ! -f "$epic/.git/MERGE_HEAD" ]]' 'cas-9cb3: a base-deleted fixed-name dist file resolves and the re-bump finishes cleanly'
 
 # 6. A conflict outside the release files stops with exit 4 and no merge.
 echo main-change >"$tmp/seed/app.txt"

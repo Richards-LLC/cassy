@@ -146,6 +146,22 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
     await controls.getByRole("button", { name: "Copy Markdown", exact: true }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(short);
   });
+  await journey.stage("Copy formula-leading values safely while keeping the table and Markdown exact (cas-4800)", async () => {
+    const source = "| Formula | Value |\n| --- | --- |\n| =cmd | @x |\n| +1 | -1 |";
+    hub.supervisorSays(PELICAN, source);
+    const formulas = log.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Formula", exact: true }) });
+    const controls = formulas.locator("xpath=../..");
+    await expect(formulas.getByRole("cell")).toHaveText(["=cmd", "@x", "+1", "-1"]);
+    await controls.getByRole("button", { name: "Copy CSV", exact: true }).click();
+    await expect(controls.getByRole("status")).toHaveText("CSV copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Formula,Value\r\n'=cmd,'@x\r\n'+1,'-1");
+    await expect(controls.getByRole("status")).toBeEmpty();
+    await controls.getByRole("button", { name: "Copy Markdown", exact: true }).click();
+    await expect(controls.getByRole("status")).toHaveText("Markdown copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
+    await expect(controls.getByRole("status")).toBeEmpty();
+    await expect(formulas.getByRole("cell")).toHaveText(["=cmd", "@x", "+1", "-1"]);
+  });
   await journey.stage("Retry after clipboard refusal and read a headerless empty cell", async () => {
     await page.evaluate(() => { Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: () => Promise.reject(new Error("Permission denied")) }); });
     const copy = sheet.getByRole("button", { name: "Copy CSV", exact: true });

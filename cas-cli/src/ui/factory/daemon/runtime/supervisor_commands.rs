@@ -50,6 +50,9 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
     match command {
         Command::Compact if fresh("compacted (ctrl+o") || fresh("context compacted ·") =>
             Some(("Context compaction confirmed by the supervisor's harness.".into(), false)),
+        Command::Clear if lower.contains("openai codex") && idle_prompt(current)
+            && (fresh("tip: use the desktop app") || fresh("to get started, describe a task")) =>
+                Some(("Codex returned to its fresh native welcome prompt after Clear.".into(), false)),
         Command::Model if fresh("select model") || fresh("select a model")
             || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
         Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
@@ -321,6 +324,29 @@ mod tests {
         assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet").is_none());
         let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯").unwrap();
         assert!(!confirmed.1);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_clear_is_observed_when_codex_returns_to_its_welcome_prompt() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_clear_is_observed_when_codex_returns_to_its_welcome_prompt") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+        let name = daemon.app.supervisor_name().to_owned();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1HREADY\r\n›".as_bytes()).unwrap();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let submitted = daemon.dispatch_supervisor_command(
+            Request::Run { command: Command::Clear, confirmed: true }, "cmd-clear".into(), owner.clone(),
+        ).await.unwrap();
+        assert!(matches!(submitted, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed(
+            "\x1bc\x1b[1;1HOpenAI Codex (v0.165.0)\r\nTip: Use the desktop app.\r\n\x1b[20;1H› Ask Codex to do anything".as_bytes(),
+        ).unwrap();
+        let observed = daemon.dispatch_supervisor_command(Request::Status, "cmd-clear".into(), owner).await.unwrap();
+        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt }
+            if receipt.phase == Phase::Observed && receipt.detail.contains("welcome prompt")));
     }
     #[test]
     fn prompt_readiness_refuses_busy_and_modal_screens() {

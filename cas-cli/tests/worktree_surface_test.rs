@@ -2402,6 +2402,23 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 }
 
 #[tokio::test]
+async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
+    let mut env = test_env();
+    let fixture = rebound_merge_fixture(&mut env).await;
+    let task = open_task_store(&fixture.cas_root).unwrap().get("cas-e429").unwrap();
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert!(task.deliverables.parked_branch.is_none());
+    let mut request = coord_req("worktree_merge");
+    request.id = Some(fixture.branch.clone());
+    request.task_id = Some(task.id);
+    request.cleanup = Some(false);
+    let response = fixture.service.coordination(Parameters(request)).await.unwrap();
+    let text = get_text(&response);
+    assert!(text.contains("UNPARKED TASK") && text.contains("cas-e429"),
+        "an explicit merge must disclose the worker's unfinished lifecycle state: {text}");
+}
+
+#[tokio::test]
 async fn test_worktree_merge_honors_rebound_task_branch_gh1397() {
     let mut env = test_env();
     let fixture = rebound_merge_fixture(&mut env).await;

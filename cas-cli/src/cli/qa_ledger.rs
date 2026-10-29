@@ -116,7 +116,26 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 cas_root,
                 config.factory().artifacts_root.as_deref(),
             );
-            let dir = crate::config::project_factory_artifacts_root(cas_root, &paths.base).join(id);
+            let dir = paths.project_root.join(id);
+            let mut components = Path::new(id).components();
+            ensure!(
+                matches!(components.next(), Some(std::path::Component::Normal(_)))
+                    && components.next().is_none(),
+                "task artifact directory escapes its project namespace"
+            );
+            // Validate existing ancestors before mkdir can follow a namespace alias.
+            // Missing directories are safe to create; dangling links fail closed.
+            for ancestor in [&paths.project_root, &dir] {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(_) => ensure!(
+                        crate::config::canonical_factory_task_artifact_dir(&paths.base, ancestor)
+                            .is_some(),
+                        "task artifact directory escapes its project namespace"
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
             std::fs::create_dir_all(&dir)?;
             ensure!(
                 crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_some(),

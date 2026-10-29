@@ -189,6 +189,22 @@ fn publish_records_the_same_digest_and_size_as_sha256sum_and_stat() {
         .assert()
         .success()
         .stdout(predicate::str::contains(id));
+
+    let manifest = project.task_dir().join("bundle.json");
+    std::fs::File::create(project.task_dir().join("trace.zip")).unwrap()
+        .set_len(cas::types::ARTIFACT_MAX_BYTES + 1).unwrap();
+    std::fs::write(&manifest, serde_json::json!({
+        "schema": 1, "task_id": TASK, "producer": "journey", "files": {"trace": "trace.zip"}
+    }).to_string()).unwrap();
+    let output = project.cmd().args(["--json", "artifact", "publish", "--task", TASK])
+        .arg(&manifest).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(record["storage"], "not_logged_in");
+    assert_eq!(record["metadata_state"], "qa_bundle_not_portable");
+    assert!(record["qa_portability_error"].as_str().unwrap().contains("byte limit"));
+    project.cmd().args(["artifact", "publish", "--task", TASK]).arg(&manifest)
+        .assert().success().stdout(predicate::str::starts_with("[WARN] QA bundle not portable"));
 }
 
 #[test]

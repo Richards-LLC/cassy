@@ -15,6 +15,25 @@ paired device controls the terminal. Raw terminal input still requires both
 `pane:input` and that device's active session lease. Message permission never
 grants terminal input authority.
 
+## Selected-session stores and live phase freshness
+
+Bridge and hub session routes resolve the selected session's `project_dir`
+with `find_cas_root_ignoring_env`. A process-wide `CAS_ROOT` can belong to the
+project that launched a multi-project hub, so it cannot select another session's
+stores. This applies to inbox peek/poll/ack/count, ping, activity, messages,
+status and SSE, and artifact URLs. The bridge's explicit `--cas-root` is a
+fallback only when session metadata has no resolvable project; without either,
+resolution fails. This is a shared session-store policy, not a phase-only override.
+
+Commander publishes completed status reads in request order for each
+machine/session: older successes and failures cannot replace a newer settled
+read. An available response can still publish while the next read is pending,
+so reads slower than the heartbeat do not starve status updates. Native compaction starts expire
+after five minutes without a newer lifecycle, including a cancelled compaction
+whose completion hook never fires. Expiry drops the phase without claiming
+completion or reviving a tool that preceded it. Later native evidence, including
+a real completion boundary, remains visible normally.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history
@@ -57,6 +76,12 @@ an answer preserves the choices; after answering it preserves the selected
 label and the durable reply reference.
 
 ## Supervisor succession and committed-work recovery
+
+Worker liveness uses concrete turn and process evidence. While a recycled
+worker's transcript is unresolved, its own recent activity or outbound message
+to the supervisor/director can establish execution within the configured stall
+window. Heartbeats and other workers' activity cannot. Resolved terminal turns
+and confirmed process exits retain precedence over this fallback.
 
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
@@ -254,6 +279,35 @@ database at a guessed path. Writable prompt-queue opens remove a regular empty
 `.cas/prompt_queue.db` artifact when it has no SQLite recovery sidecars; nonempty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
+
+Lifecycle latency diagnosis must separate quiet `lifecycle:` progress notices
+from wake-eligible `lifecycle-wake:` action events. Quiet notices wait for the
+recipient's next hook or inbox poll; that policy is not a directed-message
+latency guarantee. For either class, measure enqueue-to-transport and
+enqueue-to-recipient-surfacing separately. A `hook_surfaced` receipt proves
+injection into recipient context, not that the model read or acted on the event.
+Do not drain another recipient's queue to measure delivery.
+
+The lifecycle `[delayed Nm]` summary appears at recipient drain after nine
+minutes. It reports queue age, not the holding cause or compliance with the
+directed-message probe's 2 s p95 / 10 s normal-transport maximum. Inspect
+`message_status` while the row is held for its pending reason/detail and wake
+evidence. After surfacing, the latest detail can instead describe the hook
+acknowledgment; it is not a history of busy-pane, debounce or rate-limit holds.
+An absent gate stamp means the earlier holding cause is unverified, not that
+none occurred. Preserve a bounded read-only metadata capture before retention
+removes the evidence, and state unknown causes explicitly.
+
+The GH #1393 follow-up captured five real rows on October 29, 2026 with
+`cas 3.88.0 (b0bff67)`: two wake-eligible lifecycle transports took 2.608 s and
+43.344 s, two quiet lifecycle notices took 333.700 s and 70.409 s, and one
+directed status took 3.025 s. All five had recipient hook-surfacing receipts.
+This convenience sample does not establish a p95 or a general SLO verdict;
+the 43.344 s wake sample exceeds the probe's normal-transport maximum for that
+row. The final records do not establish its earlier holding cause. The original
+29-minute incident was on another machine/session and was not reproduced or
+explained by this capture. Portable metadata and the executed read-only capture
+script are task artifacts `art-e2253955` and `art-12f49e76` on `cas-67bb`.
 
 Cross-project task ownership inspection self-execs the internal
 `--internal-task-ownership-probe` route before ordinary CLI startup. Raw database,
@@ -935,7 +989,16 @@ in one MCP call. Use `loaded_proof` for loaded evidence. A failed Cloud commit
 keeps the local artifact record but does not append a portable proof claim.
 The note carries the committed record (including Cloud id, size and SHA-256),
 so normal task sync transports it without syncing machine-local paths or a
-new artifact store. An existing committed id cited in `task action=notes` is
+new artifact store. Publishing a producer `bundle.json` also archives the evidence
+read by the close gate, including top-level aliases into `parts/`, but excludes
+per-part-only receipts and traces. If that archive cannot be prepared or
+published (including the 25 MiB limit), CLI and MCP report **QA bundle not
+portable** while retaining the manifest record and its storage outcome. JSON
+reports `metadata_state: "qa_bundle_not_portable"` and `qa_portability_error`;
+rebuild the evidence bundle and republish before asking a peer host to close.
+Concurrent restores verify the winning cached evidence before reusing it.
+
+An existing committed id cited in `task action=notes` is
 attached the same way. Citing an unpublished artifacts-root path warns the
 writer without discarding the note.
 
@@ -2838,7 +2901,8 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    `{{VERSION}}` in it becomes the version.
 3. Run `scripts/release.sh` (in the background with a log: it watches the PR
    until it merges). It merges `main` in when the branch is behind, bumps the
-   release crates and `Cargo.lock`, promotes `[Unreleased]` to
+   release crates and `Cargo.lock`, runs `npm ci && npm run build` in `hub-web`
+   so the committed embedded Commander bundle carries that version, promotes `[Unreleased]` to
    `## [x.y.z] - <date>`, names the draft, commits `release: vx.y.z`, pushes,
    opens the PR to `main`, waits for its Scoped Validation run to go green,
    and only then enables auto-merge. When another release lands first it
@@ -2872,10 +2936,15 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    This job cannot delay main or release publication. If it fails after
    publication, rerun the failed job; do not republish the existing release.
 7. The supervisor host installs on publish: `scripts/install-on-publish.sh
-   --install` sets up a systemd user timer once per host. Every minute it
+   --install` sets up a systemd user timer on Linux or a LaunchAgent on
+   macOS once per host. While the user session is active, every minute it
    compares the latest release with `cas --version`, runs
    `cas update --yes --version x.y.z` when it is newer, and completes the
-   release timer in the notes: PR opened to installed, the one latency figure.
+   release timer in the notes after verifying the installed version: PR
+   opened to the first host's actual installation, the one latency figure.
+   On macOS, inspect `launchctl print gui/$(id -u)/dev.cassy.install-on-publish`
+   and `~/.local/state/cassy/install-on-publish.log` (under `XDG_STATE_HOME`
+   when set); `--uninstall` unloads and removes the per-user scheduler.
 8. Derive announcement digests from the published bytes with
    `./scripts/release-published-receipt.sh vx.y.z`; it fails closed while
    either asset is missing or a digest disagrees with GitHub.
@@ -2893,6 +2962,13 @@ on disk while hosts still run binaries that call them; the release path above
 does not call them.
 
 ### Task close delivery attribution
+
+Green lane CI does not declare worker completion. Director merge readiness
+requires `awaiting_merge` or an explicit `status: ready` return contract naming
+the exact pushed tip, regardless of the task's methodology. Red checkpoints and
+ordinary check/test receipts do not satisfy that boundary. A manually requested
+merge of an `in_progress` task remains available and returns an unparked-task
+warning; its existing CI, QA and authorization gates still apply.
 
 Close posture checks (`additive-only`, `value-only`), no-code intent, and the
 receipt diff stat share task delivery attribution in
@@ -3095,6 +3171,24 @@ An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
+
+### Generated dist for exact-tip journeys
+
+When a factory lane changes Commander product inputs, commit the source changes
+first, then run `npm run build` in `hub-web`. If `hub-web/dist` changes, commit
+that generated output in a separate final build commit on the lane before
+running `scripts/journey-eval.sh <task-artifact-dir>`. Review the build diff;
+token-source changes and any regenerated files outside `dist` belong with the
+source changes. Never hand-edit the bundle. If source changes again, rebuild
+and commit the updated output before obtaining a new receipt.
+
+The runner rejects dirty `hub-web` inputs, serves `hub-web/dist`, and records
+`HEAD` plus its committed dist tree in the journey bundles. An uncommitted
+scratch build cannot supply this evidence. Record the final build commit as the
+evaluated delivery tip. The integration owner rebuilds the merged sources and
+commits the generated result when it differs, superseding lane builds. Lane
+receipts prove their recorded inputs; the merge queue proves the integrated
+tree through its existing Commander checks.
 
 ### Test shape and runner evidence
 

@@ -47,14 +47,16 @@ Two of those are supervisor-specific and easy to confuse:
 
 ## Verified Commander messages
 
-When an inbound Commander message is stamped `operator … verified` and includes `notification_id=N`, answer it with:
+When an inbound Commander message is stamped `operator … verified` on a Claude or Codex supervisor, answer once in your final pane reply. Completed answers are mirrored to the Commander conversation on web and phone. An offline asking device receives the queued answer after reconnect; offline delivery is not a reason to send another copy.
+
+Use `target=operator` for unprompted updates (`kind=status|receipt|ask|blocker`), without echoing them in the pane. For an answer, use explicit routing only when mirroring is confirmed disabled (`factory.commander_mirror_enabled=false`) or the supervisor harness is known not to be mirrored. The current transcript reader captures Claude/Codex; Grok/OpenCode supervisors use this fallback. Only a registered supervisor may send operator messages; a worker routes through its supervisor. Bind that fallback to the verified question's `notification_id=N`:
 
 ```text
 coordination action=message target=operator in_reply_to=N summary="..." message="..."
 ```
 
-The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
-For phone-sized replies, follow the [phone reply contract](operator-reply.md).
+The fallback routes to the originating paired device and reports queued delivery while it is offline. Reply through that route once; do not also produce a mirrored pane answer. Never derive a routing target from the human-readable `From:` label. A missing receipt alone does not establish that a surface is unmirrored.
+For phone-sized wording in either route, follow the [phone reply contract](operator-reply.md).
 
 ## Supervisor override
 

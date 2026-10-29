@@ -56,7 +56,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
 5. Capture rendered cells with screenshots, CLI cells with terminal captures, and API cells with
    HTTP transcripts. Choose evidence labels by how the result was obtained using
    the scaffold and [evidence guidance](references/evidence-ledger.md). When
-   the 30-minute box expires, mark every unrun cell `NOT EXERCISED`. For rendered web/hub cells,
+   the 30-minute box expires, mark every unrun cell `NOT EXERCISED: <reason>`. For rendered web/hub cells,
    write the **evidence bundle** to `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md), including its trace, ARIA and
    polish requirements even when `visual_change: false`. For a visual change, also write its
@@ -84,7 +84,7 @@ These hold for every walk, task pass or [independent pass](references/independen
   identity, claim, checkout), list every entry path reaching it from source routes and any journey
   catalog. Walk them in order of real traffic, not convenience: the path that supplies the changed
   input early passes while the rest break. Entry paths take the first rows; any past the cap stay
-  `NOT EXERCISED`.
+  `NOT EXERCISED: <reason>`.
 - **Read the invariant back** from the system of record (database query, API read, admin view) after
   the final step, not from the screen: a success message can sit on wrong data. Put the read and its
   result in the row's `observed`.

@@ -26,6 +26,18 @@ pub(crate) fn commit(repo: &Path, rev: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Recovery retires the active merge authority, but retains delivery identity.
+/// QA may attest that same immutable delivery after an evidence-only restart.
+/// Prefer an active anchor; otherwise use only the latest recorded history.
+/// An unresolvable newer anchor must never resurrect an older reviewed tip.
+pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
+    task.deliverables
+        .factory_branch_anchor
+        .as_ref()
+        .or_else(|| task.deliverables.historical_factory_branch_anchors.last())
+        .and_then(|head| commit(repo, head))
+}
+
 pub(crate) fn ancestor(repo: &Path, from: &str, to: &str) -> Option<bool> {
     let code = Command::new("git")
         .args(["merge-base", "--is-ancestor", from, to])
@@ -237,11 +249,7 @@ pub(crate) fn prepare_receipt(
         }) {
             return Err(format!("no self-review: recorder implemented {id}"));
         }
-        let anchor = task
-            .deliverables
-            .factory_branch_anchor
-            .as_deref()
-            .and_then(|head| commit(&repo, head))
+        let anchor = delivery_anchor(&repo, &task)
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {
@@ -283,14 +291,15 @@ pub(crate) fn satisfying_receipt(
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
         return Ok(None);
     }
-    let Some(anchor) = task
-        .deliverables
-        .factory_branch_anchor
-        .as_deref()
-        .and_then(|h| commit(repo, h))
-    else {
+    let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
+    // Retired history can recover only its exact delivery. Without an active
+    // park, a later integrated head may be an unreviewed correction, rather
+    // than an umbrella integration receipt for the reviewed work.
+    if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
+        return Ok(None);
+    }
     let receipts = cas_store::qa_batch_receipts_for_task(root, &project, &task.id)
         .map_err(|e| e.to_string())?;
     for receipt in receipts {
@@ -331,14 +340,12 @@ pub(crate) fn covering_pass(
     target: &str,
     head: &str,
 ) -> Result<Option<cas_types::QaPass>, String> {
-    let Some(anchor) = task
-        .deliverables
-        .factory_branch_anchor
-        .as_deref()
-        .and_then(|a| commit(repo, a))
-    else {
+    let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
+    if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
+        return Ok(None);
+    }
     if ancestor(repo, &anchor, head) != Some(true)
         || (head != anchor && integration_state(repo, head, target) != Some(true))
     {

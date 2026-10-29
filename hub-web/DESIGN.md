@@ -278,7 +278,7 @@ The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud 
 - ❌ Never put light-scheme ink on `--bg-terminal` or wire ANSI colours to application tokens.
 - ✅ Make every `box-shadow` a token (`--lift*`, `--look-shadow-float`, `--shadow-overlay`); `invariants.test.ts` checks it.
 - ❌ Never render conversation content inside `.pane-host`, give it a visible size, or add a second presentation beside Conversations.
-- ❌ Never hand-edit or commit generated `hub-web/dist` from a factory lane; the integration owner rebuilds it once.
+- ❌ Never hand-edit `hub-web/dist`. For exact-tip affected journeys, a factory lane may include a separate final generated build commit; the integration owner supersedes it by rebuilding the merged sources. Follow [the generated-dist workflow](../cas-cli/docs/CONTRIBUTING.md#generated-dist-for-exact-tip-journeys).
 
 ## Behavioural constraints
 <!-- keep -->

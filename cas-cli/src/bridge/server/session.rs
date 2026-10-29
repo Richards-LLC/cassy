@@ -19,6 +19,10 @@ pub(crate) fn resolve_session_by_name(
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found"))
 }
 
+/// Resolve every session-scoped store from the selected project's metadata.
+/// Ambient CAS_ROOT belongs to the bridge/hub process and may name another
+/// project. An explicit fallback applies only without a resolvable project.
+/// This policy covers queue, activity, status, SSE and artifact consumers alike.
 pub(crate) fn cas_root_for_session_with_fallback(
     session: &crate::ui::factory::SessionInfo,
     fallback: Option<&std::path::Path>,
@@ -142,7 +146,17 @@ pub(crate) fn build_status_json(
 
     let task_store =
         status_task_store(cas_root).ok_or_else(|| anyhow::anyhow!("task store unavailable"))?;
-    let agents = session_agents(session, cas_root, task_store.as_ref())?;
+    // Staffing and task rows must describe the same decoded snapshot. A
+    // second status-filtered read can omit a supported legacy status spelling
+    // or observe a reassignment after the rows above were loaded.
+    let held: Vec<_> = data.in_progress_tasks.iter()
+        .chain(&data.ready_tasks)
+        .chain(&data.epic_tasks)
+        .filter(|task| matches!(task.status,
+            cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Open
+            | cas_types::TaskStatus::Blocked | cas_types::TaskStatus::AwaitingMerge))
+        .collect();
+    let agents = session_agents(session, cas_root, task_store.as_ref(), &held)?;
 
     let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, Some(task_store.as_ref()));
 
@@ -177,12 +191,13 @@ fn session_agents(
     session: &crate::ui::factory::SessionInfo,
     root: &std::path::Path,
     tasks: &dyn cas_store::TaskStore,
+    held: &[&cas_factory::TaskSummary],
 ) -> Result<Vec<AgentSummaryJson>> {
     use crate::mcp::tools::service::factory_ops::{
         dedupe_authoritative_agents, worker_liveness_for_agent,
     };
     use cas_types::{AgentRole, TaskStatus};
-    let agents = crate::store::open_agent_store(root)?
+    let registrations: Vec<_> = crate::store::open_agent_store(root)?
         .list(None)?
         .into_iter()
         .filter(|agent| {
@@ -192,21 +207,7 @@ fn session_agents(
             ) && agent.visible_to_factory_session(Some(&session.name))
         })
         .collect();
-    let (agents, _) = dedupe_authoritative_agents(agents);
-    // As in worker_status, an active task wins over a parked/blocked task.
-    // A registration ID and the friendly name are both valid assignees.
-    let held: Vec<_> = [
-        TaskStatus::InProgress,
-        TaskStatus::AwaitingMerge,
-        TaskStatus::Blocked,
-        TaskStatus::Open,
-    ]
-    .into_iter()
-    .map(|state| tasks.list(Some(state)))
-    .collect::<std::result::Result<Vec<_>, _>>()?
-    .into_iter()
-    .flatten()
-    .collect();
+    let (agents, _) = dedupe_authoritative_agents(registrations.clone());
     let events = SqliteEventStore::open(root)?;
     let stall_secs = crate::config::Config::load(root)
         .unwrap_or_default()
@@ -217,12 +218,50 @@ fn session_agents(
         .into_iter()
         .map(|agent| {
             let latest = events.latest_worker_activity(&agent.id, &agent.name)?;
-            let task = held.iter().find(|task| {
-                task.assignee
-                    .as_deref()
-                    .is_some_and(|assignee| assignee == agent.name || assignee == agent.id)
-            });
-            let (task_started_at, recent_trail) = worker_task_facts(root, &events, task)?;
+            // Task ownership survives a harness recycle. Keep retired IDs
+            // only for this logical worker in the selected session; a same-
+            // name registration in another session is not an alias.
+            let aliases: std::collections::HashSet<_> = registrations
+                .iter()
+                .filter(|registration| {
+                    registration.name == agent.name && registration.role == agent.role
+                })
+                .map(|registration| registration.id.as_str())
+                .chain(std::iter::once(agent.name.as_str()))
+                .collect();
+            let task = held
+                .iter()
+                .filter(|task| {
+                    task.assignee.as_deref().is_some_and(|owner| aliases.contains(owner))
+                })
+                .map(|task| {
+                    // A batch note or merge receipt changes updated_at without
+                    // assigning new work. Use the same start evidence as the
+                    // visible trail; creation is a stable legacy fallback.
+                    let work_at = task_start_event(&events, &task.id)?
+                        .map(|event| event.created_at)
+                        .or_else(|| tasks.get(&task.id).ok().map(|record| record.created_at));
+                    Ok((*task, work_at))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .min_by_key(|(task, work_at)| {
+                    (
+                        match task.status {
+                            TaskStatus::InProgress => 0,
+                            TaskStatus::Open => 1,
+                            TaskStatus::Blocked => 2,
+                            _ => 3,
+                        },
+                        std::cmp::Reverse(*work_at),
+                        task.id.clone(),
+                    )
+                })
+                .map(|(task, _)| task);
+            // Full records supply lifecycle receipts only. Missing details
+            // cannot erase the assignment already present in this response.
+            let full_task = task.and_then(|task| tasks.get(&task.id).ok());
+            let (task_started_at, recent_trail) = worker_task_facts(root, &events, full_task.as_ref())?;
             Ok(AgentSummaryJson {
                 role: agent.role.to_string(),
                 harness: agent.metadata.get("worker_cli").cloned(),
@@ -252,6 +291,13 @@ fn session_agents(
         .collect()
 }
 
+/// Shared, bounded task-start evidence for current-work ordering and its trail.
+fn task_start_event(events: &dyn EventStore, id: &str) -> Result<Option<Event>> {
+    Ok(events.list_for_entity(cas_types::EventEntityType::Task, id, 200)?
+        .into_iter()
+        .find(|event| event.event_type == cas_types::EventType::TaskStarted))
+}
+
 /// Only durable lifecycle records become Team marks. Bounded event history can
 /// omit a start; registration/heartbeat and arbitrary notes never stand in for it.
 fn worker_task_facts(
@@ -259,17 +305,14 @@ fn worker_task_facts(
     events: &dyn EventStore,
     task: Option<&cas_types::Task>,
 ) -> Result<(Option<String>, Vec<AgentTrailJson>)> {
-    use cas_types::{EventEntityType, EventType, MergeCiAdmission, VerificationStatus};
+    use cas_types::{MergeCiAdmission, VerificationStatus};
     let Some(task) = task else {
         return Ok((None, Vec::new()));
     };
-    let history = events.list_for_entity(EventEntityType::Task, &task.id, 200)?;
-    let started = history
-        .iter()
-        .find(|event| event.event_type == EventType::TaskStarted);
-    let start_at = started.map(|event| event.created_at.to_rfc3339());
+    let started = task_start_event(events, &task.id)?;
+    let start_at = started.as_ref().map(|event| event.created_at.to_rfc3339());
     let mut trail = Vec::new();
-    if let Some(event) = started {
+    if let Some(event) = started.as_ref() {
         trail.push(AgentTrailJson {
             step: "started",
             at: start_at.clone(),
@@ -386,17 +429,17 @@ fn project_deliveries(
             .any(|owner| supervisors.contains(owner))
         })
         .min_by_key(|epic| {
-            std::cmp::Reverse(
-                status
-                    .tasks_in_progress
-                    .iter()
-                    .filter(|task| {
-                        task.status == "inprogress"
-                            && task.epic_id.as_deref() == Some(epic.id.as_str())
-                            && staffed_tasks.contains(task.id.as_str())
-                    })
-                    .count(),
-            )
+            let staffed: Vec<_> = status.tasks_in_progress.iter()
+                .filter(|task| task.epic_id.as_deref() == Some(epic.id.as_str())
+                    && staffed_tasks.contains(task.id.as_str()))
+                .collect();
+            // Keep ongoing work first, then parked staffing. The
+            // last worker parking cannot demote its release behind idle
+            // history and starve the bounded delivery evidence read.
+            std::cmp::Reverse((
+                staffed.iter().filter(|task| task.status == "inprogress").count(),
+                staffed.len(),
+            ))
         })
         .map(|epic| epic.id.as_str());
     let mut order: Vec<_> = (0..status.epics.len()).collect();
@@ -654,6 +697,37 @@ mod focused_epic_tests {
     }
 
     #[test]
+    fn non_phase_session_routes_ignore_ambient_root_and_explicit_fallback() {
+        use cas_store::NotificationPriority;
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, session) = fixture();
+        crate::ui::factory::SessionManager::new().save_metadata(&session.metadata).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_root = crate::store::init_cas_dir(other.path()).unwrap();
+        env.set("CAS_ROOT", other_root.to_str().unwrap());
+        let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
+        let id = queue.notify("supervisor", "selected-only", "{}", NotificationPriority::Normal).unwrap();
+        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+        let request = |action: &str| {
+            let path = format!("/v1/sessions/{}/{action}", session.name);
+            let mut req = tiny_http::TestRequest::new().with_path(&path).into();
+            let response = super::super::routes::handle_session_routes(
+                &mut req, &path, "", None, Some(&other_root), &cache, 0,
+            ).unwrap();
+            assert_eq!(response.status_code().0, 200);
+            serde_json::from_reader::<_, serde_json::Value>(response.into_reader()).unwrap()
+        };
+        assert_eq!(request("ping")["cas_root"], root.to_string_lossy().as_ref());
+        assert_eq!(request("inbox/supervisor/pending_count")["pending_count"], 1);
+        assert_eq!(request("inbox/supervisor/peek")["notifications"][0]["id"], id);
+        assert_eq!(crate::store::open_supervisor_queue_store(&other_root).unwrap().pending_count("supervisor").unwrap(), 0);
+        let mut missing = session.clone();
+        missing.metadata.project_dir = None;
+        assert_eq!(cas_root_for_session_with_fallback(&missing, Some(&other_root)).unwrap(), other_root);
+        assert!(cas_root_for_session_with_fallback(&missing, None).is_err());
+    }
+
+    #[test]
     fn status_projects_selected_session_worker_from_worker_status_evidence() {
         use cas_store::AgentStore;
         use cas_types::{Agent, AgentRole, Task, TaskStatus};
@@ -667,10 +741,11 @@ mod focused_epic_tests {
         // A real exited PID yields the same deterministic verdict in the hub
         // and worker_status. A fresh registry heartbeat cannot hide death.
         worker.pid = Some(i32::MAX as u32);
-        worker.metadata.insert("worker_cli".into(), "codex".into());
-        worker
-            .metadata
-            .insert("worker_model".into(), "gpt-6.1".into());
+        // Exercise the same registration consumer as the restricted Codex MCP
+        // subprocess, then read the durable row through the status producer.
+        home.set("CAS_FACTORY_WORKER_CLI", "codex");
+        home.set("CAS_FACTORY_WORKER_MODEL", "gpt-6.1");
+        crate::mcp::daemon::apply_factory_worker_metadata(&mut worker, None);
         crate::store::open_agent_store(&root)
             .unwrap()
             .register(&worker)
@@ -715,6 +790,169 @@ mod focused_epic_tests {
         );
         assert_eq!(projected["liveness"], expected.state.as_str());
         assert_eq!(projected["liveness"], "dead");
+        home.remove("CAS_FACTORY_WORKER_MODEL");
+        worker.metadata.remove("worker_model");
+        crate::mcp::daemon::apply_factory_worker_metadata(&mut worker, None);
+        crate::store::open_agent_store(&root).unwrap().update(&worker).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let projected = status.agents.iter().find(|agent| agent.id == worker.id).unwrap();
+        assert!(projected.model.is_none(), "an absent recipe must remain unreported");
+    }
+
+    #[test]
+    fn executing_workers_current_task_agrees_with_the_same_status_payload() {
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (project, root, session) = fixture();
+        let account = tempfile::tempdir().unwrap();
+        let rollouts = account.path().join("sessions/2026/10/29");
+        std::fs::create_dir_all(&rollouts).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let native = [
+            serde_json::json!({"type":"session_meta", "payload":{"id":"worker-native-session", "cwd":project.path(), "source":"cli", "originator":"codex_cli_rs"}}),
+            serde_json::json!({"timestamp":now, "type":"event_msg", "payload":{"type":"task_started"}}),
+        ];
+        std::fs::write(rollouts.join("rollout-worker-native-session.jsonl"),
+            native.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let mut worker = Agent::new_with_role("worker-native-session".into(), "worker-a".into(), AgentRole::Worker);
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("clone_path".into(), project.path().to_string_lossy().into_owned());
+        worker.metadata.insert("worker_account_dir".into(), account.path().to_string_lossy().into_owned());
+        worker.factory_session = Some(session.name.clone());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-current-executing".into(), "Current executing task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        // Both spellings decode to the supported domain status. The legacy
+        // spelling exposes separate filtered/unfiltered read disagreement.
+        let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for stored_status in ["in_progress", "inprogress"] {
+            db.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", rusqlite::params![stored_status, task.id]).unwrap();
+            let status = build_status_json(&session, &root, 20).unwrap();
+            let reported = status.tasks_in_progress.iter().find(|row| row.id == task.id).unwrap();
+            assert_eq!(reported.assignee.as_deref(), Some(worker.name.as_str()));
+            let agent = status.agents.iter().find(|agent| agent.name == worker.name).unwrap();
+            assert_eq!(agent.liveness.as_deref(), Some("executing"), "native turn evidence: {stored_status}");
+            assert_eq!(agent.current_task.as_deref(), Some(task.id.as_str()), "same response: {stored_status}");
+        }
+    }
+
+    #[test]
+    fn staffing_reassignment_replaces_parked_work_after_registration_recycle() {
+        use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, session) = fixture();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut previous = Agent::new_with_role("old-worker".into(), "worker-a".into(), AgentRole::Worker);
+        previous.factory_session = Some(session.name.clone());
+        previous.status = AgentStatus::Shutdown;
+        previous.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(2);
+        agents.register(&previous).unwrap();
+        let mut current = previous.clone();
+        current.id = "new-worker".into();
+        current.status = AgentStatus::Active;
+        current.last_heartbeat = chrono::Utc::now();
+        agents.register(&current).unwrap();
+        let mut parked = Task::new("cas-old-delivery".into(), "Previous delivery".into());
+        parked.assignee = Some(current.name.clone());
+        parked.status = TaskStatus::AwaitingMerge;
+        tasks.add(&parked).unwrap();
+        let mut next = Task::new("cas-next-assignment".into(), "New assignment".into());
+        next.assignee = Some(current.name.clone());
+        tasks.add(&next).unwrap();
+        for owner in [&current.name, &current.id, &previous.id] {
+            next.assignee = Some(owner.clone());
+            for state in [TaskStatus::Open, TaskStatus::InProgress] {
+                next.status = state;
+                tasks.update(&next).unwrap();
+                let status = build_status_json(&session, &root, 20).unwrap();
+                let worker = status.agents.iter().find(|agent| agent.name == current.name).unwrap();
+                assert_eq!(worker.current_task.as_deref(), Some(next.id.as_str()), "{owner} / {state}");
+            }
+        }
+        // A fresher same-name registration in another factory is neither
+        // this session's authoritative worker nor an ownership alias.
+        let mut foreign = current.clone();
+        foreign.id = "foreign-worker".into();
+        foreign.factory_session = Some("other-session".into());
+        foreign.last_heartbeat += chrono::Duration::seconds(1);
+        agents.register(&foreign).unwrap();
+        next.assignee = Some(foreign.id);
+        tasks.update(&next).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let worker = status.agents.iter().find(|agent| agent.name == current.name).unwrap();
+        assert_eq!(worker.id, current.id);
+        assert_eq!(worker.current_task.as_deref(), Some(parked.id.as_str()));
+    }
+
+    #[test]
+    fn newer_parked_work_wins_over_an_older_integrated_delivery_after_a_note() {
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType, EventEntityType, EventType, Task, TaskStatus, TaskType};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (project, root, session) = fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["commit", "--allow-empty", "-m", "Integrated older delivery"]);
+        let integrated = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "factory/pending"]);
+        git(&["commit", "--allow-empty", "-m", "Newer parked delivery"]);
+        let pending = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "main"]);
+        let mut worker = Agent::new_with_role("worker-id".into(), "worker-a".into(), AgentRole::Worker);
+        worker.factory_session = Some(session.name.clone());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = Task::new("cas-release".into(), "Release".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("main".into());
+        tasks.add(&epic).unwrap();
+        let now = chrono::Utc::now();
+        let events = SqliteEventStore::open(&root).unwrap();
+        for (id, title, anchor, minutes, updated) in [
+            ("cas-old-parked", "Older integrated delivery", integrated.as_str(), 90, now),
+            ("cas-new-parked", "Latest parked work", pending.as_str(), 15, now - chrono::Duration::minutes(10)),
+        ] {
+            let mut task = Task::new(id.into(), title.into());
+            task.created_at = now - chrono::Duration::minutes(minutes + 10);
+            task.updated_at = updated;
+            task.status = TaskStatus::AwaitingMerge;
+            task.assignee = Some(worker.name.clone());
+            task.deliverables.factory_branch_anchor = Some(anchor.into());
+            if minutes == 90 { task.deliverables.merge_commit = Some(integrated.clone()); }
+            tasks.add(&task).unwrap();
+            tasks.add_dependency(&Dependency { from_id:id.into(), to_id:epic.id.clone(), dep_type:DependencyType::ParentChild, created_at:now, created_by:None }).unwrap();
+            let mut start = Event::new(EventType::TaskStarted, EventEntityType::Task, id, "Started assigned work");
+            start.created_at = now - chrono::Duration::minutes(minutes);
+            events.record(&start).unwrap();
+        }
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let old = status.tasks_in_progress.iter().find(|task| task.id == "cas-old-parked").unwrap();
+        assert_eq!(old.delivery_state, Some("merged"), "real Git proves the old delivery is integrated");
+        let current = status.agents.iter().find(|agent| agent.name == worker.name).unwrap();
+        assert_eq!(current.current_task.as_deref(), Some("cas-new-parked"));
+        let row = status.tasks_in_progress.iter().find(|task| Some(task.id.as_str()) == current.current_task.as_deref()).unwrap();
+        assert_eq!(row.title, "Latest parked work", "lane task identity and title agree");
+        let mut active = Task::new("cas-still-active".into(), "In-progress work".into());
+        // Older ongoing work still outranks a newer parked delivery.
+        active.created_at = now - chrono::Duration::hours(3);
+        active.assignee = Some(worker.name.clone());
+        active.status = TaskStatus::InProgress;
+        tasks.add(&active).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some(active.id.as_str()));
+        active.status = TaskStatus::Closed;
+        tasks.update(&active).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some("cas-new-parked"));
     }
 
     #[test]
@@ -778,6 +1016,25 @@ mod focused_epic_tests {
         };
         let mut home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (project, root, session) = fixture();
+        crate::ui::factory::SessionManager::new().save_metadata(&session.metadata).unwrap();
+        // Exercise the native /status route, including session resolution and
+        // serialization, with real project stores and Git rather than hub doubles.
+        let fetch_status = || {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let path = format!("/v1/sessions/{}/status", session.name);
+            let url = format!("http://{}{}", server.server_addr(), path);
+            let client = std::thread::spawn(move || {
+                ureq::get(&url).timeout(std::time::Duration::from_secs(10))
+                    .call().unwrap().into_json::<serde_json::Value>().unwrap()
+            });
+            let mut request = server.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+            let response = crate::bridge::server::routes::handle_session_routes(
+                &mut request, &path, "", None, Some(&root),
+                &std::sync::Mutex::new(std::collections::HashMap::new()), 0,
+            ).unwrap();
+            request.respond(response).unwrap();
+            client.join().unwrap()
+        };
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)
@@ -840,6 +1097,16 @@ mod focused_epic_tests {
                 historical.epic_verification_owner = Some("supervisor-id".into());
             }
             store.add(&historical).unwrap();
+            if index == 0 {
+                let mut old_delivery = Task::new("cas-history-delivery".into(), "Old delivery".into());
+                old_delivery.status = TaskStatus::AwaitingMerge;
+                old_delivery.deliverables.factory_branch_anchor = Some(base.clone());
+                store.add(&old_delivery).unwrap();
+                store.add_dependency(&Dependency {
+                    from_id: old_delivery.id.clone(), to_id: historical.id.clone(),
+                    dep_type: DependencyType::ParentChild, created_at: chrono::Utc::now(), created_by: None,
+                }).unwrap();
+            }
         }
         let mut epic = Task::new("cas-epic".into(), "Epic".into());
         epic.task_type = TaskType::Epic;
@@ -888,10 +1155,10 @@ mod focused_epic_tests {
         home.set("GIT_TRACE", &trace);
         // Like the native snapshot: 297 epics, 35 distinct delivery anchors,
         // and no focus. The first refresh must contain the current header.
-        let status = serde_json::to_value(build_status_json(&session, &root, 100).unwrap()).unwrap();
+        let status = fetch_status();
         assert!(status["focused_epic"].is_null());
         assert_eq!(status["epics"].as_array().unwrap().len(), 297);
-        let reads = std::fs::read_to_string(trace).unwrap();
+        let reads = std::fs::read_to_string(&trace).unwrap();
         let first_epic_read = reads
             .lines()
             .find(|line| line.contains("for-each-ref") && line.contains("committerdate:unix"))
@@ -902,8 +1169,8 @@ mod focused_epic_tests {
         );
         assert_eq!(
             reads.lines().filter(|line| line.contains("git rev-list") && line.contains("--not")).count(),
-            1,
-            "all 35 anchors must share one ancestry pass"
+            2,
+            "the current release's 35 anchors share one pass, then history gets its own"
         );
         let landed = status["tasks_in_progress"]
             .as_array()
@@ -932,6 +1199,23 @@ mod focused_epic_tests {
                 .iter()
                 .all(|task| task.get("delivery_state").is_none())
         );
+        // cas-c5fa: in the native dogfood snapshot every staffed worker had
+        // parked. That release must retain priority after the last active
+        // task parks, rather than lose its delivery verdicts behind history.
+        let mut active = store.get("cas-active").unwrap();
+        active.status = TaskStatus::AwaitingMerge;
+        store.update(&active).unwrap();
+        std::fs::write(&trace, "").unwrap();
+        let parked = fetch_status();
+        let reads = std::fs::read_to_string(&trace).unwrap();
+        let first_epic_read = reads.lines()
+            .find(|line| line.contains("for-each-ref") && line.contains("committerdate:unix"))
+            .expect("status must collect parked workers' delivery evidence");
+        assert!(first_epic_read.contains("refs/heads/main"),
+            "parked staffing must retain the bounded read ahead of history: {first_epic_read}");
+        let landed = parked["tasks_in_progress"].as_array().unwrap().iter()
+            .find(|task| task["id"] == "cas-landed").unwrap();
+        assert_eq!(landed["delivery_state"], "merged", "{parked:#}");
         // Read-only live verdicts cannot authorize a close-gate decision.
         let gate = collect_epic_branch_statuses_with_options(
             &store.get_subtasks(&epic.id).unwrap(),
@@ -989,6 +1273,11 @@ mod focused_epic_tests {
 
         // The status catalog contains all project epics, including foreign and
         // terminal ones. Preserve ownership so Commander can scope honestly.
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-registration".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some(name.into());
+        crate::store::open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
         let store = crate::store::open_task_store(&cas_root).unwrap();
         for (id, state, owner, verifier) in [
             (
@@ -1020,6 +1309,8 @@ mod focused_epic_tests {
         let status_json =
             || serde_json::to_value(build_status_json(&session, &cas_root, 20).unwrap()).unwrap();
         let status = status_json();
+        assert_eq!(status["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["name"] == "supervisor").unwrap()["current_task"], "cas-owned");
         let epics = status["epics"].as_array().unwrap();
         assert_eq!(epics.len(), 3);
         for (id, state, owner, verifier) in [
@@ -1052,5 +1343,10 @@ mod focused_epic_tests {
             &first,
             &status_task_store(&cas_root).unwrap()
         ));
+        let mut finished = store.get("cas-owned").unwrap();
+        finished.status = cas_types::TaskStatus::Closed;
+        store.update(&finished).unwrap();
+        assert!(status_json()["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["name"] == "supervisor").unwrap()["current_task"].is_null());
     }
 }

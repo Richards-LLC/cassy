@@ -854,6 +854,13 @@ fn factory_flags_pass_through_with_and_without_a_profile() {
 
 #[test]
 fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
+    const HOLDER: &str = "CAS_TEST_ACCOUNT_HOLDER";
+    if std::env::var_os(HOLDER).is_some() {
+        // Use stderr so libtest's stdout banner cannot race the ready signal.
+        eprintln!("ready");
+        std::io::stdin().read_line(&mut String::new()).unwrap();
+        return;
+    }
     for provider in ["claude", "codex"] {
         let home = TempDir::new().unwrap();
         let folder = home.path().join(format!(".{provider}-typo@example.com"));
@@ -935,32 +942,55 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         {
             use std::io::{BufRead, Write};
             use std::process::Stdio;
-            let mut holder = std::process::Command::new("/bin/sh")
-                .args(["-c", "printf 'ready\\n'; read answer"])
+            // macOS hides Apple system-shell environments from ps. Reenter
+            // this executable so the real guard can observe the live selector.
+            let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "claude_profile_test::accounts_lifecycle_preserves_shared_targets_and_guards_mutations",
+                    "--nocapture",
+                ])
+                .env(HOLDER, "1")
                 .env(selector, &moved)
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
             let mut ready = String::new();
-            std::io::BufReader::new(holder.stdout.take().unwrap())
+            std::io::BufReader::new(holder.stderr.take().unwrap())
                 .read_line(&mut ready)
                 .unwrap();
             assert_eq!(ready.trim(), "ready");
-            cas_cmd(home.path())
-                .current_dir(home.path())
-                .env_remove(selector)
-                .args(["accounts", "rename", &key, "busy-rename"])
-                .assert()
-                .failure();
+            if can_rename {
+                cas_cmd(home.path())
+                    .current_dir(home.path())
+                    .env_remove(selector)
+                    .args(["accounts", "rename", &key, "busy-rename"])
+                    .assert()
+                    .failure()
+                    .stderr(predicate::str::contains("is in use"));
+            }
             cas_cmd(home.path())
                 .current_dir(home.path())
                 .env_remove(selector)
                 .args(["accounts", "remove", &key, "--yes"])
                 .assert()
-                .failure();
+                .failure()
+                .stderr(predicate::str::contains("is in use"));
+            assert!(moved.exists(), "busy account must remain in place");
             holder.stdin.take().unwrap().write_all(b"\n").unwrap();
             assert!(holder.wait().unwrap().success());
+        }
+        if can_rename {
+            for (from, to) in [(name, "busy-rename"), ("busy-rename", name)] {
+                cas_cmd(home.path())
+                    .current_dir(home.path())
+                    .env_remove(selector)
+                    .args(["accounts", "rename", &format!("{provider}:{from}"), to])
+                    .assert()
+                    .success();
+            }
         }
         cas_cmd(home.path())
             .current_dir(home.path())

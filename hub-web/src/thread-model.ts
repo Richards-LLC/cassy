@@ -379,7 +379,10 @@ function splitCells(line: string): string[] | undefined {
 
 /** CSV consumes displayed cell text, keeping embedded newlines and Unicode. */
 export function tableCsv(rows: string[][]): string {
-  return rows.map(row => row.map(cell => /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell).join(",")).join("\r\n");
+  return rows.map(row => row.map(value => {
+    const cell = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+    return /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+  }).join(",")).join("\r\n");
 }
 
 /**

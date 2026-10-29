@@ -138,6 +138,8 @@
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts` - scoped release/task ledger, server merge metrics and accessible device-local context width.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, typed operation/scope disclosures with exact raw evidence, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
+- `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs`, `cas-cli/src/hub/accounts_route_tests.rs` - registry projection, allowlisted paired-account lifecycle and real-router authorization/audit tests.
+- `hub-web/src/accounts-panel.ts`, `hub-web/src/accounts-panel.css`, `hub-web/src/accounts-model.ts` - body-mounted Accounts ledger, confirmations, local 12-hour capacity and New session invalidation.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
 - `cas-cli/src/hub/auth/cache.rs`, `cas-cli/src/hub/auth/audit.rs` - stat-validated auth snapshots, process-local capabilities and batched rotating audits.
 - `cas-cli/src/hub/composer_upload.rs` - DPoP-authenticated, bounded upload storage, host MIME sniffing and persistent upload identity.

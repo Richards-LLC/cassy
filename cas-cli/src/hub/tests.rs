@@ -98,11 +98,13 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     env.set("CAS_ROOT", unrelated);
     let agents = SqliteAgentStore::open(&cas_root).unwrap();
     agents.init().unwrap();
+    // cas-46db: secret-only Codex email stays absent even when auth.json
+    // contains a token; the provider selector remains independently recorded.
     let cases = [
         ("claude", "claude", Some(claude.clone()), Some("claude@example.test")),
-        ("codex", "codex", Some(codex.clone()), Some("codex@example.test")),
+        ("codex", "codex", Some(codex.clone()), None),
         ("default-claude", "claude", Some(home.join(".claude")), Some("default-claude@example.test")),
-        ("default-codex", "codex", Some(home.join(".codex")), Some("default-codex@example.test")),
+        ("default-codex", "codex", Some(home.join(".codex")), None),
         ("grok", "grok", None, None),
         ("opencode", "opencode", None, None),
         ("legacy", "claude", None, None),
@@ -6139,3 +6141,6 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert!(rows[0].ended.is_none());
     assert_eq!(rows[0].machine_online, Some(true));
 }
+
+#[path = "accounts_route_tests.rs"]
+mod accounts_route_tests;

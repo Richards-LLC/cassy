@@ -384,3 +384,68 @@ for (const cell of consentCells) {
     });
   });
 }
+
+// Fixture coverage of the shell/panel path; real lifecycle effects are also
+// exercised against the supervisor-built hub candidate for this task.
+test("HUB-J13 inspect and remove an account from the shell", journeyPart, async ({ page, journey }) => {
+  const launch = atlasLaunch();
+  const removed: string[] = [];
+  let accounts = [
+    { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: "Soonest weekly reset", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }], usage_observed_at: "2026-10-28T18:10:00Z", capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
+    { key: "codex:old", provider: "codex", name: "old", display_name: "old@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
+    { key: "grok:default", provider: "grok", name: "default", display_name: "Grok", login_state: "unknown", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Unsupported", disable: "Unsupported", enable: "Unsupported", rename: "Unsupported", set_default: "Unsupported" } },
+  ];
+  launch.profiles!.claude!.profiles = [{ name: "spare", logged_in: true, is_default: true }, { name: "main", logged_in: true, is_default: false }];
+  await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage", "session-launch"] }, launch: { atlas: launch } });
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts(?:\/operations)?$/, async route => {
+    const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    if (route.request().method() === "POST") {
+      const request = route.request().postDataJSON();
+      expect(request).toEqual({ operation: "remove", account: "claude:spare", confirmation: "claude:spare" });
+      removed.push(request.account);
+      accounts = accounts.filter(account => account.key !== request.account);
+      launch.profiles!.claude!.profiles = launch.profiles!.claude!.profiles.filter(profile => profile.name !== "spare");
+      return route.fulfill({ headers, json: { ok: true } });
+    }
+    return route.fulfill({ headers, json: { accounts } });
+  });
+  await journey.open();
+  const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await journey.stage(`Accounts at ${width} in ${colorScheme}`, async () => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      await page.reload();
+      await page.getByRole("button", { name: "Accounts", exact: true }).click();
+      await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
+      await expect(dialog.getByText(/weekly 62% left/)).toContainText(/AM|PM/);
+      await expect(dialog.getByText("Stale login", { exact: true })).toBeVisible();
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+      if (width === 390) {
+        await page.mouse.move(200, 600);
+        await page.mouse.wheel(0, 1800);
+        await expect(dialog.getByText("Grok uses one account. Named account management and login status are unavailable.", { exact: true })).toBeInViewport();
+        await page.mouse.wheel(0, -1800);
+        await expect(dialog.getByText("hello@example.test", { exact: true })).toBeInViewport();
+      }
+    });
+  }
+  await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {
+    const row = dialog.locator("li").filter({ hasText: "hello@example.test" });
+    await row.getByRole("button", { name: "Remove", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByRole("textbox", { name: "Type claude:spare to confirm" })).toBeFocused();
+    await dialog.getByRole("textbox").fill("claude:spare");
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByText("Account updated.", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("hello@example.test", { exact: true })).toHaveCount(0);
+    expect(removed).toEqual(["claude:spare"]);
+    await dialog.getByRole("button", { name: "Close accounts" }).click();
+    await expect(page.getByRole("button", { name: "Accounts", exact: true })).toBeFocused();
+    await page.locator("#new-session-toggle").click();
+    const start = page.getByRole("dialog", { name: "New session", exact: true });
+    await expect(start.locator('input[name="launch-account"][value="main"]')).toBeVisible();
+    await expect(start.locator('input[name="launch-account"][value="spare"]')).toHaveCount(0);
+  });
+});

@@ -1,3 +1,4 @@
+import { accountCapacity, type AccountWindow } from "./accounts-model";
 // New session (cas-0f51): start a factory session on a paired machine from
 // Commander — machine → project → supervisor → start — and land on its
 // supervisor. The sheet lives on <body>, outside #app, so a shell rebuild
@@ -53,7 +54,7 @@ export interface BrowseListing { root: BrowseRoot; path: string; entries: Browse
 export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
 
 /** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
-export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string }
+export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string; windows?: AccountWindow[]; usage_observed_at?: string | null }
 
 /** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
 export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
@@ -351,6 +352,7 @@ export class LaunchSheet {
   private cliChosen = false;
   private profiles: Load<LaunchProfiles> = { status: "idle" };
   private account: string | undefined;
+  private profilesGeneration = 0;
   private loads = new AbortController();
   /** Bumped per launch; a stale wait never lands the operator anywhere. */
   private launchGeneration = 0;
@@ -521,16 +523,22 @@ export class LaunchSheet {
     return this.profiles.status === "ready" ? defaultAccount(this.profiles.data[cli]) : undefined;
   }
 
+  /** Refresh account choices after a machine mutation, preserving project and workers. */
+  accountsChanged(machineId: string): void {
+    if (this.dialog?.open && this.machineId === machineId) void this.loadProfiles(machineId);
+  }
+
   private async loadProfiles(machineId: string): Promise<void> {
+    const generation = ++this.profilesGeneration;
     const signal = this.loads.signal;
     this.profiles = { status: "loading" };
     this.renderAccounts();
     try {
       const data = await this.host.profiles(machineId, signal);
-      if (signal.aborted || this.machineId !== machineId) return;
+      if (signal.aborted || this.machineId !== machineId || generation !== this.profilesGeneration) return;
       this.profiles = { status: "ready", data };
     } catch {
-      if (signal.aborted || this.machineId !== machineId) return;
+      if (signal.aborted || this.machineId !== machineId || generation !== this.profilesGeneration) return;
       this.profiles = { status: "failed", message: "" };
     }
     // Keep a choice that is still usable; otherwise the default again.
@@ -973,8 +981,10 @@ export function commandTokensMarkup(command: string): string {
 
 function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {
   const name = escapeHtml(profile.name);
-  const recommendation = profile.recommendation ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(profile.recommendation)}</small>` : profile.exclusion ? `<small class="launch-row-path">${escapeHtml(profile.exclusion)}</small>` : "";
-  const usage = profile.usage?.split("; ").map((window) => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("") ?? "";
+  const reason = profile.windows && profile.recommendation ? "Based on the capacity and reset times below." : profile.recommendation;
+  const exclusion = profile.windows && profile.exclusion?.startsWith("resets later than ") ? "Other accounts reset sooner." : profile.exclusion;
+  const recommendation = reason ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(reason)}</small>` : exclusion ? `<small class="launch-row-path">${escapeHtml(exclusion)}</small>` : "";
+  const usage = (profile.windows ? accountCapacity(profile.windows, profile.usage_observed_at) : profile.usage?.split("; ") ?? []).map(window => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("");
   const tag = recommendation + usage + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
   if (profile.logged_in) {
     return `<label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>`;

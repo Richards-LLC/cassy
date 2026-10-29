@@ -429,6 +429,8 @@ pub struct LaunchProfile {
     pub recommendation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<String>,
+    pub windows: Vec<crate::account_registry::UsageWindow>,
+    pub usage_observed_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusion: Option<String>,
 }
@@ -533,7 +535,7 @@ pub fn profiles_for_project(
                         logged_in: probe_login(cli, executable, &set, remove).unwrap_or(false),
                         name: p.name,
                         recommendation: None,
-                        usage: None,
+                        usage: None, windows: Vec::new(), usage_observed_at: None,
                         exclusion: None,
                     }
                 })
@@ -578,6 +580,10 @@ fn mark_recommendation(
     for row in rows {
         row.usage = accounts.iter().find(|account| account.name == row.name)
             .and_then(|account| crate::cli::limits::summarize_account_at(account, now));
+        if let Some(account) = accounts.iter().find(|account| account.name == row.name) {
+            row.windows = account.windows.clone();
+            row.usage_observed_at = account.usage_observed_at;
+        }
         row.recommendation = selection
             .recommended
             .as_ref()
@@ -804,6 +810,9 @@ mod tests {
             let account = accounts.iter().find(|account| account.name == "chosen").unwrap();
             assert_eq!(account.plan.as_deref(), Some("pro"), "retain native rollout plan metadata");
             assert!(account.email.is_none() && account.identity.is_none(), "secret-only identity stays unknown");
+            let catalog = serde_json::to_value(crate::hub::accounts::catalog(&home).unwrap()).unwrap();
+            let displayed = catalog["accounts"].as_array().unwrap().iter().find(|row| row["key"] == "codex:chosen").unwrap();
+            assert_eq!(displayed["display_name"], "chosen", "Accounts must retain the alias when credential-free Codex identity is unknown");
             return;
         }
         let fixture = tempfile::tempdir().unwrap();
@@ -888,9 +897,11 @@ mod tests {
             let mut accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
             accounts[0].usage_observed_at = Some("2026-10-27T09:00:00Z".parse().unwrap());
             if provider == crate::accounts::Provider::Claude { accounts[0].windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
-            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, exclusion: None }];
+            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, exclusion: None }];
             mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 41% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()), "{cli:?}");
+            assert_eq!(rows[0].windows, accounts[0].windows);
+            assert_eq!(rows[0].usage_observed_at, accounts[0].usage_observed_at);
             for name in ["5h", "weekly"] {
                 assert!(rows[0].usage.as_ref().unwrap().contains(name));
             }
@@ -910,7 +921,7 @@ mod tests {
             duplicate.folder = "/fixture/duplicate".into();
             duplicate.flags.duplicate_of = Some(idle_accounts[0].folder.clone());
             idle_accounts.extend([later, duplicate]);
-            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, usage: None, exclusion: None }));
+            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, exclusion: None }));
             mark_recommendation(&mut rows, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 90% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));
             assert_eq!(rows[1].exclusion.as_deref(), Some(format!("resets later than chosen; {}", crate::cli::limits::format_reset(Some("2026-10-30T00:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));

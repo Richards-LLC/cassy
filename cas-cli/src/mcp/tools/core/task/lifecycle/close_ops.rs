@@ -6603,6 +6603,28 @@ impl CasCore {
         if unchanged_rebase {
             return Some(candidate);
         }
+        // A recovery merge makes the old anchor reachable again as a side
+        // parent, so `equivalent_prefix(recorded, candidate, ...)` correctly
+        // rejects the whole merge range. Compare the first parent instead and
+        // advance only when the merge restores that exact anchor unchanged.
+        if let Some(rebased) = resolve_branch_sha(repo_path, &format!("{candidate}^1"))
+            && rebased_delivery::equivalent_prefix(
+                repo_path, recorded, &rebased, &rebase_target, &task.id,
+            )
+            .as_deref()
+                == Some(rebased.as_str())
+        {
+            let branch = task.assignee.as_deref()
+                .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
+            let foreign_since = self.sibling_lease_boundary(task_store, task);
+            if self.tip_is_own_task_lineage(
+                task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
+            ) && restored_anchor_merge_is_attributable(
+                repo_path, recorded, &rebased, &candidate, &task.id, foreign_since,
+            ) {
+                return Some(candidate);
+            }
+        }
         // cas-749f: a rebase may be followed by a correction before the
         // worker re-parks. Prove the entire old delivery at its rewritten
         // boundary, then apply the ordinary same-task continuation fences

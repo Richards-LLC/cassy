@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
 
 describe("supervisor slash commands", () => {
-  it("filters the real composer palette and keeps arbitrary slash text out of message sends", async () => {
+  it("filters command suggestions but submits only an exact supported command", async () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn().mockResolvedValue(undefined);
@@ -11,16 +11,36 @@ describe("supervisor slash commands", () => {
     input.value = "/us"; input.dispatchEvent(new Event("input"));
     expect(document.querySelectorAll("[data-supervisor-command]")).toHaveLength(1);
     expect(document.querySelector("[data-supervisor-command]")?.textContent).toContain("Usage");
+    const partial = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(partial);
+    expect(partial.defaultPrevented).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    input.value = "/usage"; input.dispatchEvent(new Event("input"));
     const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
     input.dispatchEvent(enter);
     expect(enter.defaultPrevented).toBe(true);
     await Promise.resolve();
     expect(run).toHaveBeenCalledWith("usage", false);
-    input.value = "/shell whoami";
-    expect(commands.submit()).toBe(true);
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain("No supported command");
     expect(commandsForHarness("grok")).toEqual([]);
+    commands.dispose();
+  });
+
+  it("lets pasted paths and unsupported slash text reach the normal composer send", () => {
+    document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn();
+    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => "No command control", label: () => "test supervisor", run });
+    for (const text of ["/home/pippenz/notes.md", "/mnt/notes.md review this", "/shell whoami", "/usage-report", "//usage", " /usage"]) {
+      input.value = text; input.dispatchEvent(new Event("input"));
+      const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      input.dispatchEvent(enter);
+      expect(enter.defaultPrevented, text).toBe(false);
+      expect(commands.submit(), text).toBe(false);
+      expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden, text).toBe(true);
+      expect(input.value).toBe(text);
+    }
+    expect(run).not.toHaveBeenCalled();
+    commands.dispose();
   });
 
   it("requires a separate destructive confirmation naming the supervisor", async () => {

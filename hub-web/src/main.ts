@@ -4045,7 +4045,7 @@ async function loadComposerUploads(): Promise<typeof import("./composer-uploads"
 async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
-  if (!quick && composer.value.startsWith("/")) { bindSlashCommands(composer); slashCommands?.palette.submit(); return; }
+  if (!quick) { bindSlashCommands(composer); if (slashCommands?.palette.submit()) return; }
   const renderedThread = composer.dataset.threadKey;
   if (renderedThread) await acceptingUploads.get(renderedThread);
   const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;

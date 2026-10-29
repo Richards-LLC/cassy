@@ -100,10 +100,14 @@ typography:
     fontWeight: 400
     lineHeight: 1.35
 rounded:
-  card: 4px
-  pane: 8px
+  inline: 4px
+  control: 12px
+  surface: 16px
   glass: 22px
+  sheet: 24px
   full: 999px
+  card: 12px
+  pane: 16px
 spacing:
   space-1: 4px
   space-2: 8px
@@ -117,9 +121,14 @@ components:
   canvas: { backgroundColor: "{colors.bg}", textColor: "{colors.ink}" }
   glass-panel: { backgroundColor: "{colors.glass}", rounded: "{rounded.glass}", padding: 8px }
   dialog: { backgroundColor: "{colors.glass-strong}", textColor: "{colors.ink}", rounded: 24px }
-  card: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", rounded: "{rounded.pane}" }
+  card: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", rounded: "{rounded.surface}", padding: 12px }
+  list-row: { textColor: "{colors.ink}", rounded: "{rounded.control}", height: 44px }
   button-primary: { backgroundColor: "{colors.primary}", textColor: "{colors.on-primary}", rounded: "{rounded.full}", height: 40px }
-  project-badge: { backgroundColor: "{colors.verdict-soft}", typography: "{typography.title-md}", rounded: "{rounded.card}" }
+  button-action: { backgroundColor: "{colors.glass-strong}", textColor: "{colors.ink}", rounded: "{rounded.full}", height: 32px }
+  pill-status: { backgroundColor: "{colors.surface}", textColor: "{colors.ink-muted}", typography: "{typography.eyebrow}", rounded: "{rounded.full}", height: 24px }
+  machine-chip: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", typography: "{typography.label-md}", rounded: "{rounded.full}" }
+  provider-avatar: { backgroundColor: "{colors.surface}", textColor: "{colors.ink}", rounded: "{rounded.full}", width: 42px, height: 42px }
+  project-badge: { backgroundColor: "{colors.verdict-soft}", typography: "{typography.title-md}", rounded: "{rounded.control}" }
   bubble-supervisor: { backgroundColor: "{colors.supervisor}", textColor: "{colors.on-supervisor}" }
   bubble-operator: { backgroundColor: "{colors.you}", textColor: "{colors.on-you}" }
   ask-card: { backgroundColor: "{colors.ask}", textColor: "{colors.on-ask}" }
@@ -177,10 +186,14 @@ maps:
   typography.eyebrow: "fontFamily --font-ui, fontSize --fs-xs, fontWeight --weight-semibold, letterSpacing --tracking-label"
   typography.mono-xs: "fontFamily --font-mono, fontSize --fs-xs, fontWeight --weight-regular"
   typography.terminal: "fontFamily --font-mono, fontSize --fs-terminal, fontWeight --weight-regular, lineHeight --line-terminal"
+  rounded.inline: "--radius-inline"
+  rounded.control: "--radius-control"
+  rounded.surface: "--radius-surface"
+  rounded.glass: "--glass-radius"
+  rounded.sheet: "--radius-sheet"
+  rounded.full: "--radius-pill"
   rounded.card: "--radius-card"
   rounded.pane: "--radius-pane"
-  rounded.glass: "--glass-radius"
-  rounded.full: "--radius-pill"
 ---
 ## Overview
 
@@ -217,7 +230,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 
 ## Layout
 
-- 4px grid: 4/8/12/16/24/32/48/64px (`--space-*`). Controls are `--button-height` 40px, compact pane controls 28px.
+- 4px grid: 4/8/12/16/24/32/48/64px (`--space-*`). Controls are `--button-height` 40px, card action pills `--pill-action-height` 32px, compact pane controls 28px.
 - Desktop: a floating 382px glass list (`--conversation-rail-width`; 374px of content inside an 8px `--glass-inset`), a reading column open to the aurora, and the glass context rail, which collapses to its 48px track.
 - The phone query is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` in CSS and in `hub-web/src/viewport.ts`; landscape uses the same short-axis query, so rotation keeps the phone layout.
 - Phone: list → full-width thread with an always-addressed composer. The list is full-bleed glass, the heading hangs from the top edge with rounded lower corners, every touch target is at least `--rail-item-min` 44px, and Tasks & progress, Waiting on you and Raw output open as sheets.
@@ -235,10 +248,23 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 
 ## Shapes
 
-- Radii: `--radius-card` 4px (controls, project badge), `--radius-pane` 8px (panes), `--glass-radius` 22px (list and context rail), 20px (conversation heading), 24px (dialogs), 26px (composer bar), 23px (reply fields: the conversation composer's and the inbox reply composer's), 16px (conversation rows, search, app-switcher card), `--radius-pill` 999px (dots, chips, outlined dialog buttons).
-- Bubbles are asymmetric: supervisor 8px 22px 22px 8px, operator 22px 8px 8px 22px.
+Glass has no square-cornered rectangles. Anything with its own fill or edge takes one step of the shape scale, chosen by what it is, never by its size:
+
+| Step | Token | Value | Use |
+| --- | --- | --- | --- |
+| inline | `--radius-inline` | 4px | Inline code, key hints (`Enter ↵`), focus-outline rounding. Never a card. |
+| control | `--radius-control` | 12px | Fields and selects, menu items, wells and rows nested inside a card, the project badge. |
+| surface | `--radius-surface` | 16px | Cards (project, worker, account, Needs you), conversation rows, search, code frames, evidence wells. |
+| glass | `--glass-radius` | 22px | The floating list and context rail; the conversation heading is 20px. |
+| sheet | `--radius-sheet` | 24px | Dialogs and sheets; phone bottom sheets round only their top corners. |
+| full | `--radius-pill` | 999px | Buttons, chips, badges, machine chips, status pills, avatars and dots. |
+
+- Glass re-shapes the house `--radius-card` (4px) and `--radius-pane` (8px) to 12px and 16px, so every existing consumer inherits the scale; new rules name the semantic step (`--radius-control`, `--radius-surface`), not the house alias.
+- A nested shape is one step smaller than its parent (surface card → control rows), so corners never collide. Ledgers and tables inside a card stay ruled, never boxed.
+- Fixed shapes kept on purpose: bubbles are asymmetric (supervisor 8px 22px 22px 8px, operator 22px 8px 8px 22px), the composer bar is 26px, reply fields 23px (both composers), the PDF plate 7px.
+- ❌ Never write a literal radius below 12px on anything with a fill or an edge, except the `inline` step; never square a card's corners to fit a neighbour.
 - Lines: `--line-width` 1px hairlines, `--state-rule-width` 2px critical rules, `--rule-verdict` 2.5px and `--rule-hero` 3px (launch progress). The open conversation row has a 2px `--color-action` edge all round, never a left bar.
-- Focus: `--focus-ring-width` 2px in `--color-focus`.
+- Focus: `--focus-ring-width` 2px in `--color-focus`, following the element's own radius.
 
 ## Components
 
@@ -255,6 +281,56 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 - **Inbox reply composer** (`form.operator-inbox-composer`, `inbox/inbox-view.ts`; `styles.css`). The offline inbox's reply field reuses the conversation composer's rounded field so a reply looks the same in both places: a column with a `--space-2` gap; the textarea is full width with `--line-width` `--line-strong` edge, 23px radius, `--panel` fill (white 0.84 light, indigo rgba(32, 29, 60, 0.82) dark, opaque `--bg-panel` under more contrast, reduced transparency or forced colours), `--ink` text, inherited font at line-height 1.55 and `resize: none`. Text is inset `12px 22px` so no line touches the rounded edge, including a long reply that scrolls. Unlike the conversation field it carries no `--lift` and keeps `--panel` rather than Glass's `--look-glass-strong`, because it already sits on the glass-strong dialog. HUB-J19 (`e2e/journeys/operator-inbox.journey.ts`) compares the field's fill, edge, radius, ink, inset, line height and resize against these tokens.
 
 Work-step disclosures (`work-rows-view.ts`) use operation-first body text at `--fs-meta`, with named read/edit target lists, search-match scope, or command/working-directory/exit metadata. Exact tool input and output stays plain mono text inside the existing `--bg-raised` detail well; unknown wrapper tools keep their original label and raw record. Failures have words plus the critical dot. Routine turn-start/completion notices share a collapsed Turn activity disclosure; failed notices remain visible. Detail loads only on opening, and live metadata updates preserve focus and expansion in both the thread and worker timeline. See `src/work-rows.brief.md`.
+
+### Cards and rows
+
+One card pattern serves the project register, Needs you, Tasks & progress worker cards, Team lanes and Accounts.
+
+- **Card.** `--bg-raised` fill, `--radius-surface`, a 1px `--line-subtle` edge, `--card-padding` (12px) inside and `--card-gap` (8px) between its lines and between sibling cards. Cards are separated by fill and spacing, never by a heavy outline: a card edge is `--line-strong` only under more contrast or forced colours. Severity is an edge colour on the card (`--state-warn` for Needs you, `--state-crit` for a blocker), never a fill some severities get and others do not (D8); selection is the 2px `--color-action` edge.
+- **Card header.** One row: title (15px semibold, or mono for a codename), then status pills, then trailing actions pushed to the end with `margin-inline-start: auto`. The row wraps as a whole; an action never drops below the body text.
+- **Card body.** At most three text lines at `--fs-meta`: the work, then evidence (`--ink-mid`), then time. Identifiers stay mono inside prose.
+- **Row inside a card.** `--radius-control`, transparent until hover (`--bg-hover`) or open (`--look-row-open` plus the action edge), at least `--rail-item-min` 44px tall on a phone.
+- ❌ Never box a box: a card inside a card becomes rows; a list of cards inside a dialog has no extra frame around the list.
+
+### Pills
+
+Three kinds, distinguishable without reading them:
+
+- **Status pill** (`.status-chip`). `--pill-status-height` 24px, `--radius-pill`, `--bg-panel` fill, 12px uppercase label in the state's text colour (`--state-ok`, `--state-warn` with `--tint-warn`, `--ink-mid` for idle/open). It states a fact and is never a button: no hover, no border, no pointer.
+- **Action pill** (a `button` in a card header or row). `--pill-action-height` 32px, `--radius-pill`, `--look-glass-strong` fill with a 1px `--line-strong` edge, `--ink` text at `--fs-meta` 500; hover is `--bg-hover`, never brighter. On a phone its hit area reaches 44px with padding, not a taller face. Only one `.primary` (Send gradient) per surface; a destructive action is the `--crit-bg` outlined pill.
+- **Chip** (filters, machine chips, badges). `--radius-pill`, 28–32px tall, `--bg-raised` fill with a `--line-subtle` edge; pressed filters take `--bg-active` and the action edge. A **machine chip** is a pill: the connection dot, the machine name in `--font-ui`, then the runtime in quiet mono `--ink-mid`; it never uses `--radius-control`.
+- Default and Recommended are verdict-coloured text badges (`--color-verdict` on `--bg-active`), never status colours.
+- ❌ Never set a 40px button beside a 24px status pill in one header row (the oversized "Activity" pill); never give a status pill a border that makes it read as a button.
+
+### Avatars
+
+An avatar names who is working, and the model's provider is that identity.
+
+- **Provider mark.** Sessions and workers that report a harness show its provider's mark: Claude (Claude Code), OpenAI (Codex, including the Sol and Luna models) and Grok, as clean single-colour SVG on a `--bg-panel` disc. Sizes: `--avatar-size` 42px with a `--avatar-mark` 24px mark in conversation rows and project cards; `--avatar-lane-size` 32px with an 18px mark in Team lanes and worker cards. Marks are `aria-hidden`; the harness is spoken in the row's name.
+- **Fallback.** An unknown or unsupported harness shows its name's first two letters in `--font-ui` 600 (OpenCode → "OC"); a session with no harness shows the machine monogram on its machine accent. Never a single tiny glyph (✳, `>_`) in a dark circle.
+- **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it; its colour is the state (`--state-ok` working, `--state-warn` needs you, `--state-idle` idle or offline). The dot is never the only carrier of the state: the row text or a status pill says it too.
+
+### Conversation header
+
+The heading answers, in this order of weight: which project, which model, where, which session, and is it live.
+
+- **Avatar.** The provider-mark avatar (`--avatar-size`, `--avatar-mark`) with its status dot leads the identity row; a session with no harness keeps the machine monogram.
+- **Line 1.** The project name (`typography.title-md`, 600; the codename when there is no project), then the live-state status pill ("Live", "Reconnecting", "Ended") on the same baseline. The state is a pill, not a trailing "· Live" word.
+- **Line 2.** The model and version in `--ink` at `--fs-meta` 500 ("Claude Opus 5.5", "GPT-5 Sol"), then the machine as a machine chip, then the session codename in mono `--ink-mid`. Separators are `--space-2` gaps, not dot-joined mono strings. When the hub does not report a model, line 2 names the harness ("Claude Code", "Codex") instead; the header never shows "Model not reported".
+- Header actions (Raw output, Interrupt, Show work) are action pills in one cluster above or beside the identity, never between avatar and name. On a phone the identity keeps one avatar row (about 56px), line 2 ellipsises with its full text in `title`.
+
+### Header and action spacing
+
+- Panel headers (list, heading, rail, sheets) keep every control at least `--space-3` (12px) from the panel's rounded edge and `--space-2` (8px) apart; icon-only controls are 40px circles (`--radius-pill`) with an accessible name, never an empty square.
+- An action cluster is one flex row with an `--space-2` gap; the primary action is last. A sheet's sticky action bar keeps its 12px gap and hairline.
+- Section labels inside a sheet are eyebrows (`typography.eyebrow`, `--ink-mid`) followed by their count in the same style ("WORKERS · 5"); they are not cards.
+
+### Unknown and empty states
+
+- Say what is missing in plain words, at the weight of evidence, not of a verdict: `--ink-mid`, regular weight, `--fs-meta`. "Merge progress not reported", "Usage unknown", "Version unknown" are evidence lines; they are never bold, never headings and never status pills.
+- Pair an unknown with the action that would make it known when one exists ("Usage unknown · log in to read it"); otherwise state it once and move on.
+- An empty list says what would fill it in one sentence ("No workers in this supervisor's session.") inside the surface it would fill, never as a floating card of its own.
+- Times are local 12-hour with the generic zone name (`timeZoneName: "shortGeneric"`: "3:45 PM ET", never "EDT"/"EST"), never 24-hour or UTC.
 
 ### Brand
 

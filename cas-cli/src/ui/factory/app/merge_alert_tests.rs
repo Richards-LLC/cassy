@@ -257,6 +257,7 @@ fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
         } if active.task_id == next.id)), "the real retry path must probe the new assignment");
         let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         let ready: Vec<_> = prompts.iter().filter(|prompt| prompt.is_merge_ready()).collect();
+        // pin: the director emits one merge action for current work and none for a preceding delivery.
         assert_eq!(ready.len(), usize::from(new_work), "new_work={new_work}; prior merged delivery={old_tip}; prompts={:?}", prompts.iter().map(|prompt| &prompt.text).collect::<Vec<_>>());
         if let Some(prompt) = ready.first() {
             let evidence = prompt.merge_alert.as_ref().unwrap();

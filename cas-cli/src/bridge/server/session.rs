@@ -3,7 +3,7 @@ use cas_factory::DirectorData;
 use cas_store::{EventStore, SqliteEventStore};
 use cas_types::Event;
 
-use crate::store::{find_cas_root_from, open_prompt_queue_store};
+use crate::store::{find_cas_root_ignoring_env, open_prompt_queue_store};
 
 use crate::bridge::server::types::{
     AgentLatestActivityJson, AgentSummaryJson, AgentTrailJson, EpicProgressJson, StatusJson,
@@ -25,7 +25,9 @@ pub(crate) fn cas_root_for_session_with_fallback(
 ) -> Result<std::path::PathBuf> {
     if let Some(project_dir) = session.metadata.project_dir.as_ref() {
         let project = std::path::PathBuf::from(project_dir);
-        match find_cas_root_from(&project) {
+        // A hub serves several projects; its launch environment does not own
+        // the selected session's agents, lifecycle or operator queue.
+        match find_cas_root_ignoring_env(&project) {
             Ok(root) => return Ok(root),
             Err(_) if fallback.is_some() => {
                 // Fall through to fallback root.

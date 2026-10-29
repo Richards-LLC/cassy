@@ -133,6 +133,11 @@ pub fn handle_session_start(
             }
         };
 
+        // Persist before notifying the daemon: native model fields belong to
+        // this hook process, and the socket receiver cannot recover them from
+        // its own environment. The daemon still owns its PID/session map.
+        register_directly(&mut stores);
+        crate::agent_model::record_hook(cas_root, "SessionStart", input);
         {
             use crate::mcp::socket::{DaemonEvent, send_event};
             let event = DaemonEvent::SessionStart {
@@ -149,9 +154,7 @@ pub fn handle_session_start(
                     std::env::var("CAS_AGENT_ROLE").ok()
                 ),
                 Err(e) => {
-                    // Daemon socket not available - register directly in database as fallback
-                    eprintln!("cas: Daemon not available ({e}), registering directly");
-                    register_directly(&mut stores);
+                    eprintln!("cas: Daemon not available ({e}); agent registered directly");
                 }
             }
         }

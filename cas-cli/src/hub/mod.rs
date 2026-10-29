@@ -507,6 +507,14 @@ pub struct HubSession {
     /// The recorded supervisor harness, normalized to its backend name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Supervisor model ID or display name, including its model version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Recorded identities for this session. `workers` remains a name list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<crate::agent_model::AgentModel>,
     /// Local account-file identity for the recorded selector. Only exposed
     /// through the session:read-authorized session catalog, never credentials.
     /// Legacy registrations without a proven selector remain unknown.
@@ -724,6 +732,9 @@ impl LocalSessionReadModel {
             rows.push(HubSession {
                 name: receipt.metadata.name,
                 harness,
+                model: hub_session(&recorded).model,
+                effort: hub_session(&recorded).effort,
+                agents: session_agent_models(&recorded),
                 account_email,
                 project,
                 machine_online: Some(false),
@@ -846,9 +857,16 @@ pub(crate) fn activity_label(source: &str, target: &str) -> String {
 /// running five of them, which made every session report "0 workers".
 fn hub_session(session: &SessionInfo) -> HubSession {
     let (harness, account_email) = session_account(session);
+    let agents = session_agent_models(session);
+    let supervisor = agents.iter().find(|agent| agent.role == "supervisor" && agent.name == session.metadata.supervisor.name);
+    let model = supervisor.and_then(|agent| agent.model.clone());
+    let effort = supervisor.and_then(|agent| agent.effort.clone());
     HubSession {
         name: session.name.clone(),
         harness,
+        model,
+        effort,
+        agents,
         account_email,
         project: None,
         machine_online: Some(true),
@@ -879,6 +897,19 @@ fn hub_session(session: &SessionInfo) -> HubSession {
                 pid_starttime,
             }),
     }
+}
+
+fn session_agent_models(session: &SessionInfo) -> Vec<crate::agent_model::AgentModel> {
+    let agents = session_cas_root(session)
+        .and_then(|root| open_agent_store(&root).ok())
+        .and_then(|store| store.list(None).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| agent.visible_to_factory_session(Some(&session.name))
+            && crate::agent_model::metadata_prefix(agent.role).is_some())
+        .collect();
+    crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents).0
+        .iter().map(crate::agent_model::AgentModel::from_agent).collect()
 }
 
 /// Read only this session's registered supervisor. Neither names/prompts nor
@@ -1093,6 +1124,9 @@ pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
         harness: None,
+        model: None,
+        effort: None,
+        agents: Vec::new(),
         account_email: None,
         project: None,
         machine_online: None,

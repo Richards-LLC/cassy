@@ -259,6 +259,8 @@ pub(crate) struct AgentSummaryJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) task_started_at: Option<String>,
     pub(crate) recent_trail: Vec<AgentTrailJson>,
     #[serde(skip_serializing_if = "Option::is_none")]

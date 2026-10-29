@@ -60,6 +60,29 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
     }
 }
 
+/// Codex's native info cell, emitted after the model selection succeeds.
+/// Source: openai/codex codex-rs/tui/src/app/event_dispatch.rs.
+fn codex_model_selection(before: &str, current: &str) -> Option<(String, Option<String>)> {
+    current.lines().filter(|line| !before.lines().any(|old| old == *line)).find_map(|line| {
+        let line = line.trim().strip_prefix("• ")?;
+        let selected = line.strip_prefix("Model changed to ")?;
+        let selected = selected.strip_suffix(" for this conversation").unwrap_or(selected);
+        let mut words = selected.split_whitespace();
+        let model = words.next()?;
+        if !model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':')) { return None; }
+        let effort = words.next().filter(|level| matches!(*level, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"));
+        if words.next().is_some() { return None; }
+        Some((model.to_owned(), effort.map(str::to_owned)))
+    })
+}
+
+fn record_supervisor_model(root: &std::path::Path, session: &str, supervisor: &str, model: &str, effort: Option<&str>) {
+    let Some(agent) = crate::store::open_agent_store(root).ok().and_then(|store| store.list(None).ok())
+        .and_then(|agents| agents.into_iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor
+            && agent.name == supervisor && agent.factory_session.as_deref() == Some(session)).max_by_key(|agent| agent.registered_at)) else { return };
+    crate::agent_model::record(root, &agent.id, Some(model), effort);
+}
+
 /// A recorded request alone is still only submission. Observe its own native
 /// turn end; never interpret the model's prose as proof of a successful wrap-up.
 fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> bool {
@@ -205,6 +228,12 @@ impl FactoryDaemon {
                 record.receipt.detail = format!("Command write failed; execution is uncertain: {error}. Do not resend automatically.");
             } else if let Some((detail, interactive)) = native_observation(record.receipt.command,
                 if matches!(record.last_key, Some(Key::Next | Key::Previous | Key::Select)) && current != record.before { "" } else { &record.before }, &current) {
+                if record.receipt.command == Command::Model && !interactive && record.last_key == Some(Key::Select)
+                    && pane.harness() == cas_mux::SupervisorCli::Codex
+                    && let Some((model, effort)) = codex_model_selection(&record.before, &current)
+                {
+                    record_supervisor_model(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &model, effort.as_deref());
+                }
                 record.receipt.phase = Phase::Observed;
                 record.receipt.detail = detail;
                 record.receipt.interactive = interactive;
@@ -286,6 +315,20 @@ mod tests {
         let name = codex.app.supervisor_name().to_owned();
         codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H› Ask Codex to do anything".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.metadata.insert("supervisor_model".into(), "old-model".into());
+        store.update(&agent).unwrap();
+        codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-select".into(), owner.clone()).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\ngpt-6.1-sol").unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
+        assert_eq!(store.get("single-sup").unwrap().metadata.get("supervisor_model").map(String::as_str), Some("old-model"));
+        codex.dispatch_supervisor_command(Request::Step { key: Key::Select }, "cmd-select".into(), owner.clone()).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc• Model changed to gpt-6.1-sol xhigh for this conversation\r\n›".as_bytes()).unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
+        let observed = store.get("single-sup").unwrap();
+        assert_eq!(observed.metadata.get("supervisor_model").map(String::as_str), Some("gpt-6.1-sol"));
+        assert_eq!(observed.metadata.get("supervisor_effort").map(String::as_str), Some("xhigh"));
         codex.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "cmd-finish".into(), owner).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
@@ -321,6 +364,11 @@ mod tests {
         assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet").is_none());
         let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯").unwrap();
         assert!(!confirmed.1);
+        assert_eq!(codex_model_selection("Select model", "• Model changed to gpt-6.1-sol xhigh for this conversation\n›"), Some(("gpt-6.1-sol".into(), Some("xhigh".into()))));
+        for text in ["Select model\ngpt-6.1-sol", "› /model gpt-6.1-sol", "Model changed to gpt-6.1-sol xhigh", "• Failed to save default model: error"] {
+            assert!(codex_model_selection("", text).is_none(), "{text}");
+        }
+        assert!(codex_model_selection("• Model changed to gpt-6.1-sol high", "• Model changed to gpt-6.1-sol high\n›").is_none());
     }
     #[test]
     fn prompt_readiness_refuses_busy_and_modal_screens() {

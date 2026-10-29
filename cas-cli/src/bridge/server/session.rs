@@ -245,10 +245,12 @@ fn session_agents(
             // cannot erase the assignment already present in this response.
             let full_task = task.and_then(|task| tasks.get(&task.id).ok());
             let (task_started_at, recent_trail) = worker_task_facts(root, &events, full_task.as_ref())?;
+            let identity = crate::agent_model::AgentModel::from_agent(&agent);
             Ok(AgentSummaryJson {
                 role: agent.role.to_string(),
-                harness: agent.metadata.get("worker_cli").cloned(),
-                model: agent.metadata.get("worker_model").cloned(),
+                harness: identity.harness,
+                model: identity.model,
+                effort: identity.effort,
                 task_started_at,
                 recent_trail,
                 generation: crate::ops::fleet::worker_generation(root, &session.name, &agent.name)

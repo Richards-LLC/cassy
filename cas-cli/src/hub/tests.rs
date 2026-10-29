@@ -6200,6 +6200,13 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
             assert_eq!(row["effort"], effort);
         }
     }
+    // Re-registration from the original launch cannot undo the observed selection.
+    let mut launch = cas_types::Agent::new_with_role("lead".into(), "lead".into(), AgentRole::Supervisor);
+    launch.factory_session = Some(session.name.clone());
+    launch.metadata.insert("supervisor_cli".into(), "claude".into());
+    launch.metadata.insert("supervisor_model".into(), "stale-launch".into());
+    crate::mcp::daemon::register_with_role_reconciliation(store.as_ref(), &launch, Some(AgentRole::Supervisor)).unwrap();
+    assert_eq!(serde_json::to_value(hub_session(&session)).unwrap()["model"], "claude-opus-5-5");
     // A pre-switch attempt is not a completed selection.
     crate::hooks::handle_hook("PreModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"unconfirmed"})).unwrap()).unwrap();
     assert_eq!(serde_json::to_value(hub_session(&session)).unwrap()["model"], "claude-opus-5-5");

@@ -562,13 +562,16 @@ fn push_factory_worker_metadata_env(
     if let Some(worker_cli) = factory_worker_cli {
         env.push(("CAS_FACTORY_WORKER_CLI".to_string(), worker_cli.to_string()));
     }
-    if role == "worker" {
-        if let Some(model) = model {
-            env.push(("CAS_FACTORY_WORKER_MODEL".to_string(), model.to_string()));
-        }
-        if let Some(effort) = effort {
-            env.push(("CAS_FACTORY_WORKER_EFFORT".to_string(), effort.to_string()));
-        }
+    let prefix = match role {
+        "worker" => "WORKER",
+        "supervisor" | "director" => "SUPERVISOR",
+        _ => return,
+    };
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        env.push((format!("CAS_FACTORY_{prefix}_MODEL"), model.to_string()));
+    }
+    if let Some(effort) = effort.filter(|effort| !effort.trim().is_empty()) {
+        env.push((format!("CAS_FACTORY_{prefix}_EFFORT"), effort.to_string()));
     }
 }
 
@@ -1698,6 +1701,12 @@ impl PtyConfig {
             cas_root,
             supervisor_name,
         );
+
+        for (key, value) in &env {
+            if matches!(key.as_str(), "CAS_FACTORY_SUPERVISOR_MODEL" | "CAS_FACTORY_SUPERVISOR_EFFORT" | "CAS_FACTORY_WORKER_MODEL" | "CAS_FACTORY_WORKER_EFFORT") {
+                args.extend(["-c".into(), format!("mcp_servers.cs.env.{key}={}", serde_json::to_string(value).expect("model metadata string"))]);
+            }
+        }
 
         if let Some(m) = model {
             args.push("--model".to_string());
@@ -6729,6 +6738,9 @@ echo SMOKE_DONE
         assert!(config.env.iter().any(|(key, value)| key == "CAS_FACTORY_SUPERVISOR_MODEL" && value == "claude-opus-5-5"));
         assert!(config.env.iter().any(|(key, value)| key == "CAS_FACTORY_SUPERVISOR_EFFORT" && value == "high"));
         assert!(!config.env.iter().any(|(key, _)| key == "CAS_FACTORY_WORKER_MODEL"));
+        let codex = PtyConfig::codex("lead", "supervisor", PathBuf::from("/tmp"), None, None, None, Some("gpt-6.1-sol"), Some("xhigh"), None);
+        assert!(codex.args.iter().any(|arg| arg == "mcp_servers.cs.env.CAS_FACTORY_SUPERVISOR_MODEL=\"gpt-6.1-sol\""));
+        assert!(codex.args.iter().any(|arg| arg == "mcp_servers.cs.env.CAS_FACTORY_SUPERVISOR_EFFORT=\"xhigh\""));
     }
 
     #[test]

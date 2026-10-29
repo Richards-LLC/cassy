@@ -48,6 +48,8 @@ pub enum HookCommand {
     Status,
     /// Handle SessionStart hook event
     SessionStart,
+    /// Record a completed native model switch
+    PostModelSwitch,
     /// Handle SessionEnd hook event
     SessionEnd,
     /// Handle Stop hook event
@@ -98,6 +100,7 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::Cleanup { dry_run } => execute_cleanup(*dry_run, cli),
         HookCommand::Status => execute_status(cli),
         HookCommand::SessionStart => execute_event("SessionStart", cli),
+        HookCommand::PostModelSwitch => execute_event("PostModelSwitch", cli),
         HookCommand::SessionEnd => execute_event("SessionEnd", cli),
         HookCommand::Stop => execute_event("Stop", cli),
         HookCommand::SubagentStart => execute_event("SubagentStart", cli),

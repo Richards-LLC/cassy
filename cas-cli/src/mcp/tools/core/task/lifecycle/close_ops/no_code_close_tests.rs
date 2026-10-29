@@ -1815,3 +1815,90 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert!(f.task("cas-8488-c").assignee.is_none());
     }
 }
+
+fn queue_control_fixture(env: &mut TestEnvGuard) -> Fixture {
+    let f = fixture(env, "main");
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agents.update(&agent).unwrap();
+    }
+    let mut current = assigned("cas-8488-current", TaskType::Task, "main");
+    current.execution_note = Some("no-code".into());
+    current.external_ref = Some(PROOF.into());
+    f.put(&current);
+    claim(&f, &current.id);
+    for id in ["cas-8488-one", "cas-8488-two", "cas-8488-three"] {
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        task.assignee = None;
+        f.put(&task);
+    }
+    f
+}
+
+async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
+    let mut request = serde_json::json!({"action":"worker_queue", "id":WORKER});
+    if let Some(ids) = ids { request["task_ids"] = serde_json::json!(ids); }
+    let request = serde_json::from_value(request).unwrap();
+    let result = f.supervisor.factory_request(Parameters(request)).await.unwrap();
+    result.content.iter().filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None })
+        .collect::<Vec<_>>().join("\n")
+}
+
+/// Queue edits are supervisor operations and only affect pending work.
+#[tokio::test]
+async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let _ = call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER,
+        "task_ids":["cas-8488-one","cas-8488-two"],
+    })).await;
+    let reordered = queue_control(&f, Some(vec!["cas-8488-two","cas-8488-one"])).await;
+    assert!(reordered.contains("cas-8488-two -> cas-8488-one"), "{reordered}");
+    let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "summary":true})).unwrap();
+    let status = f.supervisor.factory_request(Parameters(request)).await.unwrap();
+    let status = format!("{status:?}");
+    assert!(status.contains("cas-8488-two -> cas-8488-one"), "{status}");
+    let worker_request = serde_json::from_value(serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[],
+    })).unwrap();
+    assert!(f.worker.task(Parameters(worker_request)).await.is_err());
+    let cleared = queue_control(&f, Some(vec![])).await;
+    assert!(cleared.contains("Pending: none"), "{cleared}");
+    assert_eq!(f.task("cas-8488-current").status, TaskStatus::InProgress);
+    assert_eq!(f.task("cas-8488-one").assignee, None);
+}
+
+/// Stale entries are recorded and skipped rather than claiming somebody else's
+/// work, terminal work or a task whose start is blocked.
+#[tokio::test]
+async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let _ = queue_control(&f, Some(vec!["cas-8488-one","cas-8488-two","cas-8488-three"])).await;
+    for (id, status, assignee) in [
+        ("cas-8488-one", TaskStatus::Open, Some("another-worker")),
+        ("cas-8488-two", TaskStatus::Closed, None),
+        ("cas-8488-three", TaskStatus::Blocked, None),
+    ] {
+        let mut task = f.task(id);
+        task.status = status;
+        task.assignee = assignee.map(str::to_string);
+        f.put(&task);
+    }
+    let response = call(&f.worker, serde_json::json!({
+        "action":"close", "id":"cas-8488-current", "reason":"Portable proof recorded",
+    })).await;
+    assert_eq!(f.task("cas-8488-current").status, TaskStatus::Closed, "{response}");
+    let notes = f.task("cas-8488-current").notes;
+    for id in ["cas-8488-one","cas-8488-two","cas-8488-three"] {
+        assert!(notes.contains(&format!("Task queue skipped {id}:")), "{notes}");
+        assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease(id).unwrap().is_none());
+    }
+    let state = queue_control(&f, None).await;
+    assert!(state.contains("Pending: none"), "{state}");
+}

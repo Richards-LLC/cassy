@@ -64,18 +64,24 @@ impl SqliteWorkerTaskQueueStore {
     pub fn save(&self, session: &str, worker: &str, state: &mut WorkerTaskQueue) -> Result<()> {
         let expected = state.revision;
         let mut next = state.clone();
-        next.revision += 1;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Other("Worker queue revision overflow".into()))?;
+        let revision =
+            i64::try_from(next.revision).map_err(|e| StoreError::Other(e.to_string()))?;
+        let expected_db = i64::try_from(expected).map_err(|e| StoreError::Other(e.to_string()))?;
         let json = serde_json::to_string(&next).map_err(|e| StoreError::Other(e.to_string()))?;
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let changed = if expected == 0 {
             conn.execute(
                 "INSERT OR IGNORE INTO worker_task_queues(factory_session,worker_name,revision,state) VALUES(?,?,?,?)",
-                params![session, worker, next.revision, json],
+                params![session, worker, revision, json],
             )?
         } else {
             conn.execute(
                 "UPDATE worker_task_queues SET revision=?,state=? WHERE factory_session=? AND worker_name=? AND revision=?",
-                params![next.revision, json, session, worker, expected],
+                params![revision, json, session, worker, expected_db],
             )?
         };
         if changed != 1 {
@@ -109,12 +115,13 @@ impl SqliteWorkerTaskQueueStore {
                 params![session, worker, json],
             )?;
             // Keep the JSON and CAS revision equal on reuse of a named worker.
-            let revision: u64 = tx.query_row(
+            let revision: i64 = tx.query_row(
                 "SELECT revision FROM worker_task_queues WHERE factory_session=? AND worker_name=?",
                 params![session, worker],
                 |row| row.get(0),
             )?;
-            state.revision = revision;
+            state.revision =
+                u64::try_from(revision).map_err(|e| StoreError::Other(e.to_string()))?;
             tx.execute(
                 "UPDATE worker_task_queues SET state=? WHERE factory_session=? AND worker_name=?",
                 params![

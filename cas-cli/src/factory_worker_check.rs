@@ -2320,6 +2320,9 @@ child.wait()
     fn worker_proofs_include_fixed_guards_before_an_unrelated_filter() {
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        // Keep the real lease above the wrapper's log FD 3, so that log
+        // descriptor cannot accidentally satisfy the inherited-lease check.
+        let _reserved_fds: Vec<_> = (0..16).map(|_| std::fs::File::open("/dev/null").unwrap()).collect();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let repo = root.join("worktrees/worker");
@@ -2997,6 +3000,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
     fn worker_memory_scope_keeps_targeted_test_receipts_and_lease() {
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let _reserved_fds: Vec<_> = (0..16).map(|_| std::fs::File::open("/dev/null").unwrap()).collect();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let repo = root.join("worktrees/worker");

@@ -182,6 +182,23 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     }
 }
 
+/// Format preflight before either verification-dispatch path mutates state.
+/// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
+pub(crate) fn ledger_preflight(cas_root: &Path, task: &Task) -> Result<(), String> {
+    let config = crate::config::Config::load(cas_root).map_err(|e| format!("QA LEDGER REJECTED: {e}"))?;
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
+    let dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
+    let ledger = dir.join("LEDGER.md");
+    if !ledger.exists() && task.demo_statement.trim().is_empty() { return Ok(()); }
+    if dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none() {
+        return Err("QA LEDGER REJECTED: task artifact directory escapes its project namespace".into());
+    }
+    let report = crate::qa_ledger::check(&ledger, crate::qa_ledger::minimum_rows(task));
+    if report.ok { Ok(()) } else {
+        Err(format!("QA LEDGER REJECTED before verification dispatch:\n{}\nRun cas qa ledger check {} --task {}", report.refusal(), ledger.display(), task.id))
+    }
+}
+
 /// A missing flat citation can outlive the namespace migration in a running
 /// service. Read its corresponding scoped file without rewriting task history.
 /// Existing historical files, unsafe relative paths and unrelated citations

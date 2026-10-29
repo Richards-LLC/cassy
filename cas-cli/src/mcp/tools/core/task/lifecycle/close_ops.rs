@@ -9505,6 +9505,10 @@ impl CasCore {
                     }
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
+                        if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task) {
+                            return Ok(Self::tool_error(message));
+                        }
+
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.

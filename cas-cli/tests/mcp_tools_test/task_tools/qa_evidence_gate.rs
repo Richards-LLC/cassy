@@ -1296,11 +1296,13 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
         "{refused}"
     );
 
+    std::fs::create_dir_all(fx.artifacts.join(TASK).join("qa")).unwrap();
+    std::fs::write(fx.artifacts.join(TASK).join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
         &ledger,
-        "| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n"),
     )
     .unwrap();
     let parked = close_text(&fx.core, TASK).await;
@@ -1315,11 +1317,13 @@ async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
+    std::fs::create_dir_all(fx.artifacts.join(TASK).join("qa")).unwrap();
+    std::fs::write(fx.artifacts.join(TASK).join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
         &ledger,
-        "M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | -\n",
+        ledger_rows(&"M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | -\n"),
     )
     .unwrap();
 
@@ -1409,7 +1413,7 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
         std::fs::create_dir_all(&task_dir).unwrap();
         std::fs::write(
             task_dir.join("LEDGER.md"),
-            "| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n",
+            ledger_rows(&"| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n"),
         )
         .unwrap();
 
@@ -1463,7 +1467,7 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
         let ledger = task_dir.join("LEDGER.md");
         std::fs::write(
             &ledger,
-            "| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n",
+            ledger_rows(&"| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n"),
         )
         .unwrap();
         let refused = close_text(&fx.core, TASK).await;
@@ -1473,7 +1477,7 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
         );
         std::fs::write(
             &ledger,
-            "| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n",
+            ledger_rows(&"| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n"),
         )
         .unwrap();
         let parked = close_text(&fx.core, TASK).await;
@@ -1504,7 +1508,7 @@ async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
     std::fs::create_dir_all(&task_dir).unwrap();
     std::fs::write(
         task_dir.join("LEDGER.md"),
-        "| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n",
+        ledger_rows(&"| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n"),
     )
     .unwrap();
     let refused = close_text(&fx.core, TASK).await;
@@ -1816,9 +1820,11 @@ async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
     agents.update(&worker).unwrap();
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("qa")).unwrap();
+    std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
     std::fs::write(
         dir.join("LEDGER.md"),
-        "| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n",
+        ledger_rows(&"| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n"),
     )
     .unwrap();
     assert!(
@@ -1860,7 +1866,9 @@ async fn cas_6f10_deferred_deployed_row_parks_with_named_obligation() {
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("LEDGER.md"), "| M01 | staging GET | served tip | pending deployment | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner | - |\n").unwrap();
+    std::fs::create_dir_all(dir.join("qa")).unwrap();
+    std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
+    std::fs::write(dir.join("LEDGER.md"), ledger_rows(&"| M01 | staging GET | served tip | pending deployment | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner | - |\n")).unwrap();
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
@@ -1882,6 +1890,8 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
     );
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("qa")).unwrap();
+    std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
     for owner in ["unregistered", "test-agent"] {
         std::fs::write(dir.join("LEDGER.md"), format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n")).unwrap();
         let refused = close_text(&fx.core, TASK).await;
@@ -1893,7 +1903,7 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
         assert!(!fx.notes().contains("POST-DEPLOY OBLIGATION"));
     }
     let _supervisor = cas_6f10_supervisor(&fx);
-    std::fs::write(dir.join("LEDGER.md"), "| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner extra | - |\n").unwrap();
+    std::fs::write(dir.join("LEDGER.md"), ledger_rows(&"| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner extra | - |\n")).unwrap();
     assert!(
         close_text(&fx.core, TASK)
             .await
@@ -2184,4 +2194,23 @@ async fn bundle_waiver_preserves_skip_marker_gate_cas_06f5() {
         "{refused}"
     );
     assert_eq!(fx.status(), TaskStatus::InProgress);
+}
+
+
+fn ledger_rows(rows: &str) -> String {
+    let mut labels = std::collections::BTreeMap::<&str, usize>::new();
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut n = 0;
+    for row in rows.lines().filter(|line| !line.trim().is_empty()) {
+        let cells: Vec<_> = row.trim().trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() == 8 && cells[0] != "id" {
+            n += 1;
+            *counts.entry(cells[4]).or_default() += 1;
+            *labels.entry(cells[5]).or_default() += 1;
+        }
+    }
+    format!("cells={n}; PASS={}; FAIL={}; NOT EXERCISED={}\nlabels: {}\n{}\n{}",
+        counts.get("PASS").unwrap_or(&0), counts.get("FAIL").unwrap_or(&0), counts.get("NOT EXERCISED").unwrap_or(&0),
+        labels.iter().map(|(key,n)| format!("{key}={n}")).collect::<Vec<_>>().join("; "),
+        cas::qa_ledger::HEADER, rows)
 }

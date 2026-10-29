@@ -3324,3 +3324,40 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     fs::remove_file(socket).unwrap();
 }
+
+#[test]
+fn qa_ledger_init_check_and_no_overwrite() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/flow.ts"), "flow").unwrap();
+    git(&["add", "src/flow.ts"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "seed"]);
+    let cas_root = cas::store::init_cas_dir(root).unwrap();
+    let artifacts = root.join("artifacts");
+    std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root={:?}\n", artifacts.display().to_string())).unwrap();
+    let mut task = cas::types::Task::new("cas-ledger-cli".into(), "Review src/flow.ts".into());
+    task.execution_note = Some("no-code".into());
+    cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
+    let output = cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id, "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(init["ok"], true);
+    assert_eq!(init["rows"][0]["verdict"], "NOT A ROUTE");
+    let path = std::path::Path::new(init["path"].as_str().unwrap());
+    let original = std::fs::read(path).unwrap();
+    cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();
+    cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    std::fs::write(path, String::from_utf8(original).unwrap().replace("NOT A ROUTE |", "partial |" )).unwrap();
+    let bad = cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(!bad.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");
+    assert_eq!(report["ok"], false);
+    assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["row_id"] == "M01" && d["field"] == "verdict"));
+}

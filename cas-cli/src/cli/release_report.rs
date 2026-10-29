@@ -1601,17 +1601,27 @@ fn report_pdf_version(path: &Path) -> Option<String> {
     let version = normalize_version(path.file_stem()?.to_str()?.strip_prefix('v')?).ok()?;
     let report_directory = path.parent()?.file_name()?.to_str()? == "release-reports";
     let generated_source = || fs::read_to_string(path.with_extension("md")).ok().is_some_and(|source| {
-        source.lines().next().is_some_and(|title| title.starts_with("# ") && title.ends_with(&format!(" v{version}")))
+        let mut lines = source.lines().peekable();
+        if lines.peek() == Some(&"---") {
+            lines.next();
+            if !lines.by_ref().any(|line| line == "---") {
+                return false;
+            }
+        }
+        lines.find(|line| !line.trim().is_empty()).is_some_and(|title| title.starts_with("# ") && title.ends_with(&format!(" v{version}")))
             && source.contains("\n## Evidence and scope\n")
     });
     (report_directory || generated_source()).then_some(version)
 }
 
-/// File uploads of one release use its PR's durable epic lane, independently
-/// of session focus. Missing/ambiguous evidence preserves the ordinary gate;
+/// File uploads of one release use its PR's durable epic lane in place of
+/// session focus. Missing/ambiguous evidence preserves the ordinary gate;
 /// callers can explicitly name --epic. Mixed attachments never borrow a PDF's
 /// release identity for an unrelated deliverable.
 pub(crate) fn publication_epic_for_reports(cas_root: &Path, files: &[PathBuf]) -> Option<String> {
+    // Inference only replaces a focused epic's gate; without focus there is
+    // no publication context to override and no need for a GitHub lookup.
+    crate::ui::factory::preferred_epic_id_from_session_metadata()?;
     let first = report_pdf_version(files.first()?)?;
     if files.iter().skip(1).any(|path| report_pdf_version(path).as_deref() != Some(&first)) {
         return None;

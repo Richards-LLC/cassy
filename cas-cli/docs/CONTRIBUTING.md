@@ -2838,7 +2838,8 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    `{{VERSION}}` in it becomes the version.
 3. Run `scripts/release.sh` (in the background with a log: it watches the PR
    until it merges). It merges `main` in when the branch is behind, bumps the
-   release crates and `Cargo.lock`, promotes `[Unreleased]` to
+   release crates and `Cargo.lock`, runs `npm ci && npm run build` in `hub-web`
+   so the committed embedded Commander bundle carries that version, promotes `[Unreleased]` to
    `## [x.y.z] - <date>`, names the draft, commits `release: vx.y.z`, pushes,
    opens the PR to `main`, waits for its Scoped Validation run to go green,
    and only then enables auto-merge. When another release lands first it

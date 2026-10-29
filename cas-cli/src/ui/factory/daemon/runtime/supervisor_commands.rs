@@ -238,10 +238,10 @@ mod tests {
         let name = daemon.app.supervisor_name().to_owned();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let request = Request::Run { command: Command::Model, confirmed: false };
-        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc✢ Flambéing… (7s · ↓ 633 tokens)\r\n❯".as_bytes()).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H✢ Flambéing… (7s · ↓ 633 tokens)\r\n❯".as_bytes()).unwrap();
         assert!(daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), owner.clone()).await.is_err());
         assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
-        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc❯".as_bytes()).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
         let mut untrusted = owner.clone(); untrusted.operator_verified = false;
         assert!(daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), untrusted).await.is_err());
         let first = daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), owner.clone()).await.unwrap();
@@ -257,7 +257,7 @@ mod tests {
         daemon.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\nOpus\r\nSonnet").unwrap();
         let opened = daemon.dispatch_supervisor_command(Request::Status, "cmd-model".into(), owner.clone()).await.unwrap();
         assert!(matches!(opened, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive));
-        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc❯".as_bytes()).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
         let closed = daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "cmd-model".into(), owner.clone()).await.unwrap();
         assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if !receipt.interactive));
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), writes, "stale controls must send no key");

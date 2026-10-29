@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import { renderTeam, updateTeamElapsed, type TeamSnapshot } from "./team-view";
 
 it("joins the selected session to real receipts, keeps focus on live updates and exposes no raw activity", () => {
-  const root = document.createElement("section"); document.body.append(root);
+  const root = document.createElement("section"); root.tabIndex = 0; document.body.append(root);
   const snapshot: TeamSnapshot = {
     roster: ["lark", "owl", "robin"], supervisor: "supervisor", supervisors: ["supervisor"], focused: "release", asks: 1,
     agents: [{ name: "lark", current_task: "work", liveness: "executing", harness: "codex", model: "gpt-6.1", task_started_at: "2026-10-28T12:00:00Z", recent_trail: [{ step: "started", reference: "event:12" }], latest_activity: { summary: "SECRET RAW TOOL OUTPUT", created_at_rfc3339: "2026-10-28T12:00:00Z" } }, { name: "outsider" }],
@@ -20,12 +20,17 @@ it("joins the selected session to real receipts, keeps focus on live updates and
   expect(root.querySelectorAll('[data-reported="true"]')).toHaveLength(1);
   updateTeamElapsed(root, Date.parse("2026-10-28T12:42:00Z"));
   expect(root.querySelector(".team-elapsed")?.textContent).toBe("42m on task");
+  const initialLane = root.querySelector(".team-lane");
+  renderTeam(root, { ...snapshot, agents: [{ ...snapshot.agents[0], latest_activity: { summary: "UNRELATED RAW UPDATE", created_at_rfc3339: "2026-10-28T12:42:00Z" } }, snapshot.agents[1]] }, questions, progress);
+  expect(root.querySelector(".team-lane")).toBe(initialLane);
   const merge = root.querySelector<HTMLButtonElement>('[data-team-action="merges"]')!;
   merge.click(); expect(progress).toHaveBeenCalledOnce(); merge.focus();
   renderTeam(root, { ...snapshot, agents: [{ ...snapshot.agents[0], liveness: "waiting_for_input" }] }, questions, progress);
   expect(root.querySelector(".team-state")?.textContent).toBe("Waiting");
   expect((document.activeElement as HTMLElement).dataset.teamAction).toBe("merges");
   root.querySelector<HTMLButtonElement>('[data-team-action="asks"]')!.click(); expect(questions).toHaveBeenCalledOnce();
+  renderTeam(root, { ...snapshot, asks: 0, tasks: [snapshot.tasks[0]] }, questions, progress);
+  expect(document.activeElement).toBe(root);
   root.remove();
 });
 

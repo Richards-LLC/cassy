@@ -31,24 +31,30 @@ export function updateTeamElapsed(root: HTMLElement, now = Date.now()): void {
 export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttention: () => void, openProgress: () => void): void {
   const document = root.ownerDocument;
   const priorFocus = (document.activeElement as HTMLElement | null)?.dataset.teamAction;
-  const signature = JSON.stringify(snapshot);
+  const workers = workerProgress(snapshot.roster, snapshot.agents, snapshot.tasks, snapshot.supervisor);
+  const release = releaseProgress(snapshot.epics, snapshot.focused, snapshot.tasks, snapshot.supervisors);
+  const needs = taskGroups(snapshot.tasks, snapshot.epics, workers.map(worker => worker.name), false, snapshot.supervisors, snapshot.focused)[0].tasks;
+  // Heartbeats and raw activity are not rendered. They cannot remount lanes,
+  // restart their animation, or replace a control under the pointer.
+  const signature = JSON.stringify([snapshot.asks, snapshot.stale, snapshot.unavailable, release, needs.map(task => [task.id, task.status]),
+    workers.map(worker => [worker.name, worker.work, workerState(worker, snapshot.tasks), worker.agent?.harness, worker.agent?.model, worker.agent?.task_started_at, worker.agent?.recent_trail])]);
   if (root.dataset.signature === signature) { updateTeamElapsed(root); return; }
   root.dataset.signature = signature;
   const text = (tag: string, value: string, className?: string): HTMLElement => {
     const node = document.createElement(tag); node.textContent = value; if (className) node.className = className; return node;
   };
+  const priorStates = new Map([...root.querySelectorAll<HTMLElement>(".team-lane")].map(lane => [lane.dataset.worker, lane.querySelector(".team-state")?.textContent]));
+  const priorButtons = new Map([...root.querySelectorAll<HTMLButtonElement>("[data-team-action]")].map(button => [button.dataset.teamAction, button]));
   const heading = text("h2", "Your team, at a glance.");
   const notice = text("p", snapshot.stale ?? "Live staffing from this supervisor’s session", "team-freshness");
   notice.setAttribute("role", "status");
   root.replaceChildren(heading, notice);
   if (snapshot.unavailable) { root.append(text("p", snapshot.unavailable, "team-empty")); return; }
-  root.append(releaseHeader(document, releaseProgress(snapshot.epics, snapshot.focused, snapshot.tasks, snapshot.supervisors)));
-  const workers = workerProgress(snapshot.roster, snapshot.agents, snapshot.tasks, snapshot.supervisor);
-  const needs = taskGroups(snapshot.tasks, snapshot.epics, workers.map(worker => worker.name), false, snapshot.supervisors, snapshot.focused)[0].tasks;
+  root.append(releaseHeader(document, release));
   const strip = document.createElement("section"); strip.className = "team-needs"; strip.setAttribute("aria-label", "Needs you");
   strip.append(text("h3", "Needs you"));
   const action = (label: string, key: string, run: () => void): void => {
-    const button = document.createElement("button"); button.type = "button"; button.textContent = label; button.dataset.teamAction = key; button.onclick = run; strip.append(button);
+    const button = priorButtons.get(key) ?? document.createElement("button"); button.type = "button"; button.textContent = label; button.dataset.teamAction = key; button.onclick = run; strip.append(button);
   };
   if (snapshot.asks) action(`${snapshot.asks} supervisor ask${snapshot.asks === 1 ? " or blocker" : "s or blockers"}`, "asks", openAttention);
   const blockers = needs.filter(task => statusClass(task.status) === "blocked").length;
@@ -64,6 +70,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
     identity.append(text("h3", worker.name), text("span", [worker.agent?.harness ?? "Harness not reported", worker.agent?.model ?? "Model not reported"].join(" · "), "team-model"));
     const state = workerState(worker, snapshot.tasks);
     const badge = text("span", state, `team-state status-chip status-chip--${statusClass(state)}`); badge.setAttribute("aria-label", `${worker.name}: ${state}`);
+    if (priorStates.has(worker.name) && priorStates.get(worker.name) !== state) badge.classList.add("team-state--changed");
     const work = text("p", worker.work, "team-task");
     const elapsed = text("p", "Task time not reported", "team-elapsed");
     if (worker.agent?.task_started_at) elapsed.dataset.taskStart = worker.agent.task_started_at;
@@ -81,5 +88,5 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   if (!workers.length) root.append(text("p", "No workers in this supervisor’s session.", "team-empty"));
   root.append(text("p", "Delivery trail: solid marks have a recorded receipt; open marks are not reported.", "team-evidence-key"));
   updateTeamElapsed(root);
-  if (priorFocus) root.querySelector<HTMLElement>(`[data-team-action="${priorFocus}"]`)?.focus({ preventScroll: true });
+  if (priorFocus) (root.querySelector<HTMLElement>(`[data-team-action="${priorFocus}"]`) ?? root).focus({ preventScroll: true });
 }

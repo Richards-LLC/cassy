@@ -4,6 +4,7 @@
 use super::*;
 
 pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Result<bool> {
+    if !agent.metadata.contains_key("clone_path") { return Ok(false); }
     let tasks = snapshot_worker_tasks(cas_root, agent)?;
     retire_worker_with_snapshot(cas_root, agent, &tasks)
 }

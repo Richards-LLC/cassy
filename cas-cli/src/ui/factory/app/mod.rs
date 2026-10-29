@@ -1333,7 +1333,7 @@ pub struct FactoryApp {
     /// have not been applied yet. Their names stay reserved, so a respawn
     /// never reuses the cgroup scope or worktree the late cleanup acts on.
     crash_cleanups_pending: std::collections::HashMap<String, usize>,
-    /// Final worktree removal runs independently of control and delivery.
+    /// Target retirement and worktree removal run independently of control and delivery.
     /// Names remain reserved until these results have been applied.
     worktree_cleanup_jobs: Vec<render_and_ops::epic_workers::WorkerCleanupJob>,
     /// Index of the currently selected worker tab (0-based, used in tabbed mode)

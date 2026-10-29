@@ -4227,6 +4227,15 @@ impl FactoryDaemon {
             &mut director_refresh, store_worker, Duration::from_secs(10),
         ).await;
         drop(director_refresh);
+        // Keep warning writes alive while exit waits for owned filesystem jobs.
+        // No cleanup is abandoned or allowed to outlive the daemon's teardown.
+        while self.app.worker_cleanup_threads_running() {
+            self.poll_worker_cleanup_jobs_at(Instant::now());
+            if self.app.worker_cleanup_threads_running() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        self.app.join_worker_worktree_cleanups();
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
         // Stop recording if it was enabled

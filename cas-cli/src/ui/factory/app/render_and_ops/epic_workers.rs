@@ -3298,7 +3298,9 @@ impl FactoryApp {
         // Check before settling bindings: that step can clear task assignees.
         // Retirement checks the configured scratch path and preserves evidence
         // before deleting; no absent in-tree target can stand in for success.
-        let retirement_tasks = crate::factory_target_cache::retirement::snapshot_worker_tasks(&cas_dir, agent);
+        let retirement_tasks = if agent.metadata.contains_key("clone_path") {
+            crate::factory_target_cache::retirement::snapshot_worker_tasks(&cas_dir, agent)
+        } else { Ok(Vec::new()) };
 
         // Only after the process is actually gone: a shutdown parks and
         // releases what the worker held; a recycle keeps it (cas-a622).
@@ -3345,8 +3347,8 @@ impl FactoryApp {
         Ok(released_task_ids)
     }
 
-    /// Queue final worktree removal after graceful shutdown. Git, symlink
-    /// scans and filesystem deletion must not hold the daemon's control loop.
+    /// Queue target retirement and optional worktree removal after shutdown.
+    /// Git, evidence copies and deletion must not hold the control loop.
     /// Reserve the name until its outcome lands, just as crash cleanup does.
     fn queue_worker_cleanup(
         &mut self,
@@ -3403,7 +3405,29 @@ impl FactoryApp {
         self.worktree_cleanup_jobs.push(job);
     }
 
-    pub(crate) fn join_worker_worktree_cleanups(&mut self) {}
+    pub(crate) fn join_worker_worktree_cleanups(&mut self) {
+        for job in std::mem::take(&mut self.worktree_cleanup_jobs) {
+            self.apply_worker_cleanup(job);
+        }
+    }
+
+    pub(crate) fn worker_cleanup_threads_running(&self) -> bool {
+        self.worktree_cleanup_jobs.iter().any(|job| !job.handle.is_finished())
+    }
+
+    /// A warning is spent only after its durable write is admitted.
+    pub(crate) fn warn_worker_cleanups_at(
+        &mut self,
+        now: Instant,
+        mut warn: impl FnMut(&str, &str, std::time::Duration) -> bool,
+    ) {
+        for job in &mut self.worktree_cleanup_jobs {
+            let elapsed = now.saturating_duration_since(job.started);
+            if !job.warned && !job.handle.is_finished() && elapsed >= WORKER_CLEANUP_WARN_AFTER {
+                job.warned = warn(&job.worker, &job.occurrence, elapsed);
+            }
+        }
+    }
 
     pub(crate) fn worker_worktree_cleanups_pending(&self) -> bool {
         !self.worktree_cleanup_jobs.is_empty()
@@ -6586,7 +6610,8 @@ mod tests {
             env.home().join("once").display(), entered.display(), release.display(),
         )).unwrap();
         std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o700)).unwrap();
-        git(&["config", "core.fsmonitor", monitor.to_str().unwrap()]);
+        git(&["config", "extensions.worktreeConfig", "true"]);
+        git(&["-C", worker.to_str().unwrap(), "config", "--worktree", "core.fsmonitor", monitor.to_str().unwrap()]);
         let (returned_tx, returned_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let gate = std::thread::spawn(move || {

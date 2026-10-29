@@ -10987,8 +10987,43 @@ impl FactoryDaemon {
     /// Git worktree creation (the slow part) runs on a background thread via
     /// `spawn_blocking`. Only one background spawn runs at a time. Each tick we
     /// either: (a) check if the in-flight spawn finished, or (b) start a new one.
-    pub(super) fn poll_worker_cleanup_jobs_at(&mut self, _now: Instant) {
+    pub(super) fn poll_worker_cleanup_jobs_at(&mut self, now: Instant) {
         self.app.poll_worker_worktree_cleanups();
+        let root = self.app.cas_dir().to_path_buf();
+        let supervisor = self.app.supervisor_name().to_string();
+        let session = self.session_name.clone();
+        let relays = &mut self.relay_jobs;
+        let jobs = &mut self.queue_jobs;
+        self.app.warn_worker_cleanups_at(now, |worker, occurrence, elapsed| {
+            let key = format!("worker-cleanup-warning:{session}:{occurrence}");
+            let root = root.clone();
+            let supervisor = supervisor.clone();
+            let session = session.clone();
+            let worker = worker.to_string();
+            let job_key = key.clone();
+            relays.submit_write(jobs, &job_key, None, move || {
+                let body = format!(
+                    "Cleanup for worker '{worker}' exceeded {}s and was still running when this notice was queued. \
+                     Its name stays reserved until completion is applied. Inspect its target or worktree cleanup \
+                     before reusing the worker; the daemon continues processing messages.", elapsed.as_secs(),
+                );
+                tracing::warn!(worker = %worker, elapsed_secs = elapsed.as_secs(), "worker cleanup still running");
+                let result = (|| -> anyhow::Result<()> {
+                    let queue = open_prompt_queue_store(&root)?;
+                    queue.enqueue_idempotent(
+                        "director", &supervisor,
+                        &crate::prompt_revalidation::attach_blocker_envelope(&body, &worker, None),
+                        Some(&session), Some(&format!("Worker cleanup still running: {worker}")),
+                        Some(cas_store::NotificationPriority::High), &key,
+                        Some(&cas_store::QueueOrigin::Daemon),
+                    )?;
+                    super::delivery::wake_daemon_after_enqueue(&root);
+                    Ok(())
+                })();
+                if let Err(error) = result { tracing::error!(%error, %worker, "worker cleanup warning could not be queued"); }
+                super::relay_jobs::RelayOutput::ProbeWritten
+            })
+        });
     }
 
     pub(super) async fn process_pending_spawns(&mut self) {

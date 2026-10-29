@@ -217,7 +217,13 @@ impl Fixture {
 
 #[test]
 fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
-    for (recorded_start, new_work) in [(true, false), (true, true), (false, false), (false, true)] {
+    for (binding, new_work) in [
+        ("current", false), ("current", true),
+        ("legacy", false), ("legacy", true),
+        ("previous-worker", false), ("previous-worker", true),
+        ("previous-branch", false), ("previous-branch", true),
+    ] {
+        let recorded_start = binding != "legacy";
         let mut f = Fixture::new();
         f.in_progress();
         let old_tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
@@ -239,7 +245,14 @@ fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
         next.deliverables.work_target = Some(target.clone());
         if recorded_start {
             next.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-                work_target: target, assignee: "merge-w".into(), branch: "factory/merge-w".into(), base_sha: old_tip.clone(),
+                work_target: target,
+                assignee: if binding == "previous-worker" { "old-worker" } else { "merge-w" }.into(),
+                branch: match binding {
+                    "previous-worker" => "factory/old-worker",
+                    "previous-branch" => "factory/merge-w-old",
+                    _ => "factory/merge-w",
+                }.into(),
+                base_sha: old_tip.clone(),
             });
         }
         tasks.add(&next).unwrap();
@@ -249,9 +262,15 @@ fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
             git(f.repo.path(), &["add", "next.rs"]);
             // Recorded graph attribution needs no message convention; older
             // tasks without a start boundary still have explicit task identity.
-            let message = if recorded_start { "new task work".into() } else { format!("{} new task work", next.id) };
+            let message = if matches!(binding, "current" | "previous-worker") { "new task work".into() } else { format!("{} new task work", next.id) };
             git(f.repo.path(), &["commit", "-qm", &message]);
             git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+            if binding == "previous-worker" {
+                // Commit capture on the new holder binds this task's work,
+                // even when an older runtime retained the previous start.
+                next.deliverables.factory_branch_anchor = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
+                tasks.update(&next).unwrap();
+            }
         }
         let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
         f.app.set_director_data_for_test(data);
@@ -262,12 +281,12 @@ fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
         let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         let ready: Vec<_> = prompts.iter().filter(|prompt| prompt.is_merge_ready()).collect();
         // pin: the director emits one merge action for current work and none for a preceding delivery.
-        assert_eq!(ready.len(), usize::from(new_work), "recorded_start={recorded_start}, new_work={new_work}; prior merged delivery={old_tip}; prompts={:?}", prompts.iter().map(|prompt| &prompt.text).collect::<Vec<_>>());
+        assert_eq!(ready.len(), usize::from(new_work), "binding={binding}, new_work={new_work}; prior merged delivery={old_tip}; prompts={:?}", prompts.iter().map(|prompt| &prompt.text).collect::<Vec<_>>());
         if let Some(prompt) = ready.first() {
             let evidence = prompt.merge_alert.as_ref().unwrap();
             assert_eq!(evidence.task_id, next.id);
             assert_eq!(evidence.factory_tip, git(f.repo.path(), &["rev-parse", "HEAD"]));
-            if recorded_start {
+            if binding == "current" {
                 // A source rebind to this tip withdraws readiness even when a
                 // durable READY receipt and successful probe already exist.
                 next.deliverables.factory_branch_start.as_mut().unwrap().base_sha = evidence.factory_tip.clone();

@@ -618,6 +618,47 @@ test("HUB-J5 message-only pairing sends without taking pane control (cas-d402)",
   });
 });
 
+test("HUB-J5 a revoked send keeps its text and draft and points to re-pairing (cas-5e60)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const composer = page.getByRole("textbox", { name: "Your message" });
+  const bubble = page.locator('.conversation-turn[data-state="error"]');
+  await journey.stage("A correlated revoked send names pairing while a new draft survives", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await composer.fill("Keep the refused message.");
+    const outbound = hub.nextSend();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    const sent = await outbound;
+    await composer.fill("Keep my newer draft too.");
+    // The real handler/wire regression supplies this actionable pairing detail;
+    // here the daemon-error route proves the shared failed-send projection.
+    hub.send(PELICAN, { Error: { client_ref: sent.client_ref, message: "This device's pairing is no longer accepted. Pair this device again, then retry." } });
+    await expect(bubble).toContainText("Keep the refused message.");
+    await expect(bubble.getByRole("status")).toContainText("Re-pair this device, then retry.");
+    await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toHaveCount(0);
+    await expect(composer).toHaveValue("Keep my newer draft too.");
+    await bubble.getByRole("button", { name: "Edit message", exact: true }).click();
+    await expect(composer).toHaveValue("Keep my newer draft too.");
+    await expect(page.locator("#message-status")).toContainText("Your draft already has text.");
+  });
+  await journey.stage("The header offers usable Re-pair while Edit still recovers the refused text", async () => {
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await page.clock.fastForward(1_000);
+    const repair = page.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true }).first();
+    await expect(repair).toBeVisible();
+    await expect(bubble.getByRole("status")).toContainText("pairing is no longer accepted");
+    await expect(bubble.getByRole("status")).not.toContainText("control");
+    await expect(composer).toHaveValue("Keep my newer draft too.");
+    await composer.fill("");
+    await bubble.getByRole("button", { name: "Edit message", exact: true }).click();
+    await expect(composer).toHaveValue("Keep the refused message.");
+    await repair.click();
+    await expect(page.locator("#pair-dialog")).toBeVisible();
+  });
+});
+
 test("HUB-J5 Send again delivers without taking pane control (cas-d402)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });

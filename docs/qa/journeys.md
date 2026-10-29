@@ -223,6 +223,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
+- A semantic send refused after device revocation names re-pairing, with no Take control action (cas-5e60). Missing message:send permission names the Send messages to supervisors grant. The refused text and a newer composer draft remain separate and recoverable; Edit never overwrites that draft, and the header's Re-pair opens pairing. Actual terminal lease refusals retain ownership guidance.
 - Once its edit is sent, a refused message cannot be retried.
 - A failed message never has to stay on screen: it can be dismissed or swiped away, and it is one tap to bring back.
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".

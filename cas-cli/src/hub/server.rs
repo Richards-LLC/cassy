@@ -2963,8 +2963,14 @@ async fn proxy_socket(
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal.")]
-struct PaneInputPermissionRequired;
+enum ClientPermissionRequired {
+    #[error("This device's pairing is no longer accepted. Pair this device again, then retry.")]
+    Pairing,
+    #[error("This device was paired without supervisor messages. Pair this device again with message:send to send messages.")]
+    MessageSend,
+    #[error("This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal.")]
+    PaneInput,
+}
 
 async fn handle_client_message(
     connector: &DaemonConnector,
@@ -2972,9 +2978,17 @@ async fn handle_client_message(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> anyhow::Result<()> {
-    let (store, context) = auth.as_ref().context("authentication required")?;
+    let (store, context) = auth.as_ref().ok_or(ClientPermissionRequired::Pairing)?;
     let now = chrono::Utc::now();
-    store.ensure_active_context(context, now)?;
+    store.ensure_active_context(context, now).map_err(|failure| {
+        // A failed store read has not judged the credential. Only a rejected
+        // active context proves that pairing again is the next step.
+        if failure.is::<super::AuthStoreUnavailable>() {
+            failure
+        } else {
+            failure.context(ClientPermissionRequired::Pairing)
+        }
+    })?;
     let mut message: ClientMessage = match serde_json::from_slice(bytes) {
         Ok(message) => message,
         Err(error) => {
@@ -3007,8 +3021,11 @@ async fn handle_client_message(
             Some(session),
             now,
         )?;
+        if scope == Scope::MessageSend && !context.has(scope) {
+            return Err(ClientPermissionRequired::MessageSend.into());
+        }
         if scope == Scope::PaneInput && !context.has(scope) {
-            return Err(PaneInputPermissionRequired.into());
+            return Err(ClientPermissionRequired::PaneInput.into());
         }
         anyhow::bail!("authorization refused")
     }
@@ -3669,11 +3686,12 @@ fn is_upstream_unavailable(failure: &anyhow::Error) -> bool {
 
 /// The legacy per-session socket's answer to a failed client message:
 /// `upstream_unavailable` (retryable, cas-a0e2) when the daemon upstream was
-/// missing, otherwise the unchanged `forbidden` refusal.
+/// missing. Pairing and message-scope refusals carry their actionable cause;
+/// a terminal lease refusal retains the legacy `forbidden` answer.
 fn legacy_send_error(failure: &anyhow::Error, client_ref: Option<&str>) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
         let mut error = legacy_forbidden_error(client_ref);
-        describe_pane_input_permission(failure, &mut error);
+        describe_client_permission(failure, &mut error, "error");
         return error;
     }
     let mut error = serde_json::json!({
@@ -3696,7 +3714,7 @@ fn multiplex_send_error(
 ) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
         let mut error = multiplex_forbidden_error(session, client_ref);
-        describe_pane_input_permission(failure, &mut error["error"]);
+        describe_client_permission(failure, &mut error["error"], "code");
         return error;
     }
     let mut error = serde_json::json!({
@@ -3713,11 +3731,18 @@ fn multiplex_send_error(
     error
 }
 
-/// Explain a missing terminal grant without changing the refusal code.
-fn describe_pane_input_permission(failure: &anyhow::Error, error: &mut serde_json::Value) {
-    if failure.is::<PaneInputPermissionRequired>() {
-        error["required_scope"] = serde_json::json!(Scope::PaneInput.as_str());
-        error["message"] = serde_json::json!(PaneInputPermissionRequired.to_string());
+/// Keep authorization's cause through either correlated socket envelope.
+fn describe_client_permission(failure: &anyhow::Error, error: &mut serde_json::Value, code_key: &str) {
+    let Some(permission) = failure.downcast_ref::<ClientPermissionRequired>() else { return; };
+    let (code, scope) = match permission {
+        ClientPermissionRequired::Pairing => ("pairing_required", None),
+        ClientPermissionRequired::MessageSend => ("message_send_required", Some(Scope::MessageSend)),
+        ClientPermissionRequired::PaneInput => ("forbidden", Some(Scope::PaneInput)),
+    };
+    error[code_key] = serde_json::json!(code);
+    error["message"] = serde_json::json!(permission.to_string());
+    if let Some(scope) = scope {
+        error["required_scope"] = serde_json::json!(scope.as_str());
     }
 }
 
@@ -4910,7 +4935,7 @@ mod upstream_unavailable_tests {
             let frame = if cause == "lease" {
                 serde_json::json!({"SupervisorCommand": {"command": "compact", "confirmed": false, "client_ref": "refused-send"}})
             } else {
-                serde_json::json!({"SendMessage": {"target": "supervisor", "text": "Keep this message", "summary": "Test", "urgent": false, "client_ref": "refused-send"}})
+                serde_json::json!({"SendMessage": {"target": "supervisor", "text": "Keep this message", "summary": "Test", "urgent": false, "client_ref": "refused-send", "attribution": MessageAttribution::default()}})
             };
             if cause == "revoked" {
                 auth.revoke_device(&context.device_id, now).unwrap();

@@ -337,22 +337,23 @@ fn recorded_delivery(repo: &Path, task: &Task) -> Option<Delivery> {
 }
 
 /// Whether a release of `epic` may treat its post-release check as a watch:
-/// the union of its children's recorded delivery diffs (start base to parked
-/// anchor, the same per-delivery file lists close uses) carries no migration
-/// and no secret-shaped line. No branch range is read, since every range
-/// moves once the epic merges into the release branch. An epic with no
-/// recorded children, or any child whose diff is unknown, keeps the gate.
+/// exactly what shipped carries no migration and no secret-shaped line. What
+/// shipped is the released SHA recorded by `cas qa post-release start --sha`
+/// for this epic, diffed as `<sha>^1..<sha>`: everything the release merge
+/// brought into its target, including direct supervisor commits and every
+/// child round. Only SHAs are read. No recorded released SHA, a SHA that is
+/// not a merge commit, a Git failure or an empty range keeps the gate.
 fn epic_release_clear(cas_root: &Path, epic: &Task) -> bool {
-    let (Some(repo), Ok(store)) = (cas_root.parent(), crate::store::open_task_store(cas_root)) else {
+    let (Some(repo), Ok(Some(receipt))) = (cas_root.parent(), crate::qa_post_release::load(cas_root, &epic.id)) else {
         return false;
     };
-    let Ok(children) = store.get_subtasks(&epic.id) else {
-        return false;
-    };
-    !children.is_empty()
-        && children
-            .iter()
-            .all(|child| recorded_delivery(repo, child).is_some_and(|delivery| floor_clear(&delivery, &[])))
+    let sha = receipt.sha.as_str();
+    let is_merge = git_text(repo, &["rev-list", "--parents", "-n", "1", sha, "--"])
+        .is_some_and(|line| line.split_whitespace().count() >= 3);
+    let first_parent = format!("{sha}^1");
+    is_merge
+        && diff_between(repo, &[first_parent.as_str(), sha, "--"])
+            .is_some_and(|shipped| !shipped.paths.is_empty() && floor_clear(&shipped, &[]))
 }
 
 /// The open window that makes `epic`'s post-release check a watch, if any.
@@ -691,31 +692,35 @@ mod tests {
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
-    /// A release cut in a window keeps the post-release run as a watch, not a
-    /// gate, unless the epic's change carries a migration.
+    /// A release cut in a window keeps the post-release run as a watch only
+    /// when what shipped (the recorded released merge) is clean; a direct
+    /// supervisor migration commit on the epic keeps the gate.
     #[test]
     fn window_makes_the_post_release_check_a_watch() {
-        let (dir, cas, store, mut delivery) = epic_fixture();
-        std::fs::write(
-            cas.join("config.toml"),
-            "[qa.post_release]\ncommand = \"echo healthy\"\nrelease_branches = [\"main\"]\n",
-        )
-        .unwrap();
-        // The epic's own work target is its lane, as factory epics record it.
-        let mut epic = store.get("cas-ep1c").unwrap();
-        epic.deliverables.work_target = Some(cas_types::WorkTarget {
-            repo_selector: "project:test".into(),
-            target_branch: "epic/hot".into(),
-        });
-        store.update(&epic).unwrap();
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (dir, cas, store, _delivery) = epic_fixture();
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
+        let epic = store.get("cas-ep1c").unwrap();
         let window = open(&cas, store.as_ref());
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none());
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "no recorded release keeps the gate");
+        let release = |dir: &Path| {
+            git(dir, &["checkout", "-q", "main"]);
+            git(dir, &["merge", "-q", "--no-ff", "-m", "release", "epic/hot"]);
+            let sha = git(dir, &["rev-parse", "HEAD"]);
+            git(dir, &["checkout", "-q", "epic/hot"]);
+            crate::qa_post_release::start(&cas, "cas-ep1c", &sha).unwrap();
+        };
+        release(dir.path());
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none(), "a clean release is a watch");
         assert_eq!(ledger(&cas, &window)[0].check, "post-release-gate");
-        deliver(dir.path(), store.as_ref(), &mut delivery, "migrations/002.sql", "alter table t add c int;\n");
-        // The gate runs after the release merge, when every branch range is empty.
-        git(dir.path(), &["checkout", "-q", "main"]);
-        git(dir.path(), &["merge", "-q", "--no-ff", "-m", "release", "epic/hot"]);
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "a released migration keeps the gate");
+        std::fs::create_dir_all(dir.path().join("db/migrate")).unwrap();
+        std::fs::write(dir.path().join("db/migrate/003_add.rb"), "class Add; end\n").unwrap();
+        git(dir.path(), &["add", "db/migrate/003_add.rb"]);
+        git(dir.path(), &["commit", "-q", "-m", "supervisor: direct migration"]);
+        release(dir.path());
+        assert!(
+            crate::qa_post_release::gate(&cas, &epic, true).is_some(),
+            "a direct supervisor migration in the release keeps the gate"
+        );
     }
 }

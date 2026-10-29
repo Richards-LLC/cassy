@@ -18,7 +18,7 @@ The mono source label anchors a compact tool strip; the violet pressed Wrap stat
 
 ## Deliberately omitted
 
-No Run action, hover-only controls, syntax palette or command inference: this frame owns reading and exact copying, while existing rich previews continue to own their content.
+No Run action, hover-only controls or command inference: this frame owns reading and exact copying, while rich previews own their content. Optional lazy source color extends this frame in [code-syntax.brief.md](code-syntax.brief.md).
 
 ## Implementation boundary
 

@@ -5,6 +5,41 @@ import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 vi.mock("pele/lazy", async (original) => ({ ...await original<typeof import("pele/lazy")>() }));
 
 describe("supervisor markdown subset", () => {
+  it("colors safe source lazily while preserving selection and oversized plain text", async () => {
+    const source = 'const message = "<script>&雪"; // keep source\r\nreturn true;';
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, `\`\`\`ts example.ts\n${source}\n\`\`\``));
+    document.body.append(root);
+    const code = root.querySelector("code")!;
+    expect(code.textContent).toBe(source);
+    expect(code.querySelector("span")).toBeNull();
+    const selection = document.getSelection()!;
+    selection.setBaseAndExtent(code.firstChild!, 35, code.firstChild!, 6);
+    const selected = selection.toString();
+    await vi.waitFor(() => expect(root.querySelector('[data-syntax-state="ready"]')).not.toBeNull());
+    expect(code.querySelector('.syntax-keyword')?.textContent).toBe("const");
+    expect(code.querySelector('.syntax-string')?.textContent).toBe('"<script>&雪"');
+    expect(code.querySelector('.syntax-comment')?.textContent).toBe("// keep source");
+    expect(code.textContent).toBe(source);
+    expect(root.querySelector("script")).toBeNull();
+    expect(selection.toString()).toBe(selected);
+    const offsets = [selection.anchorNode!, selection.focusNode!].map((node, index) => {
+      const range = document.createRange(); range.selectNodeContents(code);
+      range.setEnd(node, index === 0 ? selection.anchorOffset : selection.focusOffset);
+      return range.toString().length;
+    });
+    expect(offsets).toEqual([35, 6]);
+    root.querySelector<HTMLButtonElement>('[data-action="wrap"]')!.click();
+    expect(selection.toString()).toBe(selected);
+    selection.removeAllRanges();
+    root.remove();
+    const large = "const a = 1;\n".repeat(4000);
+    root.replaceChildren(...renderMarkdown(document, `\`\`\`js\n${large}\n\`\`\``));
+    await vi.waitFor(() => expect(root.querySelector('[data-syntax-state="plain"]')).not.toBeNull());
+    expect(root.querySelector("code")!.textContent).toBe(large);
+    expect(root.textContent).toContain("Plain text · source too large to color");
+  });
+
   it("copies literal fence source with honest feedback and wraps each block independently", async () => {
     const source = '\tconst literal = "<script>&amp;雪";  \r\n\r\n  done();';
     const writeText = vi.fn().mockResolvedValue(undefined);

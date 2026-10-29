@@ -761,7 +761,7 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
 #[tokio::test(flavor = "current_thread")]
 async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let Fixture { _dir, mut daemon, request_id, pids } = processed_but_unexecuted_shutdown();
+    let Fixture { _dir, mut daemon, pids, .. } = processed_but_unexecuted_shutdown();
     let cas_dir = daemon.app.cas_dir().to_path_buf();
     register_idle_worker(&cas_dir, "already-dead");
     let agents = open_agent_store(&cas_dir).unwrap();
@@ -775,17 +775,23 @@ async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
     daemon.enqueue_spawn_requests().unwrap();
     let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
     let blocker = std::thread::spawn(move || {
         let _connection = shared.lock().unwrap();
         held_tx.send(()).unwrap();
-        std::thread::sleep(super::store_worker::SHUTDOWN_STORE_WAIT_BUDGET * 2 + Duration::from_millis(500));
+        release_rx.recv().unwrap();
     });
     held_rx.recv().unwrap();
     {
         let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
         daemon.process_pending_spawns().await;
     }
+    release_tx.send(()).unwrap();
     blocker.join().unwrap();
+    assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas_dir, request).0
+        .is_some_and(|state| SpawnLifecycleState::from_str(&state).is_some_and(|state| state.is_terminal()))));
+    let (state, detail) = shutdown_row_state(&cas_dir, request);
+    assert_eq!(state.as_deref(), Some(SpawnLifecycleState::Stopped.as_str()), "mixed batch: {detail:?}");
     for (name, pid) in &pids {
         assert!(wait_until(Duration::from_secs(5), || !alive(*pid)), "{name} must stop despite pooled contention");
         assert!(!daemon.app.worker_names().contains(name), "{name} must leave the roster");
@@ -793,10 +799,6 @@ async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
     assert!(wait_until(Duration::from_secs(15), || names.iter().all(|name| {
         agents.get(&format!("agent-{name}")).is_ok_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
     })), "all identities retire after the writer releases the connection");
-    assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas_dir, request).0
-        .is_some_and(|state| SpawnLifecycleState::from_str(&state).is_some_and(|state| state.is_terminal()))));
-    let (state, detail) = shutdown_row_state(&cas_dir, request);
-    assert_eq!(state.as_deref(), Some(SpawnLifecycleState::Stopped.as_str()), "mixed batch: {detail:?}; superseded fixture request {request_id}");
     for name in names {
         assert!(detail.as_deref().unwrap().contains(&name), "each outcome must be recorded: {detail:?}");
     }

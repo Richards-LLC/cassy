@@ -3320,7 +3320,10 @@ as a START CONTEXT task note before budgeting. An unchanged latest context reuse
 its note and cursor; transient claim/lease text stays in the start response.
 Warnings take precedence over scope, notes and recall; an oversized warning block
 is replaced by an explicit instruction to read its saved note before acting.
-The start response gives a byte cursor into `task notes` and a full-notes path.
+The start response gives a `task notes offset=0` paging path (follow `next=` to
+`end` and read the latest `START CONTEXT`) and a full-notes path. It never gives a tail cursor from the
+start snapshot: Cloud reconciliation can reorder note blocks before the next
+read, making that cursor invalid or hiding the saved instructions.
 Default show retains Type and Demo for builtin gates, and names full-only sections
 (including dependencies, design, deliverables and terminal outcomes) explicitly.
 

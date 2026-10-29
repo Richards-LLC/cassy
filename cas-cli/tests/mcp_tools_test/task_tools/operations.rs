@@ -321,7 +321,7 @@ async fn task_read_default_show_preserves_gate_inputs() {
 /// Complete start-only guidance must survive default reads and later full reads.
 #[tokio::test]
 async fn task_read_default_start_preserves_complete_advisories() {
-    for case in ["qa-blockers", "qa-overflow", "unanchored", "parked", "recalled-markers", "restart", "parent-worktree"] {
+    for case in ["qa-blockers", "qa-overflow", "unanchored", "parked", "recalled-markers", "restart", "parent-worktree", "synced-history"] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
         let cas_dir = temp.path().join(".cas");
@@ -388,10 +388,15 @@ canonical_id = "start-read-fixture"
                 "cas cloud purge-foreign".into(),
                 "foreign rows and re-pull.".into(),
             ];
-        } else if matches!(case, "recalled-markers" | "restart" | "parent-worktree") {
+        } else if matches!(case, "recalled-markers" | "restart" | "parent-worktree" | "synced-history") {
             task.assignee = Some("test-agent".into());
             task.origin_project = Some("start-read-fixture".into());
-            task.notes.clear();
+            if case == "synced-history" {
+                task.notes = "🧪".repeat(11000);
+                task.execution_note = Some("no-code".into());
+            } else {
+                task.notes.clear();
+            }
             store.add(&task).unwrap();
             if case == "recalled-markers" {
                 let mut memory = cas::types::Entry::new(
@@ -423,6 +428,8 @@ Keep reading.".into(),
                     task.id.clone(), parent.id, cas::types::DependencyType::ParentChild,
                 )).unwrap();
                 required = vec![format!("Work in directory: {}", temp.path().display())];
+            } else if case == "synced-history" {
+                required = vec!["No-code close requirement".into()];
             } else {
                 required = vec![];
             }
@@ -469,6 +476,18 @@ Keep reading.".into(),
         };
         let started = extract_text(service.task(request("start", false)).await.unwrap());
         assert!(started.len() <= 2_000, "{case}: {} bytes", started.len());
+        if case == "synced-history" {
+            // Cloud reconciliation places timestamped notes before undated
+            // history. Model that committed store change between the real
+            // start and notes requests (cas-0f4a).
+            let mut synced = store.get(&task.id).unwrap();
+            let (history, advisory) = synced.notes.split_once("\n\n[").unwrap();
+            synced.notes = format!("[{advisory}\n\n{history}");
+            store.update(&synced).unwrap();
+            service.task(Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+                serde_json::json!({"action": "notes", "id": task.id, "notes": "Later Unicode checkpoint α🧪"})
+            ).unwrap())).await.unwrap();
+        }
         let mut recovered = extract_text(service.task(request("notes", true)).await.unwrap());
         if case == "recalled-markers" {
             assert!(recovered.contains("m-start-instructions"), "recall fixture missed: {recovered}");
@@ -534,6 +553,10 @@ Keep reading.".into(),
             );
         }
         for instruction in required {
+            assert!(
+                paged.contains(&instruction),
+                "{case}: advertised pages must recover start instructions: {instruction}"
+            );
             assert!(
                 recovered.contains(&instruction),
                 "{case}: start-only instruction unreachable: {instruction}\n{started}"

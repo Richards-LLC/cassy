@@ -13,6 +13,7 @@ import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./co
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind, SessionEndOutcome } from "./types";
 import type { WorkEvent } from "./work-events";
+import type { PhaseLine } from "./live-phase";
 import { renderWork, workSignature, type WorkRowsContext } from "./work-rows-view";
 import {
   cellTone,
@@ -108,6 +109,8 @@ export interface ConversationViewOptions {
   accentClass?: string;
   /** True while the supervisor is executing: paints the working line. */
   working?: () => boolean;
+  /** Daemon-owned phase facts; a clock here only changes their display. */
+  phase?: () => PhaseLine | undefined;
   /**
    * Render the thread's own header. Inside the conversation shell the shell
    * supplies the single Pebble header (conversationHeaderMarkup), so main.ts
@@ -503,6 +506,8 @@ export class ConversationView {
   private disposed = false;
   private updateRequest?: object;
   private resize?: ResizeObserver;
+  private phase?: PhaseLine;
+  private phaseClock?: ReturnType<typeof setInterval>;
 
   constructor(document: Document, private history: ConversationHistory, options: ConversationViewOptions | string, editMessage?: (text: string) => void) {
     this.options = typeof options === "string" ? { supervisor: options, editMessage } : options;
@@ -711,7 +716,9 @@ export class ConversationView {
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
     const ended = this.options.sessionEnd?.();
-    const working = !ended && this.options.working?.() === true;
+    this.phase = ended ? undefined : this.options.phase?.();
+    const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
+    if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -1284,14 +1291,27 @@ export class ConversationView {
     // (threadModel), so it is not a flip to repaint for.
     const newest = this.history.visibleEvents().at(-1);
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
-    const working = this.options.working?.() === true && !sending;
-    if (working !== this.nodes.has("working")) this.update();
+    const phase = this.options.phase?.();
+    const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
+    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
+    if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
+    else {
+      const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+      if (clock && phase?.elapsed !== undefined) clock.textContent = phase.elapsed;
+    }
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
     const rows = this.options.workRows;
-    const signature = item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
-    if (node.dataset.signature === signature) return;
+    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined])
+      : item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
+    if (node.dataset.signature === signature) {
+      if (item.type === "working") {
+        const clock = node.querySelector(".phase-clock");
+        if (clock && this.phase?.elapsed !== undefined) clock.textContent = this.phase.elapsed;
+      }
+      return;
+    }
     node.dataset.signature = signature;
     switch (item.type) {
       case "day": node.className = "day"; node.textContent = item.label; return;
@@ -1323,11 +1343,24 @@ export class ConversationView {
   private renderWorking(node: HTMLElement): void {
     const document = node.ownerDocument;
     node.className = "turn working-turn";
-    const line = document.createElement("div"); line.className = "working"; line.setAttribute("role", "status");
+    const phase = this.phase;
+    const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
+    if (phase) line.dataset.active = String(phase.active);
     const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-    line.append(dots, document.createTextNode("working"));
+    line.append(dots, document.createTextNode(phase?.label ?? "working"));
+    if (phase?.elapsed !== undefined) {
+      const clock = document.createElement("span"); clock.className = "phase-clock"; clock.setAttribute("role", "timer"); clock.setAttribute("aria-live", "off"); clock.textContent = phase.elapsed;
+      line.append(document.createTextNode(" · "), clock);
+    }
     node.replaceChildren(line);
+    if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
+      this.phaseClock = setInterval(() => {
+        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+        const current = this.options.phase?.();
+        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
+      }, 1000);
+    }
   }
 
   /**
@@ -1801,7 +1834,7 @@ export class ConversationView {
     });
   }
 
-  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
+  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */

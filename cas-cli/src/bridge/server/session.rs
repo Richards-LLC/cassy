@@ -149,6 +149,12 @@ pub(crate) fn build_status_json(
 
     let mut status = StatusJson {
         schema_version: 1,
+        supervisor_phase: crate::ui::factory::daemon::runtime::work_events::supervisor_phase_for_session(
+            cas_root,
+            std::path::Path::new(session.metadata.project_dir.as_deref().unwrap_or(".")),
+            &session.name,
+            &session.metadata.supervisor.name,
+        ),
         session: session_json(session),
         prompt_queue_pending: pending,
         activity,

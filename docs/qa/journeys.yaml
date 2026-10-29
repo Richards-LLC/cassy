@@ -316,6 +316,9 @@ invariants:
   HUB-J25-TYPED-TOOL-EVIDENCE:
     statement: A work row names its read, search, command or edit scope, makes failures explicit, and opens operation-specific metadata with exact readable raw evidence; unknown tools remain raw and live updates preserve focus and expansion.
     check: Run the typed work renderer case in work-picture.test.ts and the Read typed work scope stage of HUB-J25 against the production bundle; open each operation and an unknown tool by keyboard and verify metadata, exact output, named failure and stable focus through a same-ID update.
+  HUB-J25-LIVE-PHASE:
+    statement: The conversation phase and duration come from the selected supervisor's v2 lifecycle. Waiting, stale, disconnected and completed boundaries never animate; missing start times never become guessed elapsed durations. Show work remains opt-in.
+    check: Run the live phase parts of HUB-J25 at desktop and390 with forced colors/reduced motion and compare the real candidate's phase/start/end with its transcript lifecycle; run native work_events tests and conversation-view tests. Missing harness phases stay unreported.
   HUB-J22-GOAL:
     statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
@@ -2058,8 +2061,7 @@ journeys:
     trigger: '`/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a
       thread with work between two replies, and one worker on a task'
   steps:
-  - Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is
-    read
+  - Show work is off — replies and the reported phase remain visible, no work row shows and no work page is read
   - Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and
     its rows not; a worker's own tool call stays in its timeline
   - Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand
@@ -2078,6 +2080,7 @@ journeys:
   - commander_dependencies
   owners:
   - hub-web/src/work-events.ts
+  - hub-web/src/live-phase.ts
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
   - hub-web/src/work-rows.brief.md
@@ -2092,6 +2095,7 @@ journeys:
   invariants:
   - HUB-J25-GOAL
   - HUB-J25-TYPED-TOOL-EVIDENCE
+  - HUB-J25-LIVE-PHASE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

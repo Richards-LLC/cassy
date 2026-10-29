@@ -151,6 +151,16 @@ does not interpret JavaScript or shell scripts to guess their inner operations.
 No adapter invents setup, approval waiting, completion or file changes from
 prose. Some harness versions do not publish every phase; absence is unknown.
 
+Session status also carries optional `supervisor_phase`: the selected supervisor's
+latest lifecycle, kind, event identity, observation time and stale flag, without
+labels, tool input/output or reasoning. It uses the same incremental v2 adapter.
+Commander can display this while Show work is off, through the existing status
+event invalidation. Its local clock advances from the observed server duration,
+freezes for stale/disconnected snapshots and stops at an explicit end. A missing
+start reports no duration; a completed compaction boundary never becomes a live
+compaction interval. An explicit unresolved operator ask can show Waiting on you
+without inventing its start time.
+
 All new text passes the same redactor as labels/details. Lists and strings are
 bounded. The hub validates correlation using the shared protocol and forwards
 the original frame bytes, preserving optional fields through mixed versions.

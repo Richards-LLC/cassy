@@ -232,8 +232,8 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     }
     let capture = |side: &str| serde_json::json!({
         "png": format!("{side}.png"), "jpg": format!("{side}.jpg"),
-        "sha256": cas::deliverable::pairs::digest(&pairs_dir.join(format!("{side}.png"))).unwrap(),
-        "jpg_sha256": cas::deliverable::pairs::digest(&pairs_dir.join(format!("{side}.jpg"))).unwrap()
+        "sha256": cas::artifacts::digest_file(&pairs_dir.join(format!("{side}.png"))).unwrap().0,
+        "jpg_sha256": cas::artifacts::digest_file(&pairs_dir.join(format!("{side}.jpg"))).unwrap().0
     });
     std::fs::write(pairs_dir.join("pairs.json"), serde_json::json!({
         "schema": 1, "task_id": TASK, "head_sha": head,

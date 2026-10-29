@@ -388,12 +388,28 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         published.notes
     );
     published.origin_project = Some("qa-peer-project".into());
+    // One invalid owner snapshot must neither suppress later good snapshots
+    // for this delivery nor abort the rest of a personal/team pull batch.
+    let mut invalid: serde_json::Value = serde_json::from_str(
+        published
+            .notes
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("QA_PASS_PROOF: "))
+            .unwrap(),
+    )
+    .unwrap();
+    invalid["pass"]["id"] = "qapass-invalid".into();
+    invalid["pass"]["reviewer_agent_id"] = invalid["pass"]["implementer_agent_id"].clone();
+    published.notes = format!("QA_PASS_PROOF: {invalid}\n\n{}", published.notes);
+    let mut later_task = cas::types::Task::new("cas-later-row".into(), "Unrelated next row".into());
+    later_task.origin_project = published.origin_project.clone();
     published.updated_at += chrono::Duration::hours(1);
     for endpoint in ["/api/sync/pull", "/api/teams/qa-peer-team/sync/pull"] {
         Mock::given(method("GET"))
             .and(path(endpoint))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tasks": [published], "pulled_at": "2026-10-28T12:00:00Z",
+                "tasks": [published, later_task], "pulled_at": "2026-10-28T12:00:00Z",
                 "team_id": "qa-peer-team", "status": "ok"
             })))
             .mount(&server)
@@ -483,7 +499,17 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
             )
         }
         .unwrap();
-        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(
+            result.errors[0].contains("qapass-invalid"),
+            "{:?}",
+            result.errors
+        );
+        assert_eq!(
+            tasks.get("cas-later-row").unwrap().title,
+            "Unrelated next row"
+        );
+        assert!(!tasks.get(TASK).unwrap().notes.contains("qapass-invalid"));
         if newer_local {
             assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata");
         }
@@ -523,6 +549,51 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
                 .unwrap()
                 .as_secs(),
             captured_at
+        );
+        // A second real close with the same immutable closure must reuse its
+        // validated restore location instead of leaving another copy behind.
+        let restored = PathBuf::from(restored);
+        let mut retry = tasks.get(TASK).unwrap();
+        retry.status = TaskStatus::AwaitingMerge;
+        retry.closed_at = None;
+        tasks.update(&retry).unwrap();
+        let closed_again = close_text(&peer_core, TASK).await;
+        assert_eq!(
+            tasks.get(TASK).unwrap().status,
+            TaskStatus::Closed,
+            "{closed_again}"
+        );
+        let restored_again = tasks
+            .get(TASK)
+            .unwrap()
+            .notes
+            .lines()
+            .rev()
+            .find_map(|line| line.split_once("QA evidence bundle accepted: "))
+            .unwrap()
+            .1
+            .split(" (head ")
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(Path::new(&restored_again), restored);
+        let restore_root = restored
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(restore_root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("qa-restored-"))
+                .count(),
+            1
         );
         let rounds = cas_store::list_qa_passes(&root, TASK).unwrap();
         assert_eq!(rounds.len(), 1, "the peer must retain the existing round");

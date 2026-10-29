@@ -631,6 +631,78 @@ mod tests {
     }
 
     #[test]
+    fn real_qa_craft_parts_manifest_exports_only_declared_files() {
+        let f = fixture();
+        // Original closed cas-abb7 bundle, retained verbatim as regression
+        // input. Only the task binding changes for this isolated store.
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/qa-parts-bundle.json"))
+                .unwrap();
+        manifest["task_id"] = "cas-b72a".into();
+        let dir = f.task_dir.join("qa");
+        fs::create_dir_all(&dir).unwrap();
+        let files = &manifest["files"];
+        let mut declared = Vec::new();
+        for key in [
+            "trace",
+            "trace_actions",
+            "receipt",
+            "aria_yaml",
+            "aria_json",
+            "visual_qa",
+            "visual_qa_json",
+            "visual_qa_stdout",
+            "critique",
+        ] {
+            declared.push(files[key].as_str().unwrap());
+        }
+        for key in ["cells", "a11y", "polish_screenshots"] {
+            declared.extend(
+                files[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|path| path.as_str().unwrap()),
+            );
+        }
+        for part in files["parts"].as_array().unwrap() {
+            for key in ["receipt", "aria_yaml", "aria_json"] {
+                declared.push(part[key].as_str().unwrap());
+            }
+        }
+        for path in declared {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture capture").unwrap();
+        }
+        let source = dir.join("bundle.json");
+        fs::write(&source, manifest.to_string()).unwrap();
+        let (_temp, closure) = qa::prepare(&f.context(), &source).unwrap().unwrap();
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+            fs::File::open(closure).unwrap(),
+        ));
+        let paths: Vec<_> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect();
+        assert_eq!(
+            paths.len(),
+            54,
+            "53 actual declared files plus the original manifest"
+        );
+        assert!(paths.contains(&PathBuf::from(
+            "qa/parts/paste-content-390-dark-04eda936cd96b5e5/receipt.webm"
+        )));
+        assert!(paths.contains(&PathBuf::from("qa/bundle.json")));
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("PASS"))
+        );
+    }
+
+    #[test]
     fn a_path_outside_the_roots_is_refused_before_anything_is_hashed() {
         let f = fixture();
         let outside = f._dir.path().canonicalize().unwrap().join("stray.pdf");

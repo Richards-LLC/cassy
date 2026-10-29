@@ -21,3 +21,21 @@ it("keeps the newer phase after slow-then-fast status reads, including an older 
   await refresh.request("machine:session", async () => { throw new Error("current read"); }, received, failed);
   expect(failed).toHaveBeenCalledOnce();
 });
+
+it("publishes a completed status while a newer slow read is still pending", async () => {
+  const refresh = new StatusRefresh();
+  let phase = "not reported";
+  const received = (value: string) => { phase = value; };
+  const failed = vi.fn();
+  let finishFirst!: (value: string) => void;
+  let finishNext!: (value: string) => void;
+  const first = refresh.request("machine:session", () => new Promise<string>(resolve => { finishFirst = resolve; }), received, failed);
+  const next = refresh.request("machine:session", () => new Promise<string>(resolve => { finishNext = resolve; }), received, failed);
+  finishFirst("Compacting");
+  await first;
+  expect(phase).toBe("Compacting");
+  finishNext("Compacted");
+  await next;
+  expect(phase).toBe("Compacted");
+  expect(failed).not.toHaveBeenCalled();
+});

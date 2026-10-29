@@ -823,6 +823,7 @@ sleep 2
         scoped_files = {line.removeprefix("SCOPE release-notes-draft ")
                         for line in receipt.read_text().splitlines() if line.startswith("SCOPE release-notes-draft ")}
         self.assertEqual(scoped_files, {path, other})
+        # pin: both receipt readers require the terminal scope-completion protocol.
         self.assertTrue(receipt.read_text().endswith("scope complete count=2\n"), receipt.read_text())
         failed = receipt.read_bytes()
         record = dict(schema=1, task_id="cas-fixture", head=head, check="release-notes-draft",

@@ -1179,6 +1179,12 @@ async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
     let f = fixture(&mut env, "main");
     let repo = f.cas_dir().join("worktrees").join(WORKER);
     let file = "docs/release-notes/history-slack.md";
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("receipt-factory".into());
+        agents.update(&agent).unwrap();
+    }
     std::fs::create_dir_all(repo.join("scripts")).unwrap();
     std::fs::create_dir_all(repo.join("docs/release-notes")).unwrap();
     std::fs::write(repo.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
@@ -1253,8 +1259,7 @@ async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
         let refused = call(&f.worker, close.clone()).await;
         assert!(refused.contains("FAST ROWS REQUIRED"), "{approver} {role:?} {status:?}: {refused}");
     }
-    // register restores the absent session too (update preserves None).
-    agents.register(&supervisor).unwrap();
+    agents.update(&supervisor).unwrap();
     std::fs::write(&issued_path, issued).unwrap();
 
     // A changed failure set on the same SHA invalidates the approval too.

@@ -703,14 +703,12 @@ pub(crate) fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> Stri
         return queued.prompt.clone();
     }
     use crate::mcp::tools::service::agent_search_system::message::{
-        commander_reply_command, first_message_provenance,
+        commander_reply_framing, first_message_provenance,
     };
     format!(
         "{}\n{}\n{}",
         first_message_provenance(queued),
-        commander_reply_command(queued)
-            .map(|command| format!("Reply with: `{command}`"))
-            .unwrap_or_default(),
+        commander_reply_framing(queued).unwrap_or_default(),
         queued.prompt,
     )
 }
@@ -9372,10 +9370,9 @@ impl FactoryDaemon {
                     &queued
                 ),
                 supervisor_lane.map_or("", |lane| lane.label()),
-                crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
+                crate::mcp::tools::service::agent_search_system::message::commander_reply_framing(
                     &queued,
                 )
-                .map(|command| format!("Reply with: `{command}`"))
                 .unwrap_or_default(),
                 prompt_with_instructions,
             );

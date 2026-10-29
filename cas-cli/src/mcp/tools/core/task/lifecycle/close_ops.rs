@@ -19628,7 +19628,9 @@ fn update_close_snapshot_preserving_notes(
             Err(error @ cas_store::StoreError::Other(_)) if attempt < 2 => {
                 let current = task_store.get(&expected.id)?;
                 if !only_notes_changed(&baseline, &current)
-                    || !current.notes.starts_with(&baseline.notes)
+                    || !current.notes.strip_prefix(&baseline.notes).is_some_and(|suffix| {
+                        baseline.notes.is_empty() || suffix.starts_with("\n\n")
+                    })
                 {
                     return Err(error);
                 }

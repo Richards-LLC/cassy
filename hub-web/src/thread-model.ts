@@ -354,13 +354,31 @@ export interface EvidenceTable {
   rows: string[][];
 }
 
-export type MessageBlock = { type: "text"; text: string } | { type: "table"; table: EvidenceTable };
+export type MessageBlock = { type: "text"; text: string } | { type: "table"; table: EvidenceTable; source: string };
 
-const TABLE_ROW = /^\s*\|.*\|\s*$/;
-const TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+/** Outside pipes must be real delimiters, never escaped cell content. */
+function splitCells(line: string): string[] | undefined {
+  const source = line.trim();
+  if (!source.startsWith("|")) return undefined;
+  const cells: string[] = [];
+  let cell = "";
+  let lastDelimiter = false;
+  for (let index = 1; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (char === "\\" && source[index + 1] === "\\") {
+      cell += "\\\\"; index += 1; lastDelimiter = false;
+    } else if (char === "\\" && source[index + 1] === "|") {
+      cell += "|"; index += 1; lastDelimiter = false;
+    } else if (char === "|") {
+      cells.push(cell.trim()); cell = ""; lastDelimiter = true;
+    } else { cell += char; lastDelimiter = false; }
+  }
+  return lastDelimiter ? cells : undefined;
+}
 
-function splitCells(line: string): string[] {
-  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+/** CSV consumes displayed cell text, keeping embedded newlines and Unicode. */
+export function tableCsv(rows: string[][]): string {
+  return rows.map(row => row.map(cell => /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell).join(",")).join("\r\n");
 }
 
 /**
@@ -394,19 +412,22 @@ export function messageBlocks(message: string): MessageBlock[] {
       appendTextLine(index);
       continue;
     }
-    if (!TABLE_ROW.test(line)) { appendTextLine(index); continue; }
+    if (!splitCells(line)) { appendTextLine(index); continue; }
     const rows: string[][] = [];
     let header: string[] | undefined;
-    while (index < lines.length && TABLE_ROW.test(lines[index]!)) {
-      const current = lines[index]!;
-      if (TABLE_RULE.test(current)) { if (rows.length === 1 && header === undefined) header = rows.pop(); }
-      else rows.push(splitCells(current));
+    const start = index;
+    while (index < lines.length) {
+      const cells = splitCells(lines[index]!);
+      if (!cells) break;
+      if (cells.every(cell => /^:?-{2,}:?$/.test(cell))) { if (rows.length === 1 && header === undefined) header = rows.pop(); }
+      else rows.push(cells);
       index += 1;
     }
+    const source = parts.slice(start * 2, index * 2 - 1).join("");
     index -= 1;
     if (rows.length === 0 && header === undefined) continue;
     flushText();
-    blocks.push({ type: "table", table: { header, rows } });
+    blocks.push({ type: "table", table: { header, rows }, source });
   }
   flushText();
   return blocks;

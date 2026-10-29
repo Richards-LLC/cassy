@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ConversationHistory, type ConversationEvent } from "./conversation-history";
-import { blockerEvidence, cellTone, clockLabel, coalesceText, dayLabel, foldsAsStatus, messageBlocks, shownTimes, stampLabel, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
+import { blockerEvidence, cellTone, clockLabel, coalesceText, dayLabel, foldsAsStatus, messageBlocks, shownTimes, stampLabel, tableCsv, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 
@@ -206,13 +206,24 @@ describe("messageBlocks", () => {
     const blocks = messageBlocks("Yes — pass two is green. Every pack:\n\n| pack | cases | result |\n| --- | ---: | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |\n\nTagged and pushed.");
     expect(blocks).toEqual([
       { type: "text", text: "Yes — pass two is green. Every pack:" },
-      { type: "table", table: { header: ["pack", "cases", "result"], rows: [["core", "412", "pass"], ["cli", "318", "1 flake"]] } },
+      { type: "table", table: { header: ["pack", "cases", "result"], rows: [["core", "412", "pass"], ["cli", "318", "1 flake"]] }, source: "| pack | cases | result |\n| --- | ---: | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |" },
       { type: "text", text: "Tagged and pushed." },
     ]);
   });
   it("treats a table without a rule as body rows and leaves plain prose alone", () => {
-    expect(messageBlocks("| a | b |\n| c | d |")).toEqual([{ type: "table", table: { header: undefined, rows: [["a", "b"], ["c", "d"]] } }]);
+    expect(messageBlocks("| a | b |\n| c | d |")).toEqual([{ type: "table", table: { header: undefined, rows: [["a", "b"], ["c", "d"]] }, source: "| a | b |\n| c | d |" }]);
     expect(messageBlocks("just | a pipe in prose")).toEqual([{ type: "text", text: "just | a pipe in prose" }]);
+  });
+  it("keeps escaped pipes in cells and fenced pipe rows in source", () => {
+    const fenced = "````md\r\n| fenced | source |\r\n```\r\n| still | source |\r\n````";
+    const blocks = messageBlocks(`${fenced}\r\n\r\n| command | result |\r\n| --- | --- |\r\n| \`a\\|b\` | pass |\r\n| end\\| | ok |`);
+    expect(blocks[0]).toEqual({ type: "text", text: fenced });
+    expect(blocks[1]).toMatchObject({ type: "table", table: { header: ["command", "result"], rows: [["`a|b`", "pass"], ["end|", "ok"]] } });
+    expect(messageBlocks("~~~\n| not | a table |\n")).toEqual([{ type: "text", text: "~~~\n| not | a table |\n" }]);
+  });
+  it("quotes CSV delimiters, quotes and line breaks without changing cell values", () => {
+    expect(tableCsv([["name", "note"], ['雪, report', 'said "ready"\nnext line'], ["", "pass"]]))
+      .toBe('name,note\r\n"雪, report","said ""ready""\nnext line"\r\n,pass');
   });
   it("tones result cells", () => {
     expect(cellTone("pass")).toBe("pass"); expect(cellTone("1 flake")).toBe("flake"); expect(cellTone("failed")).toBe("fail"); expect(cellTone("412")).toBeUndefined();

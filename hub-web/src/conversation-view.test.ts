@@ -386,12 +386,38 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | **412** | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
     const table = view.element.querySelector<HTMLElement>(".evi")!;
     expect(table.dataset.columns).toBe("3");
+    expect(table.querySelector("table tbody")).not.toBeNull();
     expect(table.querySelectorAll(".evi-row")).toHaveLength(3);
-    expect(table.querySelector(".evi-head span")?.textContent).toBe("pack");
+    expect(table.querySelector("thead th[scope=col]")?.textContent).toBe("pack");
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");
-    expect([...table.querySelectorAll('.evi-number[role="cell"]')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
+    expect([...table.querySelectorAll('td.evi-number')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
+  });
+  it("copies original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async () => {
+    const markdown = '| item | note | result |\r\n| --- | --- | --- |\r\n| `a\\|b` | said "ready", now | **pass** |';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { Reflect.deleteProperty(navigator, "clipboard"); });
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "answer", markdown), at(9, 30)); view.update();
+    const table = view.element.querySelector<HTMLElement>(".evi")!;
+    const buttons = [...table.querySelectorAll<HTMLButtonElement>("button")];
+    buttons.find(button => button.textContent === "Copy Markdown")!.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("Markdown copied"));
+    expect(writeText).toHaveBeenLastCalledWith(markdown);
+    const csv = buttons.find(button => button.textContent === "Copy CSV")!;
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
+    expect(writeText).toHaveBeenLastCalledWith('item,note,result\r\na|b,"said ""ready"", now",pass');
+    writeText.mockRejectedValueOnce(new Error("Permission denied"));
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toContain("Copy failed"));
+    expect(csv.disabled).toBe(false);
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
+    view.dispose();
   });
   it("renders markdown bodies in the thread and a plain-text waiting bookmark", () => {
     const unregister = registerTurnRenderer("ask", (_reply, context) => {

@@ -89,6 +89,10 @@ invariants:
     statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, and wide tables scroll inside the message without widening the page.
     check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
     bug: {task: cas-8bb3}
+  HUB-J4-TABLE-COPY:
+    statement: Evidence uses native table headers and cells, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
+    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts; read back both clipboard formats, verify commas and quotes, long paths at desktop/phone in both schemes, and headerless empty cells. thread-model.test.ts covers CSV newline quoting.'
+    task: cas-0952
   HUB-J4-MESSAGE-HIERARCHY:
     statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
@@ -648,6 +652,7 @@ journeys:
   - HUB-J4-GOAL
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-READABLE-PROSE-TABLES
+  - HUB-J4-TABLE-COPY
   - HUB-J4-MESSAGE-HIERARCHY
   traffic:
     share_pct: null

@@ -2107,19 +2107,25 @@ dialog form > *,
 .thread .coalesce p + p { margin-top: 6px; }
 .thread .coalesce-expand { min-height: 32px; padding: 0 14px; border: var(--line-width) solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
 .thread .coalesce-expand[hidden] { display: none; }
-/* Intrinsic columns keep words whole in every table shape; the sheet scrolls
-   when their minimum widths exceed the message. Only evidence uses mono. */
-.thread .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; max-width: 100%; overflow-x: auto; }
-.thread .evi-body { display: table; width: 100%; border-collapse: collapse; }
-.thread .evi-row { display: table-row; font: var(--weight-regular) 12.5px/1.45 var(--font-ui); }
-.thread .evi-row > span { display: table-cell; padding: 4px 0 4px 14px; vertical-align: top; text-align: left; overflow-wrap: normal; word-break: normal; }
-.thread .evi-row > span:first-child { padding-left: 0; }
-.thread .evi :is(.markdown-inline-code, .markdown-link) { overflow-wrap: normal; word-break: normal; }
-.thread .evi-row > .evi-number { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.thread .evi-head { color: var(--ink-mid); font-size: 11.5px; }
+/* Native semantics retain column associations; only the reading well scrolls. */
+.thread .evi { background: var(--sheet-bg); color: var(--ink); border-radius: var(--radius-pane); padding: var(--space-3); margin-top: var(--space-3); max-width: 100%; min-width: 0; }
+.thread .evi-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-2); }
+.thread .evi-actions button { min-height: var(--button-height); padding-inline: var(--space-2); background: var(--sheet-bg); color: var(--ink); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+.thread .evi-scroll { max-width: 100%; overflow-x: auto; }
+.thread .evi-scroll:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+.thread .evi-body { width: 100%; border-collapse: collapse; }
+.thread .evi-row { font: var(--weight-regular) var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.thread .evi-row > :is(th, td) { padding: var(--space-1) 0 var(--space-1) var(--space-3); vertical-align: top; text-align: left; overflow-wrap: anywhere; word-break: normal; font-weight: var(--weight-regular); }
+.thread .evi-row > :first-child { padding-left: 0; }
+.thread .evi :is(.markdown-inline-code, .markdown-link) { overflow-wrap: anywhere; word-break: normal; }
+.thread .evi-row > .evi-number { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.thread .evi-head { color: var(--ink-mid); font-size: var(--fs-xs); }
 .thread .evi .pass { color: var(--state-ok); }
 .thread .evi .flake { color: var(--warn-text); }
 .thread .evi .fail { color: var(--crit-bg); }
+.thread .evi-status:not(:empty) { display: block; margin-top: var(--space-2); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+@media (max-width: 53rem) { .thread .evi-actions button { min-height: var(--rail-item-min); } }
+@media print { .thread .evi-actions, .thread .evi-status { display: none; } .thread .evi-scroll { overflow: visible; } }
 .thread .conversation-attachment { margin-top: 8px; }
 .thread .conversation-attachment a { color: inherit; }
 .thread .working { display: flex; align-items: center; gap: 9px; color: var(--ink-mid); font-size: 13px; }
@@ -2546,7 +2552,7 @@ button.chip:disabled { cursor: default; }
   .thread .visual-frame { height: min(60vh, 480px); }
   .thread .empty { padding: 40px 22px; }
   .thread .evi-row { font-size: 12px; }
-  .thread .evi-row > span + span { padding-left: 10px; }
+  .thread .evi-row > :is(th, td) + :is(th, td) { padding-left: var(--space-2); }
   .pinned-ask { padding: 8px 16px 10px; }
   .obj-body { padding: 13px 19px 12px; }
   /* 4px of the 19px inset is the tint edge (P9). */

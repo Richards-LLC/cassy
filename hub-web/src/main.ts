@@ -1,4 +1,5 @@
 import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
+import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
 import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
@@ -4270,7 +4271,7 @@ function render(captureDraft = true): void {
     commandPaletteOpen,
     pairingView,
   };
-  const signatureTail = JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
+  const signatureTail = JSON.stringify([selectedHubSession?.project_dir, selectedHubSession?.harness, infoItems.length > 0, launchAvailability()]);
   const signature = shellSignature(signatureParts) + signatureTail;
   const active = document.activeElement;
   // Focus anywhere inside the open palette counts as composing too: a rebuild
@@ -4357,7 +4358,7 @@ function render(captureDraft = true): void {
   // Only what the conversation shell shows is built (cas-0546): the thread's
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
-  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
+  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, harness: selectedHubSession?.harness, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
   if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
@@ -5430,7 +5431,9 @@ function renderStatus(status?: Record<string, unknown>): void {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
-    line.append(identifier(worker.name), chip(workerState(worker, tasks)));
+    const avatar = document.createElement("template");
+    avatar.innerHTML = providerAvatarMarkup({ harness: metadata?.harness, fallback: avatarLetters(worker.name), size: "lane" });
+    line.append(avatar.content, identifier(worker.name), chip(workerState(worker, tasks)));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {

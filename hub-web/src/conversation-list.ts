@@ -3,6 +3,7 @@ import { escapeHtml, projectTitle } from "./cloud-brand";
 import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
+import { providerAvatarMarkup } from "./provider-mark";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
@@ -251,11 +252,9 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // running under the time stamp (cas-1ca1). The codename sits beneath.
   // cas-55a4: among one project's sessions, the most recently active one says so.
   const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
-  const harnesses = { claude: "✳", codex: ">_", grok: "/", opencode: "[ ]" };
-  const harness = row.harness && Object.hasOwn(harnesses, row.harness) ? row.harness : undefined;
   const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
-  const state = row.supervisorState ? `<span class="supervisor-state ${row.supervisorState}" title="${row.supervisorState === "needs-you" ? "Needs you" : row.supervisorState}" aria-hidden="true"></span>` : "";
-  return `<span class="conversation-avatar${harness ? " harness-mark" : ""}"${harness ? ` data-harness="${harness}" title="${harness}"` : ""} aria-hidden="true">${escapeHtml(harness ? harnesses[harness] : machineMonogram(row.host))}${state}</span>`
+  // DESIGN.md Avatars: the model's provider mark, or the machine monogram.
+  return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
     + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}${account}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`

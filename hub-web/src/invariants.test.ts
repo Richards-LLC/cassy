@@ -1332,7 +1332,7 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     expect(conversations).toContain('${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info">');
     // A new info item brings the command back: the shell rebuilds on that change.
     // So does a machine starting (or stopping) to grant session launch (cas-0f51).
-    expect(main).toContain("JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()])");
+    expect(main).toContain("JSON.stringify([selectedHubSession?.project_dir, selectedHubSession?.harness, infoItems.length > 0, launchAvailability()])");
   });
 
   // Contract: moves a visible toast with the layout and uses the thread's clock and plain words in Paired machines (F8, F10).

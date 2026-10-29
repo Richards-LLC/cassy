@@ -1,7 +1,9 @@
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
-import { accountCapacity, type AccountChange, type AccountOperation, type AccountRow, type AccountsCatalog } from "./accounts-model";
+import { accountMeters, accountTime, type AccountChange, type AccountOperation, type AccountRow, type AccountsCatalog } from "./accounts-model";
+import { FACTORY_MANAGE_SCOPE, scopeGrantCommand } from "./pairing-scopes";
+import { HARNESS_NAME, providerAvatarMarkup } from "./provider-mark";
 import type { Scope } from "./types";
 
 export interface AccountsMachine { id: string; label: string; scopes: readonly Scope[] }
@@ -13,7 +15,15 @@ export interface AccountsHost {
   copy(text: string): Promise<void>;
   returnFocus(): void;
 }
-const ACTIONS: Record<AccountOperation, string> = { remove: "Remove", disable: "Disable", enable: "Enable", rename: "Rename", set_default: "Set default" };
+const ACTIONS: Record<AccountOperation, string> = { set_default: "Set default", rename: "Rename", disable: "Disable", enable: "Enable", remove: "Remove" };
+const PROVIDERS = [["claude", "Claude"], ["codex", "Codex"], ["grok", "Grok"]] as const;
+const LOGIN: Record<AccountRow["login_state"], string> = { logged_in: "Logged in", logged_out: "Logged out", never_logged_in: "Not logged in", stale_login: "Stale login", unknown: "Login unknown" };
+/** Bar widths go through CSSOM: the hub's style-src refuses inline style attributes. */
+function fillBars(root: HTMLElement): void {
+  for (const bar of root.querySelectorAll<HTMLElement>(".accounts-bar > [data-left]")) bar.style.inlineSize = `${Number(bar.dataset.left) || 0}%`;
+}
+/** Stale logins and duplicates sort into one cleanup group per machine. */
+const needsCleanup = (row: AccountRow) => row.provider !== "grok" && (row.duplicate_of !== null || row.login_state === "stale_login");
 
 /** Body-mounted modal: shell redraws do not destroy edits or confirmations. */
 export class AccountsSheet {
@@ -32,7 +42,7 @@ export class AccountsSheet {
     this.clearEditor(); this.catalogs.clear();
     this.notice("");
     const machines = this.host.machines();
-    this.$(".accounts-machines").innerHTML = machines.length ? machines.map(machine => `<section data-machine="${escapeHtml(machine.id)}" aria-label="${escapeHtml(machine.label)}"><h3>${escapeHtml(machine.label)}</h3><div class="accounts-machine-body"><p role="status">Loading accounts…</p></div></section>`).join("") : '<p>No paired machines. Pair a machine to see its accounts.</p>';
+    this.$(".accounts-machines").innerHTML = machines.length ? machines.map(machine => `<section data-machine="${escapeHtml(machine.id)}" aria-label="${escapeHtml(machine.label)}"><h3 class="accounts-machine">${escapeHtml(machine.label)}</h3><div class="accounts-machine-body"><p role="status">Loading accounts…</p></div></section>`).join("") : '<p>No paired machines. Pair a machine to see its accounts.</p>';
     if (!dialog.open) dialog.showModal();
     this.$<HTMLButtonElement>("[data-accounts-close]").focus();
     for (const machine of machines) void this.load(machine);
@@ -42,7 +52,7 @@ export class AccountsSheet {
     if (this.dialog?.isConnected) return this.dialog;
     const dialog = this.doc.createElement("dialog");
     dialog.className = "accounts-sheet"; dialog.setAttribute("aria-labelledby", "accounts-title");
-    dialog.innerHTML = `<header class="accounts-heading"><div><h2 id="accounts-title">Accounts</h2><p>Logins and capacity, on each machine.</p></div><button type="button" data-accounts-close aria-label="Close accounts">Close</button></header><p class="accounts-notice" role="status" aria-live="polite"></p><div class="accounts-machines"></div><form class="accounts-editor" hidden><h3></h3><p class="accounts-explanation"></p><label class="accounts-field"><span></span><input name="value" autocomplete="off" required></label><div class="dialog-actions"><button type="button" data-accounts-cancel>Cancel</button><button type="submit" class="primary">Confirm</button></div></form>`;
+    dialog.innerHTML = `<header class="accounts-heading"><div><h2 id="accounts-title">Accounts</h2><p>Logins, usage and where each one lives, on every paired machine.</p></div><button type="button" data-accounts-close aria-label="Close accounts">Close</button></header><p class="accounts-notice" role="status" aria-live="polite"></p><div class="accounts-machines"></div><form class="accounts-editor" hidden><h3></h3><p class="accounts-explanation"></p><label class="accounts-field"><span></span><input name="value" autocomplete="off" required></label><div class="dialog-actions"><button type="button" data-accounts-cancel>Cancel</button><button type="submit" class="primary">Confirm</button></div></form>`;
     this.doc.body.append(dialog); this.dialog = dialog;
     dialog.addEventListener("close", () => { this.loads.abort(); this.generation++; this.clearEditor(); this.host.returnFocus(); });
     dialog.addEventListener("click", event => {
@@ -52,6 +62,7 @@ export class AccountsSheet {
       if (button.hasAttribute("data-accounts-cancel")) { this.clearEditor(); this.focusRow(); }
       const machine = this.host.machines().find(item => item.id === button.dataset.machine);
       if (button.hasAttribute("data-retry") && machine) void this.load(machine);
+      if (button.dataset.grantCommand) void this.host.copy(button.dataset.grantCommand).then(() => this.notice("Command copied. Run it on the machine, then open the link it prints here."), () => this.notice("Could not copy. Select the displayed command to copy it."));
       const account = machine && this.catalogs.get(machine.id)?.accounts.find(row => row.key === button.dataset.account);
       if (account && machine && button.dataset.operation && !this.pending) this.begin(machine, account, button.dataset.operation as AccountOperation);
       if (account && machine && button.hasAttribute("data-login")) {
@@ -90,7 +101,7 @@ export class AccountsSheet {
       const catalog = await this.host.list(machine.id, signal);
       if (signal.aborted || generation !== this.generation) return;
       this.catalogs.set(machine.id, catalog);
-      body.innerHTML = this.rows(machine, catalog);
+      body.innerHTML = this.rows(machine, catalog); fillBars(body);
     } catch {
       if (signal.aborted || generation !== this.generation) return;
       body.innerHTML = `<p role="alert">Could not load accounts on ${escapeHtml(machine.label)}.</p><button type="button" data-retry data-machine="${escapeHtml(machine.id)}">Try again</button>`;
@@ -98,20 +109,45 @@ export class AccountsSheet {
   }
 
   private rows(machine: AccountsMachine, catalog: AccountsCatalog): string {
-    if (!catalog.accounts.length) return '<p>No accounts on this machine.</p>';
+    if (!catalog.accounts.length) return '<p class="accounts-empty">No accounts on this machine.</p>';
     const manage = machine.scopes.includes("factory-manage");
-    return `${manage ? "" : '<p class="accounts-readonly">Read-only · Managing accounts needs factory manage access.</p>'}${["claude", "codex", "grok"].map(provider => {
-      const accounts = catalog.accounts.filter(row => row.provider === provider);
-      if (!accounts.length) return "";
-      return `<h4 class="accounts-provider">${escapeHtml(provider)}</h4><ul class="accounts-ledger">${accounts.map(account => {
-        const attrs = `data-machine="${escapeHtml(machine.id)}" data-account="${escapeHtml(account.key)}"`;
-        const state = ({ logged_in: "Logged in", logged_out: "Logged out", never_logged_in: "Not logged in", stale_login: "Stale login", unknown: "Login unknown" })[account.login_state];
-        const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
-        const actions = manage && account.provider !== "grok" ? `<div class="accounts-actions" aria-label="Actions for ${escapeHtml(account.display_name)}">${operations.map(op => `<button type="button" ${attrs} data-operation="${op}"${this.pending || account.capabilities[op] !== null ? ` disabled title="${escapeHtml(account.capabilities[op] ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`).join("")}</div>` : "";
-        const login = account.login_state !== "logged_in" && account.provider !== "grok" ? `<div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy login command</button></div>` : "";
-        return `<li class="accounts-row"><div class="accounts-identity"><strong>${escapeHtml(account.display_name)}</strong><span class="accounts-alias">${escapeHtml(account.key)}</span><span>${state}${account.disabled ? " · Disabled" : ""}${account.duplicate_of ? ` · Duplicate of ${escapeHtml(account.duplicate_of)}` : ""}</span><span class="accounts-badges">${account.is_default ? '<span>Default</span>' : ""}${account.recommendation ? '<span title="' + escapeHtml("Based on current capacity and reset times.") + '">Recommended</span>' : ""}</span></div><div class="accounts-capacity">${accountCapacity(account.windows, account.usage_observed_at).map(text => `<p>${escapeHtml(text)}</p>`).join("")}</div>${account.provider === "grok" ? '<p class="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>' : ""}${login}${account.provider !== "grok" && account.capabilities.remove ? `<p class="accounts-readonly">${escapeHtml(account.capabilities.remove)}</p>` : ""}${account.capabilities.rename && account.capabilities.rename !== account.capabilities.remove ? `<p class="accounts-readonly">${escapeHtml(account.capabilities.rename)}</p>` : ""}${actions}</li>`;
-      }).join("")}</ul>`;
-    }).join("")}`;
+    const cleanup = catalog.accounts.filter(needsCleanup);
+    const summary = `${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${cleanup.length ? ` · ${cleanup.length} to clean up` : ""}`;
+    const groups = PROVIDERS.map(([provider, label]) => {
+      const accounts = catalog.accounts.filter(row => row.provider === provider && !needsCleanup(row));
+      return accounts.length ? `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${label} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage)).join("")}</ul></section>` : "";
+    }).join("");
+    const stale = cleanup.length ? `<section class="accounts-provider-group accounts-cleanup" aria-label="Needs cleanup on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">Needs cleanup · ${cleanup.length}</h4><p class="accounts-cleanup-lead">Stale logins and duplicates of another account. Remove the copy you no longer use; the account it duplicates stays.</p><ul class="accounts-ledger">${cleanup.map(account => this.card(machine, account, manage)).join("")}</ul></section>` : "";
+    return `<p class="accounts-machine-summary">${summary}</p>${manage ? "" : this.grantCallout(machine)}${groups}${stale}`;
+  }
+
+  /** DESIGN.md: read-only pairings see the actions and exactly how to unlock them. */
+  private grantCallout(machine: AccountsMachine): string {
+    const command = scopeGrantCommand(this.doc.defaultView?.location.origin ?? "", machine.scopes, FACTORY_MANAGE_SCOPE);
+    return `<div class="accounts-grant" role="note"><p><strong>Read-only on ${escapeHtml(machine.label)}.</strong> Removing, disabling, renaming and choosing the default need manage access. Run this on ${escapeHtml(machine.label)}, then open the link it prints here:</p><div class="accounts-login"><code>${escapeHtml(command)}</code><button type="button" data-grant-command="${escapeHtml(command)}">Copy command</button></div></div>`;
+  }
+
+  private card(machine: AccountsMachine, account: AccountRow, manage: boolean): string {
+    const attrs = `data-machine="${escapeHtml(machine.id)}" data-account="${escapeHtml(account.key)}"`;
+    const grok = account.provider === "grok";
+    const state = LOGIN[account.login_state];
+    const tone = account.disabled ? "idle" : account.login_state === "logged_in" ? "active" : account.login_state === "stale_login" ? "blocked" : "open";
+    const badges = `${account.is_default ? '<span class="accounts-badge">Default</span>' : ""}${account.recommendation ? `<span class="accounts-badge" title="${escapeHtml(account.recommendation)}">Recommended</span>` : ""}`;
+    const where = `${account.location ? `Lives in <code>${escapeHtml(account.location)}</code> on ` : "On "}${escapeHtml(machine.label)} · used by ${HARNESS_NAME[account.provider]}`;
+    const meters = accountMeters(account.windows);
+    const usage = meters.length
+      ? `<div class="accounts-usage">${meters.map(meter => `<div class="accounts-meter"><span class="accounts-meter-name">${escapeHtml(meter.name)}</span><span class="accounts-bar" aria-hidden="true"><span data-left="${meter.left ?? 0}"${meter.left !== null && meter.left < 20 ? ' class="low"' : ""}></span></span><span class="accounts-meter-text">${meter.left === null ? "usage unknown" : `${meter.left}% left`}${meter.reset ? ` <span class="accounts-reset">· ${meter.resetPast ? "reset" : "resets"} ${escapeHtml(meter.reset)}</span>` : ""}</span></div>`).join("")}${account.usage_observed_at ? `<p class="accounts-observed">As of ${escapeHtml(accountTime(account.usage_observed_at))}</p>` : ""}</div>`
+      : `<p class="accounts-observed">Usage unknown${grok ? "" : account.login_state === "logged_in" ? " · not read yet on this machine" : " · log in to read it"}</p>`;
+    const cleanup = account.duplicate_of ? `<p class="accounts-cleanup-why">Duplicate of <code>${escapeHtml(account.duplicate_of)}</code>${account.login_state === "stale_login" ? " with a stale login" : ""}.</p>` : account.login_state === "stale_login" ? '<p class="accounts-cleanup-why">Stale login: log in again, or remove it.</p>' : "";
+    const login = account.login_state !== "logged_in" && !grok ? `<div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy login command</button></div>` : "";
+    const reasons = grok ? '<p class="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>'
+      : [...new Set([account.capabilities.remove, account.capabilities.rename].filter(Boolean))].map(reason => `<p class="accounts-readonly">${escapeHtml(reason!)}</p>`).join("");
+    const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
+    const actions = grok ? "" : `<div class="accounts-actions" role="group" aria-label="Actions for ${escapeHtml(account.display_name)}">${operations.map(op => {
+      const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];
+      return `<button type="button" ${attrs} data-operation="${op}"${this.pending || reason !== null ? ` disabled title="${escapeHtml(reason ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`;
+    }).join("")}</div>`;
+    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "lane" })}<div class="accounts-card-body"><div class="accounts-identity"><strong>${escapeHtml(account.display_name)}</strong><span class="accounts-badges">${badges}</span></div><p class="accounts-alias">${escapeHtml(account.key)}</p><p class="accounts-where">${where}</p><p class="accounts-state"><span class="status-chip status-chip--${tone}">${state}${account.disabled ? " · Disabled" : ""}</span></p>${cleanup}${usage}${reasons}${login}${actions}</div></li>`;
   }
 
   private begin(machine: AccountsMachine, account: AccountRow, operation: AccountOperation): void {
@@ -159,7 +195,7 @@ export class AccountsSheet {
     // Re-render all rows to restore their capability-derived disabled states.
     for (const [id, catalog] of this.catalogs) {
       const current = this.host.machines().find(item => item.id === id);
-      if (current) { const body = this.machineBody(id); if (body) body.innerHTML = this.rows(current, catalog); }
+      if (current) { const body = this.machineBody(id); if (body) { body.innerHTML = this.rows(current, catalog); fillBars(body); } }
     }
     await this.load(machine); this.focusRow();
   }

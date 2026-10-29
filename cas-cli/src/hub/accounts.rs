@@ -1,5 +1,5 @@
 //! Machine-local account catalog and allowlisted lifecycle. Browser keys are
-//! provider-qualified aliases; profile paths and credentials never leave here.
+//! provider-qualified aliases; credentials and absolute profile paths never leave here.
 use crate::account_registry::{Account, LoginState, UsageWindow};
 use crate::accounts::Provider;
 use anyhow::{Result, bail, ensure};
@@ -18,6 +18,9 @@ pub(super) struct Row {
     provider: String,
     name: String,
     display_name: String,
+    /// Where the profile lives, relative to the machine's home ("~/.claude-work").
+    /// Never absolute: a folder outside home shows its own name only.
+    location: String,
     login_state: LoginState,
     disabled: bool,
     duplicate_of: Option<String>,
@@ -61,7 +64,7 @@ pub(super) fn catalog(home: &Path) -> Result<Catalog> {
                 .as_ref()
                 .filter(|r| r.account.name == account.name)
                 .map(|r| r.reason.clone());
-            rows.push(project(account, &accounts, default, recommendation));
+            rows.push(project(account, &accounts, default, recommendation, home));
         }
     }
     rows.push(Row {
@@ -69,6 +72,7 @@ pub(super) fn catalog(home: &Path) -> Result<Catalog> {
         provider: "grok".into(),
         name: "default".into(),
         display_name: "Grok".into(),
+        location: "~/.grok".into(),
         login_state: LoginState::Unknown,
         disabled: false,
         duplicate_of: None,
@@ -94,6 +98,7 @@ fn project(
     accounts: &[Account],
     default: &str,
     recommendation: Option<String>,
+    home: &Path,
 ) -> Row {
     let protected = account.name == "main";
     let capabilities = OPERATIONS.into_iter().map(|op| {
@@ -110,6 +115,10 @@ fn project(
         provider: account.provider.name().into(),
         name: account.name.clone(),
         display_name: account.display_name.clone(),
+        location: account.folder.strip_prefix(home).map_or_else(
+            |_| account.folder.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+            |relative| format!("~/{}", relative.display()),
+        ),
         login_state: account.login_state,
         disabled: account.flags.disabled,
         duplicate_of: account

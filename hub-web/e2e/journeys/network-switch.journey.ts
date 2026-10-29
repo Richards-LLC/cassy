@@ -1173,6 +1173,8 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     // cas-c971: replaying another session must not fan out status/lease reads
     // for the open conversation (over 2,000 requests in the original trace).
     await clock.advance(1);
+    const replayStarted = clock.now();
+    const catalogsBeforeReplay = hub.catalogFetchCount("atlas");
     const controlReads: string[] = [];
     page.on("request", request => {
       const path = new URL(request.url()).pathname;
@@ -1195,13 +1197,23 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
       for (const event of [metadata, ...prior, { kind: "replay_complete" }, ...tail,
         metadata, ...prior, ...tail, { kind: "replay_complete" }]) emit(event);
     }, { prior, tail });
-    await hub.waitFor(() => hub.catalogFetchCount("atlas") > 1);
+    await hub.waitFor(() => hub.catalogFetchCount("atlas") > catalogsBeforeReplay);
+    await clock.advance(1);
+    expect(controlReads.length, "peer replay must not reload the open session's controls").toBe(0);
     for (let step = 0; step < 12; step++) {
       await clock.advance(1_000);
       await expect(header).toHaveText(" · Live");
       expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
     }
-    expect(controlReads.length, "peer replay must not reload the open session's controls").toBe(0);
+    // cas-5f06 deliberately refreshes the selected live phase on the 5s
+    // health heartbeat; these scheduled pairs are independent of peer replay.
+    const maxHeartbeatPairs = Math.ceil((clock.now() - replayStarted) / 5_000);
+    const statusReads = controlReads.filter(path => path.endsWith("/status")).length;
+    const leaseReads = controlReads.filter(path => path.endsWith("/lease")).length;
+    expect(statusReads).toBeGreaterThan(0);
+    expect(statusReads).toBeLessThanOrEqual(maxHeartbeatPairs);
+    expect(leaseReads).toBe(statusReads);
+    controlReads.length = 0;
     // The selected session's live event must still refresh both controls.
     await page.evaluate(session => {
       (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number })

@@ -1817,8 +1817,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert!(agents.get_lease("cas-8488-b").unwrap().is_some());
         let briefs = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap().poll_all(100).unwrap();
         assert!(briefs.iter().any(|row| row.target == WORKER
-            && row.prompt.contains("Task ID: cas-8488-b")
-            && row.prompt.contains("started this task automatically")), "{briefs:?}");
+            && row.prompt.contains(&next.id)
+            && row.prompt.contains(&format!("factory/{WORKER}-{}", next.id))), "{briefs:?}");
         let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
             "action":"start", "id":"cas-8488-c",
         })).unwrap())).await;

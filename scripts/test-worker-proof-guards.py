@@ -115,12 +115,14 @@ elif any('test(=touched)' in arg for arg in args):
   assert time.monotonic()<deadline,'five concurrent runs never arrived'
   time.sleep(.01)
  failed=os.environ['STABILITY_FIXTURE_FAIL']=='yes' and index==3
- print(f'        {"FAIL" if failed else "PASS"} [   0.{index}00s] (1/1) cas touched')
+ # nextest pads the counter to the width of the total.
+ print(f'        {"FAIL" if failed else "PASS"} [   0.{index}00s] (  1/120) cas touched')
  print(f'     Summary [ 0.01s] 1 test run: {0 if failed else 1} passed'+(', 1 failed' if failed else ', 0 skipped'))
  sys.exit(1 if failed else 0)
 elif os.environ['STABILITY_FIXTURE_FAIL']=='red':
- print('        FAIL [   0.010s] (1/1) cas touched')
+ print('        FAIL [   0.010s] (  2/120) cas touched')
  print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
+ print('        FAIL [   0.010s] cas touched')
  sys.exit(100)
 else:
  print('     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped')

@@ -13,7 +13,7 @@ pub(crate) fn metadata_prefix(role: AgentRole) -> Option<&'static str> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentModel {
     pub id: String,
     pub name: String,

@@ -52,7 +52,7 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
             Some(("Context compaction confirmed by the supervisor's harness.".into(), false)),
         Command::Model if fresh("select model") || fresh("select a model")
             || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
-        Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
+        Command::Model if codex_model_selection(before, current).is_some() || fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
         Command::Usage if fresh("current session") && (lower.contains("current week") || lower.contains("resets"))
             || command == Command::Usage && fresh("context window") && lower.contains("model:") =>
                 Some(("Usage displayed by the supervisor's harness.".into(), !idle_prompt(current))),

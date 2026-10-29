@@ -71,6 +71,16 @@ impl Window {
 pub struct State {
     #[serde(default)]
     pub windows: Vec<Window>,
+    #[serde(default)]
+    pub migration_reviews: Vec<MigrationReview>,
+}
+
+/// The operator's human review of one task's migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReview {
+    pub task: String,
+    pub reviewed_at: DateTime<Utc>,
+    pub note: String,
 }
 
 /// One skipped check, as written to the back-fill ledger.
@@ -94,8 +104,10 @@ fn state_path(cas_root: &Path) -> PathBuf {
     cas_root.join(STATE_FILE)
 }
 
+/// Under `.cas/operator/`, which agents may not write, so a ledger row or
+/// back-fill marker cannot be edited away.
 fn ledger_dir(cas_root: &Path) -> PathBuf {
-    cas_root.join("rapid-response")
+    cas_root.join("operator").join("rapid-response")
 }
 
 fn ledger_path(cas_root: &Path, window: &Window) -> PathBuf {
@@ -233,68 +245,156 @@ pub fn active_window(cas_root: &Path, epic: &str, now: DateTime<Utc>) -> Option<
 }
 
 /// Whether a path is a schema or data migration, which always keeps its
-/// full human review.
+/// full gates and needs the operator's review inside a window.
 pub fn is_migration_path(path: &str) -> bool {
-    path.to_ascii_lowercase().contains("migration")
+    let lower = path.to_ascii_lowercase();
+    lower.contains("migration")
+        || lower.contains("db/migrate/")
+        || lower.contains("alembic/versions/")
+        || lower.ends_with("schema.prisma")
 }
 
-/// The open window that scales down gates for `task`'s delivery, if any.
-/// `changed` is the delivery diff when known; a migration path in it keeps
-/// every gate.
-pub fn active_for_task(
-    cas_root: &Path,
-    store: &dyn cas_store::TaskStore,
-    task: &Task,
-    changed: Option<&[String]>,
-) -> Option<Window> {
-    if changed.is_some_and(|paths| paths.iter().any(|path| is_migration_path(path))) {
-        return None;
-    }
-    let epic = if task.task_type == TaskType::Epic {
-        task.clone()
-    } else {
-        store.get_parent_epic(&task.id).ok()??
-    };
-    active_window(cas_root, &epic.id, Utc::now())
-}
-
-/// [`active_for_task`] opening the task store itself, for gates that hold
-/// only the Cassy root. Without `changed`, the delivery diff is read from Git
-/// (recorded start base to parked anchor); when a recorded delivery's diff
-/// cannot be read, no window applies, so an unknown diff never skips the
-/// migration floor.
-pub fn active_for_task_at(cas_root: &Path, task: &Task, changed: Option<&[String]>) -> Option<Window> {
+/// The open window for the epic `task` belongs to (or is), ignoring the
+/// delivery's content.
+fn window_for_task(cas_root: &Path, task: &Task) -> Option<Window> {
     if !state_path(cas_root).exists() {
         return None;
     }
-    let measured;
-    let changed = match changed {
-        Some(paths) => paths,
-        None => {
-            measured = recorded_delivery_paths(cas_root, task)?;
-            &measured
-        }
+    let epic = if task.task_type == TaskType::Epic {
+        task.id.clone()
+    } else {
+        crate::store::open_task_store(cas_root).ok()?.get_parent_epic(&task.id).ok()??.id
     };
-    let store = crate::store::open_task_store(cas_root).ok()?;
-    active_for_task(cas_root, store.as_ref(), task, Some(changed))
+    active_window(cas_root, &epic, Utc::now())
 }
 
-fn recorded_delivery_paths(cas_root: &Path, task: &Task) -> Option<Vec<String>> {
-    let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
-        // No recorded factory delivery: Cassy knows of no diff to review.
-        return Some(Vec::new());
-    };
-    let base = &start.base_sha;
+/// A delivery's committed change: its paths and added lines.
+struct Delivery {
+    paths: Vec<String>,
+    added: String,
+}
+
+/// Whether a change may relax gates: no migration path and no secret-shaped
+/// added line (the QA-evidence secret patterns over the delivery diff).
+fn floor_clear(delivery: &Delivery, extra_paths: &[String]) -> bool {
+    if delivery.paths.iter().chain(extra_paths).any(|path| is_migration_path(path)) {
+        return false;
+    }
+    if let Some(kind) = crate::qa_evidence::first_secret(&delivery.added) {
+        tracing::warn!(kind, "rapid response: secret-shaped line in the delivery diff keeps every gate");
+        return false;
+    }
+    true
+}
+
+/// The open window that scales down gates for `task`'s delivery, if any.
+///
+/// Fails closed: the delivery diff is read from Git (recorded start base to
+/// parked anchor), and without a readable diff, with a migration path (in
+/// that diff or in `changed`), or with a secret-shaped added line, no window
+/// applies and every gate keeps refusing.
+pub fn active_for_task_at(cas_root: &Path, task: &Task, changed: Option<&[String]>) -> Option<Window> {
+    active_for_delivery(cas_root, cas_root.parent()?, task, changed)
+}
+
+/// [`active_for_task_at`] reading the delivery from `repo`, for gates that
+/// know the delivery's repository (a Cassy root need not sit in it).
+pub fn active_for_delivery(
+    cas_root: &Path,
+    repo: &Path,
+    task: &Task,
+    changed: Option<&[String]>,
+) -> Option<Window> {
+    let window = window_for_task(cas_root, task)?;
+    let delivery = recorded_delivery(repo, task)?;
+    floor_clear(&delivery, changed.unwrap_or(&[])).then_some(window)
+}
+
+fn git_text(repo: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").arg("-C").arg(repo).args(args).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn diff_between(repo: &Path, range: &[&str]) -> Option<Delivery> {
+    let mut names = vec!["diff", "--name-only", "--no-renames"];
+    names.extend_from_slice(range);
+    let paths = git_text(repo, &names)?.lines().map(str::to_string).collect();
+    let mut patch = vec!["diff", "--no-color", "--no-ext-diff", "--unified=0", "--no-renames"];
+    patch.extend_from_slice(range);
+    let added = git_text(repo, &patch)?
+        .lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .map(|line| &line[1..])
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(Delivery { paths, added })
+}
+
+fn recorded_delivery(repo: &Path, task: &Task) -> Option<Delivery> {
+    let base = task.deliverables.factory_branch_start.as_ref()?.base_sha.as_str();
     let head = task.deliverables.factory_branch_anchor.as_deref()?;
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cas_root.parent()?)
-        .args(["diff", "--name-only", "--no-renames", base, head, "--"])
-        .output()
-        .ok()?;
-    output.status.success().then(|| {
-        String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect()
+    diff_between(repo, &[base, head, "--"])
+}
+
+/// Whether a release of `epic` may treat its post-release check as a watch:
+/// the epic branch's change since its target carries no migration and no
+/// secret-shaped line. An unreadable diff keeps the gate.
+fn epic_release_clear(cas_root: &Path, epic: &Task) -> bool {
+    let (Some(branch), Some(repo)) = (epic.branch.as_deref(), cas_root.parent()) else {
+        return false;
+    };
+    let target = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .map_or("main", |target| target.target_branch.as_str());
+    let range = format!("{target}...{branch}");
+    diff_between(repo, &[range.as_str(), "--"]).is_some_and(|delivery| floor_clear(&delivery, &[]))
+}
+
+/// The open window that makes `epic`'s post-release check a watch, if any.
+pub fn active_for_release(cas_root: &Path, epic: &Task, now: DateTime<Utc>) -> Option<Window> {
+    let window = active_window(cas_root, &epic.id, now)?;
+    epic_release_clear(cas_root, epic).then_some(window)
+}
+
+/// Close refusal for a migration delivery under an open window until the
+/// operator records a human review (`cas qa rapid-response review-migration`).
+/// Its gates were never relaxed; the review is the extra floor check.
+pub fn migration_review_refusal(cas_root: &Path, task: &Task) -> Option<String> {
+    window_for_task(cas_root, task)?;
+    let delivery = recorded_delivery(cas_root.parent()?, task)?;
+    let migration = delivery.paths.iter().find(|path| is_migration_path(path))?;
+    let reviewed = load(cas_root).ok()?.migration_reviews.iter().any(|review| review.task == task.id);
+    (!reviewed).then(|| {
+        format!(
+            "MIGRATION REVIEW REQUIRED (rapid response): {} changes {migration} while its epic is in a rapid-response window, so a human must review the migration before close. Ask the operator to run `cas qa rapid-response review-migration {} --note \"<what they checked>\"`, then retry the close.",
+            task.id, task.id
+        )
     })
+}
+
+/// Record the operator's migration review. The caller has established the
+/// operator.
+pub fn record_migration_review(
+    cas_root: &Path,
+    store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    note: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let note = note.trim();
+    ensure!(!note.is_empty(), "--note is required: say what you checked");
+    let task = store.get(task_id).with_context(|| format!("task {task_id} not found"))?;
+    let mut state = load(cas_root)?;
+    state.migration_reviews.retain(|review| review.task != task.id);
+    state.migration_reviews.push(MigrationReview { task: task.id.clone(), reviewed_at: now, note: note.to_string() });
+    save(cas_root, &state)?;
+    store.append_note(
+        &task.id,
+        &format!("[{}] ✅ DECISION operator migration review (rapid response, cas-1b4d): {note}", now.format("%Y-%m-%d %H:%M")),
+    )?;
+    Ok(())
 }
 
 /// Whether close verification still runs for `task_id` in a window: a
@@ -307,10 +407,13 @@ pub fn verification_sampled(task_id: &str) -> bool {
 }
 
 /// Append one skipped check to the window's back-fill ledger, once per task
-/// and check (dispatch and close both see the same skip).
-pub fn record_skip(cas_root: &Path, window: &Window, task: &str, check: &str, detail: &str) {
+/// and check (dispatch and close both see the same skip). Returns whether the
+/// row is on record: a caller relaxes its gate only when it is, so a skip
+/// that cannot be recorded keeps the gate.
+#[must_use]
+pub fn record_skip(cas_root: &Path, window: &Window, task: &str, check: &str, detail: &str) -> bool {
     if ledger(cas_root, window).iter().any(|skip| skip.task == task && skip.check == check) {
-        return;
+        return true;
     }
     let row = Skip {
         at: Utc::now(),
@@ -324,10 +427,15 @@ pub fn record_skip(cas_root: &Path, window: &Window, task: &str, check: &str, de
         std::fs::create_dir_all(ledger_dir(cas_root))?;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
         writeln!(file, "{}", serde_json::to_string(&row)?)?;
+        file.sync_data()?;
         Ok(())
     })();
-    if let Err(error) = written {
-        tracing::warn!(%error, task, check, "rapid-response ledger row not written");
+    match written {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, task, check, "rapid-response ledger row not written; the gate stays");
+            false
+        }
     }
 }
 
@@ -359,9 +467,8 @@ pub fn narrow_journeys(
     owned: &std::collections::BTreeSet<String>,
 ) {
     let dropped: Vec<String> = journeys.iter().filter(|id| !owned.contains(*id)).cloned().collect();
-    if !dropped.is_empty() {
+    if !dropped.is_empty() && record_skip(cas_root, window, task, "journeys", &dropped.join(",")) {
         journeys.retain(|id| owned.contains(id));
-        record_skip(cas_root, window, task, "journeys", &dropped.join(","));
     }
 }
 
@@ -444,14 +551,51 @@ fn create_backfill_task(
 mod tests {
     use super::*;
 
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=T", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Commit `file` on the epic branch and record it as `task`'s delivery.
+    fn deliver(dir: &Path, store: &dyn cas_store::TaskStore, task: &mut Task, file: &str, body: &str) {
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        git(dir, &["add", file]);
+        git(dir, &["commit", "-q", "-m", file]);
+        task.deliverables.factory_branch_anchor = Some(git(dir, &["rev-parse", "HEAD"]));
+        store.update(task).unwrap();
+    }
+
+    /// An epic on branch `epic/hot` with one delivery of `src/fix.rs`.
     pub(crate) fn epic_fixture() -> (tempfile::TempDir, PathBuf, std::sync::Arc<dyn cas_store::TaskStore>, Task) {
         let dir = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
         let store = crate::store::open_task_store(&cas_dir).unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("README.md"), "seed\n").unwrap();
+        git(dir.path(), &["add", "README.md"]);
+        git(dir.path(), &["commit", "-q", "-m", "seed"]);
+        let base = git(dir.path(), &["rev-parse", "HEAD"]);
+        git(dir.path(), &["checkout", "-q", "-b", "epic/hot"]);
         let mut epic = Task::new("cas-ep1c".to_string(), "Hotfix epic".to_string());
         epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/hot".to_string());
         store.add(&epic).unwrap();
-        let delivery = Task::new("cas-de11".to_string(), "Fix".to_string());
+        let mut delivery = Task::new("cas-de11".to_string(), "Fix".to_string());
+        delivery.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "epic/hot".into() },
+            assignee: "worker".into(),
+            branch: "factory/worker".into(),
+            base_sha: base,
+        });
         store.add(&delivery).unwrap();
         store
             .add_dependency(&cas_types::Dependency::new(
@@ -460,7 +604,12 @@ mod tests {
                 cas_types::DependencyType::ParentChild,
             ))
             .unwrap();
+        deliver(dir.path(), store.as_ref(), &mut delivery, "src/fix.rs", "pub fn fix() {}\n");
         (dir, cas_dir, store, delivery)
+    }
+
+    fn open(cas: &Path, store: &dyn cas_store::TaskStore) -> Window {
+        enable(cas, store, "cas-ep1c", Duration::hours(1), "outage", "revert", Utc::now()).unwrap()
     }
 
     /// The window needs an expiry, turns off on its own, and its skipped
@@ -472,29 +621,56 @@ mod tests {
         assert!(enable(&cas, store.as_ref(), "cas-ep1c", Duration::hours(13), "outage", "revert", now).is_err());
         assert!(parse_duration("").is_err());
         let window = enable(&cas, store.as_ref(), "cas-ep1c", parse_duration("90m").unwrap(), "outage", "revert the merge", now).unwrap();
-        assert!(active_for_task(&cas, store.as_ref(), &delivery, Some(&["src/lib.rs".into()])).is_some());
-        assert!(
-            active_for_task(&cas, store.as_ref(), &delivery, Some(&["cas-cli/src/migration/m200.rs".into()])).is_none(),
-            "a migration keeps every gate"
-        );
-        record_skip(&cas, &window, &delivery.id, "independent-qa", "journeys:HUB-J1");
+        assert!(active_for_task_at(&cas, &delivery, None).is_some());
+        assert!(record_skip(&cas, &window, &delivery.id, "independent-qa", "journeys:HUB-J1"));
         assert!(backfill_due(&cas, store.as_ref(), now).unwrap().is_empty(), "nothing back-fills while open");
         let later = window.expires_at + Duration::minutes(1);
         assert!(active_window(&cas, "cas-ep1c", later).is_none(), "the window turns off on its own");
         let done = backfill_due(&cas, store.as_ref(), later).unwrap();
-        assert_eq!(done.len(), 1);
-        assert_eq!(done[0].skipped, 1);
+        assert_eq!((done.len(), done[0].skipped), (1, 1));
         let task = store.get(done[0].task.as_deref().unwrap()).unwrap();
         assert!(task.description.contains("cas-de11 independent-qa"));
         assert_eq!(store.get_parent_epic(&task.id).unwrap().unwrap().id, "cas-ep1c");
         assert!(backfill_due(&cas, store.as_ref(), later).unwrap().is_empty(), "back-fill runs once");
     }
 
+    /// Safety floor: a secret-shaped added line or an unreadable delivery diff
+    /// keeps every gate inside a window.
+    #[test]
+    fn secrets_and_unknown_diffs_keep_every_gate() {
+        let (dir, cas, store, mut delivery) = epic_fixture();
+        open(&cas, store.as_ref());
+        let token = format!("gh{}_{}", "p", "a".repeat(24));
+        deliver(dir.path(), store.as_ref(), &mut delivery, "src/client.rs", &format!("const T: &str = \"{token}\";\n"));
+        assert!(active_for_task_at(&cas, &delivery, None).is_none(), "secret-shaped line");
+        let mut unknown = delivery.clone();
+        unknown.deliverables.factory_branch_start = None;
+        assert!(active_for_task_at(&cas, &unknown, None).is_none(), "no recorded delivery diff");
+    }
+
+    /// Safety floor: a migration keeps every gate, and its close waits for
+    /// the operator's human review.
+    #[test]
+    fn migrations_keep_every_gate_and_need_an_operator_review() {
+        let (dir, cas, store, mut delivery) = epic_fixture();
+        open(&cas, store.as_ref());
+        assert!(migration_review_refusal(&cas, &delivery).is_none(), "no migration, no review");
+        for path in ["db/migrate/001_users.rb", "alembic/versions/a1.py", "prisma/schema.prisma"] {
+            assert!(is_migration_path(path), "{path}");
+        }
+        deliver(dir.path(), store.as_ref(), &mut delivery, "db/migrate/001_users.rb", "class AddUsers; end\n");
+        assert!(active_for_task_at(&cas, &delivery, None).is_none());
+        let refusal = migration_review_refusal(&cas, &delivery).expect("review required");
+        assert!(refusal.contains("review-migration cas-de11"), "{refusal}");
+        record_migration_review(&cas, store.as_ref(), &delivery.id, "checked the down step", Utc::now()).unwrap();
+        assert!(migration_review_refusal(&cas, &delivery).is_none());
+    }
+
     /// Evidence is required only for journeys whose owned files were touched.
     #[test]
     fn window_narrows_required_journeys_to_touched_routes() {
         let (_dir, cas, store, delivery) = epic_fixture();
-        let window = enable(&cas, store.as_ref(), "cas-ep1c", Duration::hours(1), "outage", "revert", Utc::now()).unwrap();
+        let window = open(&cas, store.as_ref());
         let mut journeys = vec!["HUB-J1".to_string(), "HUB-J4".to_string()];
         narrow_journeys(&cas, &window, &delivery.id, &mut journeys, &["HUB-J4".to_string()].into());
         assert_eq!(journeys, ["HUB-J4"]);
@@ -504,25 +680,26 @@ mod tests {
     /// The batch receipt wait is skipped in a window, so each fix closes as it lands.
     #[test]
     fn window_skips_the_batch_receipt_wait() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let (_dir, cas, store, delivery) = epic_fixture();
-        env.set("CAS_ROOT", &cas);
-        cas_store::defer_qa_batch_evidence(&cas, &delivery.id, "0123456789abcdef0123456789abcdef01234567").unwrap();
+        cas_store::defer_qa_batch_evidence(&cas, &delivery.id, delivery.deliverables.factory_branch_anchor.as_deref().unwrap()).unwrap();
         assert!(crate::qa_batch::ensure_deferred_close(&cas, &delivery, None, None).is_err());
-        let window = enable(&cas, store.as_ref(), "cas-ep1c", Duration::hours(1), "outage", "revert", Utc::now()).unwrap();
+        let window = open(&cas, store.as_ref());
         assert!(crate::qa_batch::ensure_deferred_close(&cas, &delivery, None, None).is_ok());
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
-    /// A release cut in a window keeps the post-release run as a watch, not a gate.
+    /// A release cut in a window keeps the post-release run as a watch, not a
+    /// gate, unless the epic's change carries a migration.
     #[test]
     fn window_makes_the_post_release_check_a_watch() {
-        let (_dir, cas, store, _delivery) = epic_fixture();
+        let (dir, cas, store, mut delivery) = epic_fixture();
         std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
         let epic = store.get("cas-ep1c").unwrap();
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
-        let window = enable(&cas, store.as_ref(), "cas-ep1c", Duration::hours(1), "outage", "revert", Utc::now()).unwrap();
+        let window = open(&cas, store.as_ref());
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none());
         assert_eq!(ledger(&cas, &window)[0].check, "post-release-gate");
+        deliver(dir.path(), store.as_ref(), &mut delivery, "migrations/002.sql", "alter table t add c int;\n");
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "a migration keeps the gate");
     }
 }

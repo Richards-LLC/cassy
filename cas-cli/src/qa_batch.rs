@@ -379,8 +379,9 @@ pub(crate) fn ensure_deferred_close(
     }
     // cas-1b4d: in an operator's rapid-response window each fix merges and
     // closes as it lands; the batch receipt back-fills when the window closes.
-    if let Some(window) = crate::rapid_response::active_for_task_at(root, task, None) {
-        crate::rapid_response::record_skip(root, &window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt");
+    if let Some(window) = crate::rapid_response::active_for_task_at(root, task, None)
+        && crate::rapid_response::record_skip(root, &window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt")
+    {
         return Ok(());
     }
     let (repo, target) = task_context(root, task)?;

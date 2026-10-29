@@ -287,6 +287,8 @@ mod tests {
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {
         use cas_mux::SupervisorCli::{Claude, Codex};
         use serde_json::json;
+        // pin: an unterminated $skill opens Codex's picker and consumes Enter.
+        assert!(Command::Finish.mapping(Codex).unwrap().ends_with(' '), "Finish must terminate its native skill token before submit");
         let at = Utc::now();
         for (cli, prompt, done) in [
             (Claude, json!({"type":"user","timestamp":at,"message":{"content":"<command-message>finish</command-message>\n<command-name>/finish</command-name>"}}),

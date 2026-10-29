@@ -2399,6 +2399,7 @@ fn a_checkout_switched_to_another_branch_is_not_refreshed_as_the_target() {
 /// itself. It must refuse, and refuse before anything is written.
 #[test]
 fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let (_temp, _sibling_guard, repo_path, sibling, target) =
         repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
@@ -2410,13 +2411,10 @@ fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
         .unwrap();
     let sibling_status_before = worktree_status(&sibling);
 
-    // SAFETY: nextest runs each test in its own process, so this env var
-    // cannot leak into another test.
-    unsafe { std::env::set_var("CAS_TEST_FAIL_WORKTREE_LIST", "1") };
+    env.set("CAS_TEST_FAIL_WORKTREE_LIST", "1");
     let error = git
         .merge_branch_via_temp_worktree(&target, "factory/worker", true)
         .expect_err("an unknown inventory must refuse the merge");
-    unsafe { std::env::remove_var("CAS_TEST_FAIL_WORKTREE_LIST") };
 
     match &error {
         GitError::CheckoutInventoryUnavailable { branch, .. } => assert_eq!(branch, &target),

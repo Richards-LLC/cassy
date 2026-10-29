@@ -4026,7 +4026,7 @@ async fn test_worker_status_surfaces_unread_inbox_without_consuming_it() {
 
 #[tokio::test]
 async fn test_worker_status_scopes_agents_to_factory_session() {
-    let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
+    let mut guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
     let env = FactoryTestEnv::new();
 
     env.register_supervisor_in_session("sup-a", "session-a");
@@ -4039,7 +4039,8 @@ async fn test_worker_status_scopes_agents_to_factory_session() {
     let agent_store = env.agent_store();
     agent_store.register(&plain).expect("register plain worker");
 
-    unsafe { std::env::set_var("CAS_FACTORY_SESSION", "session-a") };
+    guard._guard.set("CAS_ROOT", &env.cas_root);
+    guard._guard.set("CAS_FACTORY_SESSION", "session-a");
     let req = factory_req("worker_status");
     let result = env
         .service
@@ -5831,9 +5832,6 @@ fn clear_context_command_really_resets_a_live_claude() {
     let stripped: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key.starts_with("CLAUDE_CODE"))
         .collect();
-    for (key, _) in &stripped {
-        unsafe { std::env::remove_var(key) };
-    }
 
     let dirs = reset::transcript_dirs_for(&cwd.to_string_lossy());
     assert!(
@@ -5850,7 +5848,7 @@ fn clear_context_command_really_resets_a_live_claude() {
             args: vec![],
             cwd: Some(cwd.clone()),
             env: vec![("TERM".to_string(), "xterm-256color".to_string())],
-            env_remove: vec![],
+            env_remove: stripped.iter().map(|(key, _)| key.clone()).collect(),
             rows: 24,
             cols: 80,
         },
@@ -5891,9 +5889,6 @@ fn clear_context_command_really_resets_a_live_claude() {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
-    for (key, value) in stripped {
-        unsafe { std::env::set_var(key, value) };
-    }
 
     let evidence = evidence.expect(
         "typing the reset command into a live claude must start a NEW session whose transcript \
@@ -14514,9 +14509,8 @@ async fn gh_699_spawn_preflight_warns_when_a_second_supervisor_shares_the_clone(
 
 /// Switch the calling session for the rest of a test that already holds the
 /// fixture's EnvGuard (which restores the original value on drop).
-fn act_as_session(session: &str) {
-    // SAFETY: the caller holds the suite's process-state guard.
-    unsafe { std::env::set_var("CAS_FACTORY_SESSION", session) };
+fn act_as_session(guard: &mut EnvGuard, session: &str) {
+    guard._guard.set("CAS_FACTORY_SESSION", session);
 }
 
 fn standalone_task(env: &FactoryTestEnv, title: &str) -> String {
@@ -14544,7 +14538,7 @@ fn assigned_task(env: &FactoryTestEnv, title: &str, worker: &str) -> String {
 /// works; status stays readable.
 #[tokio::test]
 async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
-    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let mut guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
     let env = FactoryTestEnv::new();
     env.register_supervisor_in_session("sup-a", "session-a");
     env.register_supervisor_in_session("sup-b", "session-b");
@@ -14573,7 +14567,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
             "sup-a",
         ),
     ] {
-        act_as_session(caller);
+        act_as_session(&mut guard, caller);
         let queued_before = env.spawn_queue().peek(50).expect("peek").len();
 
         // shutdown_workers: refused, naming the owning session.
@@ -14692,7 +14686,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
     }
 
     // The own-session reset (force) goes through.
-    act_as_session("session-a");
+    act_as_session(&mut guard, "session-a");
     core.cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
         task_id: task_a.clone(),
         force: Some(true),

@@ -22,8 +22,10 @@ test("journey video bounds encoder work while retaining full-size frames", async
   expect(frameDuration, "full-size receipts encode at most ten frames per second").toBeGreaterThanOrEqual(100_000_000);
   await page.route("**/receipt.webm", route => route.fulfill({ contentType: "video/webm", body: video }));
   await page.setContent('<video src="/receipt.webm" preload="metadata"></video>');
-  await expect.poll(() => page.locator("video").evaluate(video => ({ width: video.videoWidth, height: video.videoHeight })))
-    .toEqual(size);
+  await expect.poll(() => page.evaluate(() => {
+    const video = document.querySelector("video")!;
+    return { width: video.videoWidth, height: video.videoHeight };
+  })).toEqual(size);
 });
 
 // Observe real native evaluations, including evaluations on returned handles.

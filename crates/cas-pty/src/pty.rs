@@ -4578,6 +4578,14 @@ echo SMOKE_DONE
             for (key, value) in keys.iter().zip(&values) {
                 env.set(key, value);
             }
+            // A supervisor's inherited recipe must never fill an omitted
+            // worker model. Only this spawn's resolved recipe is evidence.
+            env.set("CAS_FACTORY_WORKER_MODEL", "inherited-wrong-model");
+            env.set("CAS_FACTORY_WORKER_EFFORT", "inherited-wrong-effort");
+            let recipe = [
+                ("CAS_FACTORY_WORKER_MODEL", "gpt-6.1-terra"),
+                ("CAS_FACTORY_WORKER_EFFORT", "high"),
+            ];
             for control in ["present", "removed", "unset"] {
                 let mut config = PtyConfig::codex(
                     "cache-probe",
@@ -4586,8 +4594,8 @@ echo SMOKE_DONE
                     None,
                     None,
                     None,
-                    None,
-                    None,
+                    (control != "unset").then_some(recipe[0].1),
+                    (control != "unset").then_some(recipe[1].1),
                     None,
                 );
                 config
@@ -4604,6 +4612,7 @@ echo SMOKE_DONE
                 if control == "removed" {
                     // A late removal must beat both inherited and explicitly granted values.
                     config.env_remove.extend([keys[0].into(), keys[2].into()]);
+                    config.env_remove.extend(recipe.map(|(key, _)| key.into()));
                 }
                 if control == "unset" {
                     // Remove after constructing the config: do not snapshot the parent early.
@@ -4630,6 +4639,18 @@ echo SMOKE_DONE
                     .map(|arg| std::str::from_utf8(arg).unwrap())
                     .collect();
                 assert!(args.contains(&"mcp_servers.cs.env_vars=[\"OPERATOR_EXTRA\"]"));
+                for (key, expected) in recipe {
+                    let prefix = format!("mcp_servers.cs.env.{key}=");
+                    let forwarded = args.iter().find(|arg| arg.starts_with(&prefix));
+                    if control == "present" {
+                        let parsed: toml::Value = toml::from_str(
+                            forwarded.unwrap_or_else(|| panic!("{control}: missing spawn recipe {key}")),
+                        ).unwrap();
+                        assert_eq!(parsed["mcp_servers"]["cs"]["env"][key].as_str(), Some(expected));
+                    } else {
+                        assert!(forwarded.is_none(), "{control}: inherited or removed recipe {key} was guessed");
+                    }
+                }
                 for (index, key) in keys.iter().enumerate() {
                     let prefix = format!("mcp_servers.cs.env.{key}=");
                     let forwarded = args.iter().find(|arg| arg.starts_with(&prefix));

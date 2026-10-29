@@ -221,7 +221,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
 
   await journey.stage("End a stale session", async () => {
     await backToList();
-    const end = list.locator(".conversation-end").filter({ has: page.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" }) });
+    const end = list.locator(".conversation-end").nth(2);
     // cas-f60a: a double-click on End session opens the confirmation and
     // nothing more. Its destructive button is never where the pointer was.
     const ask = end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" });

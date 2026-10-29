@@ -262,7 +262,8 @@ test.describe("on a phone", () => {
     // Enough live sessions in one project that a phone's list scrolls.
     const crowded = atlas();
     for (const [index, name] of ["amber-heron-11", "brisk-lynx-22", "copper-wren-33", "dusky-otter-44", "eager-finch-55", "fable-moth-66"].entries()) {
-      crowded.sessions!.push(session(`gabber-studio-${name}`, name, journeyStamp(-(5 + index) * 60_000), "supervisor → Commander"));
+      // cas-4f42: started before noble-cheetah-84, so it stays the lowest row.
+      crowded.sessions!.push({ ...session(`gabber-studio-${name}`, name, journeyStamp(-(5 + index) * 60_000), "supervisor → Commander"), started_at: journeyDay(2, 11 + index, 0) });
     }
     await journey.hub({ machines: [crowded], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
     const list = page.getByRole("navigation", { name: "Choose a supervisor" });

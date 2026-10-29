@@ -6139,3 +6139,6 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert!(rows[0].ended.is_none());
     assert_eq!(rows[0].machine_online, Some(true));
 }
+
+#[path = "accounts_route_tests.rs"]
+mod accounts_route_tests;

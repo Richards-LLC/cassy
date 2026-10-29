@@ -6,22 +6,18 @@ use chrono::{Duration, Utc};
 use rusqlite::params;
 use tempfile::TempDir;
 
-fn create_test_store() -> (
-    crate::test_env_guard::TestEnvGuard,
-    TempDir,
-    SqliteAgentStore,
-) {
-    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+fn create_test_store(env: &mut crate::test_env_guard::TestEnvGuard) -> (TempDir, SqliteAgentStore) {
     let temp = TempDir::new().unwrap();
     env.set("CAS_ROOT", temp.path());
     let store = SqliteAgentStore::open(temp.path()).unwrap();
     store.init().unwrap();
-    (env, temp, store)
+    (temp, store)
 }
 
 #[test]
 fn test_agent_crud() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Register agent
     let agent = Agent::new("agent-test".to_string(), "Test Agent".to_string());
@@ -54,7 +50,8 @@ fn test_agent_crud() {
 
 #[test]
 fn test_agent_pid_starttime_round_trips_through_register_and_update() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Register with pid_starttime set — INSERT path.
     let mut agent = Agent::new("agent-pidrs".to_string(), "pid-rs".to_string());
@@ -84,7 +81,8 @@ fn test_agent_pid_starttime_round_trips_through_register_and_update() {
 
 #[test]
 fn test_agent_factory_session_round_trips_through_register_and_update() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let mut agent = Agent::new("agent-factory".to_string(), "factory worker".to_string());
     agent.factory_session = Some("factory-session-a".to_string());
@@ -111,7 +109,8 @@ fn test_agent_factory_session_round_trips_through_register_and_update() {
 
 #[test]
 fn test_agent_factory_session_stamps_from_env_and_survives_absent_reregister() {
-    let (mut env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     env.set("CAS_FACTORY_SESSION", "env-session-a");
 
     let agent = Agent::new("agent-env-factory".to_string(), "env factory".to_string());
@@ -136,7 +135,8 @@ fn test_agent_factory_session_stamps_from_env_and_survives_absent_reregister() {
 
 #[test]
 fn test_agent_factory_session_update_none_preserves_existing_tag() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let mut agent = Agent::new("agent-update-preserve".to_string(), "preserve".to_string());
     agent.factory_session = Some("session-original".to_string());
@@ -162,7 +162,8 @@ fn test_agent_factory_session_update_none_preserves_existing_tag() {
 /// worker and the old supervisor later expires as a pseudo-worker death.
 #[test]
 fn supervisor_reregistration_rehomes_workers_and_supersedes_the_old_row() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let mut original_supervisor = Agent::new(
         "supervisor-session-1".to_string(),
@@ -263,7 +264,8 @@ fn supervisor_reregistration_rehomes_workers_and_supersedes_the_old_row() {
 
 #[test]
 fn distinct_supervisor_registration_does_not_steal_another_factorys_workers() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let mut first_supervisor = Agent::new(
         "supervisor-a-session".to_string(),
@@ -306,7 +308,8 @@ fn distinct_supervisor_registration_does_not_steal_another_factorys_workers() {
 fn test_agent_pid_starttime_none_round_trips_as_null() {
     // Legacy / non-Linux path: no fingerprint → column is NULL → typed
     // field reads back as None (not Some(0) or a parse-defaulted value).
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-no-fp".to_string(), "no fingerprint".to_string());
     assert!(agent.pid_starttime.is_none());
@@ -324,7 +327,8 @@ fn test_agent_pid_starttime_cleared_on_update_to_none() {
     // Regression: an UPDATE that sets pid_starttime back to None must
     // null the column — otherwise a worker that replaced its process
     // would carry a stale fingerprint forever.
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let mut agent = Agent::new("agent-clr".to_string(), "clear".to_string());
     agent.pid_starttime = Some(42);
@@ -339,7 +343,8 @@ fn test_agent_pid_starttime_cleared_on_update_to_none() {
 
 #[test]
 fn test_heartbeat() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-hb".to_string(), "Heartbeat Test".to_string());
     store.register(&agent).unwrap();
@@ -354,7 +359,8 @@ fn test_heartbeat() {
 
 #[test]
 fn test_lease_claim_and_release() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Register agent
     let agent = Agent::new("agent-1".to_string(), "Agent 1".to_string());
@@ -398,7 +404,8 @@ fn test_lease_claim_and_release() {
 
 #[test]
 fn test_lease_renewal() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-renew".to_string(), "Renew Test".to_string());
     store.register(&agent).unwrap();
@@ -513,8 +520,7 @@ fn test_lease_renewal() {
         before.renewal_count
     );
 
-    drop(_env);
-    let (_env, _temp, bootstrap) = create_test_store();
+    let (_bootstrap_temp, bootstrap) = create_test_store(&mut env);
     bootstrap.register(&agent).unwrap();
     bootstrap
         .try_claim("missing-task", &agent.id, 60, None)
@@ -541,7 +547,8 @@ fn test_lease_renewal() {
 /// `renew_lease` had zero production call sites for task leases at all.
 #[test]
 fn test_heartbeat_renews_task_lease_past_original_duration() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new(
         "agent-hb-renew".to_string(),
@@ -600,7 +607,8 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
 /// dead-holder-recovery property the lease exists for is unaffected.
 #[test]
 fn test_lease_still_expires_without_heartbeat() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-no-hb".to_string(), "No Heartbeat Test".to_string());
     store.register(&agent).unwrap();
@@ -628,7 +636,8 @@ fn test_lease_still_expires_without_heartbeat() {
 /// worktree leases had the same latent gap as task leases in practice.
 #[test]
 fn test_heartbeat_renews_worktree_lease_past_original_duration() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new(
         "agent-hb-wt-renew".to_string(),
@@ -665,7 +674,8 @@ fn test_heartbeat_renews_worktree_lease_past_original_duration() {
 /// — must not accidentally touch or extend another agent's lease.
 #[test]
 fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let agent_a = Agent::new("agent-hb-a".to_string(), "A".to_string());
     let agent_b = Agent::new("agent-hb-b".to_string(), "B".to_string());
@@ -700,7 +710,8 @@ fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
 
 #[test]
 fn test_expired_lease_reclaim() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-expire".to_string(), "Expire Test".to_string());
     store.register(&agent).unwrap();
@@ -741,7 +752,8 @@ fn test_expired_lease_reclaim() {
 
 #[test]
 fn test_list_agent_leases() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-list".to_string(), "List Test".to_string());
     store.register(&agent).unwrap();
@@ -760,7 +772,8 @@ fn test_list_agent_leases() {
 
 #[test]
 fn test_mark_stale_releases_leases() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-stale".to_string(), "Stale Test".to_string());
     store.register(&agent).unwrap();
@@ -800,7 +813,8 @@ fn test_mark_stale_releases_leases() {
 
 #[test]
 fn release_lease_if_owner_epoch_never_releases_replacement_generation() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     for (id, name) in [
         ("lease-owner", "owner"),
         ("lease-replacement", "replacement"),
@@ -851,7 +865,8 @@ fn release_lease_if_owner_epoch_never_releases_replacement_generation() {
 
 #[test]
 fn test_agent_get_handles_legacy_text_active_tasks() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-legacy".to_string(), "Legacy Agent".to_string());
     store.register(&agent).unwrap();
@@ -870,7 +885,8 @@ fn test_agent_get_handles_legacy_text_active_tasks() {
 
 #[test]
 fn test_lease_history_audit_log() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     // Register agent
     let agent = Agent::new("agent-history".to_string(), "History Test".to_string());
@@ -923,7 +939,8 @@ fn test_lease_history_audit_log() {
 
 #[test]
 fn test_lease_history_expired() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new(
         "agent-expire-hist".to_string(),
@@ -951,7 +968,8 @@ fn test_lease_history_expired() {
 
 #[test]
 fn test_lease_history_revoked() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new(
         "agent-revoke-hist".to_string(),
@@ -980,7 +998,8 @@ fn test_lease_history_revoked() {
 
 #[test]
 fn test_graceful_shutdown_records_reason_only_in_canonical_column() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     let agent = Agent::new(
         "agent-graceful-history".to_string(),
         "Graceful History".to_string(),
@@ -1010,7 +1029,8 @@ fn test_graceful_shutdown_records_reason_only_in_canonical_column() {
 
 #[test]
 fn test_get_agent_worked_tasks() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-worked".to_string(), "Worked Tasks Test".to_string());
     store.register(&agent).unwrap();
@@ -1048,7 +1068,8 @@ fn test_get_agent_worked_tasks() {
 fn test_get_agent_worked_tasks_with_since_filter() {
     use chrono::Utc;
 
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-filter".to_string(), "Filter Test".to_string());
     store.register(&agent).unwrap();
@@ -1082,7 +1103,8 @@ fn test_get_agent_worked_tasks_with_since_filter() {
 
 #[test]
 fn test_working_epics() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-epic".to_string(), "Epic Test".to_string());
     store.register(&agent).unwrap();
@@ -1113,7 +1135,8 @@ fn test_working_epics() {
 
 #[test]
 fn test_orphaned_working_epics() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Create two agents - one active, one will be marked dead
     let agent_active = Agent::new("agent-active".to_string(), "Active Agent".to_string());
@@ -1149,7 +1172,8 @@ fn test_orphaned_working_epics() {
 
 #[test]
 fn test_worker_can_takeover_supervisor_task() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Create supervisor agent
     let supervisor = Agent::new("supervisor-1".to_string(), "Supervisor".to_string());
@@ -1191,7 +1215,8 @@ fn test_worker_can_takeover_supervisor_task() {
 
 #[test]
 fn test_non_child_cannot_takeover_task() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Create two independent agents (no parent relationship)
     let agent1 = Agent::new("agent-1".to_string(), "Agent 1".to_string());
@@ -1214,7 +1239,8 @@ fn test_non_child_cannot_takeover_task() {
 
 #[test]
 fn test_list_failed_startup_detects_unconfirmed_agents() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     // Register an agent (startup_confirmed defaults to 0)
     let agent = Agent::new("agent-crashed".to_string(), "Crashed Worker".to_string());
@@ -1237,7 +1263,8 @@ fn test_list_failed_startup_detects_unconfirmed_agents() {
 
 #[test]
 fn test_list_failed_startup_ignores_confirmed_agents() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     // Register and heartbeat (confirms startup)
     let agent = Agent::new("agent-alive".to_string(), "Alive Worker".to_string());
@@ -1260,7 +1287,8 @@ fn test_list_failed_startup_ignores_confirmed_agents() {
 
 #[test]
 fn test_list_failed_startup_ignores_recent_registrations() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     // Register an agent just now (no heartbeat yet, but within grace period)
     let agent = Agent::new("agent-new".to_string(), "New Worker".to_string());
@@ -1273,7 +1301,8 @@ fn test_list_failed_startup_ignores_recent_registrations() {
 
 #[test]
 fn test_heartbeat_sets_startup_confirmed() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-confirm".to_string(), "Confirm Test".to_string());
     store.register(&agent).unwrap();
@@ -1303,7 +1332,8 @@ fn test_heartbeat_sets_startup_confirmed() {
 
 #[test]
 fn test_re_registration_preserves_startup_confirmed() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     // Register agent, heartbeat to confirm startup
     let agent = Agent::new(
@@ -1360,7 +1390,8 @@ fn test_re_registration_preserves_startup_confirmed() {
 
 #[test]
 fn test_re_registration_preserves_role_and_agent_type_authority() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     let mut worker = Agent::new("agent-authority".to_string(), "worker".to_string());
     worker.role = AgentRole::Worker;
     worker.agent_type = AgentType::Worker;
@@ -1382,7 +1413,8 @@ fn test_re_registration_preserves_role_and_agent_type_authority() {
 
 #[test]
 fn test_revive_sets_startup_confirmed() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-revive".to_string(), "Revive Test".to_string());
     store.register(&agent).unwrap();
@@ -1422,7 +1454,8 @@ fn test_revive_sets_startup_confirmed() {
 
 #[test]
 fn test_lease_release_atomically_decrements_active_tasks() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-atomic".to_string(), "Atomic Test".to_string());
     store.register(&agent).unwrap();
@@ -1458,7 +1491,8 @@ fn test_lease_release_atomically_decrements_active_tasks() {
 
 #[test]
 fn test_lease_release_for_task_atomically_decrements_active_tasks() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-fortask".to_string(), "ForTask Test".to_string());
     store.register(&agent).unwrap();
@@ -1498,7 +1532,8 @@ fn test_lease_release_for_task_atomically_decrements_active_tasks() {
 
 #[test]
 fn test_lease_release_for_task_records_awaiting_merge_park_reason() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-park".to_string(), "Park Test".to_string());
     store.register(&agent).unwrap();
@@ -1528,7 +1563,8 @@ fn test_lease_release_for_task_records_awaiting_merge_park_reason() {
 
 #[test]
 fn test_lease_history_reads_legacy_release_reason_from_previous_agent_id() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     {
         let conn = store.lock_conn().unwrap();
         conn.execute(
@@ -1558,7 +1594,8 @@ fn test_lease_history_reads_legacy_release_reason_from_previous_agent_id() {
 
 #[test]
 fn test_agent_unregister_releases_leases_atomically() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
 
     let agent = Agent::new("agent-unreg".to_string(), "Unreg Test".to_string());
     store.register(&agent).unwrap();
@@ -1594,7 +1631,8 @@ fn test_agent_unregister_releases_leases_atomically() {
 #[test]
 fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     use crate::EventStore;
-    let (_env, temp, agents) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, agents) = create_test_store(&mut env);
     let events = crate::event_store::SqliteEventStore::open(temp.path()).unwrap();
     events.init().unwrap();
     let mut agent = Agent::new("old-supervisor".into(), "peer-name".into());
@@ -1654,7 +1692,8 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
 
 #[test]
 fn cas_4ac8_round3_registration_time_changes_only_for_real_start_after_shutdown() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     let mut original = Agent::new("retained-row".into(), "worker".into());
     original.cc_session_id = Some("same-session".into());
     store.register(&original).unwrap();
@@ -1674,7 +1713,8 @@ fn cas_4ac8_round3_registration_time_changes_only_for_real_start_after_shutdown(
 
 #[test]
 fn cas_4ac8_round4_explicit_update_advances_incarnation_but_stale_update_cannot_rewind() {
-    let (_env, _temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
     let mut old = Agent::new("active-resume-epoch".into(), "worker".into());
     old.cc_session_id = Some("same".into());
     store.register(&old).unwrap();
@@ -1696,7 +1736,8 @@ fn cas_4ac8_round4_explicit_update_advances_incarnation_but_stale_update_cannot_
 /// last renewal leaves the heartbeat itself unwritten.
 #[test]
 fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
-    let (_env, temp, store) = create_test_store();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (temp, store) = create_test_store(&mut env);
     let agent = Agent::new("agent-1bc7".to_string(), "Heartbeat".to_string());
     store.register(&agent).unwrap();
     let before = store.get("agent-1bc7").unwrap().last_heartbeat;

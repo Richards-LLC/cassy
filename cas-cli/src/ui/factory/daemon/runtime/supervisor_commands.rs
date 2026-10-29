@@ -31,6 +31,11 @@ fn idle_prompt(text: &str) -> bool {
     !lower.contains("esc to interrupt") && !lower.contains("select model")
         && !lower.contains("select a model") && !lower.contains("select effort")
         && !lower.contains("compacting conversation") && !lower.contains("esc to cancel")
+        && !text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '*'])
+                && (line.contains('…') || line.contains("..."))
+        })
         && text.lines().rev().take(12).any(|line| {
             let line = line.trim();
             matches!(line, "❯" | "›") || line.starts_with("❯ Try \"")
@@ -183,6 +188,10 @@ impl FactoryDaemon {
             } else if record.last_key == Some(Key::Cancel) && current != record.before && idle_prompt(&current) {
                 record.receipt.phase = Phase::Observed;
                 record.receipt.detail = "The native chooser closed.".into();
+                record.receipt.interactive = false;
+            } else if record.receipt.interactive && idle_prompt(&current) {
+                record.receipt.phase = Phase::Observed;
+                record.receipt.detail = "The native chooser is no longer open. No additional change was confirmed.".into();
                 record.receipt.interactive = false;
             } else if let Some(Err(error)) = (record.write)() {
                 record.receipt.phase = Phase::Unconfirmed;

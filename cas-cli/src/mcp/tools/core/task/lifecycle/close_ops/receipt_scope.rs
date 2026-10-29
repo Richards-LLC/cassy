@@ -183,6 +183,7 @@ fn changelog_refusal(
 ) -> Option<String> {
     if !changed_paths.iter().any(|path| product_source_path(path))
         || has_no_changelog_decision(&task.notes)
+        || !has_unreleased_section_at_head(repo, head)
     {
         return None;
     }
@@ -208,9 +209,26 @@ fn has_no_changelog_decision(notes: &str) -> bool {
         if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
             return false;
         }
-        body.strip_prefix("no changelog:")
-            .is_some_and(|reason| !reason.trim().is_empty())
+        body.strip_prefix("no changelog:").is_some_and(|reason| {
+            let reason = reason.trim();
+            !reason.is_empty() && !is_changelog_template_value(reason)
+        })
     })
+}
+
+fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
+    let reference = format!("{head}:CHANGELOG.md");
+    std::process::Command::new("git")
+        .args(["show", &reference])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == "## [Unreleased]")
+        })
 }
 
 fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
@@ -292,6 +310,8 @@ fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), St
             && let Some((title, description)) = bullet.split_once("** — ")
             && !title.trim().is_empty()
             && !description.trim().is_empty()
+            && !is_changelog_template_value(title)
+            && !is_changelog_template_value(description)
         {
             let mut block = vec![line];
             index += 1;
@@ -315,6 +335,7 @@ fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), St
 
 fn changelog_area(heading: &str) -> Option<String> {
     let (kind, area) = heading.split_once(" — ")?;
+    let area = area.trim();
     if ![
         "Added",
         "Changed",
@@ -324,11 +345,19 @@ fn changelog_area(heading: &str) -> Option<String> {
         "Security",
     ]
     .contains(&kind)
-        || area.trim().is_empty()
+        || area.is_empty()
+        || is_changelog_template_value(area)
     {
         return None;
     }
-    Some(heading.to_string())
+    Some(format!("{kind} — {area}"))
+}
+
+fn is_changelog_template_value(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("title")
+        || value.eq_ignore_ascii_case("what changed.")
+        || (value.starts_with('<') && value.ends_with('>'))
 }
 
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
@@ -955,21 +984,35 @@ mod tests {
         );
 
         task.notes.clear();
-        std::fs::write(
-            repo.path().join("CHANGELOG.md"),
-            "# Changelog\n\n## [Unreleased]\n\n### Added — <area>\n\n- **Title** — What changed.\n\n## [1.0.0] - 2026-01-01\n",
-        ).unwrap();
-        let placeholder = commit_changelog_fixture(repo.path(), "add changelog template");
-        let placeholder_entry = changelog_refusal(
-            repo.path(),
-            &task,
-            &["CHANGELOG.md".into(), "hub-web/src/app.ts".into()],
-            &placeholder,
-            "main",
-        );
+        let mut placeholder_entries_refused = true;
+        for entry in [
+            "### Added — <area>\n\n- **Commander shows session state** — The status line follows live events.",
+            "### Added — Commander\n\n- **Title** — What changed.",
+        ] {
+            let repo = changelog_fixture();
+            std::fs::write(
+                repo.path().join("hub-web/src/app.ts"),
+                "export const value = 2;\n",
+            ).unwrap();
+            std::fs::write(
+                repo.path().join("CHANGELOG.md"),
+                format!(
+                    "# Changelog\n\n## [Unreleased]\n\n{entry}\n\n## [1.0.0] - 2026-01-01\n"
+                ),
+            ).unwrap();
+            let placeholder = commit_changelog_fixture(repo.path(), "add changelog template");
+            let refusal = changelog_refusal(
+                repo.path(),
+                &task,
+                &["CHANGELOG.md".into(), "hub-web/src/app.ts".into()],
+                &placeholder,
+                "main",
+            );
+            placeholder_entries_refused &= refusal.is_some();
+        }
         assert!(
-            placeholder_reason.is_some() && placeholder_entry.is_some(),
-            "the literal templates must be refused: reason={placeholder_reason:?}; entry={placeholder_entry:?}"
+            placeholder_reason.is_some() && placeholder_entries_refused,
+            "the literal templates must be refused: reason={placeholder_reason:?}; entries_refused={placeholder_entries_refused}"
         );
     }
 

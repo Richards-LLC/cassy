@@ -2330,7 +2330,7 @@ gate_row builtin-projections \
     "$cargo_bin nextest run -p cas --test builtin_flavor_drift_test root_managed_projections...; regenerate ledger; git diff --quiet" \
     check_builtin_projections cpu mem=4 excl=host-tests writes-tree
 gate_row changelog-and-versions \
-    'titled CHANGELOG [Unreleased] entry, [version] bullet and six release-train Cargo.toml versions' \
+    'valid existing CHANGELOG [Unreleased] entries, [version] bullet and six release-train Cargo.toml versions' \
     check_changelog_and_versions
 gate_row release-script \
     'scripts/release.sh parses and answers --help (one-command release)' \

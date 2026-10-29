@@ -60,6 +60,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::MessageClientRefDedupe,
         ProtocolCapability::WorkEvents,
         ProtocolCapability::WorkEventsLive,
+        ProtocolCapability::SupervisorCommands,
     ]
 }
 

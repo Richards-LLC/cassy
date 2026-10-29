@@ -664,6 +664,7 @@ async fn machine<R: SessionReadModel>(
                 "machine_multiplex_v2",
                 "tailscale_serve",
                 "cloud_device_suggestions",
+                "supervisor_commands",
             ],
             transport: state.metadata.transport,
             cloud_devices: state.metadata.cloud_devices,

@@ -556,6 +556,7 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         // The worker separately declares completion after the park refusal;
         // a rejected close by itself does not authorize the merge signal.
         f.mark_ready(&task.id);
+        task = store.get(&task.id).unwrap();
         if status == TaskStatus::Blocked {
             git(f.repo.path(), &["switch", "-qc", "factory/merge-w-cas-9efb-test"]);
             git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w-cas-9efb-test"]);
@@ -662,6 +663,7 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
             Some(Ok(None))), "a newer local tip withdraws queued readiness for the old tip");
         git(f.repo.path(), &["push", "-q", "origin", &branch]);
+        f.mark_ready(&task.id);
         let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(newer.len(), 1);
         let next = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(

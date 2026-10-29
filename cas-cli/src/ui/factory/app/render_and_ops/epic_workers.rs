@@ -1589,10 +1589,11 @@ impl DeferredWorkerCleanup {
         if let Some((worktree, _)) = &self.worktree {
             anyhow::ensure!(worktree.path.canonicalize()? == path.canonicalize()?, "cleanup worktree differs from its retired owner");
         }
-        anyhow::ensure!(
-            crate::factory_target_cache::retirement::retire_worker_with_snapshot(root, &self.agent, &self.tasks)?,
-            "target retirement deferred; recovery intent retained"
-        );
+        if !crate::factory_target_cache::retirement::retire_worker_with_snapshot(root, &self.agent, &self.tasks)? {
+            // A deliberate hold completes this attempt; frozen snapshots cannot
+            // make progress by replaying at every subsequent daemon startup.
+            return Ok(CrashCleanupOutcome { worktree: None });
+        }
         let Some((worktree, repo_root)) = &self.worktree else {
             return Ok(CrashCleanupOutcome { worktree: None });
         };
@@ -6670,8 +6671,6 @@ mod tests {
         assert!(!app.crash_cleanup_pending("held-worker"));
     }
 
-    /// Shutdown must give control back while Git inside target retirement is held.
-    /// The same name cannot be relaunched underneath that outstanding cleanup.
     #[test]
     fn restart_replays_deferred_cleanup_intent_cas_af63() {
         use std::process::Command;
@@ -6753,6 +6752,8 @@ mod tests {
         }
     }
 
+    /// Shutdown must give control back while Git inside target retirement is held.
+    /// The same name cannot be relaunched underneath that outstanding cleanup.
     #[cfg(unix)]
     #[tokio::test]
     async fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {

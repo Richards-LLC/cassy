@@ -317,7 +317,7 @@ The heading answers, in this order of weight: which project, which model, where,
 - **Avatar.** The provider-mark avatar (`--avatar-size`, `--avatar-mark`) with its status dot leads the identity row; a session with no harness keeps the machine monogram.
 - **Line 1.** The project name (`typography.title-md`, 600; the codename when there is no project), then the live-state status pill ("Live", "Reconnecting", "Ended") on the same baseline. The state is a pill, not a trailing "· Live" word.
 - **Line 2.** The model and version in `--ink` at `--fs-meta` 500 ("Claude Opus 5.5", "GPT-5 Sol"), then the machine as a machine chip, then the session codename in mono `--ink-mid`. Separators are `--space-2` gaps, not dot-joined mono strings. When the hub does not report a model, line 2 names the harness ("Claude Code", "Codex") instead; the header never shows "Model not reported".
-- Header actions (Raw output, Interrupt, Show work) are action pills in one cluster above or beside the identity, never between avatar and name. On a phone the identity keeps one avatar row (about 56px), line 2 ellipsises with its full text in `title`.
+- Header actions (Raw output, Interrupt, Show work) are action pills in one cluster above or beside the identity, never between avatar and name. On a phone the identity keeps one avatar row (about 56px): the provider mark carries the maker, the model label stays spoken but is not drawn, and line 2 keeps the machine and codename, ellipsising with its full text in `title`.
 
 ### Header and action spacing
 

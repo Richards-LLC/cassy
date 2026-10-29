@@ -457,7 +457,7 @@ export function fitConversationHost(root: ParentNode): void {
   // cas-d043 QA round 1: on a phone the header's codename shows whole or
   // steps aside, never as a cut slot beside the machine.
   const phoneHeader = identity.ownerDocument.defaultView?.matchMedia?.("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)").matches === true;
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0) - (harness ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0) - (harness && harness.getBoundingClientRect().width > 1 ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
 }
 
 /**

@@ -547,9 +547,10 @@ html[data-scheme="dark"] {
   :root .status-row, :root .team-lane, :root .conversation-group.project-card, :root .project-machine-chip { border-color: var(--line-strong); }
 }
 /* Conversation header line 2: the harness (model, once cas-2dcc reports it) leads in UI type. */
-:root .conversation-identity .conversation-model { flex: 0 0 auto; min-width: 0; max-width: 65%; margin-inline-end: var(--space-2); overflow: hidden; text-overflow: ellipsis; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1.25 var(--font-ui); }
-:root .conversation-identity .conversation-host { min-width: 0; overflow: hidden; }
-/* Phone header line 2 is model then machine; the codename stays spoken and in the title. */
+:root .conversation-identity .conversation-model { flex: none; margin-inline-end: var(--space-2); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1.25 var(--font-ui); }
+:root .conversation-identity .conversation-host { position: relative; min-width: 0; }
+/* Phone header (one avatar row): the provider mark carries the model's maker
+   and the model label stays spoken; machine and codename keep the line. */
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  :root .conversation-identity .conversation-host:has(> .conversation-model) .host-where > :is(.host-sep, .codename) { position: absolute; width: var(--line-width); height: var(--line-width); overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  :root .conversation-identity .conversation-host > .conversation-model { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; margin: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 }

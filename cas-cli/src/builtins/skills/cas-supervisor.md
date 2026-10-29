@@ -23,7 +23,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Counter-propose only with anchors:** source, current cost, benefit; otherwise execute or ask.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request and recipe.
-- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding. Every test [earns its place](../cas-tdd/SKILL.md#every-test-earns-its-place): red first, deterministic, cheapest layer, within budget.
+- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; each test earns its place; bloat is a finding.
 - **Public surfaces:** before merge, score distinctiveness, fit, hierarchy 1–5 (cas-codebase-design; floor 4/5); record exceptions/remedies.
 - **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
 - **A supervisor restart stops every worker:** load a new binary via MCP reconnect, else [checkpoint them first](references/worker-recovery.md#supervisor-restart).

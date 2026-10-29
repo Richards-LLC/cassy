@@ -388,7 +388,7 @@ wait_for_pr_ci() {
 # Failing test names from CI logs: nextest, cargo test, Python unittest and
 # the scripts' own "FAIL <name>" lines, de-duplicated, at most 20.
 failing_tests() {
-    sed -E 's/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
+    sed -E $'s/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
         | sed -nE 's/^ *FAIL \[ *[0-9.]+s\] +(.*)$/\1/p; s/^test (.+) \.\.\. FAILED$/\1/p; s/^(FAIL|ERROR): (.+)$/\2/p; s/^FAIL (.+)$/\1/p' \
         | awk '!seen[$0]++' | head -20 | paste -sd ';' - | sed 's/;/; /g'
 }

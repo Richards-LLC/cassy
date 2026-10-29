@@ -6778,10 +6778,12 @@ mod tests {
                 agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
                 agents.register(&agent).unwrap();
                 let mut sibling = agent.clone();
-                sibling.id = "sibling-registration".into();
+                sibling.id = format!("{name}-sibling-registration");
+                sibling.registered_at += chrono::Duration::seconds(1);
+                sibling.last_heartbeat += chrono::Duration::seconds(1);
                 agents.register(&sibling).unwrap();
                 let matching: Vec<_> = agents.list(None).unwrap().into_iter().filter(|row| row.name == name).collect();
-                let mut task = Task::new("duplicate-task".into(), "Still working".into());
+                let mut task = Task::new(format!("{name}-task"), "Still working".into());
                 task.assignee = Some(matching[1].id.clone());
                 task.status = TaskStatus::InProgress;
                 crate::store::open_task_store_cached(&root).unwrap().add(&task).unwrap();

@@ -432,12 +432,19 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
             );
         }
     }
+    // pin: the installed skill entrypoint must route readers to the policy
+    // reference; the policy moved there to preserve the SessionStart budget.
+    let skill = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/builtins/skills/cas-supervisor.md"
+    ));
+    assert!(skill.contains("[message delivery](references/reference.md#message-delivery-and-wake-authority)"));
     for (name, surface) in [
         (
-            "cas-supervisor",
+            "cas-supervisor reference",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/src/builtins/skills/cas-supervisor.md"
+                "/src/builtins/skills/cas-supervisor/references/reference.md"
             )),
         ),
         (

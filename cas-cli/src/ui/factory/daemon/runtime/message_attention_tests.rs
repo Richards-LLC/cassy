@@ -1435,13 +1435,9 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
             f.queue.mark_transport_delivered(row).unwrap();
         }
         if claimed {
-            // Exercise the existing weak probe and its actual stamps. Pane
-            // growth without this message's body must never grant a read.
-            assert_eq!(
-                super::classify_urgent_wake(10, Some(11), Duration::ZERO, Duration::from_secs(1)),
-                super::UrgentWakeOutcome::Observed
-            );
-            FactoryDaemon::consume_urgent_wake_row(f.queue.as_ref(), unread, SUPERVISOR).unwrap();
+            // This row has transport evidence only. consume_urgent_wake_row
+            // records an ObservedWake receipt, so using it here would model a
+            // consumed message rather than the unread control (cas-9c38).
             assert_eq!(
                 f.queue.recipient_receipt(unread, SUPERVISOR).unwrap(),
                 Some(cas_store::SurfacingSource::TransportClaimed)

@@ -1847,7 +1847,14 @@ export class ConversationView {
       if (this.disposed) return;
       // cas-c2cb: a reader who moved focus off the tail meanwhile stopped
       // following it; the frame-late re-pin leaves them where they went.
-      if (this.following) this.element.scrollTop = this.element.scrollHeight;
+      if (this.following) {
+        this.element.scrollTop = this.element.scrollHeight;
+        // Late preview layout can shrink this pin before another resize.
+        // Its queued scroll must compare against this position, not the
+        // synchronous pin's older offset and appear to be a reader's scroll.
+        this.scrolledTo = this.element.scrollTop;
+        this.lastContentHeight = this.element.scrollHeight;
+      }
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }

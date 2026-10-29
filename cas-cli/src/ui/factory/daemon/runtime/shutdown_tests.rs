@@ -606,7 +606,11 @@ fn processed_but_unexecuted_shutdown_with_dead_worker(include_dead: bool) -> Fix
     let mut names = Vec::new();
     if include_dead {
         register_idle_worker(&cas_dir, "already-dead");
-        open_agent_store(&cas_dir).unwrap().graceful_shutdown("agent-already-dead").unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut dead = agents.get("agent-already-dead").unwrap();
+        dead.status = cas_types::AgentStatus::Stale;
+        dead.pid = Some(i32::MAX as u32);
+        agents.update(&dead).unwrap();
         names.push("already-dead".to_string());
     }
     for (name, harness) in [
@@ -1142,6 +1146,72 @@ async fn long_transcript_recycle_registers_fresh_session_cas_c1a2() {
     if !run_hermetic_recycle_child("long_transcript_recycle_registers_fresh_session_cas_c1a2") {
         long_transcript_recycle(true).await;
     }
+}
+
+/// Block the store worker until the real recycle has queued the replacement's
+/// brief, reproducing cleanup that loses a race with an unregistered successor.
+#[tokio::test(flavor = "current_thread")]
+async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0ac() {
+    if run_hermetic_recycle_child(
+        "dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0ac",
+    ) {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    let name = "dead-pane-recycle";
+    register_idle_worker(&cas_dir, name);
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    old.status = cas_types::AgentStatus::Stale;
+    old.pid = Some(i32::MAX as u32);
+    agents.update(&old).unwrap();
+    assert!(!daemon.app.worker_names().iter().any(|worker| worker == name));
+    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas_types::Task::new("cas-resume-race".into(), "Continue held work".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some(name.into());
+    tasks.add(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let spec = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Codex,
+        model: Some("gpt-6.1-sol".into()),
+        effort: Some(cas_mux::Effort::High),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store_worker = super::store_worker::global();
+    assert!(store_worker.submit("pause before dead-worker cleanup", move || {
+        blocked_tx.send(()).unwrap();
+        // Dropping the sender on assertion failure also releases the worker.
+        let _ = release_rx.recv();
+    }));
+    blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    open_spawn_queue_store(&cas_dir).unwrap().enqueue_recycle(
+        name, Some(&serde_json::to_string(&spec).unwrap()), Some(SESSION),
+    ).unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+    let brief = queue.peek_all(100).unwrap().into_iter().find(|row| {
+        row.target == name && row.prompt.contains(&task.id)
+    }).expect("the replacement's resume brief is queued before the store worker catches up");
+    assert!(daemon.app.mux.get(name).is_some(), "replacement pane launched");
+    assert_eq!(agents.list(None).unwrap().len(), 1, "replacement has not registered");
+    release_tx.send(()).unwrap();
+    assert!(store_worker.wait_idle(Duration::from_secs(10)), "delayed cleanup completed");
+    assert_eq!(agents.get(&old.id).unwrap().status, cas_types::AgentStatus::Shutdown);
+    assert_eq!(queue.message_delivery_report(brief.id).unwrap().unwrap().stage,
+        cas_store::DeliveryStage::Enqueued, "old cleanup must not cancel the replacement's brief");
+    let inbox = queue.poll_unseen_for_recipient(name, Some(SESSION), 100).unwrap();
+    assert!(inbox.iter().any(|row| row.id == brief.id), "replacement receives its resume brief");
+    let held = tasks.get(&task.id).unwrap();
+    assert_eq!(held.status, cas_types::TaskStatus::InProgress);
+    assert_eq!(held.assignee.as_deref(), Some(name), "recycle retains the replacement's work");
 }
 
 /// Keep harness discovery local to a child process, including the CAS binary

@@ -227,9 +227,13 @@ def discovery_timeout(elapsed):
 # Install before launch so a signal received while Popen starts is not lost.
 for watched in watched_signals:
     signal.signal(watched, forward_signal)
+# Preserve the admitted target lease through the watchdog, while Popen still
+# closes every unrelated inherited descriptor before launching Cargo.
+lease_fd = os.environ.get("CAS_TARGET_LEASE_FD")
 child = subprocess.Popen(
     [cargo, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT, start_new_session=True,
+    pass_fds=(int(lease_fd),) if lease_fd else (),
 )
 if not hasattr(os, "waitid") and hasattr(select, "kqueue"):
     try:

@@ -3269,7 +3269,7 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     // boundary from any checkout path. It holds no project: the refused
     // launches never create a HOME there, and only the positive control binds
     // a socket in it.
-    let sockets = tempfile::Builder::new().prefix("c4927").tempdir().unwrap();
+    let sockets = tempfile::Builder::new().prefix("c4927").tempdir_in("/tmp").unwrap();
     let root = sockets.path();
     // The old launch reaches this inert supervisor before its bind fails.
     fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();

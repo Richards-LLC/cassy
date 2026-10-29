@@ -138,9 +138,28 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
             .await,
     )
     .await;
+    // Starts are bounded: recover the complete pointer from their advertised
+    // saved advisories, as a credential-free worker must do on long paths.
+    assert!(started.contains("acme/widgets#77"), "{started}");
     assert!(
-        started.contains(&format!("acme/widgets#77: {}", attached_path.display())),
+        started.contains(&format!("All start advisories: task notes id={} full=true", task.id)),
         "{started}"
+    );
+    let advisories = text_of(
+        worker
+            .cas_task_notes_read(Parameters(TaskNotesReadRequest {
+                id: task.id.clone(),
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
+            }))
+            .await,
+    )
+    .await;
+    assert!(
+        advisories.contains(&format!("acme/widgets#77: {}", attached_path.display())),
+        "{advisories}"
     );
 
 }

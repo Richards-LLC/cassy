@@ -787,7 +787,7 @@ async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
     let metadata_path = crate::ui::factory::session::metadata_path(SESSION);
     std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
     let metadata = crate::ui::factory::session::create_metadata(
-        SESSION, pids.len(), "supervisor", &names, None, None, None,
+        SESSION, std::process::id(), "supervisor", &names, None, None, None,
     );
     std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
     crate::ui::factory::persist_session_metadata_worker_hold_at(&metadata_path, &pids[1].0, true).unwrap();

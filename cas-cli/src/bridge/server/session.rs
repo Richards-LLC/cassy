@@ -429,7 +429,7 @@ fn project_deliveries(
                 .filter(|task| task.epic_id.as_deref() == Some(epic.id.as_str())
                     && staffed_tasks.contains(task.id.as_str()))
                 .collect();
-            // Keep ongoing work first, then parked/blocked staffing. The
+            // Keep ongoing work first, then parked staffing. The
             // last worker parking cannot demote its release behind idle
             // history and starve the bounded delivery evidence read.
             std::cmp::Reverse((

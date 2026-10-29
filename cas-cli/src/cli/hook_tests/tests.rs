@@ -79,6 +79,28 @@ fn configure_migrates_bare_statuslines_in_every_profile_once() {
         assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
     }
     assert_eq!(std::fs::read_to_string(custom_path).unwrap(), custom_bytes);
+
+    let bad = home.path().join(".claude-broken");
+    std::fs::create_dir(&bad).unwrap();
+    let bad_settings = bad.join("settings.json");
+    std::fs::write(&bad_settings, "{ malformed").unwrap();
+    let mut bare = expected.clone();
+    bare["statusLine"]["command"] = "cas statusline".into();
+    for path in [&paths[0], &paths[2]] { std::fs::write(path, bare.to_string()).unwrap(); }
+    let dirs = vec![paths[0].parent().unwrap().to_owned(), bad, paths[2].parent().unwrap().to_owned()];
+    let mut warnings = Vec::new();
+    configure_claude_hooks_with_warnings(project.path(), false, &dirs, |warning| warnings.push(warning))
+        .expect("one malformed profile must not abort project hook setup");
+    for path in [&paths[0], &paths[2]] {
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(settings["statusLine"]["command"], "cas statusline --with-session");
+    }
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&project_path).unwrap()).unwrap();
+    assert_eq!(first_hook_command(&settings, "SessionStart"), Some("cas hook SessionStart"));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(bad_settings.to_str().unwrap()) && warnings[0].contains("Invalid JSON")
+        && warnings[0].contains("cas hook configure"), "{warnings:?}");
+    assert_eq!(std::fs::read_to_string(bad_settings).unwrap(), "{ malformed");
 }
 
 #[test]

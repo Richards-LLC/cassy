@@ -344,7 +344,7 @@ fn weekly_line(
     if weekly.resets_at.is_some_and(|at| at <= now) {
         return Some(format!("weekly {reset}"));
     }
-    let observation = crate::cli::limits::observation_label(observed_at);
+    let observation = crate::cli::limits::observation_label_at(observed_at, now);
     Some(match weekly.used_percent {
         Some(used) if used.is_finite() && used >= 100.0 => format!("weekly limit hit{observation}, {reset}"),
         Some(used) if used.is_finite() && used >= 0.0 => {

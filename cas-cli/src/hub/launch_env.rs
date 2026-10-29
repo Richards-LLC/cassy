@@ -577,7 +577,7 @@ fn mark_recommendation(
     let selection = crate::account_selection::recommend(accounts, provider, now, policy);
     for row in rows {
         row.usage = accounts.iter().find(|account| account.name == row.name)
-            .and_then(|account| crate::cli::limits::summarize_windows_at(&account.windows, now));
+            .and_then(|account| crate::cli::limits::summarize_account_at(account, now));
         row.recommendation = selection
             .recommended
             .as_ref()
@@ -795,6 +795,7 @@ mod tests {
         assert_eq!(choose_profile_name(None, None, None), "main");
         for (provider, cli) in [(crate::accounts::Provider::Claude, SupervisorCli::Claude), (crate::accounts::Provider::Codex, SupervisorCli::Codex)] {
             let mut accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
+            accounts[0].usage_observed_at = Some("2026-10-27T09:00:00Z".parse().unwrap());
             if provider == crate::accounts::Provider::Claude { accounts[0].windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
             let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, exclusion: None }];
             mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
@@ -804,6 +805,11 @@ mod tests {
             }
             assert_eq!(rows[0].usage.as_ref().unwrap().matches("(in ").count(), 2);
             assert!(!rows[0].usage.as_ref().unwrap().contains("extra usage"));
+            if provider == crate::accounts::Provider::Claude {
+                assert!(rows[0].usage.as_ref().unwrap().contains("as of 5:00 AM ET"), "{:?}", rows[0].usage);
+            } else {
+                assert!(!rows[0].usage.as_ref().unwrap().contains("as of"));
+            }
             let mut idle_accounts = accounts.clone();
             idle_accounts[0].windows.remove(0);
             idle_accounts[0].windows[0].used_percent = Some(10.0);

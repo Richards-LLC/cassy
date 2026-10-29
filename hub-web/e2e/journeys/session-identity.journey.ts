@@ -363,7 +363,25 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
     await expect(ended.locator(".conversation-when")).toBeVisible();
     await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
-    await expect(old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true })).toBeVisible();
+    const clearEnded = old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true });
+    await clearEnded.scrollIntoViewIfNeeded();
+    await expect(clearEnded).toBeInViewport();
+  });
+
+  await journey.stage("An ended row offers Dismiss, while the live row stays protected", async () => {
+    const old = list.getByRole("group", { name: /^pulse-card ·/ });
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await ended.scrollIntoViewIfNeeded();
+    await expect(old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true })).toBeVisible();
+    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
+    await expect(liveSupervisor).toBeVisible();
+  });
+
+  await journey.stage("Dismiss and clear ended sessions without deleting their history", async () => {
+    const old = list.getByRole("group", { name: /^pulse-card ·/ });
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
     await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
     await expect(ended).toHaveCount(0);
     await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(1);
@@ -372,6 +390,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(old.locator(".conversation-row")).toHaveCount(1);
     await expect(old.locator(".conversation-topline .conversation-action")).toBeHidden();
     await expect(liveSupervisor).toBeVisible();
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
     await page.reload();
     await expect(old.locator(".conversation-row")).toHaveCount(1);
     await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(0);

@@ -231,6 +231,10 @@ invariants:
     statement: The shell Accounts panel lists each machine independently and scrolls through every account on a phone; only factory-manage pairings mutate named Claude/Codex accounts, destructive operations confirm and audit, Grok is read-only, and New session refreshes choices without reload with local 12-hour capacity times. The confirmation editor is not rendered for read-only pairings or after Cancel/completion, and dismissal clears its text and typed value.
     check: Run accounts_route_tests, accounts-panel and launch-session UI tests and the HUB-J13 shell Accounts journey; assert rendered editor visibility after Cancel/remove and for read-only pairings, and prove CLI parity and each audited mutation on disposable profiles against the exact-tip real hub candidate, with 1280/390 light/dark captures.
     bug: {task: cas-e5df}
+  HUB-J13-ACCOUNTS-ENTRY:
+    statement: The shell Accounts control has a visible user-group glyph, an Accounts accessible name and tooltip, and an intact action group with the design-system gap and panel inset at desktop and 390px in light and dark.
+    check: Walk the HUB-J13 shell Accounts part; measure the rendered glyph, gap and right inset before opening the dialog, then capture the header in all four viewport/scheme combinations.
+    bug: {task: cas-a9d3}
   HUB-J13-LAUNCH-STORE:
     statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
     check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.
@@ -1417,6 +1421,7 @@ journeys:
   invariants:
   - HUB-J13-GOAL
   - HUB-J13-ACCOUNT-MANAGEMENT
+  - HUB-J13-ACCOUNTS-ENTRY
   - HUB-J13-NATIVE-CLAUDE-CAPACITY
   - HUB-J13-PROVIDER-CREDENTIAL-BOUNDARY
   - HUB-J13-LAUNCH-STORE

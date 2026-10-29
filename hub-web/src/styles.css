@@ -1723,9 +1723,9 @@ dialog form > *,
    the machine's --accent-soft and --lift. The machine accent is set by the
    machine-accent-N class on each row (hub-web/src/machine-accent.ts). */
 .conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; z-index: 1; background: var(--panel); box-shadow: var(--lift-edge); }
-.conversation-list-heading { padding: calc(22px + env(safe-area-inset-top)) 18px 18px; }
-/* P13: the lockup and the Appearance & commands icon button share the top row. */
-.conversation-list-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
+.conversation-list-heading { padding: calc(var(--space-6) + env(safe-area-inset-top)) var(--space-4) var(--space-4); }
+/* Keep the full action group inside the header inset when it no longer fits beside the brand. */
+.conversation-list-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
 /* cas-eaa3: Commander ↔ Explorer, the two Cassy Cloud apps (DESIGN.md "App switcher").
    The list header's lockup is the switch (#app-switcher-toggle, a chevron
    after the wordmark) and opens this popover under itself; the current app is the active wash with a
@@ -1761,11 +1761,11 @@ dialog form > *,
 /* P14: a codename is one word and never breaks at its hyphen; a list row may ellipsise it. */
 .codename { white-space: nowrap; }
 .conversation-supervisor.codename { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-/* cas-865c: one row, "Conversations" and New session; Pair a machine sits
-   with the appearance control in the top row, so nothing wraps at 1280 or 390. */
+/* cas-865c: keep "Conversations" and New session on one row; pairing and
+   account/appearance controls stay together in the header action group. */
 .conversation-list-title { display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
 .conversation-list-title h1 { min-width: 0; }
-.conversation-list-tools { display: inline-flex; align-items: center; gap: var(--space-1); margin-inline-start: auto; }
+.conversation-list-tools { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); margin-inline-start: auto; }
 .conversation-list-tools #pair-toggle { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); white-space: nowrap; }
 .conversation-list-tools #pair-toggle.primary { width: auto; color: var(--you-fg); background: var(--you-bg); }
 .conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }

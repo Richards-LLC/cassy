@@ -40,6 +40,12 @@ Five operation cases exercise the real route allowlist, authorization and dispos
 
 ## Critique
 
+### Header entry repair
+
+The header must reveal Accounts before the operator opens the panel. Reuse the existing user-group SVG inside the shared `icon-button`, retaining its Accounts tooltip and accessible name. Keep the action group intact and allow it below the full wordmark when the rail is too narrow. Existing `--space-2` gaps and `--space-4` desktop inset give both icons breathing room; phone safe-area rules retain their existing inset. This is a header repair only; account layout and shared tokens stay with their separate design work.
+
+The visual argument is the visible group icon beside settings, fully inside the glass panel. Its register remains quiet and exact; the distinctive choice is to preserve the full brand and the complete action group as each row's unit. No new palette, token, account behavior or navigation surface is introduced. Design source: `hub-web/DESIGN.md@3c25c3fb3`.
+
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Distinctiveness | 4 | Machine/provider ledger joins state and dated capacity; Default and Recommended stay distinct. |

@@ -273,7 +273,10 @@ fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
                 next.deliverables.factory_branch_start.as_mut().unwrap().base_sha = evidence.factory_tip.clone();
                 tasks.update(&next).unwrap();
                 let (_, cached, _) = f.app.revalidate_and_prompt_for_delivery(&events);
-                assert!(cached.iter().all(|prompt| !prompt.is_merge_ready()), "start rebinding must invalidate cached attribution");
+                assert!(
+                    cached.iter().all(|prompt| !prompt.is_merge_ready()),
+                    "start rebinding must invalidate cached attribution"
+                );
             }
         }
     }

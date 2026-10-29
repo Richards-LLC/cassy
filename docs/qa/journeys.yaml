@@ -2061,8 +2061,7 @@ journeys:
     trigger: '`/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a
       thread with work between two replies, and one worker on a task'
   steps:
-  - Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is
-    read
+  - Show work is off — replies and the reported phase remain visible, no work row shows and no work page is read
   - Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and
     its rows not; a worker's own tool call stays in its timeline
   - Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand
@@ -2081,6 +2080,7 @@ journeys:
   - commander_dependencies
   owners:
   - hub-web/src/work-events.ts
+  - hub-web/src/live-phase.ts
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
   - hub-web/src/work-rows.brief.md

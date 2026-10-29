@@ -29,7 +29,7 @@ export class AccountsSheet {
   open(): void {
     const dialog = this.ensureDialog();
     this.loads.abort(); this.loads = new AbortController(); this.generation++;
-    this.edit = undefined; this.catalogs.clear(); this.editor().hidden = true;
+    this.clearEditor(); this.catalogs.clear();
     this.notice("");
     const machines = this.host.machines();
     this.$(".accounts-machines").innerHTML = machines.length ? machines.map(machine => `<section data-machine="${escapeHtml(machine.id)}" aria-label="${escapeHtml(machine.label)}"><h3>${escapeHtml(machine.label)}</h3><div class="accounts-machine-body"><p role="status">Loading accounts…</p></div></section>`).join("") : '<p>No paired machines. Pair a machine to see its accounts.</p>';
@@ -44,12 +44,12 @@ export class AccountsSheet {
     dialog.className = "accounts-sheet"; dialog.setAttribute("aria-labelledby", "accounts-title");
     dialog.innerHTML = `<header class="accounts-heading"><div><h2 id="accounts-title">Accounts</h2><p>Logins and capacity, on each machine.</p></div><button type="button" data-accounts-close aria-label="Close accounts">Close</button></header><p class="accounts-notice" role="status" aria-live="polite"></p><div class="accounts-machines"></div><form class="accounts-editor" hidden><h3></h3><p class="accounts-explanation"></p><label class="accounts-field"><span></span><input name="value" autocomplete="off" required></label><div class="dialog-actions"><button type="button" data-accounts-cancel>Cancel</button><button type="submit" class="primary">Confirm</button></div></form>`;
     this.doc.body.append(dialog); this.dialog = dialog;
-    dialog.addEventListener("close", () => { this.loads.abort(); this.generation++; this.host.returnFocus(); });
+    dialog.addEventListener("close", () => { this.loads.abort(); this.generation++; this.clearEditor(); this.host.returnFocus(); });
     dialog.addEventListener("click", event => {
       const button = (event.target as Element).closest<HTMLButtonElement>("button");
       if (!button) return;
       if (button.hasAttribute("data-accounts-close")) dialog.close();
-      if (button.hasAttribute("data-accounts-cancel")) { this.edit = undefined; this.editor().hidden = true; this.focusRow(); }
+      if (button.hasAttribute("data-accounts-cancel")) { this.clearEditor(); this.focusRow(); }
       const machine = this.host.machines().find(item => item.id === button.dataset.machine);
       if (button.hasAttribute("data-retry") && machine) void this.load(machine);
       const account = machine && this.catalogs.get(machine.id)?.accounts.find(row => row.key === button.dataset.account);
@@ -65,6 +65,15 @@ export class AccountsSheet {
 
   private $<T extends HTMLElement = HTMLElement>(selector: string): T { return this.dialog!.querySelector<T>(selector)!; }
   private editor(): HTMLFormElement { return this.$<HTMLFormElement>(".accounts-editor"); }
+  private clearEditor(): void {
+    this.edit = undefined;
+    const form = this.editor(); form.hidden = true;
+    const input = form.elements.namedItem("value") as HTMLInputElement;
+    input.value = ""; input.setCustomValidity(""); input.oninput = null;
+    form.querySelector("h3")!.textContent = "";
+    this.$(".accounts-explanation").textContent = "";
+    this.$(".accounts-field span").textContent = "";
+  }
   private notice(text: string): void { this.$(".accounts-notice").textContent = text; }
   private machineBody(id: string): HTMLElement | undefined {
     return [...this.dialog!.querySelectorAll<HTMLElement>("[data-machine]")].find(node => node.tagName === "SECTION" && node.dataset.machine === id)?.querySelector<HTMLElement>(".accounts-machine-body") ?? undefined;
@@ -144,7 +153,7 @@ export class AccountsSheet {
       if (this.dialog?.open) for (const current of this.host.machines()) void this.load(current);
       return;
     }
-    this.edit = undefined; this.editor().hidden = true;
+    this.clearEditor();
     this.editor().querySelectorAll<HTMLButtonElement>("button").forEach(button => button.disabled = false);
     this.notice(success ? "Account updated." : "Could not verify the complete change. The list has been refreshed; check the account on the machine before trying again.");
     // Re-render all rows to restore their capability-derived disabled states.

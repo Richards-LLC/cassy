@@ -58,3 +58,7 @@ Supervisor-approved demo clarification preserves the CLI's protected main accoun
 
 
 The lazy Accounts stylesheet uses the hub's hashed chunk convention. The dist manifest regression caught Vite otherwise emitting an unservable app2.css; the final QA controller proxies actual candidate-embedded Commander assets rather than serving a separate dist directory. The original CI failure and local red manifest test are retained.
+
+### Confirmation editor correction
+
+Verifier ver-0e147d7370b5 invalidated the prior completion claim: the shared dialog form grid overrode the editor's hidden attribute. The editor now has a scoped display-none rule; Cancel, dialog close/reopen and mutation settlement clear its heading, explanation, label, value and validation state. The existing browser journey now checks rendered visibility after Cancel/remove and for read-only pairings, rather than trusting the attribute. The original failure remains evidence. Native ACC-02/ACC-06 recaptures and the correction's final visual/craft verdict are deferred to batch QA round 2; the earlier critique scores do not prove this correction.

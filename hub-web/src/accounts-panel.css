@@ -22,6 +22,8 @@
 .accounts-actions button:disabled { cursor: not-allowed; }
 .accounts-login code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .accounts-editor { margin-top: var(--space-4); border-top: 2px solid var(--color-action); padding-top: var(--space-3); }
+/* The shared dialog form grid overrides the browser's [hidden] display. */
+.accounts-sheet .accounts-editor[hidden] { display: none; }
 .accounts-field { display: grid; gap: var(--space-2); }
 .accounts-field input { width: 100%; box-sizing: border-box; }
 .accounts-sheet button:focus-visible, .accounts-field input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }

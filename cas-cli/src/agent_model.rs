@@ -56,8 +56,8 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
 }
 
 /// Record only the native session's durable row, including a rebound hook ID.
-/// Missing observations cannot invent a model; a different model invalidates its
-/// predecessor's effort until the harness reports the new effective level.
+/// Missing observations cannot invent a model. A native selection invalidates
+/// unreported prior effort, including a same-model effort-only selection.
 pub(crate) fn record(root: &Path, session_id: &str, model: Option<&str>, effort: Option<&str>) {
     let model = nonempty(model);
     let effort = nonempty(effort);
@@ -82,12 +82,10 @@ pub(crate) fn record(root: &Path, session_id: &str, model: Option<&str>, effort:
     let model_key = format!("{prefix}_model");
     let effort_key = format!("{prefix}_effort");
     if let Some(model) = model {
-        if agent.metadata.get(&model_key).map(String::as_str) != Some(model) {
-            agent.metadata.remove(&effort_key);
-            agent
-                .metadata
-                .insert(format!("{prefix}_effort_observed"), "true".into());
-        }
+        agent.metadata.remove(&effort_key);
+        agent
+            .metadata
+            .insert(format!("{prefix}_effort_observed"), "true".into());
         agent.metadata.insert(model_key, model.to_owned());
         agent
             .metadata

@@ -6210,6 +6210,9 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     // A pre-switch attempt is not a completed selection.
     crate::hooks::handle_hook("PreModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"unconfirmed"})).unwrap()).unwrap();
     assert_eq!(serde_json::to_value(hub_session(&session)).unwrap()["model"], "claude-opus-5-5");
+    // A same-model selection can also change effort; absence cannot retain stale high.
+    crate::hooks::handle_hook("PostModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"claude-opus-5-5"})).unwrap()).unwrap();
+    assert!(serde_json::to_value(hub_session(&session)).unwrap().get("effort").is_none());
     // Changing models without an effort observation clears the old model's effort.
     crate::hooks::handle_hook("PostModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"claude-sonnet-5-5"})).unwrap()).unwrap();
     let changed = serde_json::to_value(hub_session(&session)).unwrap();

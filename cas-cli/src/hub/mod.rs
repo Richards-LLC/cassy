@@ -723,7 +723,7 @@ impl LocalSessionReadModel {
                 is_running: false,
                 socket_exists: false,
             };
-            let (harness, account_email) = session_account(&recorded);
+            let identity = hub_session(&recorded);
             let project = session_cas_root(&recorded).and_then(|root| {
                 cloud_project_id(&root).or_else(|| {
                     root.parent()?.file_name().map(|name| name.to_string_lossy().into_owned())
@@ -731,11 +731,11 @@ impl LocalSessionReadModel {
             });
             rows.push(HubSession {
                 name: receipt.metadata.name,
-                harness,
-                model: hub_session(&recorded).model,
-                effort: hub_session(&recorded).effort,
-                agents: session_agent_models(&recorded),
-                account_email,
+                harness: identity.harness,
+                model: identity.model,
+                effort: identity.effort,
+                agents: identity.agents,
+                account_email: identity.account_email,
                 project,
                 machine_online: Some(false),
                 project_dir: receipt.metadata.project_dir,
@@ -926,7 +926,7 @@ fn session_account(session: &SessionInfo) -> (Option<String>, Option<String>) {
                         && agent.factory_session.as_deref() == Some(session.name.as_str())
                         && agent.name == session.metadata.supervisor.name
                 })
-                .max_by_key(|agent| agent.registered_at)
+                .max_by_key(|agent| (agent.last_heartbeat, agent.registered_at))
         });
     let Some(agent) = agent else {
         return (None, None);

@@ -27434,12 +27434,23 @@ mod merge_state_gate_tests {
     }
 
     #[test]
-    fn ct2_p1_park_sends_one_relay() {
+    fn ct2_p1_park_sends_one_relay_after_upkeep_notes() {
         use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
 
         let _env = TestEnvGuard::temp_home();
         let dir = TempDir::new().unwrap();
-        let (core, tasks, queue, task) = close_relay_fixture_cas_3a82(dir.path());
+        let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(dir.path());
+        // Deterministically interleave the writes a long close can encounter:
+        // its upkeep audits, a receipt imported by another store connection,
+        // and another append after the last upkeep audit but before parking.
+        let receipts = cas_store::SqliteTaskStore::open(dir.path()).unwrap();
+        let mut upkeep = CloseNoteTracker::new(&tasks, &task);
+        upkeep.record(&mut task, "UPKEEP: registry checked");
+        receipts.append_trusted_note(&task.id, "Receipt imported during close").unwrap();
+        upkeep.record(&mut task, "UPKEEP: documentation checked");
+        assert!(tasks.get(&task.id).unwrap().notes.contains("UPKEEP: documentation checked"),
+            "an intervening receipt note must not prevent close's own upkeep audit");
+        receipts.append_trusted_note(&task.id, "Final receipt imported before park").unwrap();
         core.park_task_awaiting_merge(
             &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
@@ -27447,6 +27458,12 @@ mod merge_state_gate_tests {
         ).unwrap();
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        for note in ["UPKEEP: registry checked", "Receipt imported during close",
+            "UPKEEP: documentation checked", "Final receipt imported before park"]
+        {
+            assert_eq!(parked.notes.matches(note).count(), 1,
+                "park must retain each intervening audit exactly once: {note}");
+        }
         assert_eq!(
             parked.deliverables.parked_close_reason.as_deref(),
             Some("PASS delivery-tip: relay fixture"),

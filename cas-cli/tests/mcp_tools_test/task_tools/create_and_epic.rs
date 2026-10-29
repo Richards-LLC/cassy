@@ -854,15 +854,16 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
     std::fs::write(
         repo.join(".cas/config.toml"),
         "[project]\ncanonical_id = \"cas-1630-fixture\"\n",
-    ).unwrap();
+    )
+    .unwrap();
     cas::store::known_repos::ensure_host_schema().unwrap();
-    // Pin Git inputs: a decimal-only SHA[..9] is deliberately treated as a run ID.
+    // Pin a SHA with letters in SHA[..9]; decimal-only prefixes are treated as run IDs.
     std::fs::write(repo.join(".gitignore"), "/.cas/\n").unwrap();
-    test_env.set("GIT_AUTHOR_DATE", "1700000191 +0000");
-    test_env.set("GIT_COMMITTER_DATE", "1700000191 +0000");
+    test_env.set("GIT_AUTHOR_DATE", "1700000192 +0000");
+    test_env.set("GIT_COMMITTER_DATE", "1700000192 +0000");
     init_repo_with_commit(repo);
     let (v56, v56_branch, v56_tip) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
-    assert_eq!(v56_tip, "9402201732baa854ba8bc4b156e818d469a90cfb");
+    assert_eq!(v56_tip, "8cdb386e4f461e0492a16cc5ef4fac74e681daa5");
     let v57 = extract_task_id(&extract_text(
         service
             .cas_task_create(Parameters(epic_create_request("Burn Down V57")))

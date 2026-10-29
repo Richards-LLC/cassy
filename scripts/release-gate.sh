@@ -1642,13 +1642,18 @@ check_changelog_and_versions() {
         $0 == "## [Unreleased]" { in_unreleased=1; next }
         in_unreleased && /^## \[/ { exit }
         in_unreleased && /^### / {
-            area = ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security) — .+$/)
+            area = ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security) — [^<>]+$/)
             next
         }
-        in_unreleased && area && /^- \*\*[^*][^*]*\*\* — .+$/ { found=1 }
-        END { exit(found ? 0 : 1) }
+        in_unreleased && /^- / {
+            if (!area || $0 !~ /^- \*\*[^*][^*]*\*\* — .+$/ \
+                || $0 == "- **Title** — What changed." \
+                || $0 ~ /^- \*\*<[^>]+>\*\* — / \
+                || $0 ~ / — <[^>]+>\.?$/) invalid=1
+        }
+        END { exit(invalid ? 1 : 0) }
     ' CHANGELOG.md; then
-        printf 'changelog: [Unreleased] needs a titled entry under a category and area heading\n'
+        printf 'changelog: existing [Unreleased] entries must use a titled category and area format\n'
         return 1
     fi
 

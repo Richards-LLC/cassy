@@ -961,6 +961,32 @@ fn ledger_tier_requires_a_fresh_pass_row() {
 }
 
 #[test]
+fn ledger_rejects_failed_row_without_defect_ownership() {
+    let fx = Fixture::new();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: "",
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
+    };
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "CLI output from the fixture build").unwrap();
+    std::fs::write(fx.task_dir.join("LEDGER.md"),
+        "# QA evidence\ncells=2; PASS=1; FAIL=1; NOT EXERCISED=0\n\
+         labels: real-build=2\n\
+         | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+         | M01 | help | usage | usage printed | PASS | real-build | qa/M01.txt | - |\n\
+         | M02 | invalid option | clear error | unclear error | FAIL | real-build | qa/M01.txt | - |\n"
+    ).unwrap();
+    let refusal = validate_ledger(&ctx)
+        .expect_err("a passing row must not hide a failed row with no defect owner");
+    assert!(refusal.problem.contains("M02") && refusal.problem.contains("defect"), "{refusal:?}");
+}
+
+#[test]
 fn trace_summary_counts_top_level_errors_as_failures() {
     let summary = expect_summary_from_events(
         &[

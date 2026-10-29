@@ -606,48 +606,91 @@ mod tests {
         assert!(error.to_string().contains("nothing to publish"), "{error}");
     }
 
-    #[test]
-    fn producer_publication_keeps_manifest_when_closure_is_unavailable() {
-        let f = fixture();
-        let manifest = f.task_dir.join("bundle.json");
-        let private = f.project_root.join("private.txt");
-        fs::write(&private, "private sentinel").unwrap();
-        let private_bytes = fs::read(&private).unwrap();
-        let oversized = f.task_dir.join("oversized.zip");
-        fs::File::create(&oversized)
-            .unwrap()
-            .set_len(ARTIFACT_MAX_BYTES + 1)
-            .unwrap();
-        for path in [
-            "../private.txt".to_string(),
-            private.display().to_string(),
-            "oversized.zip".into(),
-        ] {
-            fs::write(
-                &manifest,
-                serde_json::json!({
-                    "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
-                    "files": {"trace": path}
-                })
-                .to_string(),
+    #[tokio::test]
+    async fn producer_publication_keeps_manifest_when_closure_is_unavailable() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-manifest", "upload_url": format!("{}/blob", server.uri()),
+                "required_headers": {}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/cloud-manifest/complete"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})),
             )
-            .unwrap();
-            assert!(qa::prepare(&f.context(), &manifest).is_err());
-            let published = publish(&f.context(), &manifest).unwrap();
-            assert_eq!(published.artifact.name, "bundle.json");
-            assert_eq!(published.artifact.status, "local");
-            assert!(
-                published.disposition.summary().contains("not portable"),
-                "{published:?}"
-            );
-            if path == "oversized.zip" {
-                assert!(
-                    published.disposition.summary().contains("byte limit"),
-                    "{published:?}"
-                );
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            crate::store::open_task_store(&f.project_root.join(".cas"))
+                .unwrap()
+                .add(&crate::types::Task::new(
+                    "cas-b72a".into(),
+                    "artifact".into(),
+                ))
+                .unwrap();
+            let manifest = f.task_dir.join("bundle.json");
+            let private = f.project_root.join("private.txt");
+            fs::write(&private, "private sentinel").unwrap();
+            let private_bytes = fs::read(&private).unwrap();
+            fs::File::create(f.task_dir.join("oversized.zip"))
+                .unwrap()
+                .set_len(ARTIFACT_MAX_BYTES + 1)
+                .unwrap();
+            for online in [true, false] {
+                let mut context = f.context();
+                if online {
+                    context.cloud = Some(ArtifactUploadClient::new(&endpoint, "test-token"));
+                }
+                for path in [
+                    "oversized.zip".into(),
+                    "../private.txt".to_string(),
+                    private.display().to_string(),
+                ] {
+                    fs::write(
+                        &manifest,
+                        serde_json::json!({
+                            "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
+                            "files": {"trace": path}
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                    assert!(qa::prepare(&context, &manifest).is_err());
+                    let published = publish(&context, &manifest).unwrap();
+                    assert_eq!(published.artifact.name, "bundle.json");
+                    assert_eq!(
+                        published.artifact.status,
+                        if online { "committed" } else { "local" }
+                    );
+                    assert!(
+                        published.disposition.summary().contains("not portable"),
+                        "{published:?}"
+                    );
+                    if path == "oversized.zip" {
+                        assert!(
+                            published.disposition.summary().contains("byte limit"),
+                            "{published:?}"
+                        );
+                    }
+                }
             }
-        }
-        assert_eq!(fs::read(private).unwrap(), private_bytes);
+            assert_eq!(fs::read(private).unwrap(), private_bytes);
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

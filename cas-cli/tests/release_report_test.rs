@@ -733,6 +733,9 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
     fs::create_dir_all(project.path().join("docs/release-notes")).unwrap();
     fs::write(project.path().join("docs/release-notes/v3.87.0.md"), "# Release notes\n\nCloses #705, #746.\n").unwrap();
     cas_cmd(&project).args(["init", "--yes"]).assert().success();
+    let mut config = cas::config::Config::load(&project.path().join(".cas")).unwrap();
+    config.set("issues.repo", "example/project").unwrap();
+    config.save(&project.path().join(".cas")).unwrap();
     let fake_gh = install_fake_gh_version(&project, "3.87.0");
     let real = include_str!("../../CHANGELOG.md");
     let start = real.find("## [3.87.0]").unwrap();
@@ -750,8 +753,7 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
         let report: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(report["change_count"], expected, "{report}");
         assert_eq!(report["issue_count"], 2, "official GitHub count is independent: {report}");
-        let source = fs::read_to_string(project.path().join("docs/release-reports/v3.87.0.md")).unwrap();
-        assert!(source.contains(&format!("| Changes shipped | {expected} |")), "{source}");
-        assert!(source.contains("| GitHub issues closed | 2 |"), "{source}");
+        let html = fs::read_to_string(project.path().join("docs/release-reports/v3.87.0.html")).unwrap();
+        assert_eq!(html.matches("data-change=\"").count(), expected, "one rendered mark per shipped change");
     }
 }

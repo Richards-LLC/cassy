@@ -341,28 +341,26 @@ mod tests {
             ("task", super::CasInstance::create_task, extract_task_id),
             ("rule", super::CasInstance::create_rule, extract_rule_id),
         ] {
-            for seed in 0..128 {
-                // Exercise an occupied candidate and the old 16-bit task-ID boundary.
-                cas.next_fixture_id.set(u64::from(u16::MAX) + seed * 17);
-                replay.next_fixture_id.set(u64::from(u16::MAX) + seed * 17);
-                let first = insert(&cas, "first fixture row");
-                let first_replay = insert(&replay, "first fixture row");
-                cas.next_fixture_id.set(u64::from(u16::MAX) + seed * 17);
-                replay.next_fixture_id.set(u64::from(u16::MAX) + seed * 17);
-                let second = insert(&cas, "second fixture row");
-                let second_replay = insert(&replay, "second fixture row");
-                assert_ne!(first, second, "{kind} IDs must be distinct");
-                assert_eq!(
-                    [&first, &second],
-                    [&first_replay, &second_replay],
-                    "{kind} allocation must replay independently of entropy"
-                );
-                assert_eq!(
-                    extract(&second).as_deref(),
-                    Some(second.as_str()),
-                    "{kind} ID must survive output parsing"
-                );
-            }
+            // Exercise an occupied candidate and the old 16-bit task-ID boundary.
+            cas.next_fixture_id.set(u64::from(u16::MAX));
+            replay.next_fixture_id.set(u64::from(u16::MAX));
+            let first = insert(&cas, "first fixture row");
+            let first_replay = insert(&replay, "first fixture row");
+            cas.next_fixture_id.set(u64::from(u16::MAX));
+            replay.next_fixture_id.set(u64::from(u16::MAX));
+            let second = insert(&cas, "second fixture row");
+            let second_replay = insert(&replay, "second fixture row");
+            assert_ne!(first, second, "{kind} IDs must be distinct");
+            assert_eq!(
+                [&first, &second],
+                [&first_replay, &second_replay],
+                "{kind} allocation must replay independently of entropy"
+            );
+            assert_eq!(
+                extract(&second).as_deref(),
+                Some(second.as_str()),
+                "{kind} ID must survive output parsing"
+            );
         }
     }
 

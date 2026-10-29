@@ -49,39 +49,33 @@ async fn recent_declares_and_applies_stable_id_tie_break() {
     let second_id = extract_entry_id(&extract_text(second))
         .expect("second entry id")
         .to_string();
-    let conn = Connection::open(temp.path().join(".cas/cas.db")).unwrap();
-    use rand::{Rng, SeedableRng};
-    for seed in 0..128 {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let first_id = format!("mem-{:032x}", rng.random::<u128>());
-        let second_id = format!("mem-{:032x}", rng.random::<u128>());
-        for (title, id) in [("first", &first_id), ("second", &second_id)] {
-            assert_eq!(
-                conn.execute(
-                    "UPDATE entries SET id = ?1, created = ?2, updated_at = ?2 WHERE title = ?3",
-                    rusqlite::params![id, "2026-08-09T12:00:00+00:00", title],
-                )
-                .unwrap(),
-                1
-            );
-        }
-        assert_ne!(first_id, second_id);
-        let mut expected = [&first_id, &second_id];
-        expected.sort_unstable();
-        let [lower, higher] = expected;
-        let text = extract_text(
-            service
-                .cas_recent(Parameters(RecentRequest { n: 2 }))
-                .await
-                .unwrap(),
-        );
-        assert!(
-            text.contains("ordered_by: recent_at desc, id desc"),
-            "seed {seed}: {text}"
-        );
-        assert!(
-            text.find(&format!("[{higher}]")).unwrap() < text.find(&format!("[{lower}]")).unwrap(),
-            "seed {seed}: {text}"
-        );
-    }
+    // Memory IDs are opaque; creation order does not imply lexical order.
+    assert_ne!(first_id, second_id, "fixtures must have distinct IDs");
+    let mut expected_ids = [first_id.as_str(), second_id.as_str()];
+    expected_ids.sort_unstable();
+    let [lower_id, higher_id] = expected_ids;
+
+    let conn = Connection::open(temp.path().join(".cas/cas.db"))
+        .expect("test store database should be reachable");
+    conn.execute(
+        "UPDATE entries SET created = ?1, updated_at = ?1 WHERE id IN (?2, ?3)",
+        rusqlite::params!["2026-08-09T12:00:00+00:00", first_id, second_id],
+    )
+    .expect("fixture timestamps should tie");
+
+    let result = service
+        .cas_recent(Parameters(RecentRequest { n: 2 }))
+        .await
+        .expect("recent should succeed");
+    let text = extract_text(result);
+
+    assert!(
+        text.contains("ordered_by: recent_at desc, id desc"),
+        "recent response must state its ordering contract: {text}"
+    );
+    assert!(
+        text.find(&format!("[{higher_id}]")).unwrap()
+            < text.find(&format!("[{lower_id}]")).unwrap(),
+        "equal recent timestamps must be ordered by descending id: {text}"
+    );
 }

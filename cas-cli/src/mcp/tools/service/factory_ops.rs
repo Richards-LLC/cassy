@@ -11970,7 +11970,7 @@ pub(crate) fn worker_liveness_for_agent(
     if observation.state == super::worker_liveness::Liveness::Stalled
         && path.as_deref().is_none_or(|path| !path.exists())
     {
-        let recent_age = |at| {
+        let recent_age = |at: chrono::DateTime<chrono::Utc>| {
             let age = (now - at).num_seconds();
             (0..=stall_secs).contains(&age).then_some(age)
         };

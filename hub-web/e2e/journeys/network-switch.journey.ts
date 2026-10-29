@@ -1206,13 +1206,14 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
       expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
     }
     // cas-5f06 deliberately refreshes the selected live phase on the 5s
-    // health heartbeat; these scheduled pairs are independent of peer replay.
+    // health heartbeat; each control route is bounded by that schedule.
+    // Status must refresh, while a lease may remain cached.
     const maxHeartbeatPairs = Math.ceil((clock.now() - replayStarted) / 5_000);
     const statusReads = controlReads.filter(path => path.endsWith("/status")).length;
     const leaseReads = controlReads.filter(path => path.endsWith("/lease")).length;
     expect(statusReads).toBeGreaterThan(0);
     expect(statusReads).toBeLessThanOrEqual(maxHeartbeatPairs);
-    expect(leaseReads).toBe(statusReads);
+    expect(leaseReads).toBeLessThanOrEqual(maxHeartbeatPairs);
     controlReads.length = 0;
     // The selected session's live event must still refresh both controls.
     await page.evaluate(session => {

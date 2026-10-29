@@ -4710,7 +4710,16 @@ impl CasCore {
             .or(parked_source_tip.as_deref())
             .unwrap_or(worktree.branch.as_str());
         let branch_ci_lookup = lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd);
-        let ci_prefix = describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup);
+        let unparked_notice = scoped_task.as_deref()
+            .filter(|task| task.status == cas_types::TaskStatus::InProgress
+                && task.task_type != cas_types::TaskType::Epic)
+            .map(|task| format!(
+                "⚠️ UNPARKED TASK: {} was in_progress when this explicit merge was requested. The worker had not parked the delivery; green CI alone does not prove worker completion.\n\n",
+                task.id,
+            ))
+            .unwrap_or_default();
+        let ci_prefix = format!("{unparked_notice}{}",
+            describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup));
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
         // integration gate (cas-6f48) is retired with the rolling sweep.

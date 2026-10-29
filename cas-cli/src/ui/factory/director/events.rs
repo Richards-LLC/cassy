@@ -465,15 +465,15 @@ fn opens_note_entry(line: &str) -> bool {
         && bytes[5] == b'-'
 }
 
-/// Lane CI proves its selected checks, not that a test-first delivery is
-/// complete. Only an explicit worker delivery-ready return contract binds
+/// Lane CI proves its selected checks, not that a delivery is complete.
+/// Only an explicit worker delivery-ready return contract binds
 /// completion to this tip; check/test PASS receipts do not. Parking is already
 /// an explicit completion boundary and retains its ordinary one-shot signal.
 pub(crate) fn delivery_marked_ready(task: &cas_types::Task, tip: &str) -> bool {
     if task.status == TaskStatus::AwaitingMerge {
         return true;
     }
-    let mut ready = task.execution_note.as_deref() != Some("test-first");
+    let mut ready = false;
     let mut entry = String::new();
     let settle = |entry: &str, ready: &mut bool| {
         // The notes tool stores the first payload field on the header line.

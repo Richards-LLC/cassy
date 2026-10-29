@@ -36,6 +36,14 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
    Park reads the exact-tip fast-rows and capped test receipts, never runs checks.
    Add milestones with `task action=notes note_type=progress`.
+   For a delivery that changes shipped Rust, `hub-web/src`, user-run scripts or
+   builtin skills, add or extend a titled entry in `CHANGELOG.md` under
+   `## [Unreleased]`, grouped under a category and product area (for example
+   `### Fixed — Commander` with a per-delivery `- **Title** — description` line).
+   If the delivery is test-only, docs-only or internal QA, record a typed
+   decision note with `no changelog: <reason>`. The close gate checks that the
+   task's own delivery changed an Unreleased entry; the changelog fast row
+   checks the entry format.
 4. Scaffold with `cas qa ledger init --task <id>`; run
    `cas qa ledger check <path> --task <id>` before close. Follow
    [verify-before-claim](../verify-before-claim/SKILL.md) and

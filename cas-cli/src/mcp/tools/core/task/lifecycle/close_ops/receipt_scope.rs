@@ -109,6 +109,9 @@ pub(super) fn park_refusal(
     target: &str,
 ) -> Option<String> {
     let short = &head[..head.len().min(12)];
+    if let Some(refusal) = changelog_refusal(proof_repo, task, changed_paths, head, target) {
+        return Some(refusal);
+    }
     if let Some(refusal) = fast_rows_refusal(cas_root, proof_repo, task, head, target) {
         return Some(refusal);
     }
@@ -145,6 +148,187 @@ pub(super) fn park_refusal(
         modules = uncovered.join(", "),
         targets = widened.join(","),
     ))
+}
+
+fn product_source_path(path: &str) -> bool {
+    if path.starts_with("cas-cli/src/builtins/skills/") {
+        return true;
+    }
+    if (path.starts_with("cas-cli/src/") || (path.starts_with("crates/") && path.contains("/src/")))
+        && path.ends_with(".rs")
+    {
+        return true;
+    }
+    if path.starts_with("hub-web/src/") {
+        return true;
+    }
+    if !path.starts_with("scripts/") || path.split('/').any(|part| matches!(part, "tests" | "fixtures")) {
+        return false;
+    }
+    let file = path.rsplit('/').next().unwrap_or_default();
+    if file.starts_with("test-") || file.contains(".test.") || file.contains("_test.") {
+        return false;
+    }
+    [".sh", ".py", ".js", ".mjs", ".ts", ".ps1"]
+        .iter()
+        .any(|extension| file.ends_with(extension))
+}
+
+fn changelog_refusal(
+    repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+) -> Option<String> {
+    if !changed_paths.iter().any(|path| product_source_path(path))
+        || has_no_changelog_decision(&task.notes)
+    {
+        return None;
+    }
+    let changelog_changed = changed_paths.iter().any(|path| path == "CHANGELOG.md");
+    if changelog_changed && has_titled_unreleased_delta(repo, head, target) {
+        return None;
+    }
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    Some(format!(
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading, then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        task.id, task.id, task.id,
+    ))
+}
+
+fn has_no_changelog_decision(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        let Some((stamp, body)) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once("] ✅ DECISION "))
+        else {
+            return false;
+        };
+        if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
+            return false;
+        }
+        body.strip_prefix("no changelog:")
+            .is_some_and(|reason| !reason.trim().is_empty())
+    })
+}
+
+fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let Some(base) = git(&["merge-base", head, target]) else {
+        return false;
+    };
+    let range = format!("{}..{head}", base.trim());
+    let Some(commits) = git(&["rev-list", "--first-parent", "--reverse", &range]) else {
+        return false;
+    };
+    let Some(final_text) = git(&["show", &format!("{head}:CHANGELOG.md")]) else {
+        return false;
+    };
+    let Some(final_entries) = titled_unreleased_entries(&final_text) else {
+        return false;
+    };
+
+    for commit in commits.lines().filter(|commit| !commit.is_empty()) {
+        let Some(parents) = git(&["rev-list", "--parents", "-n", "1", commit]) else {
+            continue;
+        };
+        let parents: Vec<_> = parents.split_whitespace().collect();
+        let [_, parent] = parents.as_slice() else {
+            continue;
+        };
+        let Some(changed) = git(&["diff", "--name-only", parent, commit, "--", "CHANGELOG.md"])
+        else {
+            continue;
+        };
+        if !changed.lines().any(|path| path == "CHANGELOG.md") {
+            continue;
+        }
+        let Some(previous) = git(&["show", &format!("{parent}:CHANGELOG.md")]) else {
+            continue;
+        };
+        let Some(current) = git(&["show", &format!("{commit}:CHANGELOG.md")]) else {
+            continue;
+        };
+        let old_entries = titled_unreleased_entries(&previous).unwrap_or_default();
+        let Some(new_entries) = titled_unreleased_entries(&current) else {
+            continue;
+        };
+        if new_entries.iter().any(|(key, entry)| {
+            old_entries.get(key) != Some(entry) && final_entries.get(key) == Some(entry)
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), String>> {
+    let lines: Vec<_> = text.lines().collect();
+    let start = lines.iter().position(|line| *line == "## [Unreleased]")? + 1;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.starts_with("## ["))
+        .map_or(lines.len(), |offset| start + offset);
+    let mut entries = BTreeMap::new();
+    let mut area = None::<String>;
+    let mut index = start;
+    while index < end {
+        let line = lines[index];
+        if let Some(heading) = line.strip_prefix("### ") {
+            area = changelog_area(heading);
+            index += 1;
+            continue;
+        }
+        if let Some(bullet) = line.strip_prefix("- **")
+            && let Some((title, description)) = bullet.split_once("** — ")
+            && !title.trim().is_empty()
+            && !description.trim().is_empty()
+        {
+            let mut block = vec![line];
+            index += 1;
+            while index < end
+                && !lines[index].trim().is_empty()
+                && !lines[index].starts_with("- ")
+                && !lines[index].starts_with("### ")
+            {
+                block.push(lines[index]);
+                index += 1;
+            }
+            if let Some(area) = area.as_ref() {
+                entries.insert((area.clone(), title.trim().to_string()), block.join("\n"));
+            }
+            continue;
+        }
+        index += 1;
+    }
+    Some(entries)
+}
+
+fn changelog_area(heading: &str) -> Option<String> {
+    let (kind, area) = heading.split_once(" — ")?;
+    if ![
+        "Added",
+        "Changed",
+        "Deprecated",
+        "Removed",
+        "Fixed",
+        "Security",
+    ]
+    .contains(&kind)
+        || area.trim().is_empty()
+    {
+        return None;
+    }
+    Some(heading.to_string())
 }
 
 /// cas-eac2 (D2): the refusal for a tip of a repository that ships
@@ -593,6 +777,7 @@ mod tests {
         let cas_root = tempfile::tempdir().unwrap();
         let head = "e".repeat(40);
         let mut task = blast_radius_task(&["close_ops"]);
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only receipt-gate coverage".into();
         let changed = delivered();
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas", "test(worker)",
@@ -614,9 +799,137 @@ mod tests {
         assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
 
         let bare = tempfile::tempdir().unwrap();
-        let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head, "main")
+        let mut bare_task = blast_radius_task(&[]);
+        bare_task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only proof-scope fixture".into();
+        let scope = park_refusal(cas_root.path(), bare.path(), &bare_task, &changed, &head, "main")
             .expect("undeclared modules outside a workspace");
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
+    }
+
+    fn changelog_fixture() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::create_dir_all(repo.path().join("hub-web/src")).unwrap();
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 1;\n").unwrap();
+        std::fs::write(repo.path().join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        repo
+    }
+
+    fn commit_changelog_fixture(repo: &Path, subject: &str) -> String {
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["add", "."]);
+        git(&["commit", "--allow-empty", "-qm", subject]);
+        git(&["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn product_source_delivery_requires_a_titled_unreleased_change() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        for path in [
+            "cas-cli/src/main.rs",
+            "cas-cli/src/builtins/skills/cas-worker/SKILL.md",
+            "crates/cas-store/src/lib.rs",
+            "hub-web/src/app.ts",
+            "scripts/release.sh",
+        ] {
+            assert!(product_source_path(path), "{path} should require release notes");
+        }
+        for path in ["docs/guide.md", "cas-cli/tests/cli.rs", "scripts/test-checks.py"] {
+            assert!(!product_source_path(path), "{path} is not shipped product source");
+        }
+
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let source_only = commit_changelog_fixture(repo.path(), "product change");
+        let changed = vec!["hub-web/src/app.ts".to_string()];
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &source_only, "main")
+            .expect("product source without a changelog entry must be refused");
+        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- Generic status entry.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let untitled = commit_changelog_fixture(repo.path(), "add an untitled note");
+        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &untitled, "main")
+            .expect("an untitled Unreleased bullet is not release evidence");
+        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Status updates stay current** — Status now reflects the latest response.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let titled = commit_changelog_fixture(repo.path(), "add release note");
+        let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
+        assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
+        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main"));
+        let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main");
+        assert!(accepted.is_none(), "{accepted:?}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Status updates stay current** — Status now follows the current response.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let extended = commit_changelog_fixture(repo.path(), "extend release note");
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &extended, "main").is_none());
+    }
+
+    #[test]
+    fn reasoned_no_changelog_decision_exempts_source_delivery() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "internal test-only adjustment");
+        let mut task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog:".into();
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &head,
+            "main",
+        )
+        .is_some(), "an empty reason must not exempt the delivery");
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: internal QA-only fixture correction".into();
+        let refusal = park_refusal(
+            cas_root.path(), repo.path(), &task, &["hub-web/src/app.ts".into()], &head, "main",
+        );
+        assert!(refusal.is_none(), "a typed decision with a reason should exempt the delivery: {refusal:?}");
+    }
+
+    #[test]
+    fn non_product_paths_do_not_require_a_changelog_entry() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let head = commit_changelog_fixture(repo.path(), "documentation update");
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &["docs/guide.md".into()], &head, "main").is_none());
     }
 
     /// cas-d6eb AC2: a widening that adds only crate-qualified modules of

@@ -91,7 +91,7 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
   await expect(page.locator("#conversation-connection")).toContainText("Live");
   hub.supervisorSays(PELICAN, `# Evidence ready to reuse\n\n${markdown}\n\n~~~txt\n| literal | source |\n| --- | --- |\n~~~`);
   const log = page.getByRole("log");
-  const table = log.getByRole("table", { name: "Evidence", exact: true });
+  const table = log.getByRole("table", { name: "Evidence", exact: true }).filter({ has: page.getByRole("columnheader", { name: "Item", exact: true }) });
   const sheet = table.locator("xpath=../..");
   await journey.stage("Read a native table with escaped pipes and copy its two formats", async () => {
     await expect(table).toHaveCount(1);

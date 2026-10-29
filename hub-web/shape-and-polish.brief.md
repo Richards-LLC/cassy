@@ -29,3 +29,15 @@ No new palette, gradient or motion: Glass colours stay as shipped, and shape is 
 ## Critique
 
 Appended per step after render, with before/after pairs at 1280 and 390 in light and dark against the 3.88 screen catalog.
+
+### Step 1 (rules and tokens)
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | One shape scale: worker cards, menus, project cards and fields lose their 4px/8px corners at once; provider-mark avatars and the header pattern are specified for step 2. |
+| Fit | 5 | Uses Glass tokens only; no new colour. DESIGN.md frontmatter, maps and glass.css agree (tokens.test drift check). |
+| Hierarchy | 4 | Status pill (24px) vs action pill (32px) vs chip are distinct by rule; unknowns are demoted to evidence lines. The surfaces adopt the classes in step 2. |
+| Craft | 4 | Strict visual QA PASS, 70 fixtures x 2 schemes x 3 viewports, 0 findings; 27 affected journeys, 211 tests pass on the rebuilt bundle. |
+| Accessibility | 4 | Shape only; contrast pairs unchanged; more-contrast and forced-colours edges keep --line-strong. |
+
+Before/after: the 3.88 catalog pages 20, 21 and 77 against `step1/after/*` (1280 and 390, light and dark) in the task artifacts.

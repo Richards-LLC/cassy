@@ -14,7 +14,6 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::cli::Cli;
-use std::fmt;
 
 // An observation without a known reset cannot establish capacity indefinitely.
 // Known future windows remain useful after an idle session, with their age shown.
@@ -326,20 +325,22 @@ pub(crate) fn summarize_account_at(account: &crate::account_registry::Account, n
 
 /// Human reset text; the stored/JSON instant stays UTC RFC3339.
 pub(crate) fn format_reset(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
-    format_reset_in(reset, now.with_timezone(&Local))
+    format_reset_in(reset, now)
 }
 
-fn format_reset_in<Tz: TimeZone>(reset: Option<DateTime<Utc>>, now: DateTime<Tz>) -> String
-where Tz::Offset: fmt::Display {
+fn format_reset_in(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     let Some(reset) = reset else { return "reset time unknown".into() };
-    let local = reset.with_timezone(&now.timezone());
-    let seconds = reset.signed_duration_since(now.with_timezone(&Utc)).num_seconds();
+    let now_eastern = super::release_report::eastern(now);
+    let reset_eastern = super::release_report::eastern(reset);
+    let seconds = reset.signed_duration_since(now).num_seconds();
     let minutes = (seconds + 59) / 60;
-    if local <= now { return "reset, usage unknown until next session".into() }
-    let tomorrow = now.date_naive().succ_opt();
-    let stamp = if local.date_naive() == now.date_naive() || Some(local.date_naive()) == tomorrow {
-        local.format("%a %H:%M").to_string()
-    } else { local.format("%a %b %-d %H:%M").to_string() };
+    if reset <= now { return "reset, usage unknown until next session".into() }
+    let tomorrow = now_eastern.date_naive().succ_opt();
+    let stamp = if reset_eastern.date_naive() == now_eastern.date_naive()
+        || Some(reset_eastern.date_naive()) == tomorrow
+    {
+        reset_eastern.format("%a %-I:%M %p ET").to_string()
+    } else { reset_eastern.format("%a %b %-d %-I:%M %p ET").to_string() };
     let relative = if minutes < 60 { format!("{}m", minutes.max(1)) }
         else if seconds < 24 * 3600 { format!("{}h", (minutes + 59) / 60) }
         else {

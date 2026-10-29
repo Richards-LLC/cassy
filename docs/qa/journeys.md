@@ -843,19 +843,19 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - **Suite:** `hub-web/e2e/journeys/team.journey.ts`
 - **Gaps:** the protocol double supplies lifecycle events; acceptance additionally compares a read-only real hub with simultaneous factory worker and epic readbacks
 
-**Steps**
+#### Steps
 
 1. Open Team beside the supervisor conversation — keyboard-select the lazy tab; read epic progress, worker tasks and reported model, with no output requests.
 2. A lifecycle event updates staffing without reloading — change a worker state and read it within five seconds while Team stays selected.
 3. Read Team with forced colors and reduced motion — keep lanes readable without animation or phone overflow, then return to the conversation and composer.
 
-**Expected experience**
+#### Expected experience
 
 - Team loads only when selected, with the same session roster, task titles and epic progress as Tasks & progress.
 - Every receipt mark names actual lifecycle evidence; missing model, start time and evidence remain explicitly unreported.
 - Needs you opens the existing conversation or fleet controls, and the conversation draft stays intact while viewing Team.
 
-**Edge paths**
+#### Edge paths
 
 - An empty session roster stays empty; unrelated project workers never enter the view.
 - Unavailable or stale status remains labeled and a failed status request offers Retry staffing.

@@ -2,6 +2,7 @@ pub(crate) mod audit;
 pub(crate) mod integration_batch;
 pub(crate) mod block_hold;
 mod dependencies;
+mod fast_rows_exception;
 pub(crate) mod lifecycle;
 mod notes;
 pub(crate) use notes::note_notification_ids;

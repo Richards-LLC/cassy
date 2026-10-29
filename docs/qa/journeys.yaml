@@ -28,6 +28,12 @@ bug_families:
     tasks: [cas-3286, cas-8e01]
     invariants: [HUB-J12-GOAL]
     journeys: [HUB-J12]
+  supervisor-only-project-card:
+    title: Supervisor-only projects show no phantom workers, connection state remains machine-scoped, and empty end receipts stay concise
+    found: '2026-10-29'
+    tasks: [cas-51f6]
+    invariants: [HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD]
+    journeys: [HUB-J14]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -258,6 +264,10 @@ invariants:
     statement: Sibling sessions of one project keep their places; activity moves only the quiet "Most recent" label, never a row or the selection, so two supervisors trading turns never flash the list (WCAG 2.3.1/2.2.2).
     check: Run "HUB-J14 two active supervisors of one project keep their places and the selection for 60 s" in hub-web/e2e/journeys/session-identity.journey.ts; require row order, row tops and aria-current unchanged on every turn for 60 s under reduced motion, and Most recent on the last speaker.
     bug: {task: cas-4f42}
+  HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD:
+    statement: A live supervisor with no workers has no worker count; the connected machine and active session retain live status beside ended receipts; ended rows say Ended with their time and can be dismissed individually or cleared per project without removing history or offering controls for live sessions.
+    check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip and non-offline active row, pill-radius chip, plain Ended preview and visible end time, row and project dismissal, live-row exclusion, persistence across reload and retained protocol history.
+    bug: {task: cas-51f6}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
       away once resolved, and nothing claims I replied when I didn't
@@ -1518,6 +1528,7 @@ journeys:
   invariants:
   - HUB-J14-GOAL
   - HUB-J14-STABLE-ORDER
+  - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

@@ -3336,69 +3336,70 @@ impl FactoryApp {
         Ok(released_task_ids)
     }
 
-    /// Shared teardown: attempt to remove a worker's worktree on graceful close
-    /// (all tasks Closed). Branches: clean → removed + branch deleted; dirty →
-    /// preserved, warning surfaced, agent metadata flagged for later reaper.
+    /// Queue final worktree removal after graceful shutdown. Git, symlink
+    /// scans and filesystem deletion must not hold the daemon's control loop.
+    /// Reserve the name until its outcome lands, just as crash cleanup does.
     fn finalize_worker_worktree(
         &mut self,
         agent_store: &std::sync::Arc<dyn cas_store::AgentStore>,
         agent_id: &str,
         name: &str,
     ) {
-        let Some(manager) = self.worktree_manager.as_mut() else {
+        let Some(plan) = self
+            .worktree_manager
+            .as_ref()
+            .and_then(|manager| manager.worker_removal_plan(name))
+        else {
             return;
         };
-
-        let outcome = match manager.attempt_remove_worker(name) {
-            Ok(o) => o,
-            Err(e) => {
-                self.set_error(format!("Worker '{name}' worktree cleanup failed: {e}"));
-                return;
-            }
-        };
-
-        match outcome {
-            RemoveOutcome::NotTracked | RemoveOutcome::Removed => {}
-            RemoveOutcome::DirtyDeferred(warning) => {
-                self.set_error(format!(
-                    "Worker '{}' shut down with {} uncommitted file{} at {} — worktree preserved for salvage",
-                    warning.worker_name,
-                    warning.file_count,
-                    if warning.file_count == 1 { "" } else { "s" },
-                    warning.path.display(),
-                ));
-
-                if let Err(e) = flag_agent_dirty_on_shutdown(
-                    agent_store.as_ref(),
-                    agent_id,
-                    &warning.path,
-                    warning.file_count,
-                ) {
-                    tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
+        let agents = std::sync::Arc::clone(agent_store);
+        let agent_id = agent_id.to_string();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        *self.crash_cleanups_pending.entry(name.to_string()).or_default() += 1;
+        let started = std::thread::Builder::new()
+            .name(format!("worktree-cleanup-{name}"))
+            .spawn(move || {
+                let outcome = crate::worktree::remove_worker_worktree_io(&plan);
+                if let Ok(RemoveOutcome::DirtyDeferred(warning)) = &outcome {
+                    if let Err(e) = flag_agent_dirty_on_shutdown(
+                        agents.as_ref(),
+                        &agent_id,
+                        &warning.path,
+                        warning.file_count,
+                    ) {
+                        tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
+                    }
                 }
-            }
-            RemoveOutcome::ExternalSymlinksBlocked(warning) => {
-                // cas-df97: live external symlinks (e.g. dotfiles a
-                // stow/install step pointed at this worktree by mistake)
-                // resolve into it — removing the directory would leave
-                // every one dangling. Preserve the worktree and name every
-                // offending link so it's fixable without spelunking.
-                let links_desc = warning
-                    .links
-                    .iter()
-                    .map(|l| format!("{} -> {}", l.link.display(), l.target.display()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.set_error(format!(
-                    "Worker '{}' shut down but worktree at {} has {} live external symlink{} pointing into it — worktree preserved, NOT removed: {}",
-                    warning.worker_name,
-                    warning.path.display(),
-                    warning.links.len(),
-                    if warning.links.len() == 1 { "" } else { "s" },
-                    links_desc,
-                ));
+                let _ = sender.send(CrashCleanupOutcome { worktree: Some(outcome) });
+            });
+        match started {
+            Ok(_) => self.worktree_cleanup_jobs.push((name.to_string(), receiver)),
+            Err(error) => {
+                self.abandon_crash_cleanup(name);
+                self.set_error(format!("Worker '{name}' worktree cleanup failed: {error}"));
             }
         }
+    }
+
+    pub(crate) fn worker_worktree_cleanups_pending(&self) -> bool {
+        !self.worktree_cleanup_jobs.is_empty()
+    }
+
+    /// Apply finished removals without waiting for Git or filesystem work.
+    pub(crate) fn poll_worker_worktree_cleanups(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let mut pending = Vec::new();
+        for (name, receiver) in std::mem::take(&mut self.worktree_cleanup_jobs) {
+            match receiver.try_recv() {
+                Ok(outcome) => self.apply_crash_cleanup(&name, outcome),
+                Err(TryRecvError::Empty) => pending.push((name, receiver)),
+                Err(TryRecvError::Disconnected) => {
+                    self.abandon_crash_cleanup(&name);
+                    self.set_error(format!("Worker '{name}' worktree cleanup failed: cleanup thread exited without an outcome"));
+                }
+            }
+        }
+        self.worktree_cleanup_jobs = pending;
     }
 
     /// Mark a worker as crashed (removes from tracking, keeps worktree for respawn)
@@ -6479,6 +6480,79 @@ mod tests {
     use super::*;
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
+
+    /// Shutdown must give control back while Git's worktree cleanup is held.
+    /// The same name cannot be relaunched underneath that outstanding cleanup.
+    #[cfg(unix)]
+    #[test]
+    fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args)
+                .current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        git(&["commit", "--allow-empty", "-qm", "fixture"]);
+        let cas = crate::store::init_cas_dir(&repo).unwrap();
+        let mut manager = WorktreeManager::new(&repo, crate::worktree::WorktreeConfig {
+            enabled: true, base_path: cas.join("worktrees").to_string_lossy().into_owned(),
+            branch_prefix: "factory/".into(), auto_merge: false,
+            cleanup_on_close: false, promote_entries_on_merge: false,
+        }).unwrap();
+        let name = "held-cleanup";
+        manager.create_for_worker(name).unwrap();
+        let worker = manager.worker_removal_plan(name).unwrap().worktree.path;
+        let entered = env.home().join("entered");
+        let release = env.home().join("release");
+        for path in [&entered, &release] {
+            let path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        let monitor = env.home().join("fsmonitor");
+        std::fs::write(&monitor, format!(
+            "#!/bin/sh\nif mkdir '{}' 2>/dev/null; then\nprintf x > '{}'\nread signal < '{}'\nfi\nprintf 'token\\0'\n",
+            env.home().join("once").display(), entered.display(), release.display(),
+        )).unwrap();
+        std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        git(&["config", "core.fsmonitor", monitor.to_str().unwrap()]);
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gate = std::thread::spawn(move || {
+            std::fs::File::open(entered).unwrap().read_exact(&mut [0]).unwrap();
+            // This is a responsiveness deadline, not a sleep to order the test.
+            // On the old path it releases Git so the failing test cannot hang.
+            let returned_while_held = returned_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            if returned_while_held { let _ = release_rx.recv_timeout(Duration::from_secs(10)); }
+            std::fs::File::create(release).unwrap().write_all(b"continue\n").unwrap();
+            returned_while_held
+        });
+        let mut app = FactoryApp::for_test_at(cas.clone());
+        app.set_worktree_manager_for_test(manager);
+        app.finalize_worker_worktree(&open_agent_store(&cas).unwrap(), "fixture-agent", name);
+        let _ = returned_tx.send(());
+        let reserved = app.crash_cleanup_pending(name);
+        let _ = release_tx.send(());
+        assert!(gate.join().unwrap(), "worktree cleanup blocked the daemon's control lane");
+        assert!(reserved, "a late cleanup must not remove a same-name replacement");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while app.worker_worktree_cleanups_pending() && std::time::Instant::now() < deadline {
+            app.poll_worker_worktree_cleanups();
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        assert!(!worker.exists(), "the released Git cleanup must finish");
+        assert!(!app.crash_cleanup_pending(name), "completed cleanup releases the name");
+        assert!(app.worktree_manager().unwrap().worker_removal_plan(name).is_none());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cas_50713_stale_reset_releases_cloud_then_replacement_starts_without_claim_lost() {

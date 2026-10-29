@@ -5,15 +5,13 @@
 // to the pairing relay is answered here, at the network boundary. Payload
 // shapes follow the hub wire types in src/types.ts and the relay contract in
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
-import { expect, type Page, type Route, type WebSocketRoute } from "@playwright/test";
-import { createHash, webcrypto } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { journeyNow } from "./clock";
+import type { Page, Route, WebSocketRoute } from "@playwright/test";
+import { runtime } from "./hub-double-runtime";
 export const LATEST_RELEASE_URL = "https://api.github.com/repos/Richards-LLC/cassy/releases/latest";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
 /** The hub's visual page policy, the very file it embeds (cas-3aff). */
-const VISUAL_PAGE_CSP = readFileSync(new URL("../../../cas-cli/src/hub/visual_page_csp.txt", import.meta.url), "utf8").trim();
+const VISUAL_PAGE_CSP = runtime.visualPageCsp;
 export const SCOPES = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
 
 export type Session = {
@@ -186,14 +184,8 @@ const PANE_EPOCH = 1_788_970_165_000;
 /** The real hub's operator text for `upstream_unavailable` (hub/server.rs). */
 const UPSTREAM_UNAVAILABLE_MESSAGE = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
 type InstallationRow = { machine: string; device_id: string; credential_id: string; credential_generation: number; credential: string; scopes: string[]; device_label: string; operator_label: string; controller_origin: string; public_key_jwk: JsonWebKey; revoked_at: string | null };
-const hash = (value: string) => createHash("sha256").update(value).digest("base64url");
+const { hash, verifyInstallation } = runtime;
 const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
-async function verifyInstallation(key: JsonWebKey, proof: string, transcript: unknown[]): Promise<boolean> {
-  try {
-    const imported = await webcrypto.subtle.importKey("jwk", key, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    return await webcrypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, imported, Buffer.from(proof, "base64url"), new TextEncoder().encode(JSON.stringify(transcript)));
-  } catch { return false; }
-}
 
 export class HubDouble {
   readonly sends: SentMessage[] = [];
@@ -332,7 +324,7 @@ export class HubDouble {
     return Object.entries(this.options.baseUrls ?? {}).find(([, base]) => new URL(base).host === url.host)?.[0] ?? url.hostname.replace(/\.test$/, "");
   }
 
-  private now(): number { return this.options.time?.now() ?? journeyNow(); }
+  private now(): number { return this.options.time?.now() ?? runtime.now(); }
   private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
   private delay(callback: () => void, ms: number): void {
     if (this.options.time) this.options.time.delay(callback, ms);
@@ -426,9 +418,7 @@ export class HubDouble {
    * pause a loaded host can outrun.
    */
   async received(notificationId: number, page = this.page): Promise<void> {
-    await expect.poll(() => page.evaluate((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId), {
-      message: `the page received hub frame ${notificationId}`,
-    }).toBe(true);
+    await page.waitForFunction((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId, { timeout: 5_000 });
   }
 
   /** Install routes; call before the first navigation. */

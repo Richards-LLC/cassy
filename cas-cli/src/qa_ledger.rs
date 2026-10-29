@@ -582,6 +582,9 @@ mod tests {
         std::fs::write(dir.path().join("capture.txt"), "usage").unwrap();
         std::fs::write(&path, &base).unwrap();
         assert!(check(&path, 1).ok);
+        std::fs::write(&path, base.replace("labels: real-build=1", "labels: fixture=0; real-build=1; eyewitness=0")).unwrap();
+        let report = check(&path, 1);
+        assert!(report.ok, "zero label counts: {}", report.refusal());
         for (body, code) in [
             (base.replace("cells=1", "cells=2"), "count"),
             (

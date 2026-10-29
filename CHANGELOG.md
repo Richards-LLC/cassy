@@ -13,6 +13,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   exclude Known limits sections while keeping their entries, tests and
   documentation in the report prose.
 
+### Fixed — Release workflow
+
+- **Post-cut gate accepts an empty Unreleased section** — The release gate
+  validates entries that exist and rejects the documented example placeholders.
+
 ### Added — Delivery process
 
 - **Park requires a titled changelog entry** — Product-source deliveries need

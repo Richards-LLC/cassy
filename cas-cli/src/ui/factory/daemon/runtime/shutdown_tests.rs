@@ -1355,6 +1355,8 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    // Status honors CAS_ROOT; read this fixture's registry rather than temp_home's.
+    env.set("CAS_ROOT", &cas_dir);
     env.set_current_dir(dir.path());
 
     let mut daemon = daemon(&cas_dir);
@@ -1574,7 +1576,11 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         names.sort();
         assert_eq!(names, vec![NAME, "roster-peer"]);
         let status = crate::bridge::server::session::build_status_json(&session, &cas_dir, 20).unwrap();
-        assert_eq!(status.session.workers.len(), 2, "Team status retains both lanes");
+        assert_eq!(
+            status.session.workers.len(), 2,
+            "Team status retains both lanes; observed={:?}, metadata={names:?}",
+            status.session.workers,
+        );
 
         // A teardown of this actual generation must still reap it and
         // release its binding; generation checks are not a blanket bypass.

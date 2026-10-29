@@ -30,4 +30,12 @@ Extend one renderer test for typed summaries/bodies, safe raw fallback, live met
 
 ## Critique
 
-Pending rendered proof.
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | The quiet activity ledger retains Commander Glass; opening a row reveals operation-specific evidence rather than another generic card. |
+| Fit to argument | 4 | Read targets, search counts, command/cwd/exit and edit targets distinguish the four operations at a glance and on opening. |
+| Hierarchy | 4 | Replies lead, then one collapsed work summary; failure words stand out without making all work equally prominent. |
+| Craft | 4 | Strict visual QA PASS at 1280×800 and 390×844 in light/dark: zero contrast, clipping, overlap or overflow findings. Raw records wrap in the existing scrollable well. |
+| Accessibility | 4 | Enter opens each detail, live metadata preserves detail focus, Escape returns from the timeline; forced colors, reduced motion and more contrast retain disclosure state. JavaScript is explicitly required by the application. |
+
+Scored by crisp-tiger-26 on 2026-10-28 after reviewing production-bundle captures. All floors hold. The polish check inspects a captured production DOM with the exact dist CSS; live protocol and keyboard checks are in the runner trace. Source build b7a7e717d; evidence: task cas-d278, qa/bundle.json.

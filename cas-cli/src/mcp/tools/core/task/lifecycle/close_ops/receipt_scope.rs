@@ -122,7 +122,11 @@ pub(super) fn park_refusal(
             crates = untested.join(", "),
         ));
     }
-    if proof_repo.join("Cargo.toml").is_file() {
+    // A workspace may live below the repository root; any changed Rust file
+    // inside a Cargo package turns the touched-test check on.
+    if changed_paths.iter().any(|path| path.ends_with(".rs")
+        && Path::new(path).ancestors().skip(1).any(|dir| proof_repo.join(dir).join("Cargo.toml").is_file()))
+    {
         let evidence = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head);
         match evidence.missing_stability(target) {
             Ok(missing) if missing.is_empty() => {}

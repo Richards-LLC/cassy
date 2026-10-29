@@ -855,6 +855,7 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
         repo.join(".cas/config.toml"),
         "[project]\ncanonical_id = \"cas-1630-fixture\"\n",
     ).unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
     // Pin Git inputs: a decimal-only SHA[..9] is deliberately treated as a run ID.
     std::fs::write(repo.join(".gitignore"), "/.cas/\n").unwrap();
     test_env.set("GIT_AUTHOR_DATE", "1700000191 +0000");

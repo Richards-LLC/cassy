@@ -86,6 +86,7 @@ EOF2
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
+    printf 'base styles\n' >"$root/hub-web/dist/app.css"
     printf '{"name":"release-web-fixture","version":"1.0.0","private":true,"scripts":{"build":"node build.cjs"}}\n' >"$root/hub-web/package.json"
     printf '{"name":"release-web-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"release-web-fixture","version":"1.0.0"}}}\n' >"$root/hub-web/package-lock.json"
     cat >"$root/hub-web/build.cjs" <<'JS'
@@ -116,6 +117,7 @@ clone_epic() {
     git -C "$dir" checkout --quiet -b "$name"
     perl -0777 -i -pe "s/## \\[Unreleased\\]\\n/## [Unreleased]\\n\\n### Added — $entry\\n\\n- $entry shipped.\\n/" "$dir/CHANGELOG.md"
     echo "$entry" >"$dir/$entry.txt"
+    printf '%s styles\n' "$entry" >"$dir/hub-web/dist/app.css"
     git -C "$dir" add -A
     git -C "$dir" commit --quiet -m "$entry work"
 }
@@ -229,13 +231,16 @@ check 'rerun_after_repair' 'a repaired release requeues once with old/new notes 
 
 # 5. Another epic's release lands first with the same version: re-bump.
 clone_epic "$tmp/beta" epic/beta beta
+# cas-9cb3: base deletes a fixed-name generated file our branch modified.
+git -C "$tmp/beta" rm --quiet hub-web/dist/app.css
+git -C "$tmp/beta" commit --quiet -m 'drop obsolete generated styles'
 printf 'Beta v{{VERSION}}\n' >"$tmp/beta-draft.md"
 rm -f "$FAKE_GH_STATE/pr"
 run "$tmp/beta" --no-watch --notes "$tmp/beta-draft.md" 2>/dev/null
 git -C "$tmp/beta" push --quiet origin epic/beta:main
 rm -f "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
 : >"$FAKE_GH_LOG"
-run "$epic" --no-watch 2>"$tmp/rebump.err"
+run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
 check 'git -C "$epic" merge-base --is-ancestor origin/main HEAD' 'the base branch is merged in'
 check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A4 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
@@ -247,6 +252,7 @@ check 'grep -q "Cassy v9.101.0" "$epic/docs/release-notes/2026-10-15-v9.101.0-sl
 check '[[ -f "$epic/beta.txt" && -f "$epic/alpha.txt" ]]' 'the landed code is merged'
 check 'grep -q "^pr edit 77 --title Release v9.101.0: epic/alpha" "$FAKE_GH_LOG" && grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'the open PR is retitled and auto-merge re-enabled'
 check 'grep -q "9.101.0" "$epic/hub-web/dist/app.js" && grep -q "alpha" "$epic/hub-web/dist/app.js" && grep -q "beta" "$epic/hub-web/dist/app.js" && git -C "$epic" diff --quiet HEAD -- hub-web/dist' 'a re-bump resolves generated bundle conflicts and commits the merged web sources with the new version'
+check '[[ ! -e "$epic/hub-web/dist/app.css" && -z "$(git -C "$epic" status --porcelain)" && ! -f "$epic/.git/MERGE_HEAD" ]]' 'cas-9cb3: a base-deleted fixed-name dist file resolves and the re-bump finishes cleanly'
 
 # 6. A conflict outside the release files stops with exit 4 and no merge.
 echo main-change >"$tmp/seed/app.txt"

@@ -202,7 +202,12 @@ sync_with_base() {
                 # Generated files may conflict when two releases change web
                 # inputs. Take the base output (including deletions); prepare
                 # regenerates it from the merged sources and bumped version.
-                git restore --source="$remote/$base" --staged --worktree -- "$file"
+                if git cat-file -e "$remote/$base:$file" 2>/dev/null; then
+                    git restore --source="$remote/$base" --staged --worktree -- "$file"
+                else
+                    git rm --quiet -- "$file"
+                    continue # The deletion is staged; no path remains to add.
+                fi
                 ;;
             CHANGELOG.md)
                 git show ":3:$file" >"$scratch/base-changelog.md"

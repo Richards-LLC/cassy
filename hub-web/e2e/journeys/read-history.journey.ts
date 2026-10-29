@@ -712,6 +712,10 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     const tabs = tab.context().pages().length;
 
     await journey.stage(`See a page the supervisor sent, inline (${name})`, async () => {
+      // Page tickets are lazy: bring the persistent page card into view before
+      // asking for the iframe it creates. A shorter conversation viewport may
+      // leave the first card outside the observer's preload margin.
+      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
       const report = log.getByTitle("Gate report.html, a page from the supervisor");
       await report.scrollIntoViewIfNeeded();
       await expect(report).toHaveAttribute("sandbox", "");

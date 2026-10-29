@@ -195,7 +195,34 @@ mod tests {
             "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"bad/repo/extra\"}'\n",
         );
         assert!(resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).is_err());
-        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
-        assert!(resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).is_err());
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\necho 'GH_TOKEN=fixture-secret' >&2\nexit 7\n");
+        let failed = resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2))
+            .unwrap_err();
+        assert!(failed.contains("exit status: 7"), "{failed}");
+        assert!(!failed.contains("fixture-secret"), "{failed}");
+        let timed_out = resolve_slug("pippenz/cas", temp.path(), &gh, Duration::ZERO)
+            .unwrap_err();
+        assert!(timed_out.contains("timed out"), "{timed_out}");
+        assert!(!timed_out.contains("unavailable"), "{timed_out}");
+        let unavailable = resolve_slug(
+            "pippenz/cas", temp.path(), &temp.path().join("missing-gh"), Duration::from_secs(2),
+        ).unwrap_err();
+        assert!(unavailable.contains("unavailable"), "{unavailable}");
+        assert!(!unavailable.contains("timed out"), "{unavailable}");
+    }
+
+    #[test]
+    fn github_origin_inspection_distinguishes_git_failure_from_absent_origin_cas_e1ca() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        assert!(Command::new("git").current_dir(temp.path()).args(["init", "-q"])
+            .status().unwrap().success());
+        assert_eq!(origin_slug(temp.path(), Duration::from_secs(2)).unwrap(), None);
+        std::fs::write(temp.path().join(".git/config"), "[broken\n").unwrap();
+        let failed = origin_slug(temp.path(), Duration::from_secs(2)).unwrap_err();
+        assert!(failed.contains("GitHub origin lookup failed"), "{failed}");
+        assert!(failed.contains("128"), "{failed}");
+        let timed_out = origin_slug(temp.path(), Duration::ZERO).unwrap_err();
+        assert!(timed_out.contains("timed out"), "{timed_out}");
     }
 }

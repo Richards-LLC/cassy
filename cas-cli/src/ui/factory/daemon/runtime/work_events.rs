@@ -1216,6 +1216,12 @@ fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str) -> PhaseHooks {
         }
         let starting = row["event"] == "pre_compact_fired";
         let completed = row["event"] == "session_start_fired" && row["source"] == "compact";
+        if row["event"] == "session_start_fired" && !completed {
+            // A new/cleared context cannot inherit the previous context's
+            // compaction interval when its transcript has no lifecycle yet.
+            starts.clear();
+            evidence.phase = None;
+        }
         if !starting && !completed { continue; }
         let event_id = format!("compact:{native_id}:{}", at.timestamp_millis());
         let (id, started_at) = if starting {
@@ -1255,7 +1261,9 @@ pub(crate) fn supervisor_phase_for_session(
     scope.supervisors.retain(|source| source.agent_name == supervisor);
     let hooks = phase_hooks(cas_dir, session, supervisor);
     if let Some((source, _)) = &hooks.transcript {
-        scope.supervisors.push(source.clone());
+        // The native hook names this exact factory and supervisor; do not
+        // combine it with a lagging pre-/clear registration or parse it twice.
+        scope.supervisors = vec![source.clone()];
     }
     let resolve = |source: &SupervisorSource| {
         if let Some((hook_source, path)) = &hooks.transcript

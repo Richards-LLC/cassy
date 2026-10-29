@@ -452,6 +452,13 @@ fn native_phase_uses_scoped_hook_identity_and_compaction_boundaries() {
         {"type":"tool_use","id":"next-tool","name":"Read","input":{"file_path":"src/lib.rs"}}
     ]}})]);
     assert_eq!(phase().unwrap().lifecycle.id, "next-tool");
+    let cleared_path = project.path().join("cleared.jsonl");
+    std::fs::write(&cleared_path, "").unwrap();
+    let mut cleared = hook("session_start_fired", &at(6), "clear");
+    cleared["transcript_path"] = json!(cleared_path);
+    cleared["session_id"] = json!("cleared-native-session");
+    write_lines(&log, &[cleared]);
+    assert!(phase().is_none(), "a new empty context must not inherit its old tool/compaction phase");
 }
 
 #[test]

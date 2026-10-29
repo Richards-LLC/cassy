@@ -216,6 +216,73 @@ impl Fixture {
 }
 
 #[test]
+fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
+    for (recorded_start, new_work) in [(true, false), (true, true), (false, false), (false, true)] {
+        let mut f = Fixture::new();
+        f.in_progress();
+        let old_tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
+        f.advance_target(true);
+        git(f.repo.path(), &["fetch", "-q", "origin", "epic/test"]);
+        git(f.repo.path(), &["merge-base", "--is-ancestor", &old_tip, "origin/epic/test"]);
+        git(f.repo.path(), &["branch", "epic/next", "HEAD^"]);
+        git(f.repo.path(), &["push", "-q", "origin", "epic/next"]);
+        let tasks = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut previous = tasks.get("cas-9efb-test").unwrap();
+        previous.status = TaskStatus::Closed;
+        tasks.update(&previous).unwrap();
+        let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+        agents.release_lease(&previous.id, "merge-w").unwrap();
+        let mut next = Task::new("cas-adbb-next".into(), "work in another epic".into());
+        next.status = TaskStatus::InProgress;
+        next.assignee = Some("merge-w".into());
+        let target = WorkTarget { repo_selector: "project:fixture".into(), target_branch: "epic/next".into() };
+        next.deliverables.work_target = Some(target.clone());
+        if recorded_start {
+            next.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target, assignee: "merge-w".into(), branch: "factory/merge-w".into(), base_sha: old_tip.clone(),
+            });
+        }
+        tasks.add(&next).unwrap();
+        assert!(agents.try_claim(&next.id, "merge-w", 600, None).unwrap().is_success());
+        if new_work {
+            std::fs::write(f.repo.path().join("next.rs"), "// new task work\n").unwrap();
+            git(f.repo.path(), &["add", "next.rs"]);
+            // Recorded graph attribution needs no message convention; older
+            // tasks without a start boundary still have explicit task identity.
+            let message = if recorded_start { "new task work".into() } else { format!("{} new task work", next.id) };
+            git(f.repo.path(), &["commit", "-qm", &message]);
+            git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+        }
+        let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
+        f.app.set_director_data_for_test(data);
+        let events = f.app.merge_alert_retry_events_at(Utc::now());
+        assert!(events.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle {
+            active_task: Some(active), ..
+        } if active.task_id == next.id)), "the real retry path must probe the new assignment");
+        let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        let ready: Vec<_> = prompts.iter().filter(|prompt| prompt.is_merge_ready()).collect();
+        // pin: the director emits one merge action for current work and none for a preceding delivery.
+        assert_eq!(ready.len(), usize::from(new_work), "recorded_start={recorded_start}, new_work={new_work}; prior merged delivery={old_tip}; prompts={:?}", prompts.iter().map(|prompt| &prompt.text).collect::<Vec<_>>());
+        if let Some(prompt) = ready.first() {
+            let evidence = prompt.merge_alert.as_ref().unwrap();
+            assert_eq!(evidence.task_id, next.id);
+            assert_eq!(evidence.factory_tip, git(f.repo.path(), &["rev-parse", "HEAD"]));
+            if recorded_start {
+                // A source rebind to this tip withdraws readiness even when a
+                // durable READY receipt and successful probe already exist.
+                next.deliverables.factory_branch_start.as_mut().unwrap().base_sha = evidence.factory_tip.clone();
+                tasks.update(&next).unwrap();
+                let (_, cached, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+                assert!(
+                    cached.iter().all(|prompt| !prompt.is_merge_ready()),
+                    "start rebinding must invalidate cached attribution"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     let mut f = Fixture::new();
     f.in_progress();
@@ -320,6 +387,14 @@ fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
     let mut task = store.get("cas-9efb-test").unwrap();
     task.execution_note = Some("test-first".into());
     task.deliverables.factory_branch_anchor = None;
+    // A started test-first task records its graph boundary before its red
+    // checkpoint; completion readiness and commit attribution are separate.
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: "merge-w".into(),
+        branch: "factory/merge-w".into(),
+        base_sha: git(f.repo.path(), &["rev-parse", "epic/test"]),
+    });
     let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
     // Replace the fixture delivery with a real test-only, intentionally red
     // commit. Its lane CI fixture remains green because that lane skips it.

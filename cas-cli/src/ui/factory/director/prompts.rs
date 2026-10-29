@@ -1165,6 +1165,9 @@ pub(crate) fn refresh_ci_merge_signal(
                 || crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
                     repo_root, task, &original.factory_branch, &original.factory_tip,
                 ).is_err()
+                || !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(
+                    repo_root, task, &original.factory_branch, &original.factory_tip,
+                )
             { return false; }
         }
     }

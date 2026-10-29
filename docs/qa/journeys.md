@@ -498,6 +498,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A named-profile startup brief written to Teams before pane readiness retries its wake once ready, submits once and leaves one Teams body (the real queue/PTY regression for cas-dd2e).
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
 - The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.
+- The Accounts entry remains visible before the dialog opens: a user-group glyph, tooltip and accessible name "Accounts", with the header actions inside the panel inset and spaced apart at desktop/390px in light/dark (cas-a9d3).
 
 ### HUB-J14 · Tell a project's live sessions apart
 

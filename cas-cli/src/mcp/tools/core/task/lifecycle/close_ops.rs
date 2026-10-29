@@ -27565,7 +27565,7 @@ mod merge_state_gate_tests {
             ("proof scope", |task| task.proof_targets = vec!["new proof target".into()]),
             ("acceptance", |task| task.acceptance_criteria = "Corrected acceptance".into()),
             ("delivery", |task| task.deliverables.factory_branch_anchor = Some("replacement-tip".into())),
-            ("timeline rewrite", |task| task.notes = "Corrected timeline".into()),
+            ("timeline rewrite", |task| task.notes = "Original timeline corrected".into()),
         ];
         for (field, edit) in edits {
             tasks.update(&original).unwrap();

@@ -875,13 +875,15 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 1. Choose Usage from the slash palette with the keyboard
 2. Read the observed native result without resending the command
 3. Cancel Clear, then confirm Exit for the named supervisor
-4. Open the quick controls and read the permission explanation
-5. Read adjacent Raw output and return by keyboard
+4. Settle Exit from the ended catalog after its status request loses the daemon
+5. Open the quick controls and read the permission explanation
+6. Read adjacent Raw output and return by keyboard
 
 #### Expected experience
 
 - Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
 - Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
+- After a disconnect refusal followed by an authenticated ended catalog, Exit is observed without a not-sent/retry claim or mutation replay; an earlier Usage keeps its own observed result (cas-7f2a).
 - Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.
 
 #### Edge paths

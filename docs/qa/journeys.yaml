@@ -60,6 +60,10 @@ invariants:
   HUB-J27-ALLOWLIST:
     statement: A command requires authenticated control and an active lease; arbitrary strings, foreign references, busy prompts and operator drafts cannot inject input.
     check: Run hub::server::supervisor_commands_require_control_confirmation_and_private_audited_receipts and the supervisor_commands runtime module; verify the closed wire enum and guarded actual PTY bytes, including stale native chooser recovery.
+  HUB-J27-EXIT-END-CONSISTENCY:
+    statement: An authenticated ended session settles its already-submitted Exit even after reconnect, without a not-sent claim or replay; genuine refusals and unrelated commands or sessions stay separate.
+    check: Run supervisor-commands.test.ts with rejection, timeout, late-status and session-isolation cases, then the HUB-J27 error-before-ended-catalog stage at desktop and 390px. Batch QA verifies real Claude and Codex Exit against authenticated ended receipts with at least 120 seconds of failure observation allowance.
+    bug: {task: cas-7f2a}
   HUB-J27-OBSERVED-OUTCOME:
     statement: Submission is distinct from observed native execution, a model chooser is distinct from selection, and uncertain mutations never replay automatically.
     check: Run the receipt controller tests and HUB-J27; verify native Claude/Codex outcomes against the supervisor-built candidate, correlate Finish with its own completed turn and Exit with the authenticated ended receipt, and inspect durable audit rows.
@@ -2205,7 +2209,7 @@ journeys:
   - Busy prompts and operator drafts refuse injection.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME]
+  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

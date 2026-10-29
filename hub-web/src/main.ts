@@ -473,8 +473,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // Older daemons can establish activity but cannot name its phase/time.
       working,
       phase: () => livePhase(statuses.get(threadKey)?.supervisor_phase, {
-        connected: connectionStates.get(threadMachineId)?.phase === "live" && !connectionStates.get(threadMachineId)?.authFailure,
-        stale: statusFailures.has(threadKey) || connectionStates.get(threadMachineId)?.degraded === true,
+        connected: conversationConnection(threadMachineId, threadSession)?.phase === "live" && !conversationConnection(threadMachineId, threadSession)?.authFailure,
+        stale: statusFailures.has(threadKey) || conversationConnection(threadMachineId, threadSession)?.degraded === true,
         waiting: waitingOnOperator(history) > 0,
         working: working(),
         now: performance.now(), receivedAt: statusReceivedAt.get(threadKey),

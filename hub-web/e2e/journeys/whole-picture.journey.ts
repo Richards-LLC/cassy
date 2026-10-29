@@ -206,6 +206,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(line.locator(".phase-clock")).toHaveText(/^\d+:\d{2}$/);
         const [minutes, seconds] = (await line.locator(".phase-clock").innerText()).split(":").map(Number);
         expect(minutes! * 60 + seconds!).toBeGreaterThanOrEqual(42);
+        const before = await line.locator(".phase-clock").innerText();
+        await page.clock.runFor(1000);
+        await expect(line.locator(".phase-clock")).not.toHaveText(before);
         expect(hub.frames.filter(frame => ["WorkEventsRequest", "WorkEventDetailRequest", "ScrollbackRequest"].includes(frame.kind))).toEqual([]);
       });
       await journey.stage("Compacting changes live; waiting has no moving dots", async () => {

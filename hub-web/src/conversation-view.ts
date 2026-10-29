@@ -1355,7 +1355,11 @@ export class ConversationView {
     }
     node.replaceChildren(line);
     if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
-      this.phaseClock = setInterval(() => { if (this.element.isConnected) this.refreshWorking(); }, 1000);
+      this.phaseClock = setInterval(() => {
+        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+        const current = this.options.phase?.();
+        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
+      }, 1000);
     }
   }
 

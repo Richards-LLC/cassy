@@ -14275,7 +14275,7 @@ fn target_identical_delivered_paths(
         identity: content_identity.clone(),
     };
     let window = content_window.unwrap_or(&fallback_window);
-    let base = task_attribution::delivery_base(repo_path, parent_branch, window, Some(&anchor))?;
+    let base = task_attribution::final_snapshot_delivery_base(repo_path, parent_branch, window, &anchor)?;
     let mut delivered = vec![anchor.clone()];
     if include_live_tip
         && let Some(assignee) = task.assignee.as_deref()

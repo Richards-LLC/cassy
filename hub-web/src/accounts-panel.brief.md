@@ -48,10 +48,13 @@ Five operation cases exercise the real route allowlist, authorization and dispos
 | Craft | 4 | Eight strict panel/confirmation captures pass at 1280/390 in light/dark with zero findings; the last phone row is reachable by wheel. |
 | Accessibility | 4 | Keyboard confirmation and focus return, named controls, read-only restrictions, and forced colors/reduced motion/more contrast captures. |
 
-Evidence: task cas-e5df `LEDGER.md` and `qa/bundle.json`, executed on candidate 91f58ab3f. Eight real hub cells prove CLI parity, every mutation and audit, read-only denial and New session refresh. The 201 producer-selected browser cases, 189 Rust lib cases, 37 hub lifecycle integration cases and 72 UI cases pass. Native login/usage fixture boundaries are disclosed in the ledger; no live subscription reading is claimed.
+Evidence: task cas-e5df `LEDGER.md` and `qa/bundle.json`, with exact candidate and native embedded-asset build recorded in the ledger. Eight real hub cells prove CLI parity, every mutation and audit, read-only denial and New session refresh. The 201 producer-selected browser cases, 189 Rust lib cases, 37 hub lifecycle integration cases and 75 UI cases pass. Native login/usage fixture boundaries are disclosed in the ledger; no live subscription reading is claimed.
 
 Strict QA caught the generic dialog overflow rule overriding the panel on a phone. The fix gives the panel an explicit open-state scroll rule; the original failure and a wheel regression that failed before the fix are retained. Two capture attempts reached the existing pairing throttle; resetting the disposable fixture between independent cases corrected the harness, and those failed captures alone were repeated. No visual findings were suppressed.
 
-The panel and stylesheet load on demand. Vite reports initial app.js at 199.87 kB gzip, with 0.88 kB lazy Accounts CSS. The existing main stylesheet is 38.03 kB gzip, above the generic 30 kB budget; this task preserves that baseline. Field LCP/INP/CLS remain the release performance lane's measurements. No image assets or decorative motion were added. The existing JavaScript declaration and print behavior are checked by strict QA.
+The panel and stylesheet load on demand. Vite reports initial app.js at 199.88 kB gzip, with 0.88 kB lazy Accounts CSS. The existing main stylesheet is 38.03 kB gzip, above the generic 30 kB budget; this task preserves that baseline. Field LCP/INP/CLS remain the release performance lane's measurements. No image assets or decorative motion were added. The existing JavaScript declaration and print behavior are checked by strict QA.
 
 Supervisor-approved demo clarification preserves the CLI's protected main account: delete a stale named duplicate after confirming, then observe its absence in New session. No lifecycle guard was weakened.
+
+
+The lazy Accounts stylesheet uses the hub's hashed chunk convention. The dist manifest regression caught Vite otherwise emitting an unservable app2.css; the final QA controller proxies actual candidate-embedded Commander assets rather than serving a separate dist directory. The original CI failure and local red manifest test are retained.

@@ -52,6 +52,7 @@ export default defineConfig({
           const name = asset.names[0] ?? "asset";
           if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash:8].js";
           if (name === "rich-content.css") return "chunk-rich-content-[hash:8].css";
+          if (name === "accounts-panel.css") return "chunk-accounts-panel-[hash:8].css";
           if (name === "composer-uploads.css") return "chunk-composer-uploads-[hash:8].css";
           if (name.endsWith(".css")) return "app.css";
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).

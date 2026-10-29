@@ -718,6 +718,42 @@ mod focused_epic_tests {
     }
 
     #[test]
+    fn staffing_reassignment_replaces_parked_work_after_registration_recycle() {
+        use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, session) = fixture();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut previous = Agent::new_with_role("old-worker".into(), "worker-a".into(), AgentRole::Worker);
+        previous.factory_session = Some(session.name.clone());
+        previous.status = AgentStatus::Shutdown;
+        previous.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(2);
+        agents.register(&previous).unwrap();
+        let mut current = previous.clone();
+        current.id = "new-worker".into();
+        current.status = AgentStatus::Active;
+        current.last_heartbeat = chrono::Utc::now();
+        agents.register(&current).unwrap();
+        let mut parked = Task::new("cas-old-delivery".into(), "Previous delivery".into());
+        parked.assignee = Some(current.name.clone());
+        parked.status = TaskStatus::AwaitingMerge;
+        tasks.add(&parked).unwrap();
+        let mut next = Task::new("cas-next-assignment".into(), "New assignment".into());
+        next.assignee = Some(current.name.clone());
+        tasks.add(&next).unwrap();
+        for owner in [&current.name, &previous.id] {
+            next.assignee = Some(owner.clone());
+            for state in [TaskStatus::Open, TaskStatus::InProgress] {
+                next.status = state;
+                tasks.update(&next).unwrap();
+                let status = build_status_json(&session, &root, 20).unwrap();
+                let worker = status.agents.iter().find(|agent| agent.name == current.name).unwrap();
+                assert_eq!(worker.current_task.as_deref(), Some(next.id.as_str()), "{owner} / {state}");
+            }
+        }
+    }
+
+    #[test]
     fn team_trail_requires_recorded_delivery_and_current_approved_verdict() {
         let _home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (_project, root, _session) = fixture();

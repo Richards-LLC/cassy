@@ -1341,6 +1341,16 @@ mod tests {
             "workers with stale heartbeats are not live"
         );
 
+        // A quiet but live harness must not disappear and return on catalog
+        // polls as its MCP heartbeat crosses the thirty-second boundary.
+        stale.pid = Some(std::process::id());
+        for seconds in (31..=91).step_by(5) {
+            stale.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(seconds);
+            agents.update(&stale).unwrap();
+            assert_eq!(session.worker_count(), 4, "live harness vanished at {seconds}s");
+            assert!(session.project_worker_names().contains(&stale.name));
+        }
+
         let fallback_metadata = create_metadata(
             "factory-registry-unavailable",
             std::process::id(),

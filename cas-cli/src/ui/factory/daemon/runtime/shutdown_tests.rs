@@ -1361,6 +1361,18 @@ async fn long_transcript_recycle(register_replacement: bool) {
         held.assignee = Some(NAME.into());
         held.status = cas_types::TaskStatus::InProgress;
         tasks.add(&held).unwrap();
+        let peer = "roster-peer";
+        register_idle_worker(&cas_dir, peer);
+        let mut registration = agents.get(&format!("agent-{peer}")).unwrap();
+        registration.factory_session = Some(SESSION.into());
+        agents.update(&registration).unwrap();
+        daemon.app.adopt_worker_pane_for_test(idle_worker_pane(peer, cas_mux::SupervisorCli::Codex));
+        // This is how a zero-worker boot precedes later dynamic spawns.
+        let metadata = crate::ui::factory::create_metadata(
+            SESSION, std::process::id(), daemon.app.supervisor_name(), &[], None,
+            Some(dir.path().to_str().unwrap()), None,
+        );
+        crate::ui::factory::SessionManager::new().save_metadata(&metadata).unwrap();
     }
     let old = idle_worker_pane(NAME, cas_mux::SupervisorCli::Codex);
     let old_pid = old.process_group_id().unwrap();
@@ -1529,6 +1541,18 @@ async fn long_transcript_recycle(register_replacement: bool) {
             output.len() < 2_000,
             "the short new output is not padded with old history"
         );
+        // A real two-pane spawn/recycle must durably retain both names,
+        // including while the same-name replacement registers.
+        let store_worker = super::store_worker::StoreWorker::start();
+        daemon.flush_epic_focus_write(&store_worker);
+        assert!(store_worker.wait_idle(Duration::from_secs(5)));
+        let session = crate::ui::factory::SessionManager::new().find_session(Some(SESSION)).unwrap().unwrap();
+        let mut names: Vec<_> = session.metadata.workers.iter().map(|worker| worker.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec![NAME, "roster-peer"]);
+        let status = crate::bridge::server::session::build_status_json(&session, &cas_dir, 20).unwrap();
+        assert_eq!(status.session.workers.len(), 2, "Team status retains both lanes");
+
         // A teardown of this actual generation must still reap it and
         // release its binding; generation checks are not a blanket bypass.
         let target = daemon.app.phantom_worker_target(NAME);

@@ -46,29 +46,31 @@ fn fixture_with_return(
     drop_on_merge: bool,
     return_to: Option<(&str, &str)>,
 ) -> (tempfile::TempDir, Task, String) {
-    fixture_with_subjects(drop_on_merge, return_to, true)
+    fixture_with_subjects(drop_on_merge, return_to, true, DIST, false)
 }
 
 fn fixture_with_subjects(
     drop_on_merge: bool,
     return_to: Option<(&str, &str)>,
     named: bool,
+    delivery_path: &str,
+    rebuild_on_sync: bool,
 ) -> (tempfile::TempDir, Task, String) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q", "-b", "main"]);
-    commit(repo, DIST, "(()=>base())();\n", "seed bundle");
+    commit(repo, delivery_path, "(()=>base())();\n", "seed bundle");
     git(repo, &["checkout", "-qb", "factory/worker"]);
     commit(
         repo,
-        DIST,
+        delivery_path,
         "(()=>draft())();\n",
         if named { "build(cas-test1): draft bundle" } else { "build: draft bundle" },
     );
     git(repo, &["checkout", "-q", "main"]);
     commit(
         repo,
-        DIST,
+        delivery_path,
         "(()=>epicBuild())();\n",
         "build(cas-aaaa): epic bundle",
     );
@@ -81,18 +83,18 @@ fn fixture_with_subjects(
     );
     commit(
         repo,
-        DIST,
+        delivery_path,
         "(()=>epicBuild())();\n",
         if named { "merge(cas-test1): recover onto epic" } else { "merge: recover onto epic" },
     );
     commit(
         repo,
-        DIST,
+        delivery_path,
         "(()=>finalBuild())();\n",
         if named { "build(cas-test1): final bundle" } else { "build: final bundle" },
     );
     if let Some((contents, subject)) = return_to {
-        commit(repo, DIST, contents, subject);
+        commit(repo, delivery_path, contents, subject);
     }
     git(repo, &["checkout", "-q", "main"]);
     commit(
@@ -106,6 +108,12 @@ fn fixture_with_subjects(
         repo,
         &["merge", "--no-ff", "main", "-m", if named { "sync epic (cas-test1)" } else { "sync epic" }],
     );
+    if rebuild_on_sync {
+        // A generated merge driver can produce output unlike either parent.
+        std::fs::write(repo.join(delivery_path), "(()=>syncBuild())();\n").unwrap();
+        git(repo, &["add", delivery_path]);
+        git(repo, &["commit", "--amend", "--no-edit", "-q"]);
+    }
     let anchor = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["checkout", "-q", "main"]);
     if drop_on_merge {
@@ -469,22 +477,27 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
 
 #[test]
 fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474() {
-    for mode in ["present", "dropped", "missing", "reverted", "imported baseline"] {
+    for mode in ["present", "source present", "restarted", "rebuilt", "dropped", "missing", "reverted", "imported baseline"] {
         let return_to = match mode {
             "reverted" => Some(("(()=>base())();\n", "revert: abandon bundle")),
             "imported baseline" => Some(("(()=>epicBuild())();\n", "build: restore imported bundle")),
             _ => None,
         };
-        let (dir, task, _) = fixture_with_subjects(mode == "dropped", return_to, false);
+        let path = if mode == "source present" { "docs/design/brief.md" } else { DIST };
+        let (dir, task, _) = fixture_with_subjects(mode == "dropped", return_to, false, path, mode == "rebuilt");
         let repo = dir.path();
         if mode == "missing" {
-            git(repo, &["rm", DIST]);
+            git(repo, &["rm", path]);
             git(repo, &["commit", "-qm", "remove integrated bundle"]);
         }
         let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
         let window = TaskCommitReceiptWindow {
             supervisor_override_reason: None,
-            not_before: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            not_before: if mode == "restarted" {
+                chrono::Utc::now() + chrono::Duration::hours(1)
+            } else {
+                chrono::DateTime::from_timestamp(0, 0).unwrap()
+            },
             task_floor: chrono::DateTime::from_timestamp(0, 0).unwrap(),
             basis: "unnamed delivery before integrated sync anchor",
             identity: task_commit_identity(&task, None),
@@ -492,7 +505,7 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
         assert!(task_attribution::delivery_base(repo, "main", &window, Some(anchor)).is_none(),
             "fixture must reproduce unavailable attributed delivery base");
         assert_eq!(
-            tree_path_blob(repo, anchor, DIST).unwrap() == tree_path_blob(repo, "main", DIST).unwrap(),
+            tree_path_blob(repo, anchor, path).unwrap() == tree_path_blob(repo, "main", path).unwrap(),
             !matches!(mode, "dropped" | "missing"),
         );
         let result = run_factory_branch_merge_gate_with_attribution(
@@ -502,7 +515,7 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
                 search_manifest: None, commit_receipt: None, stranded_branch_override: None },
             "main", repo, TaskCommitAttribution { receipt: None, window: Some(&window) },
         );
-        if mode != "present" {
+        if matches!(mode, "dropped" | "missing" | "reverted" | "imported baseline") {
             assert!(matches!(result, MergeStateGateOutcome::Reject(_)), "{mode}: {result:?}");
         } else {
             assert!(matches!(result, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),

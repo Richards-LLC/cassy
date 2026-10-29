@@ -43,7 +43,8 @@ pub fn handle_pre_tool_use(
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap();
-        let (args, suffix, isolated_test_env) = worker_check_command(command).expect("route was selected");
+        let WorkerCheckRequest { args, suffix, isolated_test_env, red_control } =
+            worker_check_command(command).expect("route was selected");
         let Some(root) = cas_root else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -79,11 +80,12 @@ pub fn handle_pre_tool_use(
         };
         let executable = std::env::current_exe()?;
         let rewritten = format!(
-            "{} factory worker-check --cas-root {}{}{} -- {}{}",
+            "{} factory worker-check --cas-root {}{}{}{} -- {}{}",
             shell_quote_path(&executable),
             shell_quote_path(root),
             if detach { " --detach" } else { "" },
             isolated_test_env.as_ref().map(|path| format!(" --isolated-test-env {}", shell_quote_path(path))).unwrap_or_default(),
+            red_control.as_ref().map(|label| format!(" --red-control {label}")).unwrap_or_default(),
             args.iter()
                 .map(|arg| if arg.trim_start().starts_with("test(") {
                     format!("'{arg}'")
@@ -1421,12 +1423,30 @@ fn handle_pre_tool_use_inner(
     Ok(HookOutput::empty())
 }
 
+struct WorkerCheckRequest {
+    args: Vec<String>,
+    suffix: String,
+    isolated_test_env: Option<std::path::PathBuf>,
+    /// `CAS_RED_CONTROL=<label>`: run the named tests against the uncommitted mutation.
+    red_control: Option<String>,
+}
+
 /// Accept a literal check/targeted nextest plus a simple log/background suffix.
-/// The sole env prefix is the complete fixed provider-isolation profile; never
-/// accept general wrappers, shell substitutions, toolchains or build overrides.
-fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>)> {
+/// The env prefixes are the complete fixed provider-isolation profile and a
+/// literal `CAS_RED_CONTROL=<label>` before a named test; never accept general
+/// wrappers, shell substitutions, toolchains or build overrides.
+fn worker_check_command(command: &str) -> Option<WorkerCheckRequest> {
     let command = command.trim();
     if command.contains(['\n', '\r']) { return None; }
+    if let Some(rest) = command.strip_prefix("CAS_RED_CONTROL=") {
+        let (label, cargo) = rest.split_once(' ')?;
+        let label_ok = (1..=64).contains(&label.len())
+            && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte));
+        let (args, suffix) = literal_worker_check_command(cargo)?;
+        return (label_ok && args.first().map(String::as_str) == Some("nextest")).then(|| WorkerCheckRequest {
+            args, suffix, isolated_test_env: None, red_control: Some(label.to_owned()),
+        });
+    }
     let (cargo, isolated) = if command.starts_with("env ") {
         let split = command.find(" cargo ")?;
         let words = command[..split].split_whitespace().collect::<Vec<_>>();
@@ -1449,7 +1469,7 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<st
     } else { (command, None) };
     let (args, suffix) = literal_worker_check_command(cargo)?;
     if isolated.is_some() && args.first().map(String::as_str) != Some("nextest") { return None; }
-    Some((args, suffix, isolated))
+    Some(WorkerCheckRequest { args, suffix, isolated_test_env: isolated, red_control: None })
 }
 
 fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> {

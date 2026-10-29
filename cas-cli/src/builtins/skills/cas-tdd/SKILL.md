@@ -8,6 +8,14 @@ metadata:
 
 # Test-Driven Development
 
+## Every test earns its place
+
+- **Fails without the change.** Run it red before the fix: commit the test first, or revert the fix uncommitted and run `CAS_RED_CONTROL=<label> cargo nextest run ...`, which snapshots the mutation to `refs/cas/red/` and never pushes it. Park refuses a touched Rust test without a red receipt unless the task is `characterization-first` or notes `test-waiver: fail-first <test id> - <reason>`.
+- **Deterministic.** It passes five concurrent zero-retry runs under load; park reads that receipt.
+- **Cheapest layer.** Unit, then integration, then journey. A journey that only re-proves a unit test is waste.
+- **Within budget.** Unit under 1s, integration under 10s, journey under 60s. Over budget needs `test-waiver: budget <test id> - <reason>` in the task notes.
+- **Flakes.** Fix the pattern. Delete a test only when another covers the same behaviour. Never retry, never weaken.
+
 ## Fewest tests
 
 Elegant tests, not copious: a test exists to catch a real regression, and each extra one costs CI time and another chance to flake.
@@ -20,7 +28,6 @@ Elegant tests, not copious: a test exists to catch a real regression, and each e
 - Claim, identity and state-machine changes are the exception: cover the combination table, every identity kind × every entry kind, as rows of one table-driven test. One happy-path fixture hides the pairs that break.
 - Every bug fix adds a regression case that runs red before the fix, so the suite keeps the bug out; where the project keeps a user-flow case catalog, add the case there too.
 - Stress loops and live probes are proof artifacts for the task note, not suite members.
-- A flaky test is a bug in the test: fix or delete it, never retry-wrap it.
 - Each test has one command and lane, selected from the dependency graph, and a failure that names whose fault it is.
 
 Imported and adapted from mattpocock/skills `tdd`, MIT © 2026 Matt Pocock.

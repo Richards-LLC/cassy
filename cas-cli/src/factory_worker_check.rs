@@ -14,7 +14,9 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod red;
 mod stability;
+pub(crate) use stability::Touched;
 
 #[cfg(unix)]
 static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -881,8 +883,11 @@ impl<'a> PassingTests<'a> {
         packages
     }
 
-    pub(crate) fn missing_stability(&self, target: &str) -> Result<Vec<String>> {
-        stability::missing(self.repo, target, self.head, self.records())
+    /// Touched tests at the delivery lacking a five-run pass within budget,
+    /// or a failing run before the change.
+    pub(crate) fn touched(&self, target: &str) -> Result<stability::Touched> {
+        let reds = red::records(self.cas_root, self.repo);
+        stability::evaluate(self.repo, target, self.head, self.records(), &reds)
     }
 }
 
@@ -1333,16 +1338,30 @@ pub(crate) fn record_passing_test_for_tests(
 
 #[cfg(test)]
 pub(crate) fn record_stability_for_tests(cas_root: &Path, repo: &Path, head: &str, base: &str, package: &str, filter: &str, id: &str) {
+    record_stability_with_durations_for_tests(cas_root, repo, head, base, package, filter, id, 0.01);
+}
+
+/// A failing run at `tested` of the touched test `id` as planned at `delivery`.
+#[cfg(test)]
+pub(crate) fn record_red_for_tests(cas_root: &Path, repo: &Path, tested: &str, delivery: &str, target: &str, id: &str) {
+    red::record_for_tests(cas_root, repo, tested, delivery, target, id);
+}
+
+/// A five-run receipt whose every trial took `seconds`.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_stability_with_durations_for_tests(cas_root: &Path, repo: &Path, head: &str, base: &str, package: &str, filter: &str, id: &str, seconds: f64) {
     let repo = repo.canonicalize().unwrap();
     let test = TargetedTest { package: package.into(), harness: None, filter: filter.into() };
     let path = test_receipt_path(cas_root, &repo, head, &test);
     let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let proof = serde_json::json!({
-        "version": 1, "base": base, "head": head, "tests": [id], "names": ["new_test"],
+        "version": 2, "base": base, "head": head, "tests": [id], "names": ["new_test"],
         "runs": 5, "parallelism": 5, "retries": 0,
         "trials": (0..5).map(|_| serde_json::json!({
             "exit_code": 0, "count": 1, "started": 0.0, "ended": 1.0, "log": "fixture"
-        })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>(),
+        "cases": {id: ["new_test"]}, "durations": {"new_test": vec![seconds; 5]},
     });
     receipt.test.as_mut().unwrap().stability = Some(serde_json::from_value(proof).unwrap());
     std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
@@ -1613,15 +1632,13 @@ pub(crate) const ISOLATED_TEST_CREDENTIALS: [&str; 6] = [
     "VIKTOR_API_KEY", "VIKTOR_KEY", "NEON_API_KEY", "NEON_TOKEN", "VERCEL_TOKEN", "VERCEL_API_TOKEN",
 ];
 
-pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
-    execute_at_with_scope(
-        cas_root,
-        args,
-        &std::env::current_dir()?,
-        Path::new("cargo"),
-        cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
-        isolated_test_env,
-    )
+pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, red_control: Option<&str>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let scope = cfg!(target_os = "linux").then_some(Path::new("systemd-run"));
+    match red_control {
+        Some(label) => red::execute(cas_root, args, &cwd, Path::new("cargo"), scope, isolated_test_env, label),
+        None => execute_at_with_scope(cas_root, args, &cwd, Path::new("cargo"), scope, isolated_test_env),
+    }
 }
 
 /// Run the capped runner in its own session and return once it has started
@@ -1633,11 +1650,11 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Optio
 /// session is outside that group. Its stdout and stderr both go to this
 /// process's stdout (the shell's log redirect), never the harness pipe.
 #[cfg(unix)]
-pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, red_control: Option<&str>) -> Result<()> {
     if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
-    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env);
+    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env, red_control);
     let child = spawn_detached(command).context("starting the detached worker-check runner")?;
     println!(
         "worker-check: detached pid {} in its own session; this log receives its output and receipt",
@@ -1649,7 +1666,7 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
 /// The detached runner, ending its log with `worker-check: EXIT <code>` so a
 /// refused or failed run is distinguishable from one still running (cas-6591).
 #[cfg(unix)]
-fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Command {
+fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, red_control: Option<&str>) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
@@ -1658,6 +1675,9 @@ fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], 
         .arg(cas_root);
     if let Some(directory) = isolated_test_env {
         command.arg("--isolated-test-env").arg(directory);
+    }
+    if let Some(label) = red_control {
+        command.arg("--red-control").arg(label);
     }
     command.arg("--").args(args);
     command
@@ -1687,7 +1707,7 @@ fn spawn_detached(mut command: Command) -> std::io::Result<std::process::Child> 
 }
 
 #[cfg(not(unix))]
-pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_test_env: Option<&Path>) -> Result<()> {
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_test_env: Option<&Path>, _red_control: Option<&str>) -> Result<()> {
     bail!("worker-check --detach needs a Unix session; run the check in the foreground")
 }
 
@@ -1740,22 +1760,23 @@ fn execute_verifier_at(
     execute_at_with_scope(cas_root, args, &checkout.path, cargo, scope_runner, None)
 }
 
+/// The in-progress task this worker session holds a lease on, if any.
+fn active_task(cas_root: &Path) -> Option<crate::types::Task> {
+    let session = std::env::var("CAS_SESSION_ID").ok()?;
+    let agents = crate::store::open_agent_store(cas_root).ok()?;
+    let agent = agents.get(&session).ok()?;
+    let tasks = crate::store::open_task_store(cas_root).ok()?;
+    agents.list_agent_leases(&agent.id).ok()?.into_iter()
+        .filter_map(|lease| tasks.get(&lease.task_id).ok())
+        .find(|task| task.status == crate::types::TaskStatus::InProgress)
+}
+
 /// Prefer the active task's declared integration target, never the pushed
 /// worker branch's upstream (which would erase the task diff after a push).
 fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Result<String> {
     let mut target = configured.map(str::to_string);
-    if let Ok(session) = std::env::var("CAS_SESSION_ID") {
-        let agents = crate::store::open_agent_store(cas_root)?;
-        if let Ok(agent) = agents.get(&session) {
-            let tasks = crate::store::open_task_store(cas_root)?;
-            for lease in agents.list_agent_leases(&agent.id)? {
-                let task = tasks.get(&lease.task_id)?;
-                if task.status == crate::types::TaskStatus::InProgress {
-                    target = task.deliverables.work_target.map(|work| work.target_branch).or(target);
-                    break;
-                }
-            }
-        }
+    if let Some(task) = active_task(cas_root) {
+        target = task.deliverables.work_target.map(|work| work.target_branch).or(target);
     }
     if let Some(target) = target {
         let remote = format!("refs/remotes/origin/{target}");
@@ -1769,6 +1790,12 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
 }
 
 fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>) -> Result<()> {
+    run_capped(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, None)
+}
+
+/// `red` runs the named tests once against a red-control snapshot of the
+/// worktree's mutation instead of a clean commit, recording their failure.
+fn run_capped(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, red: Option<&red::Snapshot>) -> Result<()> {
     let test = targeted_test(args);
     if let Some(directory) = isolated_test_env {
         if test.is_none() || !directory.is_absolute() || !directory.is_dir() {
@@ -1789,7 +1816,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             cas_root.join("worktrees").display()
         );
     }
-    let head = clean_head(&repo)?;
+    let head = match red {
+        Some(snapshot) if git(&repo, &["rev-parse", "HEAD"])? == snapshot.parent => snapshot.commit.clone(),
+        Some(_) => bail!("HEAD moved after the red-control snapshot; no red receipt recorded"),
+        None => clean_head(&repo)?,
+    };
     if let Some(test) = &test {
         validate_harness(&repo, test)?;
     }
@@ -1914,6 +1945,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 .arg("--cargo").arg(cargo)
                 .arg("--count-file").arg(&count_file)
                 .arg("--stability-script").arg(stability::SCRIPT)
+                .args(red.map(|snapshot| ["--head", &snapshot.commit, "--red"]).into_iter().flatten())
                 .arg("--");
             guarded
         } else {
@@ -1923,6 +1955,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 .arg("--verified-script").arg(verified)
                 .arg("--cargo").arg(cargo)
                 .arg("--count-file").arg(&count_file)
+                .args(red.map(|snapshot| ["--head", &snapshot.commit, "--red"]).into_iter().flatten())
                 .arg("--");
             plain
         };
@@ -2023,6 +2056,19 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     drop(worker_signals);
     drop(slot);
+    if let Some(test) = &test {
+        // A failed named run is fail-first evidence for the touched tests it ran.
+        let recorded = red::persist(&cas_root, &repo, &head, test, &count_file, red)?;
+        if let Some(line) = &recorded {
+            println!("{line}");
+        }
+        if red.is_some() {
+            return match recorded {
+                Some(_) if !status.success() => Ok(()),
+                _ => bail!("red control: no touched test failed under the mutation; no red receipt recorded ({status})"),
+            };
+        }
+    }
     if !status.success() {
         bail!(
             "{}: FAIL {head} ({status})",
@@ -2362,7 +2408,7 @@ child.wait()
     fn detached_runner_log_ends_with_the_runner_exit_code() {
         // `false` stands in for a runner that refuses: it exits 1.
         let args = vec!["-p".to_string(), "cas".into(), "--lib".into()];
-        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args, None)
+        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args, None, None)
             .output()
             .unwrap();
         let log = String::from_utf8(output.stdout).unwrap();
@@ -4378,12 +4424,12 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
         let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
-        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach }) = factory.command else { panic!("worker-check command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach, .. }) = factory.command else { panic!("worker-check command") };
         assert!(detach);
         assert_eq!(cas_root, root);
         assert_eq!(cargo_args, args);
         assert_eq!(isolated_test_env.as_deref(), Some(xdg.as_path()));
-        let detached = detached_runner_command(Path::new("cas"), &root, &cargo_args, isolated_test_env.as_deref());
+        let detached = detached_runner_command(Path::new("cas"), &root, &cargo_args, isolated_test_env.as_deref(), None);
         let detached_args = detached.get_args().collect::<Vec<_>>();
         assert!(detached_args.windows(2).any(|pair| pair == [std::ffi::OsStr::new("--isolated-test-env"), xdg.as_os_str()]));
         fake_cargo(&fake, &format!(r#"set -e

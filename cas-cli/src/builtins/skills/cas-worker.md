@@ -12,6 +12,8 @@ function plus every integration harness that calls it
 ([discipline.md](references/discipline.md)). Use the
 [fewest tests](../cas-tdd/SKILL.md#fewest-tests) that fail without the change,
 one per behaviour. A case added to an existing test file satisfies `test-first`.
+Every changed test follows [Every test earns its place](../cas-tdd/SKILL.md#every-test-earns-its-place);
+park reads its red, five-run and budget receipts.
 Workers close their own tasks; never ask the supervisor to close
 your task on their behalf. `CONTRIBUTING` names the scoped test commands. Docs-only and no-code tasks prove their
 acceptance check instead (e.g. markdownlint, `cas codemap status`, a published

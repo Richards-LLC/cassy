@@ -115,15 +115,21 @@ elif any('test(=touched)' in arg for arg in args):
   assert time.monotonic()<deadline,'five concurrent runs never arrived'
   time.sleep(.01)
  failed=os.environ['STABILITY_FIXTURE_FAIL']=='yes' and index==3
+ print(f'        {"FAIL" if failed else "PASS"} [   0.{index}00s] (1/1) cas touched')
  print(f'     Summary [ 0.01s] 1 test run: {0 if failed else 1} passed'+(', 1 failed' if failed else ', 0 skipped'))
  sys.exit(1 if failed else 0)
+elif os.environ['STABILITY_FIXTURE_FAIL']=='red':
+ print('        FAIL [   0.010s] (1/1) cas touched')
+ print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
+ sys.exit(100)
 else:
  print('     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped')
 ''')
         fake.chmod(0o755)
-        for failed in [False, True]:
-            with self.subTest(failed=failed):
-                state = self.repo / ('failed-runs' if failed else 'passed-runs')
+        for mode in ['no', 'yes', 'red']:
+            failed = mode != 'no'
+            with self.subTest(mode=mode):
+                state = self.repo / (mode+'-runs')
                 count = self.repo / 'count'
                 result = subprocess.run([
                     'python3', str(SCRIPTS / 'worker-proof-guards.py'), '--base', base,
@@ -132,10 +138,10 @@ else:
                     'nextest', 'run', '-p', 'cas', '--lib', '-E', 'test(touched)',
                 ], cwd=self.repo, env={**os.environ, 'STABILITY_FIXTURE_STATE': str(state),
                                      'VERIFIED_TEST_REPO_ROOT': str(self.repo),
-                                     'STABILITY_FIXTURE_FAIL': 'yes' if failed else 'no'},
+                                     'STABILITY_FIXTURE_FAIL': mode},
                     capture_output=True, text=True, timeout=25)
                 self.assertEqual(state.read_text().splitlines() if state.exists() else [],
-                                 ['1', '2', '3', '4', '5'], result.stdout + result.stderr)
+                                 [] if mode == 'red' else ['1', '2', '3', '4', '5'], result.stdout + result.stderr)
                 self.assertEqual(result.returncode == 0, not failed, result.stdout + result.stderr)
                 receipt = count.with_suffix('.stability.json')
                 self.assertEqual(receipt.exists(), not failed)
@@ -144,6 +150,16 @@ else:
                     self.assertEqual(proof['tests'], ['src/lib.rs::touched'])
                     self.assertEqual(proof['runs'], 5)
                     self.assertEqual(proof['parallelism'], 5)
+                    self.assertEqual(proof['cases'], {'src/lib.rs::touched': ['touched']})
+                    self.assertEqual(sorted(proof['durations']['touched']), [0.1, 0.2, 0.3, 0.4, 0.5])
+                # A failing requested run binds its failed touched tests for park's fail-first check.
+                red = count.with_suffix('.red.json')
+                self.assertEqual(red.exists(), mode == 'red', result.stdout + result.stderr)
+                if mode == 'red':
+                    entry, = json.loads(red.read_text())['tests']
+                    self.assertEqual((entry['id'], entry['failed']), ('src/lib.rs::touched', ['touched']))
+                    self.assertTrue(entry['fingerprint'])
+                    red.unlink()
 
     def test_selection_covers_every_parameter_case_without_claiming_plain_name_descendants(self):
         (self.repo / 'Cargo.toml').write_text('[package]\nname="cas"\nversion="0.1.0"\n')

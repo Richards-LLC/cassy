@@ -331,6 +331,9 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
         &f.cas_dir(), &f.worker_path, &head, &base, "widget", "test(gear::tests)",
         "crates/widget/src/gear_tests.rs::turns",
     );
+    crate::factory_worker_check::record_red_for_tests(
+        &f.cas_dir(), &f.worker_path, &base, &head, "main", "crates/widget/src/gear_tests.rs::turns",
+    );
     let parked = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",
     })).await;
@@ -633,6 +636,9 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     crate::factory_worker_check::record_stability_for_tests(
         &f.cas_dir(), &f.worker_path, &tested_tip, &base, "widget", "test(gear)",
         "crates/widget/tests/gear.rs::gear_turns",
+    );
+    crate::factory_worker_check::record_red_for_tests(
+        &f.cas_dir(), &f.worker_path, &base, &tested_tip, "main", "crates/widget/tests/gear.rs::gear_turns",
     );
     std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();
     std::fs::write(f.worker_path.join(doc_path), "Updated operator guidance.\n").unwrap();

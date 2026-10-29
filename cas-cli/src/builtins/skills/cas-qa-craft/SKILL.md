@@ -7,16 +7,20 @@ metadata:
 
 # Delivery QA evidence
 
-`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery reviews.
-Start with the [batch flow](references/independent-pass.md#batch-default).
-Prove the named build's demo, `qa.user_facing_paths`, `qa.api_paths` and impacted journeys.
-API globs declare non-rendered server code, including server-only TSX; rendered paths need visual evidence.
-This evidence pass does not replace fixture, unit or integration tests. Time-box it to **30 minutes**;
-an honest incomplete ledger beats a late, invented result. For an epic with child demos, use the
-supervisor's [epic flow walk](../cas-supervisor/references/epic-flow-walk.md): one combined matrix
-with a **60-minute** box. On a `qa-pass` task you review someone else's delivery: use the API path
-below for API-only reasons; otherwise use [the independent pass](references/independent-pass.md).
+`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery reviews. Start with the [batch flow](references/independent-pass.md#batch-default).
+Prove the named build's demo, `qa.user_facing_paths`, `qa.api_paths` and impacted journeys. API globs declare non-rendered server code, including server-only TSX; rendered paths need visual evidence.
+This evidence pass does not replace fixture, unit or integration tests. Time-box it to **30 minutes**; an honest incomplete ledger beats a late, invented result.
+For an epic with child demos, use the supervisor's [epic flow walk](../cas-supervisor/references/epic-flow-walk.md): one combined matrix with a **60-minute** box.
+On a `qa-pass` task you review someone else's delivery: use the API path below for API-only reasons; otherwise use [the independent pass](references/independent-pass.md).
 Record its verdict with `verification action=qa_record`, naming the round's `LEDGER.md`.
+
+## Every test earns its place
+
+- **Fails without the change.** Run it red before the fix: commit the test first, or revert the fix uncommitted and run `CAS_RED_CONTROL=<label> cargo nextest run ...`, which snapshots the mutation to `refs/cas/red/` and never pushes it. Park refuses a touched Rust test without a red receipt unless the task is `characterization-first` or notes `test-waiver: fail-first <test id> - <reason>`.
+- **Deterministic.** It passes five concurrent zero-retry runs under load; park reads that receipt.
+- **Cheapest layer.** Unit, then integration, then journey. A journey that only re-proves a unit test is waste.
+- **Within budget.** Unit under 1s, integration under 10s, journey under 60s. Over budget needs `test-waiver: budget <test id> - <reason>` in the task notes.
+- **Flakes.** Fix the pattern. Delete a test only when another covers the same behaviour. Never retry, never weaken.
 
 ## Procedure
 
@@ -100,17 +104,11 @@ These hold for every walk, task pass or [independent pass](references/independen
 
 ## Close gate
 
-Close enforces fresh, commit-bound evidence (`qa.evidence_gate`). Rendered surfaces need
-`qa/bundle.json`, cited in a `platform_proof` note as `qa-bundle: <abs path>/bundle.json`; follow
-its contract, including passing `Expect`, visual QA, critique floors and base-build comparison for
-scoped findings. API-only changes need `LEDGER.md` and `contracts.diff`; demo-only non-web changes
-need a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a cas-cli-craft `terminal-qa: PASS`
-report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_paths` (`node
-<skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <cmd> --out <dir> -- <cmd>`).
+Close enforces fresh, commit-bound evidence (`qa.evidence_gate`).
+Rendered surfaces need `qa/bundle.json`, cited in a `platform_proof` note as `qa-bundle: <abs path>/bundle.json`; follow its contract, including passing `Expect`, visual QA, critique floors and base-build comparison for scoped findings.
+API-only changes need `LEDGER.md` and `contracts.diff`; demo-only non-web changes need a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a cas-cli-craft `terminal-qa: PASS` report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_paths` (`node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <cmd> --out <dir> -- <cmd>`).
 `<skills-dir>` is the harness skill directory: `.claude/skills`, `.codex/skills` or `.grok/skills`.
-Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line
-above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is
-missing.
+Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is missing.
 
 ## Boundaries
 

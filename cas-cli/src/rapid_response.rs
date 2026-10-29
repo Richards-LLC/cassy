@@ -337,27 +337,22 @@ fn recorded_delivery(repo: &Path, task: &Task) -> Option<Delivery> {
 }
 
 /// Whether a release of `epic` may treat its post-release check as a watch:
-/// the epic branch's change against every release branch it ships to (the
-/// post-release `release_branches`, else the default branch, as the watch
-/// itself arms) carries no migration and no secret-shaped line. The epic's
-/// own work target is not used: it is often the epic lane itself, whose
-/// `X...X` range is empty. An unreadable diff, or a release branch that is
-/// the epic branch, keeps the gate.
+/// the union of its children's recorded delivery diffs (start base to parked
+/// anchor, the same per-delivery file lists close uses) carries no migration
+/// and no secret-shaped line. No branch range is read, since every range
+/// moves once the epic merges into the release branch. An epic with no
+/// recorded children, or any child whose diff is unknown, keeps the gate.
 fn epic_release_clear(cas_root: &Path, epic: &Task) -> bool {
-    let (Some(branch), Some(repo)) = (epic.branch.as_deref(), cas_root.parent()) else {
+    let (Some(repo), Ok(store)) = (cas_root.parent(), crate::store::open_task_store(cas_root)) else {
         return false;
     };
-    let mut targets = crate::qa_post_release::configured(cas_root)
-        .map(|config| config.release_branches)
-        .unwrap_or_default();
-    if targets.is_empty() {
-        targets.push(crate::worktree::GitOperations::new(repo.to_path_buf()).detect_default_branch());
-    }
-    targets.iter().all(|target| {
-        target != branch
-            && diff_between(repo, &[format!("{target}...{branch}").as_str(), "--"])
-                .is_some_and(|delivery| floor_clear(&delivery, &[]))
-    })
+    let Ok(children) = store.get_subtasks(&epic.id) else {
+        return false;
+    };
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|child| recorded_delivery(repo, child).is_some_and(|delivery| floor_clear(&delivery, &[])))
 }
 
 /// The open window that makes `epic`'s post-release check a watch, if any.
@@ -718,6 +713,9 @@ mod tests {
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none());
         assert_eq!(ledger(&cas, &window)[0].check, "post-release-gate");
         deliver(dir.path(), store.as_ref(), &mut delivery, "migrations/002.sql", "alter table t add c int;\n");
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "a migration keeps the gate");
+        // The gate runs after the release merge, when every branch range is empty.
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "-q", "--no-ff", "-m", "release", "epic/hot"]);
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "a released migration keeps the gate");
     }
 }

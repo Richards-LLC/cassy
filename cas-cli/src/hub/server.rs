@@ -2968,11 +2968,19 @@ async fn handle_client_message(
     bytes: &[u8],
 ) -> anyhow::Result<()> {
     let (store, context) = auth.as_ref().context("authentication required")?;
-    let mut message: ClientMessage = serde_json::from_slice(bytes)?;
-    let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
-    let read_message = is_pane_read_message(&message);
     store.ensure_active_context(context, now)?;
+    let mut message: ClientMessage = match serde_json::from_slice(bytes) {
+        Ok(message) => message,
+        Err(error) => {
+            if serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|frame| frame.get("SupervisorCommand").is_some()) {
+                store.audit(Some(context), "denied", "supervisor_command_invalid", Some(Scope::PaneInput), Some(session), now)?;
+            }
+            return Err(error.into());
+        }
+    };
+    let scope = required_scope(&message).context("operation is not exposed by Commander")?;
+    let read_message = is_pane_read_message(&message);
     let allowed = if read_message {
         context.has(Scope::PaneRead)
     } else if matches!(&message, ClientMessage::SendMessage { .. }) {
@@ -3749,7 +3757,12 @@ pub(crate) fn admit_correlated_daemon_frame(
         if context.device_id != receipt.device_id { return false; }
         if pending.get(&(session.to_owned(), receipt.client_ref.clone())) != Some(&PendingRefKind::SupervisorCommand) { return false; }
         let detail = serde_json::json!({"client_ref": receipt.client_ref, "command": receipt.command, "phase": receipt.phase}).to_string();
-        if store.audit_operation(context, "observed", "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
+        if store.audit_operation(context, match receipt.phase {
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Submitted => "submitted",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Unconfirmed => "unconfirmed",
+        }, "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
     }
     match correlate_daemon_frame(pending, session, bytes) {
         Correlation::Refused => false,

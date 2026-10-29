@@ -17,6 +17,7 @@ struct Record {
     before: String,
     write: Box<dyn Fn() -> Option<Result<(), String>> + Send>,
     hook: Option<tokio::task::JoinHandle<Option<String>>>,
+    last_key: Option<Key>,
 }
 
 fn screen(pane: &cas_mux::Pane) -> String {
@@ -29,19 +30,19 @@ fn idle_prompt(text: &str) -> bool {
     let lower = text.to_lowercase();
     !lower.contains("esc to interrupt") && !lower.contains("select model")
         && !lower.contains("select a model") && !lower.contains("select effort")
-        && text.lines().rev().take(12).any(|line| matches!(line.trim(), "❯" | "›" | ">"))
+        && text.lines().rev().take(12).any(|line| matches!(line.trim(), "❯" | "›"))
 }
 
 fn native_observation(command: Command, before: &str, current: &str) -> Option<(String, bool)> {
     if before == current { return None; }
     let lower = current.to_lowercase();
+    let fresh = |marker: &str| lower.contains(marker) && !before.to_lowercase().contains(marker);
     match command {
-        Command::Model if lower.contains("select model") || lower.contains("select a model")
-            || lower.contains("select reasoning effort") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
-        Command::Model if lower.contains("set model to") || lower.contains("model changed to")
-            || lower.contains("switched to") => Some(("The harness confirmed a model selection.".into(), false)),
-        Command::Usage if lower.contains("current session") && (lower.contains("current week") || lower.contains("resets"))
-            || command == Command::Usage && lower.contains("context window") && lower.contains("model:") =>
+        Command::Model if fresh("select model") || fresh("select a model")
+            || fresh("select reasoning effort") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
+        Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
+        Command::Usage if fresh("current session") && (lower.contains("current week") || lower.contains("resets"))
+            || command == Command::Usage && fresh("context window") && lower.contains("model:") =>
                 Some(("Usage displayed by the supervisor's harness.".into(), !idle_prompt(current))),
         _ => None,
     }
@@ -93,7 +94,7 @@ impl FactoryDaemon {
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before, write: Box::new(move || write.result()), hook: None });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before, write: Box::new(move || write.result()), hook: None, last_key: None });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         let record = self.supervisor_commands.records.get_mut(&owner).ok_or_else(|| anyhow::anyhow!("The original command receipt is unavailable. Do not resend an uncertain command."))?;
@@ -104,9 +105,10 @@ impl FactoryDaemon {
             // Navigation remains scoped to the observed native dialog. A stale
             // browser cannot send a key after that dialog disappeared.
             let current = screen(pane);
-            anyhow::ensure!(native_observation(record.receipt.command, &record.before, &current).is_some_and(|(_, open)| open), "The native chooser is no longer open.");
+            anyhow::ensure!(native_observation(record.receipt.command, "", &current).is_some_and(|(_, open)| open), "The native chooser is no longer open.");
             pane.deliver_user_input(key.bytes(), cas_mux::UserInputKind::KeyStream).await?;
             record.before = current;
+            record.last_key = Some(key);
             record.receipt.phase = Phase::Submitted;
             record.receipt.interactive = false;
             record.receipt.detail = "Selection submitted; awaiting the harness's response.".into();
@@ -117,10 +119,15 @@ impl FactoryDaemon {
                 record.receipt.phase = Phase::Observed;
                 record.receipt.detail = "Supervisor process ended. See the session-ended receipt.".into();
                 record.receipt.interactive = false;
+            } else if record.last_key == Some(Key::Cancel) && current != record.before && idle_prompt(&current) {
+                record.receipt.phase = Phase::Observed;
+                record.receipt.detail = "The native chooser closed.".into();
+                record.receipt.interactive = false;
             } else if let Some(Err(error)) = (record.write)() {
                 record.receipt.phase = Phase::Unconfirmed;
                 record.receipt.detail = format!("Command write failed; execution is uncertain: {error}. Do not resend automatically.");
-            } else if let Some((detail, interactive)) = native_observation(record.receipt.command, &record.before, &current) {
+            } else if let Some((detail, interactive)) = native_observation(record.receipt.command,
+                if matches!(record.last_key, Some(Key::Next | Key::Previous | Key::Select)) && current != record.before { "" } else { &record.before }, &current) {
                 record.receipt.phase = Phase::Observed;
                 record.receipt.detail = detail;
                 record.receipt.interactive = interactive;
@@ -151,6 +158,7 @@ mod tests {
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
         assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯").is_none());
+        assert!(native_observation(Command::Model, "Set model to Sonnet\n❯", "Set model to Sonnet\n❯ /model").is_none());
         let opened = native_observation(Command::Model, "❯", "Select model\nOpus\nSonnet").unwrap();
         assert!(opened.1);
         assert!(opened.0.contains("chooser opened"));

@@ -128,7 +128,10 @@ for expected in \
     '--test builtin_flavor_drift_test' \
     '--test agent_definition_contract_test' \
     '--test factory_codex_skill_guardrails'; do
-    grep -qF -- "$expected" <<<"$without_rg_output"
+    if ! grep -qF -- "$expected" <<<"$without_rg_output"; then
+        printf 'FAIL: missing target %s with color.grep=always: %s\n' "$expected" "$without_rg_output" >&2
+        exit 1
+    fi
 done
 
 printf 'ok   committed target mapping never launches host rg\n'

@@ -652,6 +652,27 @@ mod tests {
         );
         assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &delivery, "main").is_none());
 
+        // The touched-test check also finds a workspace below the repository root.
+        let nested = tempfile::tempdir().unwrap();
+        let nested_git = |args: &[&str]| {
+            let output = crate::test_env_guard::git_fixture(nested.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        std::fs::create_dir_all(nested.path().join("rust/src")).unwrap();
+        std::fs::write(nested.path().join("rust/Cargo.toml"), "[package]\nname = \"nested\"\n").unwrap();
+        nested_git(&["init", "-q", "-b", "main"]);
+        nested_git(&["add", "."]);
+        nested_git(&["commit", "-qm", "base"]);
+        nested_git(&["switch", "-qc", "factory/nested"]);
+        std::fs::write(nested.path().join("rust/src/lib.rs"), "#[test] fn nested_test() {}\n").unwrap();
+        nested_git(&["add", "."]);
+        nested_git(&["commit", "-qm", "nested test"]);
+        let tip = nested_git(&["rev-parse", "HEAD"]);
+        let refusal = park_refusal(cas_root.path(), nested.path(), &plain, &["rust/src/lib.rs".into()], &tip, "main")
+            .expect("a subdirectory workspace still needs five-run evidence");
+        assert!(refusal.contains("rust/src/lib.rs::nested_test"), "{refusal}");
+
         let bare = tempfile::tempdir().unwrap();
         let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head, "main")
             .expect("undeclared modules outside a workspace");

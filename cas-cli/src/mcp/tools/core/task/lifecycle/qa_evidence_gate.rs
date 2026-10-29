@@ -748,7 +748,7 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         env.set_current_dir(dir.path());
-        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let root = env.bind_store_root(crate::store::init_cas_dir(dir.path()).unwrap());
         let artifacts = dir.path().join("artifacts");
         let mut config = crate::config::Config::default();
         config

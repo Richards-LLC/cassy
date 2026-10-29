@@ -485,10 +485,32 @@ class Analyzer:
                 guards.discard('@temporary')
             i += 1
 
+    def unbound_store(self, f):
+        """cas-08e6: temp_home() pins CAS_ROOT to an empty store under the
+        temporary HOME, and that override beats the current directory. A test
+        that enters a project and builds its store there must bind CAS_ROOT to
+        it, or root-resolving readers silently read the empty store."""
+        u, calls = f.unit, []
+        for k in range(f.body + 1, f.end):
+            call = u.call(k)
+            if call:
+                args = u.values(call[1] + 1, call[2])
+                calls.append((k, call[0].split('::'), args[1:] if args[:1] == ['&'] else args))
+        if any(u.ts[k].string and u.ts[k].value == '"CAS_ROOT"' for k in range(f.body + 1, f.end)) or \
+                not any(names[-2:] == ['TestEnvGuard', 'temp_home'] for _, names, _ in calls) or \
+                any(names[-1] == 'bind_store_root' for _, names, _ in calls):
+            return
+        entered = [args for _, names, args in calls if names[-1] == 'set_current_dir']
+        for k, names, args in calls:
+            if names[-1] == 'init_cas_dir' and args in entered:
+                self.record(f, k, 'unbound-store-root', ''.join(args))
+
     def run(self):
         for f in self.functions:
             if f.test or f.unit.path == CANONICAL:
                 self.analyze(f)
+            if f.test:
+                self.unbound_store(f)
         return sorted(self.findings.values(), key=lambda x: x['id'])
 
 

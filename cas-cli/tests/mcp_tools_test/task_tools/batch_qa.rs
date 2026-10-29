@@ -619,6 +619,51 @@ impl Fx {
 }
 
 #[tokio::test]
+async fn reviewed_delivery_with_legacy_producer_ledger_closes_cas_dd03() {
+    for batch in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        let fx = fixture(&mut env);
+        fx.unmerge();
+        let root = fx.repo.join(".cas");
+        let tasks = open_task_store(&root).unwrap();
+        let parked = fx.close("cas-bq01").await;
+        assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
+        git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+
+        // Shipped producer evidence predates today's matrix grammar. The
+        // reviewer's canonical ledger is a separate, published artifact.
+        let config = cas::config::Config::load(&root).unwrap();
+        let paths = cas::config::resolved_factory_artifact_paths(
+            &root, config.factory().artifacts_root.as_deref(),
+        );
+        let producer = paths.task_dirs("cas-bq01")[0].join("LEDGER.md");
+        std::fs::create_dir_all(producer.parent().unwrap()).unwrap();
+        std::fs::write(&producer, "# QA\n2 PASS, 0 FAIL\nold walkthrough NOT EXERCISED\n").unwrap();
+        let legacy = std::fs::read(&producer).unwrap();
+        let uncovered = fx.close("cas-bq01").await;
+        assert!(uncovered.contains("QA LEDGER REJECTED"), "{uncovered}");
+        assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+
+        if batch {
+            fx.record().await;
+        } else {
+            let request = serde_json::from_value(serde_json::json!({
+                "action":"qa_request", "task_id":"cas-bq01", "summary":"Review shipped delivery"
+            })).unwrap();
+            fx.supervisor.verification(Parameters(request)).await.unwrap();
+            cas_store::claim_qa_pass(&root, "cas-bq01", "independent-reviewer", chrono::Utc::now()).unwrap();
+            cas_store::resolve_qa_pass(
+                &root, "cas-bq01", "independent-reviewer", cas::types::QaVerdict::Approved,
+                "Reviewed shipped delivery", None, fx.ledger.to_str().unwrap(), chrono::Utc::now(),
+            ).unwrap();
+        }
+        let closed = fx.close("cas-bq01").await;
+        assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "batch={batch}: {closed}");
+        assert_eq!(std::fs::read(&producer).unwrap(), legacy, "close must preserve historical producer evidence");
+    }
+}
+
+#[tokio::test]
 async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);

@@ -926,17 +926,60 @@ pub(crate) fn squash_receipt_qa_anchor(
     (!own.is_empty() && own.iter().all(|path| carried.contains(path))).then_some(anchor)
 }
 
+/// Snapshot proof can recover an integrated unnamed delivery from its recorded
+/// sync anchor. Re-run the ordinary selection against that merge's immutable
+/// target parent, before integration erased the off-target range. Keep the
+/// same start/time/foreign-task fences and split ranges at imported baselines.
+/// This is content evidence only; it does not broaden QA or receipt attribution.
+fn final_snapshot_delivery_ranges(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<Vec<DeliveryRange>> {
+    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
+    if !ranges.is_empty() {
+        return Some(ranges);
+    }
+    let tip = resolve_branch_sha(repo, &format!("{tip}^{{commit}}"))?;
+    let target = preferred_diff_target_ref(repo, target);
+    if !window.identity.matches_known_commit(&tip) || !git_commit_is_ancestor(repo, &tip, &target) {
+        return Some(ranges);
+    }
+    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", &tip])?;
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [_, _, target_parent] = parents.as_slice() else {
+        return Some(ranges);
+    };
+    if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
+        return Some(ranges);
+    }
+    task_delivery_ranges(repo, target_parent, window, Some(&tip))
+}
+
+pub(super) fn final_snapshot_delivery_base(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<String> {
+    Some(
+        final_snapshot_delivery_ranges(repo, target, window, tip)?
+            .first()?
+            .base
+            .clone(),
+    )
+}
+
 /// Shared candidate selection for whole-delivery and final-snapshot proof.
 /// Preserve side-parent identity, foreign-subject and work-window rules.
 fn attributed_content_commits(
     repo: &Path,
-    target: &str,
     tip: &str,
     window: &TaskCommitReceiptWindow,
     identity: &TaskCommitIdentity,
+    ranges: &[DeliveryRange],
 ) -> Option<Vec<String>> {
-    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
-
     let mut commits = Vec::new();
     for range in ranges {
         let range = format!("{}..{}", range.base, range.tip);
@@ -1012,10 +1055,10 @@ pub(super) fn final_path_snapshot_proven(
     path: &str,
 ) -> Option<bool> {
     let snapshot = tree_path_blob(repo, tip, path)?;
-    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
+    let ranges = final_snapshot_delivery_ranges(repo, target, window, tip)?;
     let mut authored_blobs = Vec::new();
     let mut imported_baselines = Vec::new();
-    for range in ranges {
+    for range in &ranges {
         let history = git_text(repo, &["rev-list", "--first-parent", "--reverse", &format!("{}..{}", range.base, range.tip)])?;
         let mut path_commits = Vec::new();
         for commit in history.lines().filter(|commit| !commit.is_empty()) {
@@ -1044,7 +1087,7 @@ pub(super) fn final_path_snapshot_proven(
     if imported_baselines.contains(&snapshot) {
         return Some(false);
     }
-    for commit in attributed_content_commits(repo, target, tip, window, &window.identity)? {
+    for commit in attributed_content_commits(repo, tip, window, &window.identity, &ranges)? {
         let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
         if delivery_evolution::is_revert_message(&message)
             || !super::commit_changes_path(repo, &commit, path).ok()? {
@@ -1131,7 +1174,8 @@ pub(super) fn merge_tip_content_presence(
         .filter(|commit| !commit.is_empty())
         .collect::<Vec<_>>();
 
-    let mut commits = attributed_content_commits(repo, target, merge_tip, window, identity)?;
+    let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+    let mut commits = attributed_content_commits(repo, merge_tip, window, identity, &ranges)?;
 
     if let Some(receipt) = validated_receipt
         .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())

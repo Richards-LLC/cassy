@@ -469,9 +469,18 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
 
 #[test]
 fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474() {
-    for dropped in [false, true] {
-        let (dir, task, _) = fixture_with_subjects(dropped, None, false);
+    for mode in ["present", "dropped", "missing", "reverted", "imported baseline"] {
+        let return_to = match mode {
+            "reverted" => Some(("(()=>base())();\n", "revert: abandon bundle")),
+            "imported baseline" => Some(("(()=>epicBuild())();\n", "build: restore imported bundle")),
+            _ => None,
+        };
+        let (dir, task, _) = fixture_with_subjects(mode == "dropped", return_to, false);
         let repo = dir.path();
+        if mode == "missing" {
+            git(repo, &["rm", DIST]);
+            git(repo, &["commit", "-qm", "remove integrated bundle"]);
+        }
         let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
         let window = TaskCommitReceiptWindow {
             supervisor_override_reason: None,
@@ -484,7 +493,7 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             "fixture must reproduce unavailable attributed delivery base");
         assert_eq!(
             tree_path_blob(repo, anchor, DIST).unwrap() == tree_path_blob(repo, "main", DIST).unwrap(),
-            !dropped,
+            !matches!(mode, "dropped" | "missing"),
         );
         let result = run_factory_branch_merge_gate_with_attribution(
             &task,
@@ -493,8 +502,8 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
                 search_manifest: None, commit_receipt: None, stranded_branch_override: None },
             "main", repo, TaskCommitAttribution { receipt: None, window: Some(&window) },
         );
-        if dropped {
-            assert!(matches!(result, MergeStateGateOutcome::Reject(_)), "{result:?}");
+        if mode != "present" {
+            assert!(matches!(result, MergeStateGateOutcome::Reject(_)), "{mode}: {result:?}");
         } else {
             assert!(matches!(result, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
                 "identical final blobs survive missing attribution base: {result:?}");

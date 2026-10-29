@@ -1287,7 +1287,7 @@ mod tests {
         use cas_types::{AgentRole, AgentStatus, AgentType};
 
         let project = tempfile::tempdir().unwrap();
-        let _env = crate::test_support::TestEnvGuard::for_store(project.path().join(".cas"));
+        let env = crate::test_support::TestEnvGuard::for_store(project.path().join(".cas"));
         let cas_root = init_cas_dir(project.path()).unwrap();
         let session_name = "factory-registry-count";
         let metadata = create_metadata(

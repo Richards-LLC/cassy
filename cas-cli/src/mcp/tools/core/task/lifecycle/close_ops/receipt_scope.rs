@@ -132,7 +132,7 @@ pub(super) fn park_refusal(
                     Err(error) => format!("selection could not be resolved: {error:#}"),
                 };
                 return Some(format!(
-                    "TOUCHED TEST STABILITY REQUIRED: task {} at {short}: {reason}. Run the touched Rust tests through the capped worker lane; it runs only those tests five times concurrently with zero retries and records commit-bound evidence. A single failed copy prevents park. Park only reads receipts and starts no test or CI stage.", task.id
+                    "TOUCHED TEST STABILITY REQUIRED at {short}.\n{reason}\nRun the named tests through the capped worker lane, then retry `{caller}task action=close id={}`. Five concurrent zero-retry passes are required; park only reads their bound receipt.", task.id
                 ));
             }
         }

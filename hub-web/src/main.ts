@@ -2014,9 +2014,11 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) { clearDisconnectedState(grid); return; }
-  // A fatal machine verdict wins over a session's last retry snapshot.
+  // A stopped machine verdict wins over a session's cached attach, including
+  // pairing revoked before the first Welcome (cas-3286).
   const machineState = connectionStates.get(machineId);
-  if (machineState?.fatal === true) snapshot = machineState;
+  if (machineState?.fatal === true || machineState?.authFailure) snapshot = machineState;
+  const where = machines.get(machineId)?.label ?? "the machine";
   // The session's thread is up (cas-f285: it is the stage's last frame now
   // that no pane card stands behind it): keep it, under a banner.
   const hasLastFrame = grid.querySelector(":scope > .conversation-thread-slot") !== null;
@@ -2030,7 +2032,6 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
     // Plain words in the body font (cas-a447): who was lost and what happens next.
-    const where = machines.get(machineId)?.label ?? "the machine";
     // cas-d15c: with the machine still connected, only this session's daemon
     // link dropped; the banner names the conversation, not the machine.
     const sessionOnly = sessionOnlyDrop(machineId, session);
@@ -2103,6 +2104,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     repair: () => openRepairDialog(machineId),
   }, now, {
     openingTitle: CONVERSATION_OPENING,
+    repairLabel: `Re-pair ${where}`,
     quietOpening: true,
     quietRetry: "session" in snapshot && firstAttachRetry(snapshot as AttachSnapshot, sessionsEverLive.has(sessionKey(machineId, session))),
   });

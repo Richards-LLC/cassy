@@ -197,6 +197,23 @@ describe("the attach surface opens calmly (journey F3)", () => {
     expect([...target.querySelectorAll(".terminal-connecting-actions button")].map((button) => button.textContent)).toEqual(["Retry", "Diagnose"]);
   });
 
+  it("offers named repair immediately when pairing fails before the conversation opens (cas-3286)", () => {
+    for (const authFailure of ["revoked", "scope-mismatch", "needs-pairing"] as const) {
+      const target = card();
+      let repairs = 0;
+      renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "failed", stage: "auth", authFailure }), {
+        retry: () => { throw new Error("a blocked pairing cannot retry"); },
+        repair: () => { repairs += 1; },
+      }, startedAt + 100, { quietOpening: true, repairLabel: "Re-pair Atlas · Linux" });
+      expect(target.textContent).toContain("Connection failed — re-pair required.");
+      expect(target.querySelector(".terminal-connecting-actions")?.textContent).not.toContain("Retry");
+      const repair = target.querySelector<HTMLButtonElement>('button[aria-label="Re-pair Atlas · Linux"]');
+      expect(repair).not.toBeNull();
+      repair!.click();
+      expect(repairs).toBe(1);
+    }
+  });
+
   it("shows a failure or a retry with its timeline in the open, not behind Details", () => {
     for (const state of [snapshot({ phase: "backoff", retryInMs: 2_000 }), snapshot({ phase: "failed", reason: "hub did not answer" }), snapshot({ phase: "failed", fatal: true })]) {
       expect(attachInProgress(state)).toBe(false);

@@ -834,12 +834,17 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
 test("HUB-J12 network switch: re-pairing by code says plainly that starting sessions must be allowed again (cas-0e14)", journeyPart, async ({ page, journey }) => {
   test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, relay: { machine: "atlas", claimAfter: 1, authorizeAfter: 2 } });
+  // Revoke before the first Welcome: the machine's verdict must replace a
+  // pending attach, not leave Opening visible beside Needs pairing (cas-3286).
+  const releaseAttach = hub.holdAttach(PELICAN);
   const dialog = page.locator("#pair-dialog");
   const header = page.locator("#conversation-connection");
 
   await journey.stage("A pairing that could start sessions is revoked", async () => {
     await journey.open();
     await chooseConversation(page);
+    await expect.poll(() => hub.hasSocket(PELICAN)).toBe(true);
+    await expect(page.locator(".conversation-loading")).toHaveText("Opening the conversation…");
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
@@ -848,7 +853,10 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
   });
 
   await journey.stage("Re-pair says starting sessions won't come with a code, and how to keep it", async () => {
-    await page.getByRole("button", { name: "Re-pair Atlas · Linux" }).filter({ visible: true }).first().click();
+    const recovery = page.locator("#conversation-stage");
+    await expect(recovery).toContainText("Connection failed — re-pair required.");
+    await recovery.getByRole("button", { name: "Re-pair Atlas · Linux", exact: true }).click();
+    releaseAttach();
     await expect(dialog).toBeVisible();
     await expect(dialog.locator(".pair-status")).toContainText("starting sessions will need to be allowed again");
     // cas-093d F02: the command is its own code token with Copy, not prose

@@ -10,6 +10,13 @@ seeded_from:
 - docs/qa/journeys.md (HUB-J1–HUB-J21, curated steps/goals/gaps)
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
+bug_families:
+  pairing-revoked-before-welcome:
+    title: A revoked pairing must replace a pending conversation attach with immediate named Re-pair recovery
+    found: '2026-10-29'
+    tasks: [cas-3286]
+    invariants: [HUB-J12-GOAL]
+    journeys: [HUB-J12]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

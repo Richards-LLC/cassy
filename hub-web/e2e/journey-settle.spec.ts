@@ -47,6 +47,7 @@ test("frozen screenshot settle drains evaluations before page teardown", async (
 });
 
 test("running screenshot settle waits for both animation frames", async ({ page }) => {
+  await page.clock.install({ time: JOURNEY_NOW });
   await page.setContent("<h1>Before paint</h1>");
   await page.evaluate(() => {
     requestAnimationFrame(() => requestAnimationFrame(() => {

@@ -279,7 +279,9 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
         // The page re-reads who holds control when it reloads.
         await page.reload();
         const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
-        if (await back.isVisible().catch(() => false)) await back.click();
+        // Phone startup restores the conversation asynchronously. Wait for
+        // Back instead of sampling visibility before the phone shell is ready.
+        if (phone) await back.click();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(interrupt).toBeVisible();
         // cas-d043 G02: the header names the device in control before any take.

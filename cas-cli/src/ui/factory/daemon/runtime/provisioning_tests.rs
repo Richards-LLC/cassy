@@ -329,8 +329,8 @@ async fn daemon_provisioning_deadline_retires_only_stalled_generation() {
         task_id: None,
     });
     daemon.app.spawning_count += 1;
-    daemon.process_pending_spawns().await;
-    // Store I/O shares this pass; prove generation retirement and FIFO progress.
+    tokio::time::timeout(Duration::from_secs(5), daemon.process_pending_spawns())
+        .await.expect("deadline handling must not await the stalled provisioner");
     assert!(daemon.spawn_task.is_none());
     assert!(daemon.spawn_cancellation.is_none());
     assert_eq!(daemon.app.spawning_count, 1);

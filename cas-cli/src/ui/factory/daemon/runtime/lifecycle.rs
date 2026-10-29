@@ -4229,13 +4229,7 @@ impl FactoryDaemon {
         drop(director_refresh);
         // Keep warning writes alive while exit waits for owned filesystem jobs.
         // No cleanup is abandoned or allowed to outlive the daemon's teardown.
-        while self.app.worker_cleanup_threads_running() {
-            self.poll_worker_cleanup_jobs_at(Instant::now());
-            if self.app.worker_cleanup_threads_running() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-        self.app.join_worker_worktree_cleanups();
+        self.finish_worker_cleanup_jobs_for_exit(Duration::from_secs(10)).await;
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
         // Stop recording if it was enabled
@@ -4288,6 +4282,17 @@ impl FactoryDaemon {
     }
 
     /// Cleanup on shutdown
+    async fn finish_worker_cleanup_jobs_for_exit(&mut self, _budget: Duration) -> Vec<String> {
+        while self.app.worker_cleanup_threads_running() {
+            self.poll_worker_cleanup_jobs_at(Instant::now());
+            if self.app.worker_cleanup_threads_running() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        self.app.join_worker_worktree_cleanups();
+        Vec::new()
+    }
+
     async fn cleanup(&mut self) -> anyhow::Result<()> {
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.
@@ -5142,6 +5147,26 @@ async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, sess
 
 #[cfg(test)]
 mod communication_summary_tests {
+    #[tokio::test]
+    async fn held_cleanup_cannot_hold_daemon_exit_past_budget_cas_af63() {
+        use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        daemon.app.register_worker_cleanup(WorkerCleanupJob::new("held-worker".into(), std::thread::spawn(move || {
+            let _ = held.recv();
+            CrashCleanupOutcome { worktree: None }
+        })));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            daemon.finish_worker_cleanup_jobs_for_exit(std::time::Duration::from_millis(100))).await;
+        drop(release);
+        daemon.app.join_worker_worktree_cleanups();
+        assert!(result.is_ok(), "held cleanup exceeded the daemon exit budget");
+        assert_eq!(result.unwrap(), vec!["held-worker"]);
+    }
+
     #[tokio::test]
     async fn cas_7e24_factory_session_end_persists_summary() {
         let project = tempfile::tempdir().unwrap();

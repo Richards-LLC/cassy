@@ -189,7 +189,7 @@ pub(crate) fn ledger_preflight(cas_root: &Path, task: &Task, require_missing: bo
     let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
     let dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
     let ledger = dir.join("LEDGER.md");
-    if !ledger.exists() && (!require_missing || task.demo_statement.trim().is_empty()) { return Ok(()); }
+    if !ledger.exists() && (!require_missing || !config.qa().evidence_gate || task.demo_statement.trim().is_empty()) { return Ok(()); }
     if dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none() {
         return Err("QA LEDGER REJECTED: task artifact directory escapes its project namespace".into());
     }
@@ -1052,7 +1052,9 @@ mod tests {
         std::fs::create_dir_all(&artifacts).unwrap();
         let transcript = format!(
             "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
-             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n\
+             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | LEDGER.md | - |\n\
              request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
         );
         std::fs::write(artifacts.join("LEDGER.md"), &transcript).unwrap();

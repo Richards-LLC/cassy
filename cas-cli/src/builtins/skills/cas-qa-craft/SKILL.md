@@ -54,8 +54,8 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    `cas qa candidate build --task <task-id> --rev <sha>`, then get the binary's path with
    `cas qa candidate path --task <task-id>` (never type the hashed path) and cite its receipt.
 5. Capture rendered cells with screenshots, CLI cells with terminal captures, and API cells with
-   HTTP transcripts; label every row `source-inferred`, `fixture`, `real-build`, or `eyewitness`. A
-   label weaker than the cell needs is `NOT EXERCISED`, never `PASS`; never write “partial”. When
+   HTTP transcripts. Choose evidence labels by how the result was obtained using
+   the scaffold and [evidence guidance](references/evidence-ledger.md). When
    the 30-minute box expires, mark every unrun cell `NOT EXERCISED`. For rendered web/hub cells,
    write the **evidence bundle** to `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md), including its trace, ARIA and

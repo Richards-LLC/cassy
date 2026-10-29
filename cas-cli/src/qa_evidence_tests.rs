@@ -1434,6 +1434,8 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
     );
 
     // The ledger tier composes both requirements.
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     std::fs::write(
         fx.task_dir.join("LEDGER.md"),
         ledger_rows(&"| M01 | cas status | ok | ok | PASS | real-build | qa/M01.txt | - |\n"),

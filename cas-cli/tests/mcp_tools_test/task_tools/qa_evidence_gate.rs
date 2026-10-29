@@ -2207,6 +2207,8 @@ async fn bundle_waiver_preserves_skip_marker_gate_cas_06f5() {
 
 
 fn ledger_rows(rows: &str) -> String {
+    // These fixtures all describe a demo: keep three honest unrun conditions.
+    let rows = format!("{rows}| M02 | invalid input | clear refusal | not run | NOT EXERCISED | source-inferred | - | - |\n| M03 | boundary | bounded | not run | NOT EXERCISED | source-inferred | - | - |\n| M04 | adjacent | stable | not run | NOT EXERCISED | source-inferred | - | - |\n");
     let mut labels = std::collections::BTreeMap::<&str, usize>::new();
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
     let mut n = 0;

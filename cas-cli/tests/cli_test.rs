@@ -3336,7 +3336,9 @@ fn qa_ledger_init_check_and_no_overwrite() {
     git(&["init", "-q", "-b", "main"]);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/flow.ts"), "flow").unwrap();
-    git(&["add", "src/flow.ts"]);
+    std::fs::create_dir_all(root.join("docs/qa")).unwrap();
+    std::fs::write(root.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-10-28'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: FLOW-J1\n    status: live\n    entry: {url: /flow, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
+    git(&["add", "src/flow.ts", "docs/qa/journeys.yaml"]);
     git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "seed"]);
     let cas_root = cas::store::init_cas_dir(root).unwrap();
     let artifacts = root.join("artifacts");
@@ -3349,6 +3351,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(init["ok"], true);
     assert_eq!(init["rows"][0]["verdict"], "NOT A ROUTE");
+    assert_eq!(init["rows"][0]["id"], "FLOW-J1");
     let path = std::path::Path::new(init["path"].as_str().unwrap());
     let original = std::fs::read(path).unwrap();
     cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();
@@ -3359,5 +3362,5 @@ fn qa_ledger_init_check_and_no_overwrite() {
     assert!(!bad.status.success());
     let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");
     assert_eq!(report["ok"], false);
-    assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["row_id"] == "M01" && d["field"] == "verdict"));
+    assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["row_id"] == "FLOW-J1" && d["field"] == "verdict"));
 }

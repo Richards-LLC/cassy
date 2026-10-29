@@ -1124,11 +1124,16 @@ fn fresh_ledger(f: &Recovery) -> std::path::PathBuf {
     let paths = crate::config::resolved_factory_artifact_paths(&cas_dir, None);
     let task_dir = paths.task_dirs(TASK)[0].clone();
     std::fs::create_dir_all(&task_dir).unwrap();
-    std::fs::write(
-        task_dir.join("LEDGER.md"),
-        "| M01 | render contract | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
-    )
-    .unwrap();
+    std::fs::create_dir_all(task_dir.join("qa")).unwrap();
+    std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
+    std::fs::write(task_dir.join("LEDGER.md"), format!(
+        "cells=4; PASS=1; FAIL=0; NOT EXERCISED=3\nlabels: real-build=1; source-inferred=3\n{}\n\
+         | M01 | render | ok | ok | PASS | real-build | qa/M01.txt | - |\n\
+         | M02 | invalid | refused | not run | NOT EXERCISED | source-inferred | - | - |\n\
+         | M03 | boundary | bounded | not run | NOT EXERCISED | source-inferred | - | - |\n\
+         | M04 | adjacent | stable | not run | NOT EXERCISED | source-inferred | - | - |\n",
+        crate::qa_ledger::HEADER
+    )).unwrap();
     task_dir
 }
 

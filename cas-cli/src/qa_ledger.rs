@@ -436,7 +436,11 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
         }
     };
     let mut report = parse(&body, min_rows);
-    let root = path.parent().unwrap_or(Path::new(".")).canonicalize();
+    let root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize();
     let mut failures = Vec::new();
     for row in report.rows.iter().filter(|r| r.verdict == Verdict::Pass) {
         let readable = root
@@ -502,7 +506,11 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
     }
     for name in ["Invalid input", "Boundary condition", "Adjacent surface"] {
         if rows.len() < min {
-            rows.push((format!("M{:02}", rows.len() + 1), name.into()));
+            let mut index = rows.len() + 1;
+            while rows.iter().any(|(id, _)| id == &format!("M{index:02}")) {
+                index += 1;
+            }
+            rows.push((format!("M{index:02}"), name.into()));
         }
     }
     let verdict = if no_code {
@@ -544,13 +552,13 @@ mod tests {
         let path = dir.path().join("LEDGER.md");
         let mut task = cas_types::Task::new("cas-ledger".into(), "CLI | evidence".into());
         task.demo_statement = "Open command help".into();
-        let journeys = vec![("CLI-J1".into(), "Help | reader".into())];
+        let journeys = vec![("M02".into(), "Help | reader".into())];
         for no_code in [false, true] {
             task.execution_note = no_code.then(|| "no-code".into());
             std::fs::write(&path, scaffold(&task, &journeys, "fixture-revision")).unwrap();
             let report = crate::cli::qa_ledger::check(&path, Some(&task));
             assert!(report.ok, "{}", report.refusal());
-            assert_eq!(report.rows[0].id, "CLI-J1");
+            assert_eq!(report.rows[0].id, "M02");
             assert_eq!(report.rows[0].cell, "Help | reader");
             assert_eq!(report.rows.len(), if no_code { 1 } else { 4 });
             assert!(report.rows.iter().all(|r| r.verdict
@@ -564,8 +572,10 @@ mod tests {
 
     #[test]
     fn diagnostics_reject_bad_counts_labels_verdicts_and_escaping_captures() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("LEDGER.md");
+        env.set_current_dir(dir.path());
+        let path = Path::new("LEDGER.md");
         let base = format!(
             "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n{HEADER}\n| M01 | help | usage | usage | PASS | real-build | capture.txt | - |\n"
         );

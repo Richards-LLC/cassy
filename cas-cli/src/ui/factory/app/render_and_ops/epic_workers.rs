@@ -6481,11 +6481,11 @@ mod tests {
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
 
-    /// Shutdown must give control back while Git's worktree cleanup is held.
+    /// Shutdown must give control back while Git inside target retirement is held.
     /// The same name cannot be relaunched underneath that outstanding cleanup.
     #[cfg(unix)]
-    #[test]
-    fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
+    #[tokio::test]
+    async fn held_worktree_cleanup_leaves_control_and_reserves_name_cas_f9f7() {
         use std::io::{Read, Write};
         use std::os::unix::fs::PermissionsExt;
         use std::sync::mpsc;
@@ -6502,6 +6502,8 @@ mod tests {
         git(&["init", "-q"]);
         git(&["config", "user.name", "Fixture"]);
         git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        git(&["add", ".gitignore"]);
         git(&["commit", "--allow-empty", "-qm", "fixture"]);
         let cas = crate::store::init_cas_dir(&repo).unwrap();
         let mut manager = WorktreeManager::new(&repo, crate::worktree::WorktreeConfig {
@@ -6512,6 +6514,15 @@ mod tests {
         let name = "held-cleanup";
         manager.create_for_worker(name).unwrap();
         let worker = manager.worker_removal_plan(name).unwrap().worktree.path;
+        drop(crate::factory_target_cache::owner::acquire(&cas, &worker).unwrap().unwrap());
+        let target = crate::factory_scratch::worker_target_dir(&worker);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("worker-check.log"), "preserve proof").unwrap();
+        let agents = open_agent_store(&cas).unwrap();
+        let mut agent = cas_types::Agent::new("fixture-agent".into(), name.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.metadata.insert("clone_path".into(), worker.display().to_string());
+        agents.register(&agent).unwrap();
         let entered = env.home().join("entered");
         let release = env.home().join("release");
         for path in [&entered, &release] {
@@ -6538,7 +6549,14 @@ mod tests {
         });
         let mut app = FactoryApp::for_test_at(cas.clone());
         app.set_worktree_manager_for_test(manager);
-        app.finalize_worker_worktree(&open_agent_store(&cas).unwrap(), "fixture-agent", name);
+        let pty = cas_mux::Pty::spawn(name, cas_mux::PtyConfig {
+            command: "/bin/sleep".into(), args: vec!["300".into()],
+            cwd: Some(worker.clone()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        app.shutdown_worker(name, true).await.unwrap();
         let _ = returned_tx.send(());
         let reserved = app.crash_cleanup_pending(name);
         let _ = release_tx.send(());
@@ -6550,6 +6568,7 @@ mod tests {
             std::thread::park_timeout(Duration::from_millis(1));
         }
         assert!(!worker.exists(), "the released Git cleanup must finish");
+        assert!(!target.exists(), "target retirement finishes before checkout removal");
         assert!(!app.crash_cleanup_pending(name), "completed cleanup releases the name");
         assert!(app.worktree_manager().unwrap().worker_removal_plan(name).is_none());
     }

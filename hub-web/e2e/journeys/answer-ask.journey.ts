@@ -100,12 +100,11 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
     await expect(question).toContainText("Fix it in the train, or ship with it allowlisted?");
     await expect(question.getByRole("button")).toHaveCount(2);
     await expect(pinned.locator(".obj")).toHaveCount(0);
-    // cas-97d58 F09: the rail and the bookmark read the same open asks. The
-    // rail lists the hydrated blocker and the pinned question, marked as pinned.
-    await expect(waiting.locator("li")).toHaveCount(2);
+    // The rail lists the hydrated blocker; the pinned question shows in its
+    // bubble and the bookmark only, never a third time (operator, 2026-10-29).
+    await expect(waiting.locator("li")).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="blocker"]')).toHaveCount(1);
-    await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(1);
-    await expect(waiting.locator('.context-jump[data-kind="ask"] .context-pinned')).toHaveText("Pinned above your reply");
+    await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(0);
     // The waiting blocker says how it clears, in the thread and in the rail (journey F12).
     await expect(page.getByRole("log").locator('.obj.blk[data-waiting="true"] .blk-hint')).toHaveText("Reply to unblock");
     await expect(waiting.locator('.context-jump[data-kind="blocker"] .context-hint')).toHaveText("Reply to unblock");

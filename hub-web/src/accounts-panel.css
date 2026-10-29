@@ -31,7 +31,7 @@
 .accounts-state .status-chip { text-transform: none; letter-spacing: 0; font-family: var(--font-ui); font-weight: var(--weight-medium); }
 .accounts-cleanup-why { color: var(--warn-text, var(--state-warn)); font-size: var(--fs-meta); }
 .accounts-usage { display: grid; gap: var(--space-1); margin-top: var(--space-1); }
-.accounts-meter { display: grid; grid-template-columns: 3.5rem minmax(3rem, 4.5rem) 1fr; align-items: center; gap: var(--space-2); font-size: var(--fs-meta); }
+.accounts-meter { display: grid; grid-template-columns: 3.5rem minmax(3rem, 4.5rem) minmax(0, 1fr); align-items: center; gap: var(--space-2); font-size: var(--fs-meta); }
 .accounts-meter-name { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
 .accounts-bar { block-size: 6px; border-radius: var(--radius-pill); background: var(--bg-active); overflow: hidden; }
 .accounts-bar > span { display: block; block-size: 100%; inline-size: 0; border-radius: var(--radius-pill); background: var(--state-ok); }
@@ -69,7 +69,8 @@
   .accounts-sheet { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--space-4)); padding: var(--space-4); }
   .accounts-heading { gap: var(--space-2); }
   .accounts-row { padding: var(--space-3) var(--space-2); }
-  .accounts-meter { grid-template-columns: 3.5rem minmax(2.5rem, 4rem) 1fr; }
+  .accounts-meter { grid-template-columns: 3rem minmax(2.5rem, 4rem) minmax(0, 1fr); }
+  .accounts-reset { white-space: normal; }
   .accounts-actions button, .accounts-login button, .accounts-more > summary, .accounts-cleanup-banner button { min-height: var(--rail-item-min); }
   .accounts-more > summary { min-width: var(--rail-item-min); }
 }

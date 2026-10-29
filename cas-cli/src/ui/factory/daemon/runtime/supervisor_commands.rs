@@ -282,18 +282,26 @@ mod tests {
             serde_json::json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}}))).unwrap();
         assert!(finish_observation(cas_dir, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude, at).is_some());
         assert!(finish_observation(cas_dir, "another-session", &name, cas_mux::SupervisorCli::Claude, at).is_none());
+        let (root, mut codex) = super::super::supervisor_single_turn_tests::fixture_for(cas_mux::SupervisorCli::Codex).await;
+        let name = codex.app.supervisor_name().to_owned();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H› Ask Codex to do anything".as_bytes()).unwrap();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        codex.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "cmd-finish".into(), owner).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert!(!input.windows(b"$finish".len()).any(|bytes| bytes == b"$finish"), "Codex's skill picker must not consume the command submit");
     }
     #[test]
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {
         use cas_mux::SupervisorCli::{Claude, Codex};
         use serde_json::json;
-        // pin: an unterminated $skill opens Codex's picker and consumes Enter.
-        assert!(Command::Finish.mapping(Codex).unwrap().ends_with(' '), "Finish must terminate its native skill token before submit");
         let at = Utc::now();
         for (cli, prompt, done) in [
             (Claude, json!({"type":"user","timestamp":at,"message":{"content":"<command-message>finish</command-message>\n<command-name>/finish</command-name>"}}),
                 json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}})),
-            (Codex, json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$finish"}]}}),
+            (Codex, json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"finish"}]}}),
                 json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete"}})),
         ] {
             assert!(!finish_turn_handled(&[prompt.clone()], cli, at));

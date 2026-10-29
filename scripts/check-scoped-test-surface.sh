@@ -85,10 +85,10 @@ run_test_path_search() {
     shift
     case "$mode" in
         regex)
-            git grep -n -E "$@" -- "${tracked_rust_test_paths[@]}"
+            git grep --no-color -n -E "$@" -- "${tracked_rust_test_paths[@]}"
             ;;
         fixed)
-            git grep -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
+            git grep --no-color -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
             ;;
         *)
             return 2
@@ -370,8 +370,7 @@ source_public_symbols_for() {
 
 discover_source_integration_targets() {
     local source_path="$1" source_file module_path test_path symbol symbol_filter
-    local matched_paths search_status
-    local -a symbol_patterns=()
+    local matched_paths search_status symbol_alternation=""
     source_file="$repo_root/$source_path"
     [[ -f "$source_file" ]] || return 0
     module_path="$(source_module_path_for "$source_path")"
@@ -380,10 +379,7 @@ discover_source_integration_targets() {
         [[ -n "$symbol" ]] || continue
         symbol_filter="$symbol"
         [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
-        symbol_patterns+=(
-            -e
-            "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::${symbol_filter}([^[:alnum:]_]|$)"
-        )
+        symbol_alternation+="${symbol_alternation:+|}${symbol_filter}"
     done < <(source_public_symbols_for "$source_file")
 
     # Integration tests normally consume a service through its public parent
@@ -416,8 +412,12 @@ discover_source_integration_targets() {
     # Public integration tests must reference the changed module or a
     # qualified public symbol. Bare test-name collisions are not evidence that
     # a test exercises the source module.
-    if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
-        if matched_paths="$(search_test_paths regex "${symbol_patterns[@]}" 2>/dev/null)"; then
+    if [[ -n "$symbol_alternation" ]]; then
+        # Git evaluates separate -e patterns independently. One alternation
+        # shares the module/boundary scan even on symbol-heavy files.
+        if matched_paths="$(search_test_paths regex \
+            -e "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::(${symbol_alternation})([^[:alnum:]_]|$)" \
+            2>/dev/null)"; then
             :
         else
             search_status=$?

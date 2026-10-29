@@ -74,29 +74,20 @@ resolve_test_target_name() {
     printf '%s\n' "$wanted"
 }
 
-# GitHub-hosted runners do not guarantee ripgrep. Resolve the search backend
-# once, then keep every test-surface search on either rg or tracked git files.
-if command -v rg >/dev/null 2>&1; then
-    grep_backend=rg
-else
-    grep_backend=git
-fi
+# Proof scope comes from committed Git paths, so use Git for discovery too.
+# A PATH-provided rg is unnecessary and can stall before main (cas-81bc),
+# exhausting close's checker budget even for a tiny diff. No probe is needed.
+grep_backend=git
 tracked_rust_test_paths=('cas-cli/tests/*.rs' 'cas-cli/tests/**/*.rs')
 
 run_test_path_search() {
     local mode="$1"
     shift
-    case "${grep_backend}:${mode}" in
-        rg:regex)
-            rg -l --glob '*.rs' "$@" -- cas-cli/tests
-            ;;
-        rg:fixed)
-            rg -l -F --glob '*.rs' -- "$1" cas-cli/tests
-            ;;
-        git:regex)
+    case "$mode" in
+        regex)
             git grep -n -E "$@" -- "${tracked_rust_test_paths[@]}"
             ;;
-        git:fixed)
+        fixed)
             git grep -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
             ;;
         *)
@@ -110,9 +101,7 @@ search_test_paths() {
     shift
     if matches="$(run_test_path_search "$mode" "$@")"; then
         [[ -n "$matches" ]] || return 0
-        if [[ "$grep_backend" == git ]]; then
-            matches="$(sed -E 's/:[0-9]+:.*$//' <<<"$matches")"
-        fi
+        matches="$(sed -E 's/:[0-9]+:.*$//' <<<"$matches")"
         printf '%s\n' "$matches" | sort -u
     else
         search_status=$?

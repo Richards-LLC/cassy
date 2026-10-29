@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for check-scoped-test-surface.sh, including its no-rg fallback.
+# Self-test for committed scoped-test surface resolution, independent of host rg.
 
 set -euo pipefail
 
@@ -41,11 +41,6 @@ printf '%s\n' 'changed skill' >>"$repo/cas-cli/src/builtins/skills/demo/SKILL.md
 git -C "$repo" add .
 git -C "$repo" commit -qm 'change scoped surfaces'
 
-with_rg_output="$(
-    cd "$repo"
-    bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --
-)"
-
 # Build an isolated PATH containing every command used by the checker except
 # rg. This masks both /usr/bin/rg and /bin/rg on hosts that ship either one.
 no_rg_bin="$tmpdir/no-rg-bin"
@@ -59,7 +54,24 @@ without_rg_output="$(
         --resolve-targets --base main --
 )"
 
-[[ "$without_rg_output" == "$with_rg_output" ]]
+# cas-81bc: the proof resolver must not launch a PATH-provided rg. The
+# Codex bundle can stall before main on macOS; an immediately failing stand-in
+# catches that dependency deterministically, without sleeps or host state.
+unusable_rg_bin="$tmpdir/unusable-rg-bin"
+mkdir -p "$unusable_rg_bin"
+cat >"$unusable_rg_bin/rg" <<'EOF'
+#!/bin/sh
+printf '%s\n' invoked >>"$CAS_TEST_RG_CALLS"
+exit 99
+EOF
+chmod +x "$unusable_rg_bin/rg"
+unusable_rg_output="$(
+    cd "$repo"
+    CAS_TEST_RG_CALLS="$tmpdir/rg-calls" PATH="$unusable_rg_bin:$no_rg_bin" \
+        bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --
+)"
+[[ "$unusable_rg_output" == "$without_rg_output" ]]
+[[ ! -e "$tmpdir/rg-calls" ]]
 for expected in \
     '--lib widget' \
     '--test widget_test' \
@@ -70,7 +82,7 @@ for expected in \
     grep -qF -- "$expected" <<<"$without_rg_output"
 done
 
-printf 'ok   no-rg backend preserves scoped target mapping\n'
+printf 'ok   committed target mapping never launches host rg\n'
 
 manifest_repo="$tmpdir/manifest-repo"
 mkdir -p "$manifest_repo/cas-cli/tests/hooks_test" "$manifest_repo/scripts"

@@ -735,6 +735,9 @@ mod focused_epic_tests {
     fn cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics() {
         use cas_store::AgentStore;
         use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType};
+        use crate::mcp::tools::core::task::lifecycle::close_ops::{
+            EpicStatusOptions, collect_epic_branch_statuses_with_options,
+        };
         let mut home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (project, root, session) = fixture();
         let git = |args: &[&str]| {
@@ -884,11 +887,28 @@ mod focused_epic_tests {
                 .iter()
                 .all(|task| task.get("delivery_state").is_none())
         );
+        // Read-only live verdicts cannot authorize a close-gate decision.
+        let gate = collect_epic_branch_statuses_with_options(
+            &store.get_subtasks(&epic.id).unwrap(),
+            "main",
+            project.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: false,
+                budget: std::time::Duration::ZERO,
+            },
+        );
+        assert!(
+            gate.statuses.is_empty(),
+            "projection proofs must stay out of the close cache"
+        );
         // A moved delivery target must invalidate completed live proofs.
         let base = git(&["rev-parse", "HEAD^"]);
         git(&["update-ref", "refs/heads/main", &base]);
         let changed = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
-        let progress = &changed["epics"].as_array().unwrap().iter()
+        let progress = &changed["epics"]
+            .as_array().unwrap().iter()
             .find(|item| item["id"] == epic.id).unwrap()["progress"];
         assert_eq!(progress["total"], 3);
         assert_eq!(progress["merged"], 0, "moved refs must not reuse a live merge verdict");

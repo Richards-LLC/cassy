@@ -22,6 +22,10 @@
 //! repository's common Git directory, so worktrees of one repository share it
 //! and nothing appears in the working tree. Cache I/O failures never change a
 //! verdict; they only cost a recomputation.
+//!
+//! The read-only Team projection uses a separate file and also retains completed
+//! active-child proofs, bound to live delivery metadata as well as Git inputs.
+//! Mutation/close gates never load those projection verdicts.
 
 use super::{BranchContentDirection, EpicChildBranchStatus, EpicGitSnapshot};
 use cas_types::Task;
@@ -180,7 +184,11 @@ pub(super) fn verdict_key(
     if projection {
         // Live receipts can change without moving a ref (retarget, reviewed
         // drop, integration-batch receipt, or negative-result transition).
-        let _ = writeln!(material, "projection={}", serde_json::to_string(&child.deliverables).unwrap_or_default());
+        let _ = writeln!(
+            material,
+            "projection={}",
+            serde_json::to_string(&child.deliverables).unwrap_or_default()
+        );
     }
     for decision in super::accepted_delivery_drop_decisions(child) {
         let _ = writeln!(material, "accepted-reviewed-drop={decision}");

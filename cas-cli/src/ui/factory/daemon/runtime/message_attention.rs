@@ -28,6 +28,7 @@ pub(crate) struct AttentionInputs {
     pub(crate) session_name: String,
     dead_workers: HashSet<String>,
     workers: Vec<String>,
+    replacement_workers: HashSet<String>,
 }
 impl AttentionInputs {
     pub(crate) fn from_daemon(daemon: &FactoryDaemon) -> Self {
@@ -36,6 +37,7 @@ impl AttentionInputs {
             session_name: daemon.session_name.clone(),
             dead_workers: daemon.dead_workers.clone(),
             workers: daemon.app.worker_names().to_vec(),
+            replacement_workers: daemon.pending_worker_replacements(),
         }
     }
     /// Snapshot stores once and resolve each recipient transcript once per scan.
@@ -66,8 +68,12 @@ impl AttentionInputs {
         let mut transcript_cache = HashMap::new();
         let mut merge_cache = HashMap::<String, bool>::new();
         let mut decisions = HashMap::new();
+        let spawns = open_spawn_queue_store(&self.cas_dir).ok();
         for row in rows {
-            if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents) {
+            if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents, &self.replacement_workers)
+                && spawns.as_ref().and_then(|store|
+                    store.has_pending_spawn(&row.target, Some(&self.session_name)).ok()) == Some(false)
+            {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }

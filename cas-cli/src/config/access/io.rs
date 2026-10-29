@@ -333,7 +333,18 @@ impl Config {
         let user = if let Some(host) = host.filter(|host| {
             host != cas_dir && host.canonicalize().ok() != cas_dir.canonicalize().ok()
         }) {
-            read_qa_source(&host)?
+            read_qa_source(&host).unwrap_or_else(|_| {
+                // A broken optional user layer must not disable every project.
+                // Local project errors are still returned by the loader above.
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    let path = if host.join("config.toml").exists() {
+                        host.join("config.toml")
+                    } else { host.join("config.yaml") };
+                    eprintln!("Warning: unreadable or invalid user QA defaults in {}\n  User defaults ignored; project and built-in settings apply.\n  Repair this file to restore inheritance.", path.display());
+                });
+                empty_qa_table()
+            })
         } else {
             empty_qa_table()
         };

@@ -4,12 +4,16 @@ Batch QA is the built-in default for fresh projects and new machines.
 Opt into per-delivery evidence and independent QA with
 `cas config set qa.mode per_task`. QA keys resolve per key from project
 `.cas/config.toml`, then user `~/.cas/config.toml`, then built-in defaults.
-The setting is operator-owned. No background process is added.
+An unreadable or invalid user QA config warns and is ignored; invalid project
+config still reports its error. The setting is operator-owned. No background
+process is added.
 
 In batch mode, an implementer's pre-merge close still checks added test skip
 and focus markers, then parks the delivery with evidence deferred. Cassy does
 not automatically dispatch a per-task QA pass. A supervisor can still request
-one explicitly with `verification action=qa_request`.
+one explicitly with `verification action=qa_request`. A pending or failed explicit
+round still binds: re-parking a changed tip opens the next round. A logged
+waiver ends that per-task obligation; deferred batch evidence is still owed.
 
 Every hour with new deliveries, the supervisor builds a candidate at the exact
 epic tip, walks the combined batch matrix and records the reviewed revision.

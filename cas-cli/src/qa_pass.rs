@@ -200,7 +200,10 @@ pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && passes.iter().filter(|pass| !pass.is_withdrawn()).max_by_key(|pass| pass.round)
+        // Pending replacements can share a rejection-based round ordinal.
+        // Follow the store's latest-history ordering, not max(round).
+        && passes.iter().filter(|pass| !pass.is_withdrawn())
+            .max_by_key(|pass| (pass.requested_at, pass.round, pass.id.as_str()))
             .is_some_and(|latest| {
                 // A logged waiver completes the per-task obligation in batch
                 // mode. Older rounds must not recreate it for the next tip;

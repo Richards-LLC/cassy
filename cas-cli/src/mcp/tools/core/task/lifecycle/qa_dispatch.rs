@@ -697,15 +697,16 @@ impl CasCore {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         if qa.mode == crate::config::QaMode::Batch && requested.is_none() {
-            // Historical rounds (including waivers) do not opt batch deliveries
-            // back into automatic per-task review. Explicit requests still enter below.
-            if let Some(head) = head {
-                let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-                if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+            let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            // Batch parks do not start QA, but an explicitly recorded review
+            // still owes its successor after a moved tip or rejection (GH #1001).
+            // gate_applies excludes the latest logged waiver in batch mode.
+            if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+                if let Some(head) = head {
                     crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
                 }
+                return None;
             }
-            return None;
         }
         let implementer = task.assignee.as_deref()?;
         // cas-7877: the close backstop reaches here for a delivery that is not

@@ -204,6 +204,8 @@ describe("grouped project sessions (cas-55a4)", () => {
     const preview = (index: number) => new DOMParser().parseFromString(conversationRowMarkup(rows[index]!), "text/html").querySelector(".conversation-preview")?.textContent;
     // The catalog's activity until the thread has a turn; the turn once it has; the state when neither.
     expect([preview(0), preview(1), preview(2)]).toEqual(["Messaged bright-robin-85", "Stem export is at 60%.", "Live"]);
+    const ended = row("watchful-heron-16", 50, { ended: { at: "2026-10-29T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
+    expect(new DOMParser().parseFromString(conversationRowMarkup(ended), "text/html").querySelector(".conversation-preview")?.textContent).toBe("Ended");
     // An ungrouped row keeps its connection words.
     expect(new DOMParser().parseFromString(conversationRowMarkup({ ...row("solo", 1), activityLine: "Wrote to you" }), "text/html").querySelector(".conversation-preview")?.textContent).toBe("Live");
   });

@@ -109,7 +109,7 @@ pub(super) fn park_refusal(
     target: &str,
 ) -> Option<String> {
     let short = &head[..head.len().min(12)];
-    if let Some(refusal) = fast_rows_refusal(proof_repo, &task.id, head, target) {
+    if let Some(refusal) = fast_rows_refusal(cas_root, proof_repo, task, head, target) {
         return Some(refusal);
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -152,7 +152,8 @@ pub(super) fn park_refusal(
 /// exists. That happens when the push skipped the hook through
 /// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed. Only a
 /// supervisor-issued exception bound to that failed result can substitute.
-fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Option<String> {
+fn fast_rows_refusal(cas_root: &Path, repo: &Path, task: &Task, head: &str, target: &str) -> Option<String> {
+    let task_id = &task.id;
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .args(args)
@@ -167,7 +168,7 @@ fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Op
     let receipt = directory.join(format!("{head}.pass"));
     let text = std::fs::read_to_string(&receipt).unwrap_or_default();
     if text.starts_with(&format!("fast-rows: PASS {head} "))
-        || super::super::super::fast_rows_exception::approved(&directory, task_id, head, &text)
+        || super::super::super::fast_rows_exception::approved(cas_root, &directory, task, head, &text)
     {
         return None;
     }

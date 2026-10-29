@@ -1691,8 +1691,8 @@ A different SHA, failed result, check or file set invalidates it. Rerunning fast
 rows on the same SHA rewrites the failed receipt, including its timestamp, and
 invalidates an issued approval when those bytes change. Obtain a new supervisor
 approval after a rerun; the old exception file does not authorize the new result.
-Caller-supplied
-approver fields, ordinary note text and `overrides.log` cannot issue approval.
+Caller-supplied approver fields, ordinary note text and `overrides.log` cannot
+issue approval through the note handler.
 Other failed rows, missing tools, changed-crate test receipts and merge-queue
 requirements retain their existing gates. These local receipts share the trust
 boundary of the existing Git-local PASS receipts; they are not a separate Unix

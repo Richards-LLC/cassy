@@ -1,0 +1,5 @@
+title: An executing worker names the assigned in-progress task already present in the same Team status response, including supported legacy status spellings
+found: '2026-10-29'
+tasks: [cas-787c]
+invariants: [HUB-J26-GOAL]
+journeys: [HUB-J26]

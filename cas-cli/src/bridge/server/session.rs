@@ -230,7 +230,18 @@ fn session_agents(
                 .filter(|task| {
                     task.assignee.as_deref().is_some_and(|owner| aliases.contains(owner))
                 })
-                .min_by_key(|task| {
+                .map(|task| {
+                    // A batch note or merge receipt changes updated_at without
+                    // assigning new work. Use the same start evidence as the
+                    // visible trail; creation is a stable legacy fallback.
+                    let work_at = task_start_event(&events, &task.id)?
+                        .map(|event| event.created_at)
+                        .or_else(|| tasks.get(&task.id).ok().map(|record| record.created_at));
+                    Ok((*task, work_at))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .min_by_key(|(task, work_at)| {
                     (
                         match task.status {
                             TaskStatus::InProgress => 0,
@@ -238,9 +249,11 @@ fn session_agents(
                             TaskStatus::Blocked => 2,
                             _ => 3,
                         },
-                        std::cmp::Reverse(task.updated_at),
+                        std::cmp::Reverse(*work_at),
+                        task.id.clone(),
                     )
-                });
+                })
+                .map(|(task, _)| task);
             // Full records supply lifecycle receipts only. Missing details
             // cannot erase the assignment already present in this response.
             let full_task = task.and_then(|task| tasks.get(&task.id).ok());
@@ -274,6 +287,13 @@ fn session_agents(
         .collect()
 }
 
+/// Shared, bounded task-start evidence for current-work ordering and its trail.
+fn task_start_event(events: &dyn EventStore, id: &str) -> Result<Option<Event>> {
+    Ok(events.list_for_entity(cas_types::EventEntityType::Task, id, 200)?
+        .into_iter()
+        .find(|event| event.event_type == cas_types::EventType::TaskStarted))
+}
+
 /// Only durable lifecycle records become Team marks. Bounded event history can
 /// omit a start; registration/heartbeat and arbitrary notes never stand in for it.
 fn worker_task_facts(
@@ -281,17 +301,14 @@ fn worker_task_facts(
     events: &dyn EventStore,
     task: Option<&cas_types::Task>,
 ) -> Result<(Option<String>, Vec<AgentTrailJson>)> {
-    use cas_types::{EventEntityType, EventType, MergeCiAdmission, VerificationStatus};
+    use cas_types::{MergeCiAdmission, VerificationStatus};
     let Some(task) = task else {
         return Ok((None, Vec::new()));
     };
-    let history = events.list_for_entity(EventEntityType::Task, &task.id, 200)?;
-    let started = history
-        .iter()
-        .find(|event| event.event_type == EventType::TaskStarted);
-    let start_at = started.map(|event| event.created_at.to_rfc3339());
+    let started = task_start_event(events, &task.id)?;
+    let start_at = started.as_ref().map(|event| event.created_at.to_rfc3339());
     let mut trail = Vec::new();
-    if let Some(event) = started {
+    if let Some(event) = started.as_ref() {
         trail.push(AgentTrailJson {
             step: "started",
             at: start_at.clone(),
@@ -826,6 +843,73 @@ mod focused_epic_tests {
         let worker = status.agents.iter().find(|agent| agent.name == current.name).unwrap();
         assert_eq!(worker.id, current.id);
         assert_eq!(worker.current_task.as_deref(), Some(parked.id.as_str()));
+    }
+
+    #[test]
+    fn newer_parked_work_wins_over_an_older_integrated_delivery_after_a_note() {
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType, EventEntityType, EventType, Task, TaskStatus, TaskType};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (project, root, session) = fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["commit", "--allow-empty", "-m", "Integrated older delivery"]);
+        let integrated = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "factory/pending"]);
+        git(&["commit", "--allow-empty", "-m", "Newer parked delivery"]);
+        let pending = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "main"]);
+        let mut worker = Agent::new_with_role("worker-id".into(), "worker-a".into(), AgentRole::Worker);
+        worker.factory_session = Some(session.name.clone());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = Task::new("cas-release".into(), "Release".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("main".into());
+        tasks.add(&epic).unwrap();
+        let now = chrono::Utc::now();
+        let events = SqliteEventStore::open(&root).unwrap();
+        for (id, title, anchor, minutes, updated) in [
+            ("cas-old-parked", "Older integrated delivery", integrated.as_str(), 90, now),
+            ("cas-new-parked", "Latest parked work", pending.as_str(), 15, now - chrono::Duration::minutes(10)),
+        ] {
+            let mut task = Task::new(id.into(), title.into());
+            task.created_at = now - chrono::Duration::minutes(minutes + 10);
+            task.updated_at = updated;
+            task.status = TaskStatus::AwaitingMerge;
+            task.assignee = Some(worker.name.clone());
+            task.deliverables.factory_branch_anchor = Some(anchor.into());
+            if minutes == 90 { task.deliverables.merge_commit = Some(integrated.clone()); }
+            tasks.add(&task).unwrap();
+            tasks.add_dependency(&Dependency { from_id:id.into(), to_id:epic.id.clone(), dep_type:DependencyType::ParentChild, created_at:now, created_by:None }).unwrap();
+            let mut start = Event::new(EventType::TaskStarted, EventEntityType::Task, id, "Started assigned work");
+            start.created_at = now - chrono::Duration::minutes(minutes);
+            events.record(&start).unwrap();
+        }
+        let status = build_status_json(&session, &root, 20).unwrap();
+        let old = status.tasks_in_progress.iter().find(|task| task.id == "cas-old-parked").unwrap();
+        assert_eq!(old.delivery_state, Some("merged"), "real Git proves the old delivery is integrated");
+        let current = status.agents.iter().find(|agent| agent.name == worker.name).unwrap();
+        assert_eq!(current.current_task.as_deref(), Some("cas-new-parked"));
+        let row = status.tasks_in_progress.iter().find(|task| Some(task.id.as_str()) == current.current_task.as_deref()).unwrap();
+        assert_eq!(row.title, "Latest parked work", "lane task identity and title agree");
+        let mut active = Task::new("cas-still-active".into(), "In-progress work".into());
+        // Older ongoing work still outranks a newer parked delivery.
+        active.created_at = now - chrono::Duration::hours(3);
+        active.assignee = Some(worker.name.clone());
+        active.status = TaskStatus::InProgress;
+        tasks.add(&active).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some(active.id.as_str()));
+        active.status = TaskStatus::Closed;
+        tasks.update(&active).unwrap();
+        let status = build_status_json(&session, &root, 20).unwrap();
+        assert_eq!(status.agents.iter().find(|agent| agent.name == worker.name).unwrap().current_task.as_deref(), Some("cas-new-parked"));
     }
 
     #[test]

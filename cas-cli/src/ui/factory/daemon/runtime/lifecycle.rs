@@ -4452,6 +4452,9 @@ impl FactoryDaemon {
         loop_progress: &super::loop_watchdog::LoopProgress,
         tick_interval_ms: f64,
     ) -> bool {
+        // Dynamic spawns and recycles also change the durable session roster,
+        // even when the director has no lifecycle events to deliver.
+        self.flush_epic_focus_write(store_worker);
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
         let cas_dir = self.app.cas_dir().to_path_buf();
@@ -4878,6 +4881,15 @@ impl FactoryDaemon {
 
     /// Hand the latest epic-focus write to the store worker (cas-5e72).
     pub(super) fn flush_epic_focus_write(&mut self, store_worker: &super::store_worker::StoreWorker) {
+        if let Some((path, workers)) = self.app.take_worker_roster_write() {
+            store_worker.submit("worker roster metadata", move || {
+                if let Err(error) = crate::ui::factory::app::update_session_metadata_at(&path, |metadata| {
+                    metadata.workers = workers;
+                }) {
+                    tracing::warn!(%error, "failed to persist worker roster");
+                }
+            });
+        }
         if let Some((path, epic_id)) = self.app.take_epic_focus_write() {
             store_worker.submit("epic focus metadata", move || {
                 crate::ui::factory::app::persist_epic_focus_at(&path, epic_id.as_deref());

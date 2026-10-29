@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  staffed-epic-delivery-budget:
+    title: Staffed release delivery reads precede idle history even after the last active worker parks
+    tasks: [cas-9d2a, cas-c5fa]
+    invariants: [HUB-J26-ACTIVE-EPIC-BUDGET]
+    journeys: [HUB-J26]
   pairing-revoked-before-welcome:
     title: Every authentication failure must replace a pending conversation attach with immediate named Re-pair recovery, including expired credentials on a phone
     found: '2026-10-29'

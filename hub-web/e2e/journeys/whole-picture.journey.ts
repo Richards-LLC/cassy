@@ -194,6 +194,51 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
     };
 
+    test(`HUB-J25 live phase ${width} ${colorScheme}`, journeyPart, async ({ page, journey }) => {
+      const world = fleet();
+      world.supervisor_phase = { event_id: "phase-1", kind: "notice", lifecycle: { id: "turn-1", stage: "phase", phase: "setting_up", started_at: journeyStamp(-42_000) }, observed_at: journeyStamp(), stale: false };
+      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, fleet: { [PELICAN]: world } });
+      const line = page.getByRole("log").locator(".phase-line");
+      const refresh = async () => page.evaluate(session => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
+      await journey.stage("Read the reported phase without opening Show work", async () => {
+        await openConversation(page, journey);
+        await expect(line).toContainText("Setting up");
+        await expect(line.locator(".phase-clock")).toHaveText(/^\d+:\d{2}$/);
+        const [minutes, seconds] = (await line.locator(".phase-clock").innerText()).split(":").map(Number);
+        expect(minutes! * 60 + seconds!).toBeGreaterThanOrEqual(42);
+        expect(hub.frames.filter(frame => ["WorkEventsRequest", "WorkEventDetailRequest", "ScrollbackRequest"].includes(frame.kind))).toEqual([]);
+      });
+      await journey.stage("Compacting changes live; waiting has no moving dots", async () => {
+        world.supervisor_phase!.lifecycle.phase = "compacting";
+        await refresh(); await expect(line).toContainText("Compacting", { timeout: 5_000 });
+        await page.emulateMedia({ reducedMotion: "reduce", forcedColors: "active" });
+        expect(await line.locator(".dots i").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+        world.supervisor_phase!.lifecycle.phase = "waiting_on_you";
+        await refresh(); await expect(line).toContainText("Waiting on you");
+        await expect(line).toHaveAttribute("data-active", "false");
+        expect(await line.locator(".dots i").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await expect(line.locator(".phase-clock")).toHaveCount(0);
+      });
+      await journey.stage("Stale data freezes the observed duration", async () => {
+        world.supervisor_phase!.lifecycle.phase = "compacting";
+        world.supervisor_phase!.stale = true;
+        await refresh(); await expect(line).toContainText("Update stale");
+        await expect(line.locator(".phase-clock")).toHaveText("0:42");
+        await expect(line).toHaveAttribute("data-active", "false");
+      });
+      await journey.stage("A completed boundary and a disconnected machine never look active", async () => {
+        world.supervisor_phase!.stale = false;
+        world.supervisor_phase!.lifecycle = { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" };
+        await refresh(); await expect(line).toContainText("Compacted");
+        await expect(line).not.toContainText("Compacting");
+        await expect(line.locator(".phase-clock")).toHaveCount(0);
+        await hub.down("atlas", { sockets: "close" });
+        await expect(line).toContainText("Disconnected");
+        await expect(line).toHaveAttribute("data-active", "false");
+      });
+    });
+
     // One catalog journey (HUB-J25), run as a part per surface and width.
     test(`HUB-J25 show work ${width} ${colorScheme} cas_ff22`, journeyPart, showWork);
     test(`HUB-J25 worker timeline ${width} ${colorScheme} cas_ff22`, journeyPart, timeline);

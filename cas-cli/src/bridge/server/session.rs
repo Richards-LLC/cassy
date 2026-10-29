@@ -153,6 +153,7 @@ pub(crate) fn build_status_json(
             cas_root,
             std::path::Path::new(session.metadata.project_dir.as_deref().unwrap_or(".")),
             &session.name,
+            &session.metadata.supervisor.name,
         ),
         session: session_json(session),
         prompt_queue_pending: pending,

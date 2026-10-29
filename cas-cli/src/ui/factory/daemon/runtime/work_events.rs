@@ -1168,11 +1168,14 @@ pub(crate) fn supervisor_phase_for_session(
     cas_dir: &Path,
     project_path: &Path,
     session: &str,
+    supervisor: &str,
 ) -> Option<SupervisorPhase> {
     type Cache = HashMap<(PathBuf, String), WorkEventIndex>;
     static INDEXES: std::sync::LazyLock<Mutex<Cache>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
     let agents = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?;
-    let scope = WorkEventScope::from_agents(session, &agents);
+    let (agents, _) = crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents);
+    let mut scope = WorkEventScope::from_agents(session, &agents);
+    scope.supervisors.retain(|source| source.agent_name == supervisor);
     let resolve = |source: &SupervisorSource| {
         crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
             project_path.to_str(), &source.harness_session, source.cli, source.account_dir.as_deref(),

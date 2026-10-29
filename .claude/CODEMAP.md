@@ -148,7 +148,8 @@
 - `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/auth/media.rs` - session-scoped media tickets and bounded artifact Range streaming.
 - `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - allowlisted hashed Commander lazy chunks; ticketed sandbox route for supervisor-published HTML pages.
 - `cas-cli/src/ui/factory/daemon/runtime/ws_client.rs`, `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - Commander attachment/input delivery and durable operator replies.
-- `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged Commander work events (thinking, tool calls, task and worker events) from transcripts and the task DB; schema in `docs/guides/commander-work-events.md`.
+- `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged Commander work events and an allowlisted supervisor lifecycle projection for ordinary status; schema in `docs/guides/commander-work-events.md`.
+- `hub-web/src/live-phase.ts` - measured supervisor phase/elapsed view model, with explicit waiting, stale, disconnected and unreported states; the conversation owns its display-only clock.
 - `hub-web/src/usage.ts` - per-journey usage counter (action to HUB journey map), flushed to every paired machine.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - browser journeys and isolated previews; `hub-web/e2e/journeys/real-hub-server.mjs` owns the real hub/daemon recovery fixture.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - Slack routing and daemon entrypoints.

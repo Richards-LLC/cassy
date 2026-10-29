@@ -91,6 +91,7 @@ import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
 import { countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
+import { livePhase } from "./live-phase";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -165,6 +166,7 @@ const sessionsEverLive = new Set<string>();
 const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING, BROWSER_BLOCKED, BROWSER_UNSUPPORTED]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
+const statusReceivedAt = new Map<string, number>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
 const statusPending = new Set<string>();
 const statusFailures = new Set<string>();
@@ -457,19 +459,26 @@ function mountConversation(key: string, mount: HTMLElement): void {
     const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
     const target = supervisorTarget(hubSession) || "Supervisor";
     const history = conversationHistory(threadKey, threadSession);
+    const working = (): boolean => supervisorWorking(
+      history,
+      connectionStates.get(threadMachineId),
+      [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+    );
     conversation = new ConversationView(document, history, {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
       sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
-      // Only recent pane activity drives the working line. A queued or
-      // transported message alone never proves the supervisor took a turn.
-      working: () => supervisorWorking(
-        history,
-        connectionStates.get(threadMachineId),
-        [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
-      ),
+      // Older daemons can establish activity but cannot name its phase/time.
+      working,
+      phase: () => livePhase(statuses.get(threadKey)?.supervisor_phase, {
+        connected: connectionStates.get(threadMachineId)?.phase === "live" && !connectionStates.get(threadMachineId)?.authFailure,
+        stale: statusFailures.has(threadKey) || connectionStates.get(threadMachineId)?.degraded === true,
+        waiting: waitingOnOperator(history) > 0,
+        working: working(),
+        now: performance.now(), receivedAt: statusReceivedAt.get(threadKey),
+      }),
       editMessage: (text, send) => {
         const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
         if (!composer || composer.dataset.threadKey !== threadKey) return;
@@ -2090,6 +2099,7 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     // only the supervisor's own asks and blockers wait on the operator.
     statusFailures.delete(key);
     statuses.set(sessionKey(machineId, session), status);
+    statusReceivedAt.set(key, performance.now());
     statusPending.delete(key);
     render();
   } catch {

@@ -428,7 +428,7 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     let (started, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
     let phase = index.supervisor_phase(&scope, &resolve).expect("status projects the live v2 lifecycle");
     assert_eq!(phase.kind, WorkEventKind::Tool);
-    assert_eq!(phase.lifecycle.started_at.as_deref(), Some(at(1).as_str()));
+    assert_eq!(DateTime::parse_from_rfc3339(phase.lifecycle.started_at.as_deref().unwrap()).unwrap(), DateTime::parse_from_rfc3339(&at(1)).unwrap());
     let projection = serde_json::to_string(&phase).unwrap();
     assert!(!projection.contains("git status"), "status must not include tool input");
     let before = index.fingerprint(&scope, &stores, &resolve).unwrap();
@@ -449,8 +449,8 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     assert_eq!(wire["lifecycle"]["outcome"], "success");
     let phase = index.supervisor_phase(&scope, &resolve).unwrap();
     assert_eq!(phase.lifecycle.stage, "end");
-    assert_eq!(phase.lifecycle.started_at.as_deref(), Some(at(1).as_str()));
-    assert_eq!(phase.lifecycle.ended_at.as_deref(), Some(at(2).as_str()));
+    assert_eq!(DateTime::parse_from_rfc3339(phase.lifecycle.started_at.as_deref().unwrap()).unwrap(), DateTime::parse_from_rfc3339(&at(1)).unwrap());
+    assert_eq!(DateTime::parse_from_rfc3339(phase.lifecycle.ended_at.as_deref().unwrap()).unwrap(), DateTime::parse_from_rfc3339(&at(2)).unwrap());
     assert_ne!(
         index.fingerprint(&scope, &stores, &resolve).unwrap(),
         before,

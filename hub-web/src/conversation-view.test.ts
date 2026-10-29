@@ -24,10 +24,13 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
     now += 1000; view.refreshWorking();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:43");
+    expect(livePhase(snapshot, { ...state, now, waiting: true })?.label).toBe("Compacting");
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, phase: "waiting_on_you" } };
     state = { ...state, waiting: true }; view.refreshWorking();
     expect(view.element.querySelector(".phase-line")?.textContent).toContain("Waiting on you");
     expect(view.element.querySelector(".phase-line")?.getAttribute("data-active")).toBe("false");
     expect(view.element.querySelector(".phase-clock")).toBeNull();
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, phase: "compacting" } };
     state = { ...state, waiting: false, stale: true }; view.refreshWorking();
     expect(view.element.querySelector(".phase-line")?.textContent).toContain("Update stale");
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
@@ -40,6 +43,9 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:45");
     now += 60_000; view.refreshWorking();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:45");
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, ended_at: "2026-10-28T12:00:46Z" } };
+    view.update();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:46");
     expect(livePhase(null, { ...state, now, working: true })?.label).toBe("Phase not reported");
     expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
   });

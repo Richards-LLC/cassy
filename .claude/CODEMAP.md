@@ -135,7 +135,7 @@
 - `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css` - reusable fenced-source header with literal-source Copy feedback and per-block Wrap, retained around rich previews.
 - `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - reserved inline media, lifecycle and PDF first-page pixels.
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts` - scoped release/task ledger, server merge metrics and accessible device-local context width.
-- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, collapsed supervisor work and live worker timelines.
+- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, typed operation/scope disclosures with exact raw evidence, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
 - `cas-cli/src/hub/auth/cache.rs`, `cas-cli/src/hub/auth/audit.rs` - stat-validated auth snapshots, process-local capabilities and batched rotating audits.

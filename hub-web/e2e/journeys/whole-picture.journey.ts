@@ -108,7 +108,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(await reply.evaluate((node) => (node as HTMLElement & { journeyMark?: boolean }).journeyMark === true), "the earlier reply is the same node").toBe(true);
       });
 
-      await journey.stage("Read typed operation scope and exact evidence without lifecycle noise", async () => {
+      await journey.stage("Read typed work scope", async () => {
         const typed = [
           event("typed-start", "notice", "Turn started", -900, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
           event("typed-read", "tool", "Read files", -800, { tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),

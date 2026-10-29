@@ -29,6 +29,13 @@ class Shapes(unittest.TestCase):
     def test_clean_behavior_and_production(self):
         self.assertFalse(self.hits('#[test] fn t() { assert_eq!(run(input), 3); } fn real() { assert_eq!(LIMIT, 3); }'))
 
+    def test_random_id_cannot_be_pinned_to_an_assertion_literal(self):
+        for expression in ['uuid::Uuid::new_v4().to_string()', 'rand::random::<u64>()']:
+            with self.subTest(expression=expression):
+                code = f'#[test] fn t() {{ let id = {expression}; let alias = id.clone(); assert_eq!(alias, "fixed-id"); }}'
+                self.assertTrue(any('random ID' in kind for _, kind in self.hits(code)))
+        self.assertFalse(self.hits('#[test] fn t() { let id = "fixed-id"; assert_eq!(read_back(), id); }'))
+
     def test_literals_are_not_code(self):
         self.assertFalse(self.hits('#[test] fn t() { let s = r###"assert_eq!(LIMIT, 3); include_str!(\"lib.rs\") {"###; /* /*nested*/ assert_eq!(LIMIT, 3); */ }'))
 

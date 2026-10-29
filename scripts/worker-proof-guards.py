@@ -3,6 +3,7 @@
 import argparse
 import ast
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import warnings
 
 GUARD_FILTER = ('test(=test_support::lib_test_process_env_mutation_is_isolated) | '
@@ -118,9 +120,12 @@ def main():
     parser.add_argument('--verified-script', required=True)
     parser.add_argument('--cargo', required=True)
     parser.add_argument('--count-file', required=True)
+    parser.add_argument('--stability-script')
+    parser.add_argument('--target-metadata', default=os.environ.get('CAS_WORKER_STABILITY_TARGET'))
     parser.add_argument('args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     repo = Path.cwd()
+    Path(args.count_file).with_suffix('.stability.json').unlink(missing_ok=True)
     base = git(repo, 'merge-base', args.base, 'HEAD').strip()
     started = time.monotonic()
     subprocess.run([sys.executable, str(repo / 'scripts/check-test-shape.py'),
@@ -135,7 +140,15 @@ def main():
         print(f'guards: PASS tests={guard_count.read_text().strip()} '
               f'elapsed={time.monotonic() - started:.3f}s string_matches={len(hits)}', flush=True)
     requested = args.args[1:] if args.args[:1] == ['--'] else args.args
-    verified(args.verified_script, args.cargo, requested, args.count_file)
+    stability = types.ModuleType('worker_test_stability')
+    sys.modules[stability.__name__] = stability
+    source = args.stability_script
+    if source is None:
+        source = Path(__file__).with_name('worker-test-stability.py').read_text()
+    exec(source, stability.__dict__)
+    stability.run_requested(repo.resolve(), base, requested, args.cargo,
+                            args.verified_script, args.count_file,
+                            json.loads(args.target_metadata) if args.target_metadata else None)
 
 
 if __name__ == '__main__':

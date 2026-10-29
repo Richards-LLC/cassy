@@ -620,9 +620,8 @@ async fn test_task_update_depth_to_light() {
 // ---------------------------------------------------------------------------
 
 fn git_in(repo: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = crate::test_env_guard::git_fixture(repo)
         .args(args)
-        .current_dir(repo)
         .output()
         .unwrap_or_else(|e| panic!("git {args:?} failed to run: {e}"));
     assert!(
@@ -859,8 +858,11 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
     cas::store::known_repos::ensure_host_schema().unwrap();
     // Pin a SHA with letters in SHA[..9]; decimal-only prefixes are treated as run IDs.
     std::fs::write(repo.join(".gitignore"), "/.cas/\n").unwrap();
-    test_env.set("GIT_AUTHOR_DATE", "1700000192 +0000");
-    test_env.set("GIT_COMMITTER_DATE", "1700000192 +0000");
+    // The shared Git fixture must override inherited identities and clocks.
+    test_env.set("GIT_AUTHOR_DATE", "946684800 +0000");
+    test_env.set("GIT_COMMITTER_DATE", "946684800 +0000");
+    test_env.set("GIT_AUTHOR_NAME", "ambient fixture poison");
+    test_env.set("GIT_COMMITTER_NAME", "ambient fixture poison");
     init_repo_with_commit(repo);
     let (v56, v56_branch, v56_tip) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
     assert_eq!(v56_tip, "8cdb386e4f461e0492a16cc5ef4fac74e681daa5");

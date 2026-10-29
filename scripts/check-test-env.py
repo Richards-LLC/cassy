@@ -20,7 +20,7 @@ from rust_test_source import pairs, tokens
 BASELINE = 'scripts/test-env-baseline.json'
 CANONICAL = 'cas-cli/src/test_env_guard.rs'
 MUTATORS = {'set_var', 'remove_var', 'set_current_dir'}
-CONSTRUCTORS = {'new', 'temp_home', 'with_vars', 'with_optional_vars'}
+CONSTRUCTORS = {'new', 'temp_home', 'for_store', 'with_vars', 'with_optional_vars'}
 
 
 def git(root, *args):

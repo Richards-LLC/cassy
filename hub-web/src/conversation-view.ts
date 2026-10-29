@@ -1920,6 +1920,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     const table = document.createElement("div"); table.className = "evi";
     const actions = document.createElement("div"); actions.className = "evi-actions";
     const status = document.createElement("span"); status.className = "evi-status"; status.setAttribute("role", "status"); status.setAttribute("aria-atomic", "true");
+    let copyStatusTimer: ReturnType<typeof setTimeout> | undefined;
     const scroll = document.createElement("div"); scroll.className = "evi-scroll"; scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Scrollable evidence table");
     const native = document.createElement("table"); native.className = "evi-body"; native.setAttribute("aria-label", "Evidence");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
@@ -1951,6 +1952,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     for (const format of ["Markdown", "CSV"] as const) {
       const copy = document.createElement("button"); copy.type = "button"; copy.textContent = `Copy ${format}`;
       copy.addEventListener("click", () => {
+        clearTimeout(copyStatusTimer);
         void (async () => {
           copy.disabled = true; status.textContent = "Copying…";
           try {
@@ -1959,6 +1961,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
             const text = format === "Markdown" ? block.source : tableCsv([...native.rows].map(row => [...row.cells].map(cell => cell.textContent ?? "")));
             await clipboard.writeText(text);
             status.textContent = `${format} copied`;
+            copyStatusTimer = setTimeout(() => { status.textContent = ""; }, 2000);
           } catch { status.textContent = "Copy failed. Select the table and copy manually, or try again."; }
           finally { copy.disabled = false; }
         })();

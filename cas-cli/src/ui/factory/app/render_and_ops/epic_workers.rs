@@ -6715,6 +6715,7 @@ mod tests {
                 let agents = open_agent_store(&root).unwrap();
                 agent.role = cas_types::AgentRole::Worker;
                 agent.pid = Some(i32::MAX as u32);
+                agent.status = cas_types::AgentStatus::Shutdown;
                 agents.register(&agent).unwrap();
                 let mut sibling = agent.clone();
                 sibling.id = "sibling-registration".into();
@@ -6820,7 +6821,10 @@ mod tests {
         let agents = open_agent_store(&cas).unwrap();
         let mut agent = cas_types::Agent::new("fixture-agent".into(), name.into());
         agent.role = cas_types::AgentRole::Worker;
-        if dead { agent.pid = Some(i32::MAX as u32); }
+        if dead {
+            agent.pid = Some(i32::MAX as u32);
+            agent.status = cas_types::AgentStatus::Shutdown;
+        }
         agent.metadata.insert("clone_path".into(), worker.display().to_string());
         agents.register(&agent).unwrap();
         let entered = env.home().join("entered");

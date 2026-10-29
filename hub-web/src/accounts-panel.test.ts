@@ -1,18 +1,23 @@
 // @vitest-environment jsdom
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
-import { accountCapacity, accountTime, type AccountRow, type AccountOperation } from "./accounts-model";
+import { accountCapacity, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
 const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function() { this.removeAttribute("open"); this.dispatchEvent(new Event("close")); };
 });
 afterEach(() => { document.body.innerHTML = ""; vi.restoreAllMocks(); });
-const settle = async () => { await new Promise(resolve => setTimeout(resolve, 0)); };
-function setup(manage = true, account = row) {
+const settle = async () => {
+  await vi.waitFor(() => {
+    expect(document.querySelector('.accounts-machine-body [role="status"]')).toBeNull();
+    expect(document.querySelector(".accounts-notice")?.textContent).not.toBe("Changing account…");
+  });
+};
+function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] })) {
   const host: AccountsHost = {
     machines: () => [{ id: "linux", label: "Soundwave", scopes: manage ? ["machine-read", "factory-manage"] : ["machine-read"] }],
-    list: vi.fn(async () => ({ accounts: [account] })), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
+    list: vi.fn(list), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
   };
   const sheet = new AccountsSheet(host); sheet.open();
   return { sheet, host };
@@ -20,7 +25,13 @@ function setup(manage = true, account = row) {
 function click(selector: string) { document.querySelector<HTMLButtonElement>(selector)!.click(); }
 
 it("shows read-only pairings their disabled actions and the exact manage-access command", async () => {
-  const { host } = setup(false); await settle();
+  let completeListing!: (catalog: AccountsCatalog) => void;
+  const listing = new Promise<AccountsCatalog>(resolve => { completeListing = resolve; });
+  const { host } = setup(false, row, () => listing);
+  expect(document.body.textContent).toContain("Loading accounts…");
+  const loaded = settle();
+  completeListing({ accounts: [row] });
+  await loaded;
   expect(document.body.textContent).toContain("Stale login");
   expect(document.body.textContent).toContain("Usage unknown");
   expect(document.body.textContent).toContain("Read-only on Soundwave");

@@ -355,9 +355,10 @@ describe("grouped project sessions (cas-55a4)", () => {
     const list = new ConversationList();
     let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
     const open = vi.fn();
-    // As main.ts does: the hub ends it, the catalog drops it, the list redraws.
+    // Hold the hub response so completion cannot be inferred from elapsed time.
+    let completeEnd!: () => void;
     const end = vi.fn(async (ended: ConversationRow) => {
-      await new Promise((ok) => setTimeout(ok, 0));
+      await new Promise<void>(resolve => { completeEnd = resolve; });
       live = live.filter((item) => item.key !== ended.key);
       list.render(container, groupConversationRows(live), open, end);
     });
@@ -370,7 +371,8 @@ describe("grouped project sessions (cas-55a4)", () => {
       confirm.click();
       // While it ends, focus waits on the status line, not the page.
       expect(document.activeElement?.textContent).toBe(`Ending ${session}…`);
-      await new Promise((ok) => setTimeout(ok, 5));
+      completeEnd();
+      await vi.waitFor(() => expect(document.activeElement?.matches(".conversation-row")).toBe(true));
     };
     draw();
     await endFromKeyboard("wild-shark-68");

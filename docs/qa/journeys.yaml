@@ -254,6 +254,10 @@ invariants:
       edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the daemon''s session-bound
       history page, the catalog''s last activity and the hub''s End session are doubled; that ending a session stops
       its daemon is proven on a real machine at epic assembly'
+  HUB-J14-STABLE-ORDER:
+    statement: Sibling sessions of one project keep their places; activity moves only the quiet "Most recent" label, never a row or the selection, so two supervisors trading turns never flash the list (WCAG 2.3.1/2.2.2).
+    check: Run "HUB-J14 two active supervisors of one project keep their places and the selection for 60 s" in hub-web/e2e/journeys/session-identity.journey.ts; require row order, row tops and aria-current unchanged on every turn for 60 s under reduced motion, and Most recent on the last speaker.
+    bug: {task: cas-4f42}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
       away once resolved, and nothing claims I replied when I didn't
@@ -1513,6 +1517,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J14-GOAL
+  - HUB-J14-STABLE-ORDER
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

@@ -1,0 +1,4 @@
+title: Sibling sessions must keep stable places; activity may change only the Most recent label, never row order or the selection
+tasks: [cas-4f42]
+invariants: [HUB-J14-STABLE-ORDER]
+journeys: [HUB-J14]

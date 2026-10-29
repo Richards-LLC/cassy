@@ -259,37 +259,15 @@ export async function holdPageClock(page: Page, ahead = 250): Promise<void> {
 
 /** Two animation frames: let the UI paint before a screenshot. */
 export async function settle(page: Page): Promise<void> {
-  // A test that holds the page clock (ProtocolClock) holds animation frames
-  // too; the screenshot then shows the held frame, after at most a short
-  // real-time wait instead of a hang (cas-1f7e).
-  // Return the state immediately: evaluating the promise itself would leave
-  // no way to finish it when the virtual clock holds both frame callbacks.
-  const state = await page.evaluateHandle(() => {
-    let frame: number;
-    let finish!: () => void;
-    const painted = new Promise<void>((resolve) => {
-      finish = () => {
-        cancelAnimationFrame(frame);
-        resolve();
-      };
-      frame = requestAnimationFrame(() => { frame = requestAnimationFrame(finish); });
-    });
-    return { painted, finish };
-  });
-  const painted = state.evaluate(({ painted }) => painted);
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([painted, new Promise<void>((resolve) => { deadline = setTimeout(resolve, 250); })]);
-  } finally {
-    clearTimeout(deadline);
-    try {
-      await state.evaluate(({ finish }) => finish());
-    } finally {
-      // Drain even on navigation/close; do not turn a real page error into a
-      // successful screenshot or leave an evaluation to fail at teardown.
-      try { await painted; } finally { await state.dispose(); }
-    }
-  }
+  // Playwright's RAF polling uses the browser's native frames, even while
+  // ProtocolClock holds the page's timer/RAF callbacks. The first predicate
+  // runs immediately; the next two are paint opportunities. Waiting on a
+  // page-owned RAF promise instead required a host timer and another browser
+  // evaluation to release it, so that "deadline" still depended on cleanup
+  // reaching the renderer (cas-fc03).
+  const painted = await page.waitForFunction((state) => ++state.frames === 3,
+    { frames: 0 }, { polling: "raf" });
+  await painted.dispose();
 }
 
 /**

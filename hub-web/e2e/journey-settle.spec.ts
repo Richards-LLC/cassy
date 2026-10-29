@@ -1,9 +1,8 @@
-import { test, expect, type Page, type JSHandle } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { settle } from "./journeys/journey";
 import { JOURNEY_NOW } from "./journeys/clock";
 
-// Observe real native evaluations, including evaluations on returned handles.
-// A host timeout is insufficient if an evaluation still owns a frozen RAF.
+// Observe browser work without replacing its native execution or scheduling.
 function observeEvaluations(page: Page) {
   let pending = 0;
   let notifyEvaluation!: () => void;
@@ -12,25 +11,10 @@ function observeEvaluations(page: Page) {
     pending++;
     return work.finally(() => pending--);
   }
-  function handle(value: JSHandle): JSHandle {
-    return new Proxy(value, {
-      get(target, key) {
-        if (key === "evaluate") return (...args: unknown[]) => {
-          const evaluation = tracked(Reflect.apply(target.evaluate, target, args));
-          notifyEvaluation();
-          return evaluation;
-        };
-        const member = Reflect.get(target, key, target);
-        return typeof member === "function" ? member.bind(target) : member;
-      },
-    });
-  }
   const observed = new Proxy(page, {
     get(target, key) {
-      if (key === "evaluate") return (...args: unknown[]) => tracked(Reflect.apply(target.evaluate, target, args));
-      if (key === "evaluateHandle") return (...args: unknown[]) => tracked(Reflect.apply(target.evaluateHandle, target, args) as Promise<JSHandle>).then(handle);
-      if (key === "waitForFunction") return (...args: unknown[]) => {
-        const evaluation = tracked(Reflect.apply(target.waitForFunction, target, args));
+      if (key === "evaluate" || key === "evaluateHandle" || key === "waitForFunction") return (...args: unknown[]) => {
+        const evaluation = tracked(Reflect.apply(target[key], target, args));
         notifyEvaluation();
         return evaluation;
       };

@@ -7681,6 +7681,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // A claimed body may still be held by its harness. Pane growth
+            // alone cannot promote it; transcript-correlated consumption uses
+            // record_transcript_consumed instead (cas-ad3d / cas-d39f).
             let changed = tx.execute(
                 "INSERT INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
@@ -7691,7 +7694,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  WHERE (prompt_queue_recipient_seen.source = 'transport_delivered'
                         AND excluded.source <> 'transport_delivered')
                     OR (prompt_queue_recipient_seen.source = 'transport_claimed'
-                        AND excluded.source IN ('hook_surfaced', 'inbox_poll', 'observed_wake'))",
+                        AND excluded.source IN ('hook_surfaced', 'inbox_poll'))",
                 params![
                     prompt_id,
                     recipient,
@@ -14292,10 +14295,20 @@ mod tests {
                 assert_eq!(pending.recipient_receipt, Some(transport));
                 assert!(pending.confirmed_at.is_none());
 
+                let transport_seen = recipient_seen_at(&store, id, "worker").unwrap();
                 store
                     .record_recipient_surfaced(id, "worker", surfaced)
                     .unwrap();
                 let received = store.message_delivery_report(id).unwrap().unwrap();
+                if transport == SurfacingSource::TransportClaimed && surfaced == SurfacingSource::ObservedWake {
+                    // Pane growth alone cannot prove that the claimed body
+                    // was read; transcript consumption has its own stronger API.
+                    assert_eq!(received.recipient_receipt, Some(transport));
+                    assert!(received.confirmed_at.is_none());
+                    assert_eq!(store.recipient_receipt(id, "other-worker").unwrap(), None);
+                    assert_eq!(recipient_seen_at(&store, id, "worker"), Some(transport_seen));
+                    continue;
+                }
                 assert_eq!(
                     received.recipient_receipt,
                     Some(surfaced),

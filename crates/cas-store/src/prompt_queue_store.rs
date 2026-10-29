@@ -7681,6 +7681,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // A claimed body may still be held by its harness. Pane growth
+            // alone cannot promote it; transcript-correlated consumption uses
+            // record_transcript_consumed instead (cas-ad3d / cas-d39f).
             let changed = tx.execute(
                 "INSERT INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
@@ -7691,7 +7694,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  WHERE (prompt_queue_recipient_seen.source = 'transport_delivered'
                         AND excluded.source <> 'transport_delivered')
                     OR (prompt_queue_recipient_seen.source = 'transport_claimed'
-                        AND excluded.source IN ('hook_surfaced', 'inbox_poll', 'observed_wake'))",
+                        AND excluded.source IN ('hook_surfaced', 'inbox_poll'))",
                 params![
                     prompt_id,
                     recipient,

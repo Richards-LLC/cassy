@@ -1,3 +1,4 @@
+import { commandReceiptNode, type CommandReceipt, type CommandKey } from "./supervisor-commands";
 import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
@@ -145,6 +146,8 @@ export interface ConversationViewOptions {
    * "once the session is live again" under a header that reads Live.
    */
   sessionLive?: () => boolean;
+  commandReceipts?: () => readonly CommandReceipt[];
+  commandStep?: (clientRef: string, key: CommandKey) => void;
   /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
@@ -423,6 +426,8 @@ export class ConversationView {
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
   private readonly endReceipt: HTMLElement;
+  private readonly commands: HTMLElement;
+  private commandSignature = "";
   private readonly empty: HTMLElement;
   /** Other sessions' turns, collapsed and labelled (cas-55a4); never part of the log. */
   private readonly earlier: HTMLElement;
@@ -546,6 +551,11 @@ export class ConversationView {
       if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
+    this.commands = document.createElement("section");
+    this.commands.className = "supervisor-command-receipts";
+    this.commands.setAttribute("aria-label", "Supervisor command receipts");
+    this.commands.setAttribute("aria-live", "polite");
+    this.commands.hidden = true;
     this.endReceipt = document.createElement("section");
     this.endReceipt.className = "session-end-receipt";
     this.endReceipt.setAttribute("role", "status");
@@ -566,7 +576,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.endReceipt, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.commands, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -692,7 +702,16 @@ export class ConversationView {
   }
 
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
-  update(): void { this.render(false); }
+  update(): void {
+    this.render(false);
+    const receipts = this.options.commandReceipts?.() ?? [];
+    const signature = JSON.stringify(receipts);
+    if (signature === this.commandSignature) return;
+    this.commandSignature = signature;
+    this.commands.hidden = !receipts.length;
+    const nodes = receipts.map(receipt => commandReceiptNode(receipt, key => this.options.commandStep?.(receipt.client_ref, key)));
+    this.commands.replaceChildren(...nodes);
+  }
 
   /** Scroll-only window changes reuse the last data/state presentation. */
   private render(reuseModel: boolean): void {

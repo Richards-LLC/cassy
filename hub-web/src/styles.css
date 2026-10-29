@@ -3350,3 +3350,29 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 }
 .session-end-receipt p { margin: var(--space-2) 0 0; }
 .session-end-receipt .session-end-orphans, .session-ended-status .session-end-orphans { color: var(--state-warn); }
+
+/* Supervisor command controls reuse the Glass composer and receipt vocabulary. */
+.has-supervisor-commands { position: relative; }
+.supervisor-command-palette {
+  position: absolute; inset-inline: var(--space-2); bottom: 100%; z-index: 20;
+  max-height: min(60dvh, 24rem); overflow: auto;
+  border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane);
+  padding: var(--space-3); background: var(--bg-raised); color: var(--ink); box-shadow: var(--lift);
+}
+.supervisor-command-palette[hidden] { display: none; }
+.supervisor-command-palette > strong { display: block; margin-block-end: var(--space-2); font-size: var(--fs-meta); }
+.supervisor-command-palette > button {
+  display: flex; flex-direction: column; align-items: start; width: 100%; min-height: 44px;
+  padding: var(--space-2); border: 0; border-radius: var(--radius-card);
+  background: var(--color-transparent); color: var(--ink); text-align: start;
+}
+.supervisor-command-palette > button:hover { background: var(--bg-hover); }
+.supervisor-command-palette small { color: var(--ink-mid); }
+.supervisor-command-palette button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.supervisor-command-palette [role="alertdialog"] button,
+.supervisor-command-receipt button { min-height: 44px; margin: var(--space-1); }
+.supervisor-command-receipts { margin: var(--space-4); }
+.supervisor-command-receipt { border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); color: var(--ink-mid); }
+.supervisor-command-receipt strong { color: var(--ink); font-family: var(--font-mono); }
+.supervisor-command-receipt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: var(--fs-xs)/var(--line-ui) var(--font-mono); }
+#conversation-commands .action-label { display: none; }

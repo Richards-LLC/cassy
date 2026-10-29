@@ -680,9 +680,10 @@ mod focused_epic_tests {
     }
 
     #[test]
-    fn status_delivery_and_epic_progress_use_epic_status_containment() {
+    fn cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics() {
+        use cas_store::AgentStore;
         use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType};
-        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut home = crate::test_env_guard::TestEnvGuard::temp_home();
         let (project, root, session) = fixture();
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
@@ -706,20 +707,46 @@ mod focused_epic_tests {
         git(&["commit", "-m", "delivery"]);
         let anchor = git(&["rev-parse", "HEAD"]);
         git(&["branch", "factory/fresh-worker", &anchor]);
+        git(&["branch", "historical"]);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [
+            ("supervisor-id", "supervisor", cas_types::AgentRole::Supervisor),
+            ("worker-id", "worker-a", cas_types::AgentRole::Worker),
+        ] {
+            let mut agent = cas_types::Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some(session.name.clone());
+            agents.register(&agent).unwrap();
+        }
         let store = crate::store::open_task_store(&root).unwrap();
+        // These higher-priority historical epics precede the active release
+        // in the project catalog. Trace actual Git reads rather than depending
+        // on a particular machine exhausting the two-second budget.
+        for index in 0..300 {
+            let mut historical = Task::new(format!("cas-history-{index}"), "Old release".into());
+            historical.task_type = TaskType::Epic;
+            historical.status = TaskStatus::Closed;
+            historical.priority = cas_types::Priority(0);
+            historical.branch = Some("historical".into());
+            store.add(&historical).unwrap();
+        }
         let mut epic = Task::new("cas-epic".into(), "Epic".into());
         epic.task_type = TaskType::Epic;
         epic.branch = Some("main".into());
+        epic.epic_verification_owner = Some("supervisor-id".into());
         store.add(&epic).unwrap();
         for (id, status, delivered) in [
             ("cas-landed", TaskStatus::AwaitingMerge, true),
             ("cas-open", TaskStatus::Open, false),
+            ("cas-active", TaskStatus::InProgress, false),
             ("cas-cancel", TaskStatus::Cancelled, false),
         ] {
             let mut child = Task::new(id.into(), id.into());
             child.status = status;
             if id == "cas-open" {
                 child.assignee = Some("fresh-worker".into());
+            }
+            if id == "cas-active" {
+                child.assignee = Some("worker-id".into());
             }
             if delivered {
                 child.deliverables.factory_branch_anchor = Some(anchor.clone());
@@ -738,7 +765,17 @@ mod focused_epic_tests {
                 })
                 .unwrap();
         }
+        let trace = project.path().join("status-git.trace");
+        home.set("GIT_TRACE", &trace);
         let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        assert!(status["focused_epic"].is_null());
+        assert_eq!(status["epics"].as_array().unwrap().len(), 301);
+        let reads = std::fs::read_to_string(trace).unwrap();
+        let first_epic_read = reads.lines().find(|line| {
+            line.contains("for-each-ref") && line.contains("committerdate:unix")
+        }).expect("status must collect real Git delivery evidence");
+        assert!(first_epic_read.contains("refs/heads/main"),
+            "the selected supervisor's staffed epic must be measured before history: {first_epic_read}");
         let landed = status["tasks_in_progress"]
             .as_array()
             .unwrap()
@@ -747,8 +784,9 @@ mod focused_epic_tests {
             .unwrap();
         assert_eq!(landed["epic_id"], epic.id);
         assert_eq!(landed["delivery_state"], "merged", "{status:#}");
-        let progress = &status["epics"][0]["progress"];
-        assert_eq!(progress["total"], 2);
+        let progress = &status["epics"].as_array().unwrap().iter()
+            .find(|item| item["id"] == epic.id).unwrap()["progress"];
+        assert_eq!(progress["total"], 3);
         assert_eq!(progress["merged"], 1);
         assert_eq!(progress["merges_per_hour"], 1);
         assert!(

@@ -633,10 +633,8 @@ async fn reviewed_delivery_with_legacy_producer_ledger_closes_cas_dd03() {
         // Shipped producer evidence predates today's matrix grammar. The
         // reviewer's canonical ledger is a separate, published artifact.
         let config = cas::config::Config::load(&root).unwrap();
-        let paths = cas::config::resolved_factory_artifact_paths(
-            &root, config.factory().artifacts_root.as_deref(),
-        );
-        let producer = paths.task_dirs("cas-bq01")[0].join("LEDGER.md");
+        let base = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let producer = cas::config::factory_task_artifact_dirs(&root, &base, "cas-bq01")[0].join("LEDGER.md");
         std::fs::create_dir_all(producer.parent().unwrap()).unwrap();
         std::fs::write(&producer, "# QA\n2 PASS, 0 FAIL\nold walkthrough NOT EXERCISED\n").unwrap();
         let legacy = std::fs::read(&producer).unwrap();

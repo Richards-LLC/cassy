@@ -398,6 +398,17 @@ When a walk needs records a worker can't create (accounts, tokens or data in a s
 1. The script checks the target host against the allowed environment and exits otherwise, refuses on a colliding record instead of overwriting it, writes its outputs mode 600 under the task artifact directory, and prints sanitized errors with no secrets or tokens.
 2. The supervisor reviews the script against those four guards, runs it from the worker's worktree (the shared checkout may lack the file), and sends the worker the output path.
 
+## Batch QA
+
+Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-delivery
+reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+Every hour with new deliveries, build a candidate at the exact epic tip, walk the
+combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
+with `task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`; every listed
+delivery anchor must be contained in that reviewed target commit. Then close those
+deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
+remain available.
+
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).

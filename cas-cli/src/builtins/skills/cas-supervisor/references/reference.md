@@ -264,3 +264,7 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
 - **Another account's claims are invisible.** A peer whose details read `Claims not visible (different account)` may still be working. Agree on ownership by message and record it with an epic split.
 - **Do not resend a retried message.** A send answered `queued for automatic retry as peer-outbox:<id>` is retried under one identity for up to 15 minutes. Check it with `message_status id=peer-outbox:<id>`. Send again only after the abandonment notice arrives and its cause is fixed.
 - **On a peer refusal, message the holder.** `⛔ HELD BY A PEER` and `⛔ SPLIT TO A PEER` name the holder and include the message command to send. Do not use `force=true` to settle a disagreement.
+
+## Message delivery and wake authority
+
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.

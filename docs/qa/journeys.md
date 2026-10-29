@@ -426,6 +426,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Goal:** the conversation reconnects by itself and every message I send is delivered exactly once
 - **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/main.ts`
 - **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`: one main test and several part tests marked `journeyPart`. Each part writes its receipts under `journeys/HUB-J12/parts/<part>/`, and `scripts/journey-bundles.py` folds every part's stages, cells and verdict into the HUB-J12 bundle and its JOURNEYS.md total (cas-1f7e)
+- **Revoked before first Welcome (cas-3286):** the code re-pairing part holds the initial session attach until pairing is revoked; the conversation immediately replaces Opening with its pairing failure and a named Re-pair action, then completes re-pairing through that control. A stale attach cannot override the machine's authentication verdict.
 - **Gaps:** the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by its visibility events
 
 #### Steps

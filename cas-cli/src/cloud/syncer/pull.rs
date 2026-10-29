@@ -1476,6 +1476,27 @@ fn reconcile_web_close(
     }
 }
 
+/// Proof has its own immutable/monotonic authority. A newer task body must
+/// not discard an owner's review verdict or published bytes on another host.
+fn restore_task_proofs(
+    root: Option<&std::path::Path>, store: &dyn TaskStore, remote: &Task,
+    incoming_is_owner: bool, proofs: &[String], qa: &[String],
+) -> Result<(), CasError> {
+    if !incoming_is_owner { return Ok(()); }
+    let local = store.get(&remote.id)?;
+    if local.origin_project != remote.origin_project { return Ok(()); }
+    for proof in proofs { store.append_trusted_note(&remote.id, proof)?; }
+    if let Some(root) = root {
+        crate::qa_pass::sync::import(root, remote, qa)
+            .map_err(|error| CasError::Other(format!("QA snapshot import failed: {error}")))?;
+    }
+    if crate::qa_evidence::cited_bundle_path(&local.notes).is_none()
+        && let Some(cited) = crate::qa_evidence::cited_bundle_path(&remote.notes) {
+        store.append_note(&remote.id, &format!("qa-bundle: {cited}"))?;
+    }
+    Ok(())
+}
+
 /// Merge append-only task-note blocks without allowing a whole-row conflict
 /// resolution to discard one machine's timeline.
 fn merge_task_notes(local: &str, remote: &str) -> String {
@@ -2410,17 +2431,14 @@ impl CloudSyncer {
                     "personal_pull",
                 )
             };
+            if task_outcome.is_ok() {
+                restore_task_proofs(self.push_cas_root.as_deref(), task_store, &remote_task,
+                    incoming_is_owner, &trusted_proofs, &qa_receipts)?;
+            }
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     if let Some(block) = trusted_provenance.as_deref() {
                         task_store.append_trusted_note(&remote_task.id, block)?;
-                    }
-                    for proof in &trusted_proofs {
-                        task_store.append_trusted_note(&remote_task.id, proof)?;
-                    }
-                    if incoming_is_owner && let Some(root) = self.push_cas_root.as_deref() {
-                        crate::qa_pass::sync::import(root, &remote_task, &qa_receipts)
-                            .map_err(|error| CasError::Other(format!("QA snapshot import failed: {error}")))?;
                     }
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
@@ -3601,24 +3619,22 @@ impl CloudSyncer {
                     .as_deref()
                     .is_some_and(|origin| project_ids_match(origin, current_project_id));
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
-            match self.upsert_task_with_owner_preference(
+            let task_outcome = self.upsert_task_with_owner_preference(
                 task_store,
                 remote_task.clone(),
                 incoming_is_owner,
                 Some(strategy),
                 &task_sync_id,
                 "team_pull",
-            ) {
+            );
+            if task_outcome.is_ok() {
+                restore_task_proofs(self.push_cas_root.as_deref(), task_store, &remote_task,
+                    incoming_is_owner, &trusted_proofs, &qa_receipts)?;
+            }
+            match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     if let Some(block) = trusted_provenance.as_deref() {
                         task_store.append_trusted_note(&remote_task.id, block)?;
-                    }
-                    for proof in &trusted_proofs {
-                        task_store.append_trusted_note(&remote_task.id, proof)?;
-                    }
-                    if incoming_is_owner && let Some(root) = self.push_cas_root.as_deref() {
-                        crate::qa_pass::sync::import(root, &remote_task, &qa_receipts)
-                            .map_err(|error| CasError::Other(format!("QA snapshot import failed: {error}")))?;
                     }
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {

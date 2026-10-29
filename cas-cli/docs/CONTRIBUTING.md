@@ -1674,19 +1674,35 @@ space and:
 
 Run the fast rows first. The decision requires a FAIL receipt whose only failed
 row is `release-notes-draft`, with complete file scope. The requested files must
-name every failed draft exactly; unscoped historical receipts must be regenerated.
+name every failed draft exactly. Both readers require a terminal
+`scope complete count=N` line matching the distinct failed drafts; interrupted
+rows and older receipts without that line must be regenerated.
 Cassy authenticates the caller, checks the task's current delivery branch tip,
 and records the approver, task, SHA, check, files, reason and failed-receipt digest
 in the task timeline and `<git-common-dir>/cas/fast-rows/<sha>.<task>.exception.json`.
 This uses the existing `task action=notes` MCP handler and adds no tool action.
 
 The pre-push hook and park read this contract without rewriting FAIL as PASS.
-A different SHA, failed result, check or file set invalidates it. Caller-supplied
+Park also resolves the approver ID in the agent store and requires a live
+registered supervisor in the assigned worker's factory session. An unknown ID,
+worker, stale or shut-down supervisor, or another factory session is refused.
+
+A different SHA, failed result, check or file set invalidates it. Rerunning fast
+rows on the same SHA rewrites the failed receipt, including its timestamp, and
+invalidates an issued approval when those bytes change. Obtain a new supervisor
+approval after a rerun; the old exception file does not authorize the new result.
+Caller-supplied
 approver fields, ordinary note text and `overrides.log` cannot issue approval.
 Other failed rows, missing tools, changed-crate test receipts and merge-queue
 requirements retain their existing gates. These local receipts share the trust
 boundary of the existing Git-local PASS receipts; they are not a separate Unix
-user security boundary.
+user security boundary. A forged exception that copies a live supervisor ID
+can still imitate that identity in local files; registration alone is not proof
+of issuance. Likewise a local PASS file is cooperative runner evidence, not an
+authenticated attestation. Moving it to the same user-writable task store or
+signing with a key readable by that user does not establish a new trust boundary.
+Authenticating execution requires an independently owned runner or service; the
+merge queue continues to prove the final tree in the existing gate.
 
 ## Project capture configuration
 

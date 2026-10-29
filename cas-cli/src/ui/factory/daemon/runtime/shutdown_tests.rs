@@ -777,6 +777,8 @@ async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
     let Fixture { _dir, mut daemon, request_id: request, pids } = processed_but_unexecuted_shutdown_with_dead_worker(true);
     let cas_dir = daemon.app.cas_dir().to_path_buf();
     let agents = open_agent_store(&cas_dir).unwrap();
+    assert_ne!(agents.get("agent-already-dead").unwrap().status,
+        cas_types::AgentStatus::Shutdown, "the dead worker still requires deferred retirement");
     let names = vec!["already-dead".to_string(), pids[0].0.clone(), pids[1].0.clone()];
     for name in &names {
         let mut agent = agents.get(&format!("agent-{name}")).unwrap();
@@ -1167,7 +1169,9 @@ async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0
     let agents = open_agent_store(&cas_dir).unwrap();
     let mut old = agents.get(&format!("agent-{name}")).unwrap();
     old.factory_session = Some(SESSION.into());
-    old.status = cas_types::AgentStatus::Stale;
+    // SessionEnd may retire the old identity before its pane disappears.
+    // Its dead PID cannot vouch for the unregistered same-name replacement.
+    old.status = cas_types::AgentStatus::Shutdown;
     old.pid = Some(i32::MAX as u32);
     agents.update(&old).unwrap();
     assert!(!daemon.app.worker_names().iter().any(|worker| worker == name));

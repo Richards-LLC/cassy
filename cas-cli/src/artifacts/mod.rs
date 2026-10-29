@@ -483,6 +483,7 @@ fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
     use tempfile::TempDir;
 
@@ -612,7 +613,16 @@ mod tests {
         let private = f.project_root.join("private.txt");
         fs::write(&private, "private sentinel").unwrap();
         let private_bytes = fs::read(&private).unwrap();
-        for path in ["../private.txt".to_string(), private.display().to_string()] {
+        let oversized = f.task_dir.join("oversized.zip");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(ARTIFACT_MAX_BYTES + 1)
+            .unwrap();
+        for path in [
+            "../private.txt".to_string(),
+            private.display().to_string(),
+            "oversized.zip".into(),
+        ] {
             fs::write(
                 &manifest,
                 serde_json::json!({
@@ -625,7 +635,17 @@ mod tests {
             assert!(qa::prepare(&f.context(), &manifest).is_err());
             let published = publish(&f.context(), &manifest).unwrap();
             assert_eq!(published.artifact.name, "bundle.json");
-            assert_eq!(published.disposition, PublishDisposition::NotLoggedIn);
+            assert_eq!(published.artifact.status, "local");
+            assert!(
+                published.disposition.summary().contains("not portable"),
+                "{published:?}"
+            );
+            if path == "oversized.zip" {
+                assert!(
+                    published.disposition.summary().contains("byte limit"),
+                    "{published:?}"
+                );
+            }
         }
         assert_eq!(fs::read(private).unwrap(), private_bytes);
     }
@@ -641,7 +661,7 @@ mod tests {
         manifest["task_id"] = "cas-b72a".into();
         let dir = f.task_dir.join("qa");
         fs::create_dir_all(&dir).unwrap();
-        let files = &manifest["files"];
+        let files = manifest["files"].clone();
         let mut declared = Vec::new();
         for key in [
             "trace",
@@ -665,11 +685,21 @@ mod tests {
                     .map(|path| path.as_str().unwrap()),
             );
         }
+        let expected: BTreeSet<_> = declared
+            .iter()
+            .map(|path| PathBuf::from("qa").join(path))
+            .chain([PathBuf::from("qa/bundle.json")])
+            .collect();
         for part in files["parts"].as_array().unwrap() {
             for key in ["receipt", "aria_yaml", "aria_json"] {
                 declared.push(part[key].as_str().unwrap());
             }
         }
+        for part in manifest["files"]["parts"].as_array_mut().unwrap() {
+            part["trace"] = "parts/unread-trace.zip".into();
+            part["trace_actions"] = "parts/unread-actions.txt".into();
+        }
+        declared.extend(["parts/unread-trace.zip", "parts/unread-actions.txt"]);
         for path in declared {
             let path = dir.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -686,14 +716,8 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().path().unwrap().into_owned())
             .collect();
-        assert_eq!(
-            paths.len(),
-            54,
-            "53 actual declared files plus the original manifest"
-        );
-        assert!(paths.contains(&PathBuf::from(
-            "qa/parts/paste-content-390-dark-04eda936cd96b5e5/receipt.webm"
-        )));
+        assert_eq!(paths.into_iter().collect::<BTreeSet<_>>(), expected);
+        let paths = expected;
         assert!(paths.contains(&PathBuf::from("qa/bundle.json")));
         assert!(
             !paths

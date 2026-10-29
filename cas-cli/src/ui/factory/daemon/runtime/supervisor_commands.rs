@@ -229,6 +229,40 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let request = Request::Run { command: Command::Model, confirmed: false };
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc✢ Flambéing… (7s · ↓ 633 tokens)\r\n❯".as_bytes()).unwrap();
+        assert!(daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), owner.clone()).await.is_err());
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc❯".as_bytes()).unwrap();
+        let mut untrusted = owner.clone(); untrusted.operator_verified = false;
+        assert!(daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), untrusted).await.is_err());
+        let first = daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), owner.clone()).await.unwrap();
+        assert!(matches!(first, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        daemon.dispatch_supervisor_command(request, "cmd-model".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let writes = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&writes).matches("/model").count(), 1);
+        let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+        assert!(daemon.dispatch_supervisor_command(Request::Status, "cmd-model".into(), foreign).await.is_err());
+        daemon.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\nOpus\r\nSonnet").unwrap();
+        let opened = daemon.dispatch_supervisor_command(Request::Status, "cmd-model".into(), owner.clone()).await.unwrap();
+        assert!(matches!(opened, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive));
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc❯".as_bytes()).unwrap();
+        let closed = daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "cmd-model".into(), owner.clone()).await.unwrap();
+        assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if !receipt.interactive));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), writes, "stale controls must send no key");
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "cmd-usage".into(), owner).await.unwrap();
+    }
     #[test]
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {
         use cas_mux::SupervisorCli::{Claude, Codex};

@@ -399,7 +399,7 @@ use std::path::{Path, PathBuf};
 pub fn configured(cas_root: &Path) -> Option<PostReleaseConfig> {
     Config::load(cas_root)
         .ok()?
-        .qa?
+        .qa()
         .post_release
         .filter(|c| !c.command.trim().is_empty())
 }

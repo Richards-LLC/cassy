@@ -1,7 +1,7 @@
 # Independent QA and polish pass
 
-Use this when you started a `qa-pass` task. Cassy creates one when a
-user-facing delivery parks for merge. You are the second pair of eyes: you
+Use this when you started a `qa-pass` task. Cassy creates one on an explicit
+QA request or when a user-facing `qa.mode=per_task` delivery parks for merge. You are the second pair of eyes: you
 did not build this change, and Cassy refuses the implementer here. Judge the
 running product the way a customer meets it, and judge what the delivery
 changed: the pages, controls and journeys its diff touches, and its acceptance
@@ -13,6 +13,18 @@ The task description names the delivery, its branch and exact tip, the base
 branch, the reasons the pass applies, the ledger directory, and the deadline.
 The time box is `qa.pass_timeout_mins`, 45 minutes by default. An honest
 incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED`.
+
+## Batch default
+
+`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery
+reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+For batch work, capture before/after evidence during implementation. The supervisor
+builds an hourly candidate at the exact epic tip and walks one combined matrix.
+Publish the PASS ledger, then record `verification action=batch_receipt` with
+`task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`. Every listed
+task's delivery anchor must be contained in that reviewed target commit. Close
+after the receipt covers those anchors. A deferred close reports "waiting for
+batch receipt" until then. Explicit `qa_request` reviews use the procedure below.
 
 ## 1. Build the exact tip
 

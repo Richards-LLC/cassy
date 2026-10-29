@@ -720,8 +720,12 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
     fx.unmerge();
-    let park = fx.close("cas-bq01").await;
     let root = fx.repo.join(".cas");
+    // A historical per-task waiver must not restart automatic QA in batch mode.
+    cas_store::waive_qa_pass(&root, "cas-bq01", "batch-supervisor", "test-agent",
+        "factory/test-agent", &git(&fx.repo, &["rev-parse", "main"]),
+        "previous per-task policy", chrono::Utc::now()).unwrap();
+    let park = fx.close("cas-bq01").await;
     let tasks = open_task_store(&root).unwrap();
     assert_eq!(
         tasks.get("cas-bq01").unwrap().status,
@@ -732,7 +736,8 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
     assert!(
         cas_store::list_qa_passes(&root, "cas-bq01")
             .unwrap()
-            .is_empty()
+            .iter().all(|pass| pass.state == cas_types::QaPassState::Waived),
+        "batch park must not open another per-task round"
     );
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     // The debt survives a later change to the user-facing classification.
@@ -742,7 +747,7 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
     fx.reconfigure("mode='batch'\nuser_facing_paths=[]");
     let refused = fx.close("cas-bq01").await;
     assert!(
-        refused.contains("deferred evidence at its batch park"),
+        refused.contains("waiting for batch receipt") && !refused.contains("QA EVIDENCE REJECTED"),
         "{refused}"
     );
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
@@ -756,41 +761,28 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
 }
 
 #[tokio::test]
-async fn batch_qa_default_gate_is_unchanged_and_never_defers_cas_d697() {
+async fn batch_qa_default_defers_and_explicit_per_task_keeps_evidence_gate_cas_a56a() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
     fx.unmerge();
     fx.reconfigure("");
     let unset = fx.close("cas-bq01").await;
-    assert!(unset.contains("no `qa-bundle:` note"), "{unset}");
-    assert!(!cas_store::has_qa_batch_deferral(&fx.repo.join(".cas"), "cas-bq01").unwrap());
+    let root = fx.repo.join(".cas");
+    assert_eq!(open_task_store(&root).unwrap().get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge, "{unset}");
+    assert!(cas_store::has_qa_batch_deferral(&root, "cas-bq01").unwrap());
     fx.reconfigure("mode='per_task'");
-    let explicit = fx.close("cas-bq01").await;
-    // pin: opting out of batch deferral must preserve the exact legacy refusal.
-    assert_eq!(unset, explicit);
-    assert_eq!(
-        open_task_store(&fx.repo.join(".cas"))
-            .unwrap()
-            .get("cas-bq01")
-            .unwrap()
-            .status,
-        TaskStatus::InProgress
-    );
-    fx.reject(serde_json::json!({}), "requires qa.mode=batch")
-        .await;
+    let explicit = fx.close("cas-bq02").await;
+    assert!(explicit.contains("no `qa-bundle:` note"), "{explicit}");
+    assert!(!cas_store::has_qa_batch_deferral(&root, "cas-bq02").unwrap());
+    assert_eq!(open_task_store(&root).unwrap().get("cas-bq02").unwrap().status,
+        TaskStatus::InProgress);
+    fx.reject(serde_json::json!({}), "requires qa.mode=batch").await;
     let mut config = cas::config::Config::default();
-    assert_eq!(config.get("qa.mode").as_deref(), Some("per_task"));
-    config.set("qa.mode", "batch").unwrap();
     assert_eq!(config.get("qa.mode").as_deref(), Some("batch"));
     assert!(config.set("qa.mode", "typo").is_err());
     config.set("qa.mode", "per_task").unwrap();
-    assert!(
-        !serde_json::to_value(config.qa())
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("mode")
-    );
+    assert_eq!(serde_json::to_value(config.qa()).unwrap()["mode"], "per_task");
 }
 
 #[tokio::test]

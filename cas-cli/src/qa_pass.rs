@@ -199,7 +199,14 @@ pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && passes.iter().any(|pass| !pass.is_withdrawn())
+        && passes.iter().filter(|pass| !pass.is_withdrawn()).max_by_key(|pass| pass.round)
+            .is_some_and(|latest| {
+                // A logged waiver completes the per-task obligation in batch
+                // mode. Older rounds must not recreate it for the next tip;
+                // a newer explicit request still binds. Batch evidence debt
+                // is enforced separately and cannot be waived here.
+                qa.mode != crate::config::QaMode::Batch || latest.state != cas_types::QaPassState::Waived
+            })
 }
 
 /// cas-5c38 (GH #999): an operations/artifact task (`execution_note=no-code`)
@@ -1747,7 +1754,7 @@ mod tests {
         )
         .unwrap();
         let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
-        let qa = QaConfig::default();
+        let qa = QaConfig { mode: crate::config::QaMode::PerTask, ..Default::default() };
         assert_eq!(
             merge_gate(&task, &qa, &passes, &tip),
             Ok(()),
@@ -1856,7 +1863,7 @@ mod tests {
     #[test]
     fn merge_gate_requires_a_satisfying_round_for_the_exact_head() {
         use cas_types::QaPassState::*;
-        let qa = QaConfig::default();
+        let qa = QaConfig { mode: crate::config::QaMode::PerTask, ..Default::default() };
         let mut demo = task();
         demo.demo_statement = "Reply lands".to_string();
 
@@ -1930,6 +1937,16 @@ mod tests {
     #[test]
     fn merge_gate_binds_only_recorded_rounds() {
         let qa = QaConfig::default();
+        let waived = pass("old-tip", cas_types::QaPassState::Waived);
+        assert!(merge_gate(&task(), &qa, &[waived.clone()], "new-tip").is_ok(),
+            "a historical waiver must not opt batch deliveries back into per-task QA");
+        let mut per_task = qa.clone();
+        per_task.mode = crate::config::QaMode::PerTask;
+        assert!(merge_gate(&task(), &per_task, &[waived.clone()], "new-tip").is_err());
+        let mut requested = pass("new-tip", cas_types::QaPassState::Pending);
+        requested.round = waived.round + 1;
+        assert!(merge_gate(&task(), &qa, &[waived, requested], "new-tip").is_err(),
+            "a newer explicit QA request still gates the delivery");
         assert!(merge_gate(&task(), &qa, &[], "aaaa1111").is_ok());
         // A path-eligible delivery is bound once the park recorded a round.
         assert!(

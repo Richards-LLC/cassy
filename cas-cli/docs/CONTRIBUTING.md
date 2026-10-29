@@ -150,12 +150,16 @@ conclusion produces one notice per running factory; unrelated integration
 commits do not create another. A red conclusion asks for a supervisor decision
 instead of instructing an unconditional merge.
 
-Projects that review a batch once on staging can select `qa.mode=batch`.
+Batch QA (`qa.mode=batch`) is the built-in default for fresh projects and machines.
+Set `qa.mode=per_task` explicitly to require per-delivery gates. QA keys resolve
+from project `.cas/config.toml`, then user `~/.cas/config.toml`, then built-in defaults.
 Unmerged user-facing deliveries park with evidence deferred and no automatic
 per-task QA pass. A registered supervisor records the shared published ledger
 with `verification action=batch_receipt`; each listed delivery must be contained
 in that task's configured target. See [batch QA](../../docs/qa/batch-qa.md).
-Unset or `per_task` keeps the existing per-delivery gates.
+Every hour with new deliveries, build an exact epic-tip candidate, walk its batch
+matrix and publish the PASS ledger. Record `verification action=batch_receipt`
+with the included task IDs and delivery anchors, then close those deliveries.
 
 Message bodies default to 1,200 characters, or 2,500 for blocker and merge
 requests; task note bodies default to 1,500. These limits are configurable via

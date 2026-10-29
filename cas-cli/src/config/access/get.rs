@@ -5,7 +5,7 @@ impl Config {
         let cloud = self.cloud.clone().unwrap_or_default();
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
-        let qa = self.qa.clone().unwrap_or_default();
+        let qa = self.qa();
         let capture = qa.capture.clone().unwrap_or_default();
         let dev = self.dev.clone().unwrap_or_default();
         let daemon = self.daemon.clone().unwrap_or_default();

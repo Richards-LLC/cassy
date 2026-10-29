@@ -747,6 +747,7 @@ mod tests {
         let hub_web = commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\n").unwrap();
 
         let mut task = Task::new("cas-e4d2-regression".to_string(), "Rust fix".to_string());
         task.assignee = Some("worker".to_string());
@@ -934,6 +935,7 @@ mod tests {
         commit_file(&repo, "src/lib.rs", "pub fn backend() {}\n");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\n").unwrap();
         let mut task = Task::new("cas-bde8-squash".to_string(), "Backend fix".to_string());
         task.assignee = Some("worker".to_string());
 

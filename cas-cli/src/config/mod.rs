@@ -27,6 +27,15 @@ pub use hooks::*;
 pub use runtime::*;
 pub use settings::*;
 
+/// Load-time QA source information; never serialized as project policy.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct QaLayers {
+    user: toml::Value,
+    local: toml::Value,
+    baseline: toml::Value,
+}
+
 /// Main configuration struct
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -61,6 +70,11 @@ pub struct Config {
     /// User-facing QA gate configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qa: Option<QaConfig>,
+
+    /// Source QA keys and user defaults, retained separately from local writes.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub qa_layers: Option<QaLayers>,
 
     /// Paths and directory globs used by overview freshness and G6.
     #[serde(default, skip_serializing_if = "Option::is_none")]

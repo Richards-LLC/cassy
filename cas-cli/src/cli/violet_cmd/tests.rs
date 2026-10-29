@@ -1325,11 +1325,11 @@ fn release_report_pdf_upload_uses_released_epic_before_session_focus_cas_0327() 
     std::fs::write(root.join("config.toml"), "[issues]\nrepo = \"example/project\"\n").unwrap();
     env.set_current_dir(dir.path());
     env.set("CAS_FACTORY_SESSION", "report-upload");
-    let metadata = crate::ui::factory::session::create_metadata(
+    let metadata = crate::ui::factory::create_metadata(
         "report-upload", 1, "supervisor", &[], Some("cas-focused"),
         dir.path().to_str(), None,
     );
-    let metadata_path = crate::ui::factory::session::metadata_path("report-upload");
+    let metadata_path = crate::ui::factory::metadata_path("report-upload");
     std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
     std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
     assert_eq!(crate::ui::factory::preferred_epic_id_from_session_metadata().as_deref(), Some("cas-focused"));

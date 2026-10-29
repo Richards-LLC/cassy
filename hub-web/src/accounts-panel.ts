@@ -16,6 +16,9 @@ export interface AccountsHost {
   returnFocus(): void;
 }
 const ACTIONS: Record<AccountOperation, string> = { set_default: "Set default", rename: "Rename", disable: "Disable", enable: "Enable", remove: "Remove" };
+const CLEANUP_WORD = "clean up";
+/** Least capacity left across known windows; unknown sorts last. */
+const headroom = (row: AccountRow) => Math.min(...accountMeters(row.windows).map(meter => meter.left ?? -1).concat(row.windows.length ? [] : [-1]));
 const PROVIDERS = [["claude", "Claude"], ["codex", "Codex"], ["grok", "Grok"]] as const;
 const LOGIN: Record<AccountRow["login_state"], string> = { logged_in: "Logged in", logged_out: "Logged out", never_logged_in: "Not logged in", stale_login: "Stale login", unknown: "Login unknown" };
 /** Bar widths go through CSSOM: the hub's style-src refuses inline style attributes. */
@@ -31,7 +34,7 @@ export class AccountsSheet {
   private loads = new AbortController();
   private catalogs = new Map<string, AccountsCatalog>();
   private pending = false;
-  private edit?: { machine: AccountsMachine; account: AccountRow; operation: AccountOperation };
+  private edit?: { machine: AccountsMachine; account: AccountRow; operation: AccountOperation } | { machine: AccountsMachine; cleanup: AccountRow[] };
   private generation = 0;
   private focusTarget?: { machine: string; account: string; operation: string };
   constructor(private readonly host: AccountsHost, private readonly doc: Document = document) {}
@@ -65,6 +68,7 @@ export class AccountsSheet {
       if (button.dataset.grantCommand) void this.host.copy(button.dataset.grantCommand).then(() => this.notice("Command copied. Run it on the machine, then open the link it prints here."), () => this.notice("Could not copy. Select the displayed command to copy it."));
       const account = machine && this.catalogs.get(machine.id)?.accounts.find(row => row.key === button.dataset.account);
       if (account && machine && button.dataset.operation && !this.pending) this.begin(machine, account, button.dataset.operation as AccountOperation);
+      if (machine && button.hasAttribute("data-cleanup") && !this.pending) this.beginCleanup(machine);
       if (account && machine && button.hasAttribute("data-login")) {
         if (account.provider === "grok") return;
         void this.host.copy(accountLoginCommand(account.provider, account.name)).then(() => this.notice("Login command copied. Run it on the named machine."), () => this.notice("Could not copy. Select the displayed command to copy it."));
@@ -112,13 +116,17 @@ export class AccountsSheet {
     if (!catalog.accounts.length) return '<p class="accounts-empty">No accounts on this machine.</p>';
     const manage = machine.scopes.includes("factory-manage");
     const cleanup = catalog.accounts.filter(needsCleanup);
-    const summary = `${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${cleanup.length ? ` · ${cleanup.length} to clean up` : ""}`;
+    const observed = catalog.accounts.map(row => row.usage_observed_at).filter((at): at is string => Boolean(at)).sort().at(-1);
+    const summary = `${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${observed ? ` · usage as of ${escapeHtml(accountTime(observed))}` : ""}`;
+    const removable = cleanup.filter(row => row.capabilities.remove === null);
+    const why = !manage ? "Needs manage access on this machine" : removable.length ? "" : (cleanup[0]?.capabilities.remove ?? "Protected");
+    const banner = cleanup.length ? `<div class="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates of another account.${removable.length < cleanup.length && manage ? ` ${cleanup.length - removable.length} protected.` : ""}</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up${removable.length && removable.length !== cleanup.length ? ` ${removable.length}` : ""}</button></div>` : "";
     const groups = PROVIDERS.map(([provider, label]) => {
-      const accounts = catalog.accounts.filter(row => row.provider === provider && !needsCleanup(row));
+      const accounts = catalog.accounts.filter(row => row.provider === provider && !needsCleanup(row)).sort((a, b) => headroom(b) - headroom(a));
       return accounts.length ? `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${label} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage)).join("")}</ul></section>` : "";
     }).join("");
     const stale = cleanup.length ? `<section class="accounts-provider-group accounts-cleanup" aria-label="Needs cleanup on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">Needs cleanup · ${cleanup.length}</h4><p class="accounts-cleanup-lead">Stale logins and duplicates of another account. Remove the copy you no longer use; the account it duplicates stays.</p><ul class="accounts-ledger">${cleanup.map(account => this.card(machine, account, manage)).join("")}</ul></section>` : "";
-    return `<p class="accounts-machine-summary">${summary}</p>${manage ? "" : this.grantCallout(machine)}${groups}${stale}`;
+    return `<p class="accounts-machine-summary">${summary}</p>${banner}${manage ? "" : this.grantCallout(machine)}${groups}${stale}`;
   }
 
   /** DESIGN.md: read-only pairings see the actions and exactly how to unlock them. */
@@ -136,24 +144,25 @@ export class AccountsSheet {
     const where = `${account.location ? `Lives in <code>${escapeHtml(account.location)}</code> on ` : "On "}${escapeHtml(machine.label)} · used by ${HARNESS_NAME[account.provider]}`;
     const meters = accountMeters(account.windows);
     const usage = meters.length
-      ? `<div class="accounts-usage">${meters.map(meter => `<div class="accounts-meter"><span class="accounts-meter-name">${escapeHtml(meter.name)}</span><span class="accounts-bar" aria-hidden="true"><span data-left="${meter.left ?? 0}"${meter.left !== null && meter.left < 20 ? ' class="low"' : ""}></span></span><span class="accounts-meter-text">${meter.left === null ? "usage unknown" : `${meter.left}% left`}${meter.reset ? ` <span class="accounts-reset">· ${meter.resetPast ? "reset" : "resets"} ${escapeHtml(meter.reset)}</span>` : ""}</span></div>`).join("")}${account.usage_observed_at ? `<p class="accounts-observed">As of ${escapeHtml(accountTime(account.usage_observed_at))}</p>` : ""}</div>`
+      ? `<div class="accounts-usage">${meters.map(meter => `<div class="accounts-meter"><span class="accounts-meter-name">${escapeHtml(meter.name)}</span><span class="accounts-bar" aria-hidden="true"><span data-left="${meter.left ?? 0}"${meter.left !== null && meter.left < 10 ? ' class="crit"' : meter.left !== null && meter.left < 25 ? ' class="low"' : ""}></span></span><span class="accounts-meter-text">${meter.left === null ? "usage unknown" : `${meter.left}% left`}${meter.reset ? ` <span class="accounts-reset">· ${meter.resetPast ? "reset" : "resets"} ${escapeHtml(meter.reset)}</span>` : ""}</span></div>`).join("")}</div>`
       : `<p class="accounts-observed">Usage unknown${grok ? "" : account.login_state === "logged_in" ? " · not read yet on this machine" : " · log in to read it"}</p>`;
     const cleanup = account.duplicate_of ? `<p class="accounts-cleanup-why">Duplicate of <code>${escapeHtml(account.duplicate_of)}</code>${account.login_state === "stale_login" ? " with a stale login" : ""}.</p>` : account.login_state === "stale_login" ? '<p class="accounts-cleanup-why">Stale login: log in again, or remove it.</p>' : "";
     const login = account.login_state !== "logged_in" && !grok ? `<div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy login command</button></div>` : "";
     const reasons = grok ? '<p class="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>'
       : [...new Set([account.capabilities.remove, account.capabilities.rename].filter(Boolean))].map(reason => `<p class="accounts-readonly">${escapeHtml(reason!)}</p>`).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
-    const actions = grok ? "" : `<div class="accounts-actions" role="group" aria-label="Actions for ${escapeHtml(account.display_name)}">${operations.map(op => {
+    const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];
       return `<button type="button" ${attrs} data-operation="${op}"${this.pending || reason !== null ? ` disabled title="${escapeHtml(reason ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`;
-    }).join("")}</div>`;
-    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "lane" })}<div class="accounts-card-body"><div class="accounts-identity"><strong>${escapeHtml(account.display_name)}</strong><span class="accounts-badges">${badges}</span></div><p class="accounts-alias">${escapeHtml(account.key)}</p><p class="accounts-where">${where}</p><p class="accounts-state"><span class="status-chip status-chip--${tone}">${state}${account.disabled ? " · Disabled" : ""}</span></p>${cleanup}${usage}${reasons}${login}${actions}</div></li>`;
+    };
+    const actions = grok ? "" : `<div class="accounts-actions" role="group" aria-label="Actions for ${escapeHtml(account.display_name)}">${button("set_default")}<details class="accounts-more"><summary aria-label="More actions for ${escapeHtml(account.display_name)}">⋯</summary><div class="accounts-menu">${operations.filter(op => op !== "set_default").map(button).join("")}</div></details></div>`;
+    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "lane" })}<div class="accounts-card-body"><div class="accounts-identity"><strong title="${escapeHtml(account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})</span><span class="accounts-badges">${badges}</span></div><p class="accounts-where">${where}</p><p class="accounts-state"><span class="status-chip status-chip--${tone}">${state}${account.disabled ? " · Disabled" : ""}</span></p>${cleanup}${usage}${reasons}${login}${actions}</div></li>`;
   }
 
   private begin(machine: AccountsMachine, account: AccountRow, operation: AccountOperation): void {
     if (!machine.scopes.includes("factory-manage") || account.capabilities[operation] !== null) return;
     this.focusTarget = { machine: machine.id, account: account.key, operation };
-    if (operation === "enable" || operation === "set_default") { void this.mutate(machine, { operation, account: account.key }); return; }
+    if (operation === "enable" || operation === "set_default") { void this.mutate(machine, [{ operation, account: account.key }]); return; }
     this.edit = { machine, account, operation };
     const form = this.editor(); form.hidden = false;
     form.querySelector("h3")!.textContent = `${ACTIONS[operation]} ${account.display_name}`;
@@ -165,22 +174,42 @@ export class AccountsSheet {
     input.focus(); input.select();
   }
 
-  private async submit(): Promise<void> {
-    if (!this.edit || this.pending) return;
-    const { machine, account, operation } = this.edit;
-    const input = this.editor().elements.namedItem("value") as HTMLInputElement;
-    if (operation !== "rename" && input.value !== account.key) { input.setCustomValidity(`Type ${account.key} exactly.`); input.reportValidity(); return; }
-    if (!input.value.trim()) return;
-    await this.mutate(machine, { operation, account: account.key, ...(operation === "rename" ? { new_name: input.value } : { confirmation: input.value }) });
+  /** One confirmation removes every stale or duplicate copy this pairing may remove. */
+  private beginCleanup(machine: AccountsMachine): void {
+    const cleanup = (this.catalogs.get(machine.id)?.accounts ?? []).filter(row => needsCleanup(row) && row.capabilities.remove === null);
+    if (!machine.scopes.includes("factory-manage") || !cleanup.length) return;
+    this.focusTarget = undefined;
+    this.edit = { machine, cleanup };
+    const form = this.editor(); form.hidden = false;
+    form.querySelector("h3")!.textContent = `Clean up ${cleanup.length} account${cleanup.length === 1 ? "" : "s"} on ${machine.label}`;
+    this.$(".accounts-explanation").textContent = `Permanently remove ${cleanup.map(row => row.key).join(", ")}. The accounts they duplicate stay; shared base items stay intact.`;
+    this.$(".accounts-field span").textContent = `Type ${CLEANUP_WORD} to confirm`;
+    const input = form.elements.namedItem("value") as HTMLInputElement;
+    input.value = ""; input.setCustomValidity(""); input.oninput = () => input.setCustomValidity("");
+    input.focus();
   }
 
-  private async mutate(machine: AccountsMachine, change: AccountChange): Promise<void> {
+  private async submit(): Promise<void> {
+    if (!this.edit || this.pending) return;
+    const input = this.editor().elements.namedItem("value") as HTMLInputElement;
+    if ("cleanup" in this.edit) {
+      if (input.value !== CLEANUP_WORD) { input.setCustomValidity(`Type ${CLEANUP_WORD} exactly.`); input.reportValidity(); return; }
+      await this.mutate(this.edit.machine, this.edit.cleanup.map(row => ({ operation: "remove" as const, account: row.key, confirmation: row.key })));
+      return;
+    }
+    const { machine, account, operation } = this.edit;
+    if (operation !== "rename" && input.value !== account.key) { input.setCustomValidity(`Type ${account.key} exactly.`); input.reportValidity(); return; }
+    if (!input.value.trim()) return;
+    await this.mutate(machine, [{ operation, account: account.key, ...(operation === "rename" ? { new_name: input.value } : { confirmation: input.value }) }]);
+  }
+
+  private async mutate(machine: AccountsMachine, changes: readonly AccountChange[]): Promise<void> {
     this.pending = true;
     const generation = this.generation;
     this.dialog!.querySelectorAll<HTMLButtonElement>("[data-operation], .accounts-editor button").forEach(button => button.disabled = true);
     this.notice("Changing account…");
     let success = false;
-    try { await this.host.change(machine.id, change); success = true; }
+    try { for (const change of changes) await this.host.change(machine.id, change); success = true; }
     catch { /* A refusal may follow a partial disk change: always invalidate. */ }
     this.host.changed(machine.id);
     this.pending = false;
@@ -191,7 +220,7 @@ export class AccountsSheet {
     }
     this.clearEditor();
     this.editor().querySelectorAll<HTMLButtonElement>("button").forEach(button => button.disabled = false);
-    this.notice(success ? "Account updated." : "Could not verify the complete change. The list has been refreshed; check the account on the machine before trying again.");
+    this.notice(success ? (changes.length > 1 ? `Removed ${changes.length} accounts.` : "Account updated.") : "Could not verify the complete change. The list has been refreshed; check the account on the machine before trying again.");
     // Re-render all rows to restore their capability-derived disabled states.
     for (const [id, catalog] of this.catalogs) {
       const current = this.host.machines().find(item => item.id === id);
@@ -201,6 +230,8 @@ export class AccountsSheet {
   }
   private focusRow(): void {
     const target = [...this.dialog!.querySelectorAll<HTMLButtonElement>("[data-operation]")].find(button => !button.disabled && button.dataset.machine === this.focusTarget?.machine && button.dataset.account === this.focusTarget?.account && button.dataset.operation === this.focusTarget?.operation);
+    const menu = target?.closest("details");
+    if (menu) menu.open = true;
     (target ?? this.$<HTMLButtonElement>("[data-accounts-close]")).focus();
   }
 }

@@ -554,3 +554,14 @@ html[data-scheme="dark"] {
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root .conversation-identity .conversation-host > .conversation-model { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; margin: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 }
+/* Conversation header on one row (operator, 2026-10-29): identity left, actions right.
+   Line 2 (model, machine, session) is one typeface. */
+:root .conversation-identity .conversation-host { font-family: var(--font-ui); }
+@media not ((max-width: 53rem) or ((max-height: 30rem) and (pointer: coarse))) {
+  :root .conversation-heading { flex-direction: row-reverse; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); }
+  /* Too narrow for both (the rail open on a small desktop): the actions keep their row above. */
+  :root .conversation-heading > .conversation-identity { flex: 1 1 20rem; min-width: 0; }
+  :root .conversation-heading > .conversation-topline { flex: none; }
+}
+/* Machine chip runtime: a version number is mono; "Version unknown" is evidence in UI type. */
+:root .project-machine-chip .machine-version-installed.unknown { font-family: var(--font-ui); font-variant-numeric: normal; }

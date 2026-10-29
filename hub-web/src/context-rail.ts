@@ -65,10 +65,12 @@ export const BLOCKER_HINT = "Reply to unblock";
 /**
  * Open asks and blockers the rail lists (cas-97d58 F09): every one that is
  * waiting, from the same set the bookmark reads, so the two never disagree
- * about what is open. The one the bookmark points at is marked, not dropped.
+ * about what is open. The question the bookmark pins is left out (operator,
+ * 2026-10-29): it shows in its bubble and the banner only, never a third time.
  */
 export function railWaiting(history: ConversationHistory | undefined): OperatorReply[] {
-  return history?.waiting() ?? [];
+  const pinned = history?.pinnedAsk()?.notification_id;
+  return (history?.waiting() ?? []).filter((reply) => reply.notification_id !== pinned);
 }
 
 /** The open question the bookmark above the composer points at. */

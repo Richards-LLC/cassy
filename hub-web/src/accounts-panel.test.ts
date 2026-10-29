@@ -89,18 +89,27 @@ it("keeps other machines readable, retries failures, and refreshes after an unce
   expect(document.body.textContent).toContain("Could not verify the complete change");
 });
 
-it("groups healthy accounts by provider, sorts stale duplicates into cleanup, and says where each lives", async () => {
+it("groups by provider in headroom order, says where each lives, and cleans up stale duplicates in one confirmation", async () => {
   const healthy: AccountRow = { ...row, key: "claude:work", name: "work", display_name: "work@example.test", location: "~/.claude-work", login_state: "logged_in", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }] };
   const duplicate: AccountRow = { ...row, key: "claude:main", name: "main", location: "~/.claude", duplicate_of: "claude:work", is_default: false };
+  const tight: AccountRow = { ...healthy, key: "claude:tight", name: "tight", display_name: "tight@example.test", location: "~/.claude-tight", windows: [{ name: "weekly", used_percent: 95, resets_at: "2099-11-02T18:20:00Z" }] };
   const { host, sheet } = setup(true, healthy);
-  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, healthy] });
+  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy] });
   sheet.open(); await settle();
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
-  expect(groups.map(group => group.querySelector("h4")!.textContent)).toEqual(["Claude · 1", "Needs cleanup · 1"]);
+  expect(groups.map(group => group.querySelector("h4")!.textContent)).toEqual(["Claude · 2", "Needs cleanup · 1"]);
+  expect([...groups[0]!.querySelectorAll(".accounts-identity strong")].map(name => name.textContent)).toEqual(["work@example.test", "tight@example.test"]);
+  expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
   expect(groups[0]!.textContent).toContain("Lives in ~/.claude-work on Soundwave · used by Claude Code");
   expect(groups[0]!.textContent).toContain("62% left");
   expect(groups[1]!.textContent).toContain("Duplicate of claude:work with a stale login.");
-  expect(groups[1]!.querySelector<HTMLButtonElement>('[data-operation="remove"]')!.disabled).toBe(false);
+  click("[data-cleanup]");
+  const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+  input.value = "clean up"; input.dispatchEvent(new Event("input"));
+  document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));
+  await settle();
+  expect(host.change).toHaveBeenCalledExactlyOnceWith("linux", { operation: "remove", account: "claude:main", confirmation: "claude:main" });
+  expect(document.body.textContent).toContain("Account updated.");
 });
 
 it("formats reset and observation times locally in 12-hour form and clears expired capacity", () => {

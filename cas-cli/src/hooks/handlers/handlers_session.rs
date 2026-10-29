@@ -48,6 +48,7 @@ pub fn handle_session_start(
             "session_start_fired",
             &[
                 ("session_id", input.session_id.as_str()),
+                ("source", input.source.as_deref().unwrap_or("unknown")),
                 ("tool_prefix", crate::harness_policy::own_tool_prefix()),
                 (
                     "custom_config_dir",

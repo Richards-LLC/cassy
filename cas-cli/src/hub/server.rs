@@ -2999,7 +2999,10 @@ async fn handle_client_message(
         }
         anyhow::bail!("authorization refused")
     }
-    if let ClientMessage::SendMessage { attribution, .. } = &mut message {
+    if let ClientMessage::SendMessage { attribution, .. }
+        | ClientMessage::SupervisorCommand { attribution, .. }
+        | ClientMessage::SupervisorCommandStatus { attribution, .. }
+        | ClientMessage::SupervisorCommandStep { attribution, .. } = &mut message {
         // cas-e8df: identity comes from the authenticated device session, never
         // from what the client put in the frame. Whatever labels arrived are
         // discarded here, and `operator_verified` is only ever set on this path.
@@ -3029,6 +3032,12 @@ async fn handle_client_message(
             device = %device_id,
             "forwarding Commander conversation history request"
         );
+    }
+    if let ClientMessage::SupervisorCommand { command, confirmed, client_ref, .. } = &message {
+        let action = format!("supervisor_command_{command:?}").to_ascii_lowercase();
+        store.audit_operation(context, "requested", &action, scope, session,
+            Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string()), now)?;
+        anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
     }
     if let Err(error) = connector.send(session, message).await {
         // cas-a0e2: the hub accepted the device and the message, but the
@@ -3087,7 +3096,8 @@ pub(crate) fn verified_attribution(context: &AuthContext) -> MessageAttribution 
 pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
     matches!(
         message,
-        ClientMessage::RequestPaneKeyframe { .. }
+        ClientMessage::SupervisorCommandStatus { .. }
+            | ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
             | ClientMessage::WorkEventsRequest { .. }

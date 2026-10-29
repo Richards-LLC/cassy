@@ -4338,6 +4338,8 @@ mod tests {
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .current_dir(repo)
                 .output()
                 .unwrap();
@@ -4354,6 +4356,8 @@ mod tests {
             .args(["push", "-q", "-u", "origin", "factory/w"])
             .env("CAS_AGENT_NAME", "w")
             .env("CAS_ROOT", cas_root.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CAS_SESSION_ID")
             .env_remove("CAS_FACTORY_SESSION")
             .current_dir(repo)
@@ -4751,7 +4755,13 @@ mod tests {
         let repo = tmp.path();
         let hook_cas_root = tempfile::tempdir().unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
-            std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
+            std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .current_dir(dir)
+                .output()
+                .unwrap()
         };
         let gate = repo.join("scripts/fast-rows-pre-push.sh");
         std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
@@ -4996,7 +5006,13 @@ mod tests {
         let repo = repo_tmp.path();
         let remote = remote_tmp.path().join("origin.git");
         let git = |dir: &std::path::Path, args: &[&str]| {
-            std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
+            std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .current_dir(dir)
+                .output()
+                .unwrap()
         };
         let parked = String::from_utf8_lossy(
             &git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout,
@@ -5011,6 +5027,8 @@ mod tests {
             .args(["push", "--force", "origin", "factory/w"])
             .env("CAS_AGENT_NAME", "w")
             .env("CAS_ROOT", cas_root.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CAS_SESSION_ID")
             .env_remove("CAS_FACTORY_SESSION")
             .current_dir(repo)
@@ -5034,6 +5052,12 @@ mod tests {
         let remote = remote_tmp.path().join("origin.git");
         let merge = std::process::Command::new("git")
             .args(["merge", "--no-ff", "-q", "main", "-m", "merge target into delivery"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", cas_root.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(repo)
             .output()
             .unwrap();
@@ -5042,6 +5066,8 @@ mod tests {
             .args(["push", "origin", "factory/w"])
             .env("CAS_AGENT_NAME", "w")
             .env("CAS_ROOT", cas_root.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CAS_SESSION_ID")
             .env_remove("CAS_FACTORY_SESSION")
             .current_dir(repo)

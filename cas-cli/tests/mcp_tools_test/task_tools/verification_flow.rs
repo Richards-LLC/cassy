@@ -12333,6 +12333,7 @@ async fn malformed_ledger_refuses_close_before_verification_dispatch() {
     let store = open_task_store(&cas_dir).unwrap();
     let mut task = store.get(&id).unwrap();
     task.execution_note = Some("no-code".into());
+    task.external_ref = Some("artifact:cas-ledger/report".into());
     store.update(&task).unwrap();
     let base = cas::config::project_factory_artifacts_root(&cas_dir, &artifacts).join(&id);
     std::fs::create_dir_all(&base).unwrap();

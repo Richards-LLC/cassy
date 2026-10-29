@@ -145,7 +145,13 @@ pub(crate) fn build_status_json(
     // Staffing and task rows must describe the same decoded snapshot. A
     // second status-filtered read can omit a supported legacy status spelling
     // or observe a reassignment after the rows above were loaded.
-    let held: Vec<_> = data.in_progress_tasks.iter().chain(&data.ready_tasks).collect();
+    let held: Vec<_> = data.in_progress_tasks.iter()
+        .chain(&data.ready_tasks)
+        .chain(&data.epic_tasks)
+        .filter(|task| matches!(task.status,
+            cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Open
+            | cas_types::TaskStatus::Blocked | cas_types::TaskStatus::AwaitingMerge))
+        .collect();
     let agents = session_agents(session, cas_root, task_store.as_ref(), &held)?;
 
     let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, Some(task_store.as_ref()));
@@ -1094,6 +1100,11 @@ mod focused_epic_tests {
 
         // The status catalog contains all project epics, including foreign and
         // terminal ones. Preserve ownership so Commander can scope honestly.
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-registration".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some(name.into());
+        crate::store::open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
         let store = crate::store::open_task_store(&cas_root).unwrap();
         for (id, state, owner, verifier) in [
             (
@@ -1125,6 +1136,8 @@ mod focused_epic_tests {
         let status_json =
             || serde_json::to_value(build_status_json(&session, &cas_root, 20).unwrap()).unwrap();
         let status = status_json();
+        assert_eq!(status["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["name"] == "supervisor").unwrap()["current_task"], "cas-owned");
         let epics = status["epics"].as_array().unwrap();
         assert_eq!(epics.len(), 3);
         for (id, state, owner, verifier) in [
@@ -1157,5 +1170,10 @@ mod focused_epic_tests {
             &first,
             &status_task_store(&cas_root).unwrap()
         ));
+        let mut finished = store.get("cas-owned").unwrap();
+        finished.status = cas_types::TaskStatus::Closed;
+        store.update(&finished).unwrap();
+        assert!(status_json()["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["name"] == "supervisor").unwrap()["current_task"].is_null());
     }
 }

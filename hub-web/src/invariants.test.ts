@@ -209,6 +209,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Enter was never wired: it inserted a newline and sent nothing, in observe
     // mode and in control mode alike (measured against the live hub, cas-0d61).
     expect(source).toContain("composer.onkeydown = (event) => {");
+    // pin: composer Enter must yield to the command palette before semantic message submission.
     expect(source).toContain("if (event.defaultPrevented || !sendsOnEnter(event)) return;");
     expect(source).toContain("void submitSupervisorMessage();");
     expect(source).toContain('document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };');

@@ -20,6 +20,7 @@ import {
   dayLabel,
   stampLabel,
   messageBlocks,
+  tableCsv,
   threadModel,
   type ThreadCoalesce,
   type ThreadGroup,
@@ -1865,21 +1866,25 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
     if (block.type === "text") { nodes.push(...renderMarkdown(document, block.text)); continue; }
-    const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
+    const table = document.createElement("div"); table.className = "evi";
+    const actions = document.createElement("div"); actions.className = "evi-actions";
+    const status = document.createElement("span"); status.className = "evi-status"; status.setAttribute("role", "status"); status.setAttribute("aria-atomic", "true");
+    const scroll = document.createElement("div"); scroll.className = "evi-scroll"; scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Scrollable evidence table");
+    const native = document.createElement("table"); native.className = "evi-body"; native.setAttribute("aria-label", "Evidence");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
     table.dataset.columns = String(columns);
     // Intrinsic table layout shares column widths across rows, preserving each
     // word's minimum width. The outer sheet owns overflow on narrow screens.
-    const body = document.createElement("div"); body.className = "evi-body"; body.setAttribute("role", "rowgroup");
+    const body = document.createElement("tbody");
     const evidence = (text: string): boolean => /^(?:[+-]?\d[\d,.]*(?:\s*(?:%|ms|s|x))?|(?:\d+\s+)?(?:pass(?:ed)?|ok|green|✓|flakes?|flaky|warn(?:ing)?|skipped|fail(?:ed)?|error|red))$/i.test(plainTextMarkdown(text).trim());
     const evidenceColumns = Array.from({ length: columns }, (_, index) => {
       const values = block.table.rows.map(row => row[index] ?? "").filter(value => value.trim());
       return values.length > 0 && values.every(evidence);
     });
     const row = (cells: string[], head: boolean): HTMLElement => {
-      const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
+      const line = document.createElement("tr"); line.className = head ? "evi-row evi-head" : "evi-row";
       for (let index = 0; index < columns; index += 1) {
-        const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
+        const cell = document.createElement(head ? "th" : "td"); if (head) cell.setAttribute("scope", "col");
         const text = cells[index] ?? ""; appendInline(document, cell, text);
         if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
         const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
@@ -1887,9 +1892,29 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
       }
       return line;
     };
-    if (block.table.header) body.append(row(block.table.header, true));
+    if (block.table.header) {
+      const head = document.createElement("thead"); head.append(row(block.table.header, true)); native.append(head);
+    }
     for (const cells of block.table.rows) body.append(row(cells, false));
-    table.append(body);
+    native.append(body); scroll.append(native);
+    for (const format of ["Markdown", "CSV"] as const) {
+      const copy = document.createElement("button"); copy.type = "button"; copy.textContent = `Copy ${format}`;
+      copy.addEventListener("click", () => {
+        void (async () => {
+          copy.disabled = true; status.textContent = "Copying…";
+          try {
+            const clipboard = document.defaultView?.navigator.clipboard;
+            if (!clipboard?.writeText) throw new Error("Clipboard unavailable");
+            const text = format === "Markdown" ? block.source : tableCsv([...native.rows].map(row => [...row.cells].map(cell => cell.textContent ?? "")));
+            await clipboard.writeText(text);
+            status.textContent = `${format} copied`;
+          } catch { status.textContent = "Copy failed. Select the table and copy manually, or try again."; }
+          finally { copy.disabled = false; }
+        })();
+      });
+      actions.append(copy);
+    }
+    table.append(actions, scroll, status);
     nodes.push(table);
   }
   if (options.attachments === "none") return nodes;

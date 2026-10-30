@@ -535,6 +535,32 @@ fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case(
 }
 
 #[test]
+fn registry_upkeep_waivers_require_delivery_and_finding_cas_b7e7() {
+    let mut results = Vec::new();
+    for (token, gate, broken) in [("registry unchanged:", "G1", true), ("no case:", "G3", false)] {
+        for (stamp, scope) in [
+            ("2000-01-01 00:00".to_string(), "previous delivery".to_string()),
+            (chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string(), "delivery=0000000000000000000000000000000000000000 finding=unrelated".to_string()),
+        ] {
+            let mut f = Fixture::new(YAML);
+            if broken {
+                write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "invalid: [\n");
+            } else {
+                f.task.task_type = TaskType::Bug;
+            }
+            write(f.repo.path(), "src/pages/signup.ts", "fixed");
+            let head = commit(f.repo.path());
+            f.task.notes = format!("[{stamp}] ✅ DECISION {token} {scope} reviewed earlier finding");
+            f.task.updated_at = f.store.update(&f.task).unwrap();
+            let result = f.run(&head);
+            results.push((gate, scope, result.is_err()));
+        }
+    }
+    assert!(results.iter().all(|(_, _, refused)| *refused),
+        "stale or mismatched decisions must not waive a current finding: {results:?}");
+}
+
+#[test]
 fn registry_upkeep_bug_requires_changed_case_for_task() {
     let mut f = Fixture::new(YAML);
     f.task.task_type = TaskType::Bug;
@@ -741,6 +767,17 @@ fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
             .notes
             .contains("not blocking")
     );
+    // Parse debt may remain a warning for an unrelated feature, but a bug
+    // still needs an evaluated case gate even when it did not edit the registry.
+    let mut bug = Fixture::new("invalid: [");
+    bug.task.task_type = TaskType::Bug;
+    bug.task.updated_at = bug.store.update(&bug.task).unwrap();
+    write(bug.repo.path(), "src/pages/signup.ts", "fixed");
+    let bug_head = commit(bug.repo.path());
+    let result = bug.run(&bug_head);
+    assert!(result.as_ref().is_err_and(|error| {
+        error.contains("BUG FIX WITHOUT A CASE") && error.contains("cannot")
+    }), "untouched broken registry must not silently skip G3: {result:?}");
     write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "still: [");
     let head = commit(f.repo.path());
     assert!(
@@ -805,6 +842,8 @@ fn registry_upkeep_malformed_delivery_g1_escape_preserves_g3() {
 
     let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for an unreadable delivery");
     assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    assert!(error.contains(&format!("note_type=decision notes=\"no case: delivery={head} finding=G3-")),
+        "G3 must print its current delivery-and-finding waiver command: {error}");
     f.decision("no case: registry migration and copy correction reviewed");
     f.run(&head).expect("explicit G3 waiver remains separate from G1");
 }

@@ -11,7 +11,8 @@ async function choose(page: Page) {
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   // Selecting a row can finish before the conversation has attached. Do not
   // take its hub offline while the thread is still opening (cas-05f7).
-  await expect(page.getByRole("log")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Your message" })).toBeEditable();
+  await expect(page.getByRole("tabpanel", { name: "Conversation", exact: true }).getByText("Opening the conversation…", { exact: true })).toHaveCount(0);
 }
 async function send(page: Page, text: string) {
   const composer = page.getByRole("textbox", { name: "Your message" });

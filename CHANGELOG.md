@@ -20,6 +20,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and parser. Counts describe each file's latest edit event; missing counts stay
   unknown. The changed-files card can consume these facts in a follow-up.
 
+### Fixed — Complete command substitution boundaries
+
+- **Case patterns and comments cannot hide policy commands** — Substitution
+  boundaries use the shell tokenizer across heredoc, quoted-word and file-effect
+  checks. Parentheses in comments or case patterns no longer truncate a check;
+  single-quoted text and quoted heredoc bodies remain data.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.

@@ -1910,6 +1910,9 @@ dialog form > *,
 }
 @media (forced-colors: active) {
   .team-trail [data-reported="true"]::before { forced-color-adjust: none; background: CanvasText; border-color: CanvasText; }
+  /* A transparent border is painted in a system color here, so the unselected tab would out-weigh the selected one. */
+  .conversation-tabs [role="tab"] { border-bottom-color: Canvas; }
+  .conversation-tabs [aria-selected="true"] { color: Highlight; border-bottom-color: Highlight; }
 }
 /* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
@@ -2459,6 +2462,8 @@ button.chip:disabled { cursor: default; }
   .conversation-row[aria-current="true"],
   .conversation-row[aria-current="true"]:is(:hover, :active, :focus-visible):not(:disabled) { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1); }
   .conversation-row[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
+  /* The row opts out of color forcing, so the grouped name's ink would stay dark on Highlight. */
+  .conversation-row[aria-current="true"].grouped .conversation-supervisor { color: HighlightText; }
   .conversation-row[aria-current="true"] .conversation-avatar { outline: 1px solid HighlightText; outline-offset: -1px; }
   .conversation-row[aria-current="true"] .conversation-sep { background: HighlightText; }
   .conversation-row[aria-current="true"]::before { background: HighlightText; }

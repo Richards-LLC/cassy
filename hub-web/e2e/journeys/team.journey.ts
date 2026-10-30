@@ -62,6 +62,13 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
         await expect(page.locator("#team-panel")).toBeVisible();
         expect(await page.locator(".team-state").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        const forced = await page.evaluate(() => {
+          const color = (selector: string, property: "color" | "borderBottomColor" = "color") => getComputedStyle(document.querySelector(selector)!)[property];
+          return { selected: color("#team-tab", "borderBottomColor"), unselected: color("#conversation-tab", "borderBottomColor"), page: getComputedStyle(document.body).backgroundColor, row: color('.conversation-row[aria-current="true"]'), name: color('.conversation-row[aria-current="true"] .conversation-supervisor') };
+        });
+        expect(forced.unselected).toBe(forced.page);
+        expect(forced.selected).not.toBe(forced.unselected);
+        expect(forced.name).toBe(forced.row);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await page.getByRole("tab", { name: "Conversation", exact: true }).click();
         await expect(page.locator("#team-panel")).toBeHidden();

@@ -66,13 +66,24 @@ pub enum PublishDisposition {
     UploadFailed { reason: String },
 }
 
+/// Storage state without a QA warning wrapper. Renderers can match this
+/// exhaustively without assuming a recursive warning has been unwrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageDisposition<'a> {
+    Committed,
+    CommittedMetadataUnavailable { reason: &'a str },
+    StorageNotLive { reason: &'a str },
+    NotLoggedIn,
+    UploadFailed { reason: &'a str },
+}
+
 impl PublishDisposition {
     /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
         matches!(
             self.storage_disposition(),
-            PublishDisposition::Committed { .. }
-                | PublishDisposition::CommittedMetadataUnavailable { .. }
+            StorageDisposition::Committed
+                | StorageDisposition::CommittedMetadataUnavailable { .. }
         )
     }
 
@@ -92,10 +103,14 @@ impl PublishDisposition {
         }
     }
 
-    pub(crate) fn storage_disposition(&self) -> &Self {
+    pub(crate) fn storage_disposition(&self) -> StorageDisposition<'_> {
         match self {
             Self::QaBundleNotPortable { storage, .. } => storage.storage_disposition(),
-            other => other,
+            Self::Committed { .. } => StorageDisposition::Committed,
+            Self::CommittedMetadataUnavailable { reason } => StorageDisposition::CommittedMetadataUnavailable { reason },
+            Self::StorageNotLive { reason } => StorageDisposition::StorageNotLive { reason },
+            Self::NotLoggedIn => StorageDisposition::NotLoggedIn,
+            Self::UploadFailed { reason } => StorageDisposition::UploadFailed { reason },
         }
     }
 
@@ -452,11 +467,13 @@ pub fn publish(
         disposition,
         source,
     };
-    if outcome.disposition.is_committed()
-        && let Some((_temp, archive)) = closure
-    {
-        if let Err(error) = qa::record(context, &outcome, &archive) {
-            qa_error = Some(error.to_string());
+    if let Some((_temp, archive)) = closure {
+        if outcome.disposition.is_committed() {
+            if let Err(error) = qa::record(context, &outcome, &archive) {
+                qa_error = Some(error.to_string());
+            }
+        } else {
+            qa_error = Some("manifest is not stored in Cloud, so its QA archive is not portable".into());
         }
     }
     outcome.disposition = outcome.disposition.with_qa_error(qa_error);
@@ -976,8 +993,8 @@ mod tests {
                 case.is_committed(),
                 matches!(
                     case.storage_disposition(),
-                    PublishDisposition::Committed { .. }
-                        | PublishDisposition::CommittedMetadataUnavailable { .. }
+                    StorageDisposition::Committed
+                        | StorageDisposition::CommittedMetadataUnavailable { .. }
                 )
             );
         }

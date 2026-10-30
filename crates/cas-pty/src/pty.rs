@@ -1682,6 +1682,13 @@ impl PtyConfig {
         if let Some(sup) = supervisor_name {
             env.push(("CAS_SUPERVISOR_NAME".to_string(), sup.to_string()));
         }
+        // cas-9153: a Codex worker names its own harness in the pane too,
+        // not only in its `cs` MCP server's `-c` env. Hooks and `cas`
+        // commands run from the pane re-register the same session; without
+        // this their row dropped `worker_cli`, and recycle read it as Claude.
+        if role == "worker" {
+            env.push(("CAS_FACTORY_WORKER_CLI".to_string(), "codex".to_string()));
+        }
         push_factory_worker_metadata_env(&mut env, role, factory_worker_cli, model, effort);
 
         // cas-0bf4: see equivalent comment in `claude()`.

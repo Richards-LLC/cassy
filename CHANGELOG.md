@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker recycle recipe
+
+- **A recycled Codex worker stays on Codex** — Was: a hook or `cas` command in
+  a Codex worker's pane re-registered its session without the harness, so its
+  row lost `worker_cli`, read as Claude, and `recycle_worker` refused the
+  recipe (`cli=claude, model=gpt-6.1-sol`). Now: the Codex pane names its own
+  harness, a re-registration keeps the original spawn's harness, model,
+  effort and account when it lacks them, and a row that already lost its
+  harness relaunches on the harness its model belongs to.
+
 ### Fixed — Merge readiness
 
 - **A worker's ready message counts, and the supervisor waits for it** — Was:

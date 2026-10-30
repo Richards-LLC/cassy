@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
+- **Late file layout keeps the newest turn in view** — Was: a file preview
+  could shrink and grow before its scroll event arrived, leaving the thread
+  above the latest reply. → Now: layout keeps following the tail, while an
+  upward reading gesture keeps the reader's place.
+
 - **Messages kept in two tabs all go out after an outage** — Was: with two
   Commander tabs open, a message kept during an outage could stay "Waiting for
   the connection" under a Live header after reconnecting, and was never sent

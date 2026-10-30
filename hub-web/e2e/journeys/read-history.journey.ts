@@ -306,6 +306,23 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await expect.poll(atTail, { message: "late layout growth keeps the thread at its latest turn" }).toBe(true);
     await expect(newest).toBeInViewport();
     await expect(jump).toBeHidden();
+    // A preview can collapse and grow again between scroll deliveries. Force
+    // that real layout ordering: the browser clamps at the smaller height,
+    // then queues a scroll which will see the larger content, without input.
+    const clamp = await late.evaluate(node => {
+      const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
+      const style = node as HTMLStyleElement;
+      const css = style.textContent;
+      const before = thread.scrollTop;
+      style.textContent = "";
+      const clamped = thread.scrollTop; // force the collapsed layout
+      style.textContent = css;
+      return { before, clamped };
+    });
+    expect(clamp.clamped, "the collapsed layout actually clamps the scroll position").toBeLessThan(clamp.before);
+    await expect.poll(atTail, { message: "a layout clamp followed by growth keeps following the latest turn" }).toBe(true);
+    await expect(newest).toBeInViewport();
+    await expect(jump).toBeHidden();
     // The rest of the journey reads the thread at its normal size.
     await late.evaluate((node) => (node as Element).remove());
   });

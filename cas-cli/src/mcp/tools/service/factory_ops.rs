@@ -7721,6 +7721,8 @@ impl CasService {
         use cas_types::{AgentRole, AgentStatus, WorktreeStatus};
         use std::path::Path;
 
+        let view = GcReportView::from_request(&req)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.replace("gc_report", "gc_cleanup")))?;
         if let Some(path) = req.reclaim_unknown_target.as_deref() {
             // Exact cache consent never invokes process reaping, task/artifact
             // retention, journey cleanup or any other GC mutation.
@@ -7737,10 +7739,11 @@ impl CasService {
             let live = live_target_cache_worktrees(agents.as_ref(), &self.inner.cas_root);
             let report = cleanup_target_cache_report(&self.inner.cas_root, &config, agents.as_ref(),
                 worktrees.as_ref(), &live, req.force == Some(true) && req.dry_run == Some(false), Some(Path::new(path)));
-            return Ok(Self::success(match report {
+            let output = match report {
                 Ok(report) => format!("Named target-cache reclaim.{}", render_target_cache_report(&report)),
                 Err(error) => format!("Named cache reclaim refused (fail-closed): {error}"),
-            }));
+            };
+            return Ok(Self::success(render_gc_report_response(&output, view)));
         }
 
         let prompt_expiry_age = req.older_than_secs;
@@ -8010,6 +8013,7 @@ impl CasService {
             orphan_process_summary.records_cleared.len(),
             orphan_process_summary.skipped,
         );
+        output.push('\n');
         output.push_str(&artifact_cleanup.render());
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
@@ -8039,16 +8043,19 @@ impl CasService {
                 text
             }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Simulator cleanup worker failed: {error}")))?;
+            output.push('\n');
             output.push_str(&text);
         }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
-                "\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
+                "\n\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
             )),
-            Err(error) => output.push_str(&format!("\nJourney recording cleanup incomplete: {error}\n")),
+            Err(error) => output.push_str(&format!("\n\nJourney recording cleanup incomplete: {error}\n")),
         }
 
+        output.push('\n');
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push('\n');
         output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
@@ -8074,6 +8081,7 @@ impl CasService {
         // orphan is indistinguishable from one Cassy never saw, and that is the
         // difference between "the port is free" and a wasted morning.
         if !orphan_processes.is_empty() {
+            output.push('\n');
             output.push_str(&orphan_processes.render());
         }
         if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
@@ -8095,7 +8103,7 @@ impl CasService {
             )),
         }
 
-        Ok(Self::success(output))
+        Ok(Self::success(render_gc_report_response(&output, view)))
     }
 }
 
@@ -8229,8 +8237,11 @@ impl GcReportView {
 /// behind explicit, zero-based `limit`/`offset` pages.
 fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
     const HEADER: &str = "Factory GC Report\n=================\n";
+    const CLEANUP_HEADER: &str = "Factory GC cleanup complete.\n";
+    let cleanup = full_report.starts_with(CLEANUP_HEADER) || full_report.starts_with("Named ");
     let detail = full_report
         .strip_prefix(HEADER)
+        .or_else(|| full_report.strip_prefix(CLEANUP_HEADER))
         .unwrap_or(full_report)
         .trim_start_matches('\n');
 
@@ -8262,17 +8273,17 @@ fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
                 "{}\n",
                 serde_json::json!({
                     "schema_version": 1,
-                    "report_text": summarize_gc_report(full_report, detail),
+                    "report_text": summarize_gc_report(full_report, detail, cleanup),
                     "full_report": full_report,
                     "machine_status": machine_status,
                 })
             )
         }
-        _ => summarize_gc_report(full_report, detail),
+        _ => summarize_gc_report(full_report, detail, cleanup),
     }
 }
 
-fn summarize_gc_report(full_report: &str, detail: &str) -> String {
+fn summarize_gc_report(full_report: &str, detail: &str, cleanup: bool) -> String {
     let mut sections = detail
         .split("\n\n")
         .map(|section| section.trim_matches('\n'))
@@ -8282,9 +8293,13 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         !section.lines().next().is_some_and(gc_report_is_machine_status_line)
             && !section.starts_with("Note:")
     }).count();
-    let mut summary = format!(
-        "[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n"
-    );
+    let mut summary = if full_report.starts_with("Named cache reclaim refused") {
+        "[WARN] GC cleanup refused: named cache preserved\nReview cleanup tiers: cas factory gc cleanup --help\n\n".to_owned()
+    } else if cleanup {
+        format!("[INFO] GC cleanup complete: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n")
+    } else {
+        format!("[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n")
+    };
     if !metrics.is_empty() {
         for line in metrics.lines() {
             if !gc_report_is_machine_status_line(line) {
@@ -8292,9 +8307,11 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
                 summary.push('\n');
             }
         }
-        summary.push_str(
-            "\nInventory (first up to 3 items per category):\n",
-        );
+        summary.push_str(if cleanup {
+            "\nInventory (up to 3 largest byte-counted items per category):\n"
+        } else {
+            "\nInventory (first up to 3 items per category):\n"
+        });
     }
 
     for section in sections {
@@ -8319,6 +8336,8 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .and_then(|values| values.rsplit_once(" closed-task candidates="))
         {
             ("Durable task artifacts".to_owned(), Some(counts))
+        } else if cleanup && heading.starts_with("Cargo target caches:") {
+            ("Cargo target caches".to_owned(), None)
         } else {
             (gc_report_category_label(heading), None)
         };
@@ -8328,18 +8347,29 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .copied()
             .filter(|line| !line.is_empty() && !gc_report_is_machine_status_line(line))
             .collect::<Vec<_>>();
-        let item_lines = detail_lines
+        let mut item_lines = detail_lines
             .iter()
             .copied()
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
+        if cleanup {
+            item_lines.sort_by_key(|line| std::cmp::Reverse(line.split_whitespace().rev()
+                .find_map(|word| word.strip_prefix("bytes=")?.parse::<u64>().ok()).unwrap_or(0)));
+        }
         let item_count = item_lines.len();
-        summary.push_str(&format!(
-            "- {label}: {item_count} items\n"
-        ));
+        if cleanup && item_count == 0 && artifact_counts.is_none()
+            && !heading.starts_with("Cargo target caches:")
+        {
+            summary.push_str(&format!("- {}\n", gc_report_short_line(heading)));
+        } else {
+            summary.push_str(&format!("- {label}: {item_count} items\n"));
+        }
 
         if let Some(counts) = artifact_counts {
             summary.push_str(&format!("  Counts: closed-task candidates={counts}\n"));
+        }
+        if cleanup && let Some(counts) = heading.strip_prefix("Cargo target caches: ") {
+            summary.push_str(&format!("  Counts: {counts}\n"));
         }
         if let Some(context) = detail_lines
             .iter()
@@ -8352,11 +8382,18 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             ));
         }
         for item in item_lines.iter().take(GC_REPORT_SAMPLE_ITEMS) {
-            summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
+            // Shorten opaque path tokens before shortening the whole sample,
+            // so a long cache root cannot hide its byte count or disposition.
+            let item = if cleanup {
+                gc_report_ascii(item).split_whitespace().map(|word| gc_report_shorten_token(word, 50)).collect::<Vec<_>>().join(" ")
+            } else { (*item).to_owned() };
+            summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(&item)));
         }
     }
+    let action = if cleanup { "cleanup" } else { "report" };
+    let pages = if cleanup { "" } else { "MCP pages: factory action=gc_report limit=100 offset=0\n" };
     summary.push_str(&format!(
-        "\nDetails: cas factory gc report --full\nJSON: cas factory gc report --json\nMCP pages: factory action=gc_report limit=100 offset=0\nReport: {} bytes; full text and status are opt-in.\n",
+        "\nDetails: cas factory gc {action} --full\nJSON: cas factory gc {action} --json\n{pages}Report: {} bytes; full text and status are opt-in.\n",
         full_report.len(),
     ));
     gc_report_fit_human(&summary)
@@ -8575,6 +8612,29 @@ mod resume_brief_sender_tests {
 #[cfg(test)]
 mod gc_report_render_tests {
     use super::*;
+
+    #[test]
+    fn cleanup_summary_bounds_inventory_and_keeps_largest_items() {
+        let artifacts = (0..1_000).map(|index| format!("  - /artifact-{index}")).collect::<Vec<_>>().join("\n");
+        let items = (0..1_000)
+            .map(|index| format!("  - /tmp/{}/cache-{index} bytes={index}", "long-path/".repeat(30)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let status = serde_json::json!({"dry_run": true, "caches": ["all original data"]});
+        let full = format!("Factory GC cleanup complete.\n\nStale agents marked: 0\n\nDurable task artifacts: root=/{} closed-task candidates=0 stray inventory=1000 mode=review-only\n{artifacts}\n\nCargo target caches: mode=dry-run\n{items}\nTARGET_CACHE_STATUS_JSON={status}\n", "é/".repeat(100));
+        let summary = render_gc_report_response(&full, GcReportView::Summary);
+        assert!(summary.starts_with("[INFO] GC cleanup complete:"), "{summary}");
+        assert!(summary.is_ascii() && summary.lines().all(|line| line.len() <= 79));
+        assert!(summary.lines().count() < 40, "inventory must stay bounded");
+        assert!(summary.contains("1000 items"));
+        assert!(summary.contains("bytes=999") && summary.contains("bytes=998") && summary.contains("bytes=997"));
+        assert!(!summary.contains("bytes=996") && !summary.contains("TARGET_CACHE_STATUS_JSON="));
+        assert!(summary.contains("cas factory gc cleanup --full") && summary.contains("cas factory gc cleanup --json"));
+        assert_eq!(render_gc_report_response(&full, GcReportView::Full), full);
+        let json: serde_json::Value = serde_json::from_str(&render_gc_report_response(&full, GcReportView::Json)).unwrap();
+        assert_eq!(json["full_report"], full);
+        assert_eq!(json["machine_status"]["TARGET_CACHE_STATUS_JSON"], status);
+    }
 
     #[test]
     fn summary_bounds_inventory_and_preserves_opt_in_machine_status() {

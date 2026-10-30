@@ -29,6 +29,20 @@
 # GH_BIN (gh), SYSTEMCTL_BIN (systemctl), XDG_CONFIG_HOME, XDG_STATE_HOME.
 set -euo pipefail
 
+# Agents never change host units or restart the hub. A supervisor pane is allowed
+# because that is where the operator runs a clipboard command, as `! <command>`.
+# The self-test override only counts under a disposable HOME.
+case "${CAS_AGENT_ROLE:-}" in
+    ""|supervisor) ;;
+    *)
+        tmp_root="${TMPDIR:-/tmp}"
+        if [[ -z "${CAS_HUB_PIN_TEST_ALLOW_AGENT:-}" || "$HOME" != "${tmp_root%/}"/* ]]; then
+            printf 'hub-pin: REFUSED: the operator runs this; CAS_AGENT_ROLE=%s may not\n' "$CAS_AGENT_ROLE" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 repo="${CAS_RELEASE_REPO:-Richards-LLC/cassy}"
 cas_bin="${CAS_BIN:-cas}"
 gh_bin="${GH_BIN:-gh}"
@@ -156,6 +170,10 @@ cmd_install() {
         shift
     done
     [[ "$(uname -s)" == Linux ]] || die "the hub pin is Linux systemd only"
+    local name
+    for name in cas-hub.service.d/$dropin_name agent.slice.d/$dropin_name agent-builds.slice.d/$dropin_name agent.slice; do
+        [[ -f "$ops_dir/$name" ]] || die "install needs $ops_dir/$name; run scripts/hub-pin.sh install from a checkout"
+    done
     [[ -f "$unit" ]] || die "no hub service at $unit; run \`cas hub service install\` first"
     installed="$(command -v "$cas_bin")" || die "cannot find $cas_bin"
     check_release_binary "$installed"
@@ -189,7 +207,6 @@ cmd_install() {
     fi
 
     # Drop-ins layer over a base unit or slice another owner may manage.
-    local name
     for name in cas-hub.service agent.slice agent-builds.slice; do
         if install_if_changed "$ops_dir/$name.d/$dropin_name" "$units/$name.d/$dropin_name"; then
             log "drop-in: $units/$name.d/$dropin_name"

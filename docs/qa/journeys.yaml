@@ -2201,7 +2201,8 @@ journeys:
     earlier reply keeps its node
   - Read the published reasoning summary in place — a neutral folded preview opens safe Markdown and raw published text without moving focus or fetching detail twice
   - Read typed work scope — read, search, command and edit rows name their v2 scope; failures remain explicit, exact output stays readable, and live metadata updates preserve focus and expansion
-  - Inspect tool-reported edits — one newest cumulative file list per turn; a file opens its recorded unified diff or exact source event on demand, with card and file expansion restored after reload, and no invented line counts or Git claim
+  - Offline source evidence waits for reconnect without spinning
+  - Inspect tool-reported edits — closing disclosures removes their stored entries; one newest cumulative file list per turn; a file opens its recorded unified diff or exact source event on demand, with card and file expansion restored after reload, and no invented line counts or Git claim
   - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
     only
   - Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the

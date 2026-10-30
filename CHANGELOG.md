@@ -33,6 +33,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Arithmetic workspace checks
 
+- **Ambiguous arithmetic keeps command checks** — Parentheses must match the
+  arithmetic boundary. Command substitutions and dynamic arithmetic operands
+  retain workspace checks and unresolved effects are refused.
+
 - **Multiplication stays arithmetic in shell arguments** — Workspace checks
   keep arithmetic operators out of filesystem resolution while still checking
   nested command substitutions and refusing unresolved effects.

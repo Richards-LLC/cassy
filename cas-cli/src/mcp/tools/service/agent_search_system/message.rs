@@ -7467,8 +7467,11 @@ mod cas_89e1_post_merge_message_type_tests {
             ("Daniel@Soundwave", None, true, "requires an active factory session"),
         ] {
             if sessionless {
-                supervisor.factory_session = None;
-                agents.register(&supervisor).expect("clear sender session");
+                let mut sessionless_supervisor = supervisor.clone();
+                sessionless_supervisor.id = "sessionless-supervisor-id".into();
+                sessionless_supervisor.factory_session = None;
+                agents.register(&sessionless_supervisor).expect("register sessionless sender");
+                service.inner.set_agent_id_for_testing(sessionless_supervisor.id);
             }
             let request = serde_json::from_value(serde_json::json!({
                 "action": "message", "target": format!("commander:{selector}"),

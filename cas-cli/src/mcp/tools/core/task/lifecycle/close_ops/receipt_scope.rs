@@ -951,6 +951,47 @@ mod tests {
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }
 
+    #[test]
+    fn park_reads_web_stability_receipt_and_rejects_a_failed_copy_cas_60a9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = crate::test_env_guard::git_fixture(repo.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        std::fs::create_dir_all(repo.path().join("hub-web/src")).unwrap();
+        std::fs::write(repo.path().join("hub-web/src/worker.test.ts"),
+            "test('changed', () => expect('old').toBe('old'));\n").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-qc", "factory/web-test"]);
+        std::fs::write(repo.path().join("hub-web/src/worker.test.ts"),
+            "test('changed', () => expect('new').toBe('new'));\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "change web test"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let mut task = blast_radius_task(&[]);
+        task.risk = vec![TaskRisk::None];
+        task.notes = "[2026-10-30 11:00] ✅ DECISION no changelog: test-only receipt gate fixture".into();
+        let changed = ["hub-web/src/worker.test.ts".to_string()];
+
+        let missing = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").unwrap();
+        assert!(missing.contains("missing five-run evidence"), "{missing}");
+        crate::factory_worker_check::record_web_stability_for_tests(
+            cas_root.path(), repo.path(), &head, &base, "vitest", "hub-web/src/worker.test.ts::changed", true,
+        );
+        let failed = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").unwrap();
+        assert!(failed.contains("missing five-run evidence"), "{failed}");
+
+        crate::factory_worker_check::record_web_stability_for_tests(
+            cas_root.path(), repo.path(), &head, &base, "vitest", "hub-web/src/worker.test.ts::changed", false,
+        );
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn nested_workspace_capped_stability_is_accepted_at_park() {

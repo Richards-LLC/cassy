@@ -44,4 +44,14 @@ The delivery trail uses semantic ordered lists, labeled receipt marks and text; 
 
 ## Critique
 
-Pending rendered evidence and scored rubric.
+Scored on 2026-10-30 from real captures with four live workers. The worker's scores were recorded before each independent read. Each round had a new independent reader, who saw no scores. The worker wrote the fixes it scored.
+
+| Dimension | Round 1, f2162488a: worker / independent | Round 2, d91ccbe13: worker / independent | Round 3, c3adc949: worker / independent | Round 3 evidence |
+| --- | --- | --- | --- | --- |
+| Distinctiveness | 4 / 3 | 4 / 3 | 4 / 4 | The computed serif sentence and five-receipt track lead and repeat, though no filled segment has been seen on a real lane. |
+| Fit to argument | 3 / 2 | 4 / 4 | 4 / 3 | Each lane joins who, what and stage, but state is only a word and the tracks look alike, so you read to find the odd worker out. |
+| Hierarchy | 3 / 2 | 4 / 3 | 4 / 3 | The finding leads with little more ink than nearby titles, and the rail's In progress cards share the lanes' style at 1280. |
+| Craft | 4 / 3 | 4 / 3 | 4 / 3 | Strict visual QA passes on 8 of 8 with no page overflow, with seams: rail controls stagger. |
+| Accessibility | 4 / 2 | 3 / 3 | 3 / 4 | Text and the release track pass, but the lane connector is 2.24:1 light and 2.64:1 dark. |
+
+Two independent reads of round three's surface disagree: 4/3/3 on real-hub captures, and 4/4/4 on fixture screenshots with mixed worker states (batch QA round 12). The factory supervisor ruled the floor met on the second. The first read's concern stands as an open question: when real workers share a state the lanes look alike, so how does a worker that needs attention stand out without reading every lane?

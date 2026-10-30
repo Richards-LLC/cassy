@@ -1,4 +1,4 @@
-title: A supervisor command is refused while the harness turn is still running, including Claude's middle-dot spinner frame and a Codex reply that pauses mid-stream past the output settle with no busy text, which only Codex's own rollout turn start and end can show
-tasks: [cas-1a93, cas-3980]
-invariants: [HUB-J27-ALLOWLIST]
-journeys: [HUB-J27]
+title: A supervisor command waits briefly for an idle reply to settle, while a running turn is still refused, including Claude's middle-dot spinner and Codex's idle-looking mid-stream pauses identified by rollout turn markers
+tasks: [cas-1a93, cas-3980, cas-c04b7]
+invariants: [HUB-J27-ALLOWLIST, HUB-J13-GOAL]
+journeys: [HUB-J27, HUB-J13]

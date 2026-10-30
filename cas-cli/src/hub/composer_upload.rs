@@ -344,6 +344,12 @@ pub(super) fn open_preview(
         metadata.is_file() && metadata.len() == record.size_bytes,
         "upload unavailable"
     );
+    let key = VerifiedUpload::of(record, &metadata);
+    if key.as_ref().is_some_and(VerifiedUpload::is_cached) {
+        return Ok(file);
+    }
+    #[cfg(test)]
+    PREVIEW_HASHES.with(|count| count.set(count.get() + 1));
     let mut digest = Sha256::new();
     let mut remaining = record.size_bytes;
     let mut buffer = [0u8; 64 * 1024];
@@ -358,7 +364,79 @@ pub(super) fn open_preview(
         "upload unavailable"
     );
     file.rewind()?;
+    if let Some(key) = key {
+        key.remember();
+    }
     Ok(file)
+}
+
+#[cfg(test)]
+thread_local! {
+    static PREVIEW_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One verified digest per upload: a ticket and every content or Range request
+/// reuse it until the file's identity, size or timestamps change.
+#[derive(Clone, PartialEq, Eq)]
+struct VerifiedUpload {
+    artifact: String,
+    sha256: String,
+    file: (u64, u64, u64, i64, i64, i64, i64),
+}
+
+static VERIFIED_UPLOADS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, VerifiedUpload>>,
+> = std::sync::LazyLock::new(Default::default);
+const MAX_VERIFIED_UPLOADS: usize = 4096;
+
+impl VerifiedUpload {
+    /// No key for a file modified within the last two seconds: a later write in
+    /// the same timestamp tick could otherwise match it (git's racy-clean rule).
+    #[cfg(unix)]
+    fn of(record: &cas_store::PublishedArtifact, metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let modified = metadata.modified().ok()?;
+        if std::time::SystemTime::now()
+            .duration_since(modified)
+            .is_ok_and(|age| age < std::time::Duration::from_secs(2))
+            || modified > std::time::SystemTime::now()
+        {
+            return None;
+        }
+        Some(Self {
+            artifact: record.id.clone(),
+            sha256: record.sha256.clone(),
+            file: (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.len(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn of(_: &cas_store::PublishedArtifact, _: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+
+    fn is_cached(&self) -> bool {
+        VERIFIED_UPLOADS
+            .lock()
+            .is_ok_and(|cache| cache.get(&self.artifact) == Some(self))
+    }
+
+    fn remember(self) {
+        if let Ok(mut cache) = VERIFIED_UPLOADS.lock() {
+            if cache.len() >= MAX_VERIFIED_UPLOADS && !cache.contains_key(&self.artifact) {
+                cache.clear();
+            }
+            cache.insert(self.artifact.clone(), self);
+        }
+    }
 }
 
 /// A process-independent lock spans file persistence and artifact registration, so a lost
@@ -436,4 +514,69 @@ fn save(
         path: path.display().to_string(),
         mime: mime.into(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cas-a4c4: a ticket and every content request reuse one verified digest;
+    /// a changed file is hashed again and refused.
+    #[test]
+    fn open_preview_hashes_each_upload_once_per_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project/.cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let artifacts = temp.path().join("artifacts");
+        std::fs::write(
+            root.join("config.toml"),
+            format!(
+                "[factory]\nartifacts_root = {:?}\n",
+                artifacts.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let project = root.parent().unwrap().to_str().unwrap();
+        let saved = save(
+            project,
+            "factory-a",
+            "device",
+            "upload",
+            "notes.txt",
+            b"hello",
+            "text/plain",
+        )
+        .unwrap()
+        .unwrap();
+        let record = cas_store::SqliteArtifactStore::open(&root)
+            .unwrap()
+            .get(&saved.artifact_id)
+            .unwrap()
+            .unwrap();
+        let age = |path: &str, seconds: u64| {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(seconds),
+                )
+                .unwrap();
+        };
+        age(&saved.path, 60);
+        let hashes = || PREVIEW_HASHES.with(std::cell::Cell::get);
+        let before = hashes();
+        for _ in 0..3 {
+            open_preview(&root, "factory-a", &record).unwrap();
+        }
+        assert_eq!(hashes() - before, 1, "an unchanged upload is hashed once");
+        std::fs::write(&saved.path, b"HELLO").unwrap();
+        age(&saved.path, 30);
+        assert!(open_preview(&root, "factory-a", &record).is_err());
+        assert_eq!(
+            hashes() - before,
+            2,
+            "a changed upload is hashed again and refused"
+        );
+    }
 }

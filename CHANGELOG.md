@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander sent attachments
+
+- **Your own text file opens from its card** — Was: Open on a file you sent that was not media, such as notes.txt, failed. Now: your own text upload opens as plain text, and other uploaded files download. Neither type is ever opened as a page.
+- **Edit keeps a refused message's files as cards** — Was: Edit put each file's raw reference, including the machine's file path, into the composer. Now: the files come back as their attachment cards and only your text returns to the composer.
+- **Previews check an upload once** — Was: every preview ticket and content request re-read and re-hashed the whole upload, up to 10 MiB. Now: the hub keeps each upload's verified digest and re-checks only when the file changes.
+
 ### Fixed — Generated artifact regeneration
 
 - **Current dependencies survive regeneration** — Was: every changed hub-web

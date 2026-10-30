@@ -3045,11 +3045,11 @@ mod tests {
             |_| false,
             Some(pending.clone()),
         );
-        // Only Linux can inspect the child tree. macOS must keep the pending
-        // request visible without claiming that no child is doing the work.
-        #[cfg(target_os = "linux")]
+        // Linux and macOS can prove that no child is doing the work. Other
+        // platforms keep the pending request visible without that claim.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_eq!(state, WorkerLivenessState::ApprovalHang);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(state, WorkerLivenessState::Unverified);
         assert_eq!(evidence.pending_permission, Some(pending));
         assert!(!evidence.in_flight_tool_call);
@@ -3058,9 +3058,9 @@ mod tests {
         assert!(human.contains("python3 -<<'PY' rewrite.html PY"));
         let json: serde_json::Value =
             serde_json::from_str(&format_state_json(&state, &evidence)).expect("valid JSON");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_eq!(json["approval_status"], "awaiting leader approval");
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(json["approval_status"], "leader approval pending");
         assert_eq!(json["pending_permission"]["tool_name"], "Bash");
         assert!(

@@ -166,7 +166,8 @@ pub use external_verification_gate::{
     assessment_for_outcome, authorize_request, record_assessment,
 };
 pub use qa_batch_store::{
-    QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, defer_qa_batch_evidence, has_qa_batch_deferral,
+    QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, defer_qa_batch_evidence, get_qa_batch_receipt,
+    has_qa_batch_deferral, import_qa_batch_receipt,
     list_qa_batch_receipts, pending_qa_batch_deferrals, qa_batch_receipts_for_task,
     qa_task_implementation_actors,
     record_qa_batch_receipt,

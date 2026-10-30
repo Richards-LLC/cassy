@@ -30,6 +30,9 @@ impl CasService {
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+        // cas-6048: the peer machine's close gate learns it through task sync.
+        crate::qa_pass::sync::record_batch(&self.inner.cas_root, &receipt)
+            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;
         let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={} author={} ({})",
             receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
             receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));

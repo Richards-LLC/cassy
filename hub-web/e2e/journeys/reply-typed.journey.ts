@@ -639,7 +639,23 @@ test("HUB-J5 a revoked send keeps its text and draft and points to re-pairing (c
     await expect(composer).toHaveValue("Keep my newer draft too.");
     await bubble.getByRole("button", { name: "Edit message", exact: true }).click();
     await expect(composer).toHaveValue("Keep my newer draft too.");
-    await expect(page.locator("#message-status")).toContainText("Your draft already has text or files.");
+    await expect(page.locator("#message-status")).toHaveText("Your draft already has text. Clear it before editing the refused message.");
+
+    // A file-only draft has its own recovery, without overwriting either draft.
+    await composer.fill("");
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Attach files", exact: true }).click();
+    await (await chooser).setFiles({ name: "newer-draft.txt", mimeType: "text/plain", buffer: Buffer.from("Keep my newer file.") });
+    const remove = page.getByRole("button", { name: "Remove newer-draft.txt", exact: true });
+    await expect(remove).toBeVisible();
+    await bubble.getByRole("button", { name: "Edit message", exact: true }).click();
+    await expect(page.locator("#message-status")).toHaveText("Your draft already has files. Remove them before editing the refused message.");
+    await expect(composer).toHaveValue("");
+    await expect(remove).toBeVisible();
+    await expect(bubble).toContainText("Keep the refused message.");
+    await remove.click();
+    await expect(remove).toHaveCount(0);
+    await composer.fill("Keep my newer draft too.");
   });
   await journey.stage("The header offers usable Re-pair while Edit still recovers the refused text", async () => {
     hub.refuseProofs("atlas", 1_000, "revoked", false);

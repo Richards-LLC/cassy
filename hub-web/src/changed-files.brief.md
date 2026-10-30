@@ -22,7 +22,7 @@ No invented line counts or Git verdict: v2 reports successful tool calls and exp
 
 ## Component and state boundary
 
-The thread model selects the newest snapshot per session/agent/turn and places it once in the latest work block for that turn. Work rows render the card with the existing unified diff viewer. WorkPicture owns device-local disclosure state and lazy source detail requests. Unknown, loading, missing and failed evidence remain explicit.
+The thread model selects the newest snapshot per session/agent/turn and places it once in the latest work block for that turn. Work rows render the card with the existing unified diff viewer. WorkPicture owns device-local disclosure state and lazy source detail requests. Unknown, loading, offline, missing and failed evidence remain explicit. An unsent or interrupted request waits for the next connection; reconnect makes it eligible again. Closing a disclosure removes its saved entry.
 
 The row keeps its flexible path and trailing operation in separate spans. A follow-up may add an optional counts span beside the operation when `line_counts: {added, removed}` lands; those counts describe the latest successful edit, never a cumulative or Git total. This card does not render them.
 

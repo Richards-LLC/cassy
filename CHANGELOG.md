@@ -15,6 +15,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   non-audit field still agrees, preserving append-only notes and refusing
   concurrent reopens, ownership changes and proof corrections.
 
+### Fixed — Work evidence offline recovery
+
+- **Source edits wait for reconnection** — Expanded source evidence names an offline machine and loads when it reconnects, without requesting again on every redraw. Closing an edit disclosure removes its saved entry.
+
 ### Fixed — Parked delivery attribution
 
 - **Upkeep excludes later work on a reused lane** — When an integration merge

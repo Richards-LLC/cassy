@@ -77,6 +77,7 @@
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - semantic allowlist, native mappings and outcome evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
+- `cas-cli/src/worker_task_queue.rs` - ordered worker backlog policy, start authorization, delivery handoff and durable daemon reconciliation.
 
 ## MCP and delivery gates
 
@@ -89,7 +90,6 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep modules.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited replacement delivery branches.
-- `cas-cli/src/mcp/tools/core/task/fast_rows_exception.rs`, `scripts/fast-rows-exception.py` - supervisor-issued draft exception receipts, validated by push and park against the original failed result.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
 
 ## QA, storage and Commander
@@ -98,8 +98,10 @@
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs` - independent reviews, cross-host sync and batch receipts.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
+- `cas-cli/src/rapid_response.rs`, `cas-cli/src/cli/qa_rapid_response.rs` - operator-only, time-boxed per-epic rapid-response windows, scaled-down gates and the back-fill ledger.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - local action counts and per-journey traffic shares.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence and successor claims.
+- `crates/cas-store/src/worker_task_queue_store.rs` - persistent per-session worker queues and spawn payload binding.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and indexed QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and temporal memory/search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - startup, selected conversation state and reply grants.

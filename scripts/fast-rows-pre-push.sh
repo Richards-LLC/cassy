@@ -3,8 +3,8 @@
 #
 # Cassy installs a pre-push hook in worker worktrees that delegates here. A
 # push of refs/heads/factory/* must carry a `release-gate.sh --fast-rows` PASS
-# for the pushed tip, the same receipt the park requires, so a second-scale
-# mistake never costs a CI round. An existing same-tip receipt makes a repeat
+# for the pushed tip as early local feedback; CI owns the authoritative
+# proof and park ignores this receipt. An existing same-tip receipt makes a repeat
 # push free. Other refs (epic branches, main) pass through.
 #
 # Override, logged to <git-common-dir>/cas/fast-rows/overrides.log:
@@ -28,13 +28,6 @@ status=0
 while read -r _local_ref local_sha remote_ref remote_sha; do
     [[ "$remote_ref" == refs/heads/factory/* && "$local_sha" != "$zero" ]] || continue
     if head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then
-        continue
-    fi
-    # Authenticated decision notes issue these receipts. A legacy environment
-    # skip alone never supplies park proof; keep the underlying FAIL intact.
-    if approval="$(python3 scripts/fast-rows-exception.py "$receipts" "$local_sha" 2>/dev/null)"; then
-        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$approval" >>"$receipts/overrides.log" || exit 1
-        printf 'pre-push: %s\n' "$approval" >&2
         continue
     fi
     if [[ -n "${CAS_SKIP_FAST_ROWS:-}" ]]; then

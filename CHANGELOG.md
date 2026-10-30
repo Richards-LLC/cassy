@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Parked delivery attribution
+
+- **Upkeep excludes later work on a reused lane** — When an integration merge
+  brings in a tip beyond the parked delivery, close checks use the task's own
+  changes and record an integration-parent mismatch diagnostic.
+
 ### Fixed — Image viewer recovery
 
 - **Repeated image failures leave one clear note** — Unavailable previews and

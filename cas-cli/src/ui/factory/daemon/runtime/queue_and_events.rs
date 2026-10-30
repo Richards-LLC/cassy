@@ -10972,6 +10972,7 @@ impl FactoryDaemon {
                             request_id: request.id,
                             name,
                             spec: spec.clone(),
+                            stopped: false,
                         });
                     }
                 }
@@ -10986,7 +10987,47 @@ impl FactoryDaemon {
     /// Git worktree creation (the slow part) runs on a background thread via
     /// `spawn_blocking`. Only one background spawn runs at a time. Each tick we
     /// either: (a) check if the in-flight spawn finished, or (b) start a new one.
+    pub(super) fn poll_worker_cleanup_jobs_at(&mut self, now: Instant) {
+        self.app.poll_worker_worktree_cleanups();
+        let root = self.app.cas_dir().to_path_buf();
+        let supervisor = self.app.supervisor_name().to_string();
+        let session = self.session_name.clone();
+        let relays = &mut self.relay_jobs;
+        let jobs = &mut self.queue_jobs;
+        self.app.warn_worker_cleanups_at(now, |worker, occurrence, elapsed| {
+            let key = format!("worker-cleanup-warning:{session}:{occurrence}");
+            let root = root.clone();
+            let supervisor = supervisor.clone();
+            let session = session.clone();
+            let worker = worker.to_string();
+            let job_key = key.clone();
+            relays.submit_write(jobs, &job_key, None, move || {
+                let body = format!(
+                    "Cleanup for worker '{worker}' exceeded {}s and was still running when this notice was queued. \
+                     Its name stays reserved until completion is applied. Inspect its target or worktree cleanup \
+                     before reusing the worker; the daemon continues processing messages.", elapsed.as_secs(),
+                );
+                tracing::warn!(worker = %worker, elapsed_secs = elapsed.as_secs(), "worker cleanup still running");
+                let result = (|| -> anyhow::Result<()> {
+                    let queue = open_prompt_queue_store(&root)?;
+                    queue.enqueue_idempotent(
+                        "director", &supervisor,
+                        &crate::prompt_revalidation::attach_blocker_envelope(&body, &worker, None),
+                        Some(&session), Some(&format!("Worker cleanup still running: {worker}")),
+                        Some(cas_store::NotificationPriority::High), &key,
+                        Some(&cas_store::QueueOrigin::Daemon),
+                    )?;
+                    super::delivery::wake_daemon_after_enqueue(&root);
+                    Ok(())
+                })();
+                if let Err(error) = result { tracing::error!(%error, %worker, "worker cleanup warning could not be queued"); }
+                super::relay_jobs::RelayOutput::ProbeWritten
+            })
+        });
+    }
+
     pub(super) async fn process_pending_spawns(&mut self) {
+        self.poll_worker_cleanup_jobs_at(Instant::now());
         // Step 1: Check if in-flight background spawn completed
         let spawn_finished = self
             .spawn_task
@@ -11877,6 +11918,7 @@ impl FactoryDaemon {
                 request_id,
                 name,
                 spec,
+                stopped,
             } => {
                 // cas-c1a2 (GH #1178): the replacement reuses this pane name,
                 // and pane buffers are keyed by name and append-only. Without
@@ -11918,7 +11960,15 @@ impl FactoryDaemon {
                         ))?;
                     self.pane_buffers.remove(&name);
                     self.forget_probe_pane(&name);
-                    self.app.shutdown_worker_for_recycle(&name).await?;
+                    if !stopped {
+                        self.app.shutdown_worker_for_recycle(&name).await?;
+                        if self.app.crash_cleanup_pending(&name) {
+                            self.pending_spawns.push_back(PendingSpawn::Recycle {
+                                request_id, name: name.clone(), spec: Some(spec), stopped: true,
+                            });
+                            return Ok(None);
+                        }
+                    }
                     // cas-981e: the relaunch queues the worker's intro and
                     // tracks its process group; give it the same bounded
                     // budget as the shutdown, not the pass's leftovers.
@@ -11928,11 +11978,12 @@ impl FactoryDaemon {
                     let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
                         .respawn_worker_with_spec(&name, teams_config, Some(spec))
-                        .map(|()| launch_floor)
+                        .map(|()| Some(launch_floor))
                 }
                 .await;
                 match result {
-                    Ok(launch_floor) => {
+                    Ok(None) => {}
+                    Ok(Some(launch_floor)) => {
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a recycled worker must prove its hooks run too.
                         self.verify_respawned_worker(&name, Some(request_id), launch_floor);
@@ -13051,6 +13102,37 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cleanup_warns_supervisor_once_after_bound_cas_af63() {
+        use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome, WORKER_CLEANUP_WARN_AFTER};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut daemon = crate::ui::factory::daemon::runtime::provisioning_tests::daemon(&root);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = release.recv();
+            CrashCleanupOutcome { worktree: None }
+        });
+        let job = WorkerCleanupJob::new("slow-worker".into(), handle);
+        let started = job.started;
+        daemon.app.register_worker_cleanup(job);
+        daemon.poll_worker_cleanup_jobs_at(started + WORKER_CLEANUP_WARN_AFTER - std::time::Duration::from_millis(1));
+        assert!(queue.peek_all(10).unwrap().is_empty());
+        daemon.poll_worker_cleanup_jobs_at(started + WORKER_CLEANUP_WARN_AFTER);
+        daemon.poll_worker_cleanup_jobs_at(started + WORKER_CLEANUP_WARN_AFTER * 2);
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "a held cleanup needs one supervisor warning");
+        assert_eq!(rows[0].target, daemon.app.supervisor_name());
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(rows[0].prompt.contains("slow-worker"));
+        assert!(super::FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon,
+            daemon.app.supervisor_name(), &rows[0].source, &rows[0].prompt).is_some());
+        drop(held);
+        daemon.app.join_worker_worktree_cleanups();
+    }
+
     #[test]
     fn limit_notice_reports_reset_once_without_switch_even_after_daemon_restart() {
         use crate::mcp::tools::service::factory_ops::UsageLimitEvidence;

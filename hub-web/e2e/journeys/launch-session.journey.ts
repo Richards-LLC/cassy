@@ -391,7 +391,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
   const launch = atlasLaunch();
   const removed: string[] = [];
   let accounts = [
-    { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: "Soonest weekly reset", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }], usage_observed_at: "2026-10-28T18:10:00Z", capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
+    { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", location: "~/.claude-spare", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: "Soonest weekly reset", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }], usage_observed_at: "2026-10-28T18:10:00Z", capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
     { key: "codex:old", provider: "codex", name: "old", display_name: "old@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
     { key: "grok:default", provider: "grok", name: "default", display_name: "Grok", login_state: "unknown", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Unsupported", disable: "Unsupported", enable: "Unsupported", rename: "Unsupported", set_default: "Unsupported" } },
   ];
@@ -446,8 +446,9 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(dialog.locator(".accounts-editor")).toBeHidden();
-      await expect(dialog.getByText(/weekly 62% left/)).toContainText(/AM|PM/);
+      await expect(dialog.locator(".accounts-meter").filter({ hasText: "weekly" })).toContainText(/62% left · resets .*(AM|PM) [A-Z]/);
       await expect(dialog.getByText("Stale login", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Lives in ~/.claude-spare on Atlas · Linux · used by Claude Code", { exact: true })).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (width === 390) {
         await page.mouse.move(200, 600);
@@ -460,6 +461,10 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
   }
   await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {
     const row = dialog.locator("li").filter({ hasText: "hello@example.test" });
+    // Set default stays on the card; Rename, Disable and Remove live in its ⋯ menu.
+    await expect(row.getByRole("button", { name: "Set default", exact: true })).toBeVisible();
+    await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeHidden();
+    await row.locator(".accounts-more > summary").click();
     await row.getByRole("button", { name: "Remove", exact: true }).focus();
     await page.keyboard.press("Enter");
     await expect(dialog.getByRole("textbox", { name: "Type claude:spare to confirm" })).toBeFocused();
@@ -491,8 +496,9 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await hub.seedPaired();
     await page.reload();
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
-    await expect(dialog.getByText(/Read-only · Managing accounts/)).toBeVisible();
-    await expect(dialog.locator("[data-operation]")).toHaveCount(0);
+    await expect(dialog.getByText("Read-only on Atlas", { exact: false })).toBeVisible();
+    await expect(dialog.locator("[data-grant-command]")).toBeVisible();
+    for (const button of await dialog.locator("[data-operation]").all()) await expect(button).toBeDisabled();
     await expect(dialog.locator(".accounts-editor")).toBeHidden();
     expect(await dialog.locator(".accounts-editor").evaluate(node => node.getClientRects().length)).toBe(0);
   });

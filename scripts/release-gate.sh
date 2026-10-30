@@ -1638,6 +1638,24 @@ check_changelog_and_versions() {
         printf 'changelog: section [%s] has no bullet\n' "$version"
         return 1
     fi
+    if ! awk '
+        $0 == "## [Unreleased]" { in_unreleased=1; next }
+        in_unreleased && /^## \[/ { exit }
+        in_unreleased && /^### / {
+            area = ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security) — [^<>]+$/)
+            next
+        }
+        in_unreleased && /^- / {
+            if (!area || $0 !~ /^- \*\*[^*][^*]*\*\* — .+$/ \
+                || $0 == "- **Title** — What changed." \
+                || $0 ~ /^- \*\*<[^>]+>\*\* — / \
+                || $0 ~ / — <[^>]+>\.?$/) invalid=1
+        }
+        END { exit(invalid ? 1 : 0) }
+    ' CHANGELOG.md; then
+        printf 'changelog: existing [Unreleased] entries must use a titled category and area format\n'
+        return 1
+    fi
 
     for file in "${release_crates[@]}"; do
         [[ -f "$file" ]] || {
@@ -1826,6 +1844,16 @@ check_fixture_paths_src() {
 # cas-e7d4: a cut once stopped at preflight on a Slack draft committed
 # hours earlier (a 26-word Dev punch). A Slack suffix identifies the channel,
 # not the workflow: route diary threads and runtime release drafts separately.
+draft_failure_scope() {
+    local path="$1" code="$2" output="$3"
+    # Tool/IO failures cannot be approved as historical wording exceptions.
+    if [[ "$code" == 1 && "$output" == *"error: $path: "* && "$output" != *'[Errno'* ]]; then
+        printf 'SCOPE release-notes-draft %s\n' "$path"
+    else
+        printf 'UNSCOPED release-notes-draft %s\n' "$path"
+    fi
+}
+
 check_release_notes_draft() {
     local -a diary_drafts=() runtime_drafts=()
     local path
@@ -1849,26 +1877,35 @@ check_release_notes_draft() {
         printf 'release-notes-draft: no release-notes draft change\n'
         return 0
     fi
-    local output failed=0
-    if [[ "${#diary_drafts[@]}" -gt 0 ]]; then
-        if output="$(python3 scripts/release-diary-thread.py --lint "${diary_drafts[@]}" 2>&1)"; then
+    local output code failed=0 scope_count=0
+    for path in "${diary_drafts[@]}"; do
+        if output="$(python3 scripts/release-diary-thread.py --lint "$path" 2>&1)"; then
             printf '%s\n' "$output"
         else
+            code=$?
             printf '%s\n' "$output"
             printf 'FIX: harness-diary drafts need one parent and exactly three replies ordered Grok, Claude, Codex, with no ticket IDs\n'
+            draft_failure_scope "$path" "$code" "$output"
+            scope_count=$((scope_count + 1))
             failed=1
         fi
-    fi
-    if [[ "${#runtime_drafts[@]}" -gt 0 ]]; then
-        if output="$(python3 scripts/release-train-announce.py --lint "${runtime_drafts[@]}" 2>&1)"; then
+    done
+    for path in "${runtime_drafts[@]}"; do
+        if output="$(python3 scripts/release-train-announce.py --lint "$path" 2>&1)"; then
             printf '%s\n' "$output"
         else
+            code=$?
             printf '%s\n' "$output"
             printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
                 "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
+            draft_failure_scope "$path" "$code" "$output"
+            scope_count=$((scope_count + 1))
             failed=1
         fi
-    fi
+    done
+    # Written only after every draft has been checked. A killed row cannot
+    # authorize an exception for the partial scope it happened to emit.
+    printf 'scope complete count=%s\n' "$scope_count"
     return "$failed"
 }
 
@@ -2293,7 +2330,7 @@ gate_row builtin-projections \
     "$cargo_bin nextest run -p cas --test builtin_flavor_drift_test root_managed_projections...; regenerate ledger; git diff --quiet" \
     check_builtin_projections cpu mem=4 excl=host-tests writes-tree
 gate_row changelog-and-versions \
-    'CHANGELOG [Unreleased]/[version] bullet plus six release-train Cargo.toml versions' \
+    'valid existing CHANGELOG [Unreleased] entries, [version] bullet and six release-train Cargo.toml versions' \
     check_changelog_and_versions
 gate_row release-script \
     'scripts/release.sh parses and answers --help (one-command release)' \
@@ -2349,7 +2386,7 @@ fi
 fast_row_fix() {
     case "$1" in
         failure-log) printf 'give every entry in %s a **<gate-row-id>** that exists in release-gate.sh, or a manual: marker' "$failure_log_rel" ;;
-        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section (with a bullet) in CHANGELOG.md; put new bullets under [Unreleased]' ;;
+        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section in CHANGELOG.md; group each delivery as ### Added — <area> or ### Fixed — <area>, with a per-delivery - **Title** — description line under [Unreleased]' ;;
         release-script) printf 'make scripts/release.sh pass bash -n and exit 0 on --help' ;;
         release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
         procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
@@ -2400,6 +2437,11 @@ record_fast_rows_receipt() {
             printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$head" "$(IFS=,; printf '%s' "${failures[*]}")" \
                 "${fast_base:-HEAD^}" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             fast_row_fixes
+            # Complete file scope, independent of the bounded human FIX list.
+            # Only the draft row supports a file-scoped exception.
+            if [[ "$(IFS=,; printf '%s' "${failures[*]}")" == release-notes-draft ]]; then
+                grep -E '^((SCOPE|UNSCOPED) release-notes-draft |scope complete count=)' "$row_log_dir/release-notes-draft.log" || true
+            fi
         } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
     fi
     printf 'fast rows: receipt %s\n' "$dir/$head.pass"

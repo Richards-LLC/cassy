@@ -454,6 +454,9 @@ mod tests {
         let sessions = vec![HubSession {
             name: "factory-main".into(),
             harness: None,
+            model: None,
+            effort: None,
+            agents: Vec::new(),
             account_email: None,
             project: None,
             machine_online: None,

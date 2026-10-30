@@ -85,6 +85,13 @@ const PLATFORM_NAMES: Record<JourneyPlatform, { platform: string; uaPlatform: st
   mac: { platform: "MacIntel", uaPlatform: "macOS" },
 };
 
+export function startJourneyRecording(page: Page, path: string, size: { width: number; height: number }) {
+  // Full-size VP9 at Playwright's default 25 fps can queue more encoding than
+  // the host can drain before context teardown. Ten fps keeps three frames of
+  // each 300 ms action annotation; stage screenshots retain the exact pixels.
+  return page.screencast.start({ path, size, fps: 10 });
+}
+
 export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlatform }>({
   journeyPlatform: ["linux", { option: true }],
   page: async ({ page, journeyPlatform }, use) => {
@@ -131,7 +138,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
     // Full-size frames need trace `screenshots: false` (see playwright.config.ts).
     if (RECORD) {
-      await page.screencast.start({ path: join(dir, "receipt.webm"), size: viewport });
+      await startJourneyRecording(page, join(dir, "receipt.webm"), viewport);
       await page.screencast.showActions({ position: "top-right", duration: 300 });
     }
     let double: HubDouble | undefined;
@@ -181,7 +188,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     let ariaJson: unknown = null;
     try { ariaJson = await page.locator("body").ariaSnapshotJSON(); } catch (error) { ariaJson = { error: String(error) }; }
     writeFileSync(join(dir, "final.aria.json"), JSON.stringify(ariaJson, null, 2) + "\n");
-    if (RECORD) await page.screencast.stop().catch(() => undefined);
+    if (RECORD) await test.step("Finalize journey recording", () => page.screencast.stop().catch(() => undefined));
     const status = testInfo.status === "passed" && errors.length === 0 ? "PASS" : "FAIL";
     writeFileSync(join(dir, "result.json"), JSON.stringify({
       id,

@@ -30,6 +30,13 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
     if head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then
         continue
     fi
+    # Authenticated decision notes issue these receipts. A legacy environment
+    # skip alone never supplies park proof; keep the underlying FAIL intact.
+    if approval="$(python3 scripts/fast-rows-exception.py "$receipts" "$local_sha" 2>/dev/null)"; then
+        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$approval" >>"$receipts/overrides.log" || exit 1
+        printf 'pre-push: %s\n' "$approval" >&2
+        continue
+    fi
     if [[ -n "${CAS_SKIP_FAST_ROWS:-}" ]]; then
         mkdir -p "$receipts"
         printf '%s %s %s skipped fast rows: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$local_sha" \

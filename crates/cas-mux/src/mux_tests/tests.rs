@@ -3603,24 +3603,37 @@ async fn interrupt_and_inject_waits_for_real_output_quiescence_on_codex() {
     // Deliberately far shorter than the ~600ms output burst the pane emits:
     // proves the wait is driven by observed quiescence, not just this floor.
     let floor = std::time::Duration::from_millis(50);
-    let start = std::time::Instant::now();
     let res = mux
         .interrupt_and_inject("cas4208-codex-tick", MULTILINE_REDIRECT, floor)
         .await;
-    let elapsed = start.elapsed();
-
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
-    assert!(
-        elapsed >= std::time::Duration::from_millis(500),
-        "Codex (supports_textbox_submit=false) must wait for the pane's own \
-         output burst to actually go quiet (~600ms here) rather than injecting \
-         right after the {floor:?} floor — got elapsed={elapsed:?}. This is the \
-         cas-4208 regression: a flat sleep races a still-transitioning child \
-         and can leave the correction sitting unsent in the composer."
-    );
+
+    // Keep draining until the child's echoed payload is visible, then assert
+    // it followed the whole real output burst. This proves quiescence by event
+    // order instead of assuming how quickly this host schedules the test.
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            mux.poll_batch();
+            let output = mux
+                .panes()
+                .find(|pane| pane.id() == "cas4208-codex-tick")
+                .expect("pane remains attached")
+                .dump_viewport()
+                .expect("terminal snapshot");
+            if output.contains("STOP.") {
+                break output;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the pane echoes the injected payload");
+    let last_tick = output.find("tick6").expect("the output burst completed");
+    let injected = output.find("STOP.").expect("payload was echoed");
+    assert!(last_tick < injected, "payload followed output burst:\n{output}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
     // Same ticking child, tagged Claude this time — must NOT wait for the
     // burst. Regression guard for cas-4208 AC4: Claude/Grok behavior (a flat
@@ -3633,7 +3646,7 @@ async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
     mux.add_pane(pane);
 
     let floor = std::time::Duration::from_millis(50);
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let res = mux
         .interrupt_and_inject("cas4208-claude-tick", MULTILINE_REDIRECT, floor)
         .await;
@@ -3641,10 +3654,9 @@ async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
 
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
     assert!(
-        elapsed < std::time::Duration::from_millis(400),
+        elapsed == floor,
         "Claude/Grok (supports_textbox_submit=true) must keep the old flat-floor \
-         behavior unchanged — got elapsed={elapsed:?}, which suggests the new \
-         quiescence poll leaked into a harness that must not use it"
+         behavior unchanged — controlled time advanced by {elapsed:?}, expected {floor:?}"
     );
 }
 
@@ -3782,19 +3794,21 @@ async fn urgent_inject_is_a_per_pane_state_machine() {
     let pane = Pane::with_pty("urgent-pane", PaneKind::Worker, pty, 24, 80, SupervisorCli::Claude)
         .expect("pane");
     mux.add_pane(pane);
-    let floor = std::time::Duration::from_millis(300);
+    let floor = std::time::Duration::from_secs(3_600);
 
-    let started = std::time::Instant::now();
-    let InjectStart::Started(ticket) = mux
-        .begin_interrupt_and_inject("urgent-pane", "redirect", floor, true)
-        .await
-        .unwrap()
+    let InjectStart::Started(ticket) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        mux.begin_interrupt_and_inject("urgent-pane", "redirect", floor, true),
+    )
+    .await
+    .expect("begin returns without waiting for the settle floor")
+    .unwrap()
     else {
         panic!("a clean pane starts the inject");
     };
-    assert!(started.elapsed() < std::time::Duration::from_millis(100), "begin never waits for the settle");
     assert!(mux.inject_pending("urgent-pane"));
-    assert!(mux.advance_injects().await.is_empty(), "the floor has not passed");
+    let before_floor = std::time::Instant::now();
+    assert!(mux.advance_injects_at(before_floor).await.is_empty(), "the floor has not passed");
     assert_eq!(
         mux.inject("urgent-pane", "normal").await.unwrap(),
         InjectOutcome::DeferredComposerDirty,
@@ -3808,17 +3822,18 @@ async fn urgent_inject_is_a_per_pane_state_machine() {
         "one urgent inject per pane"
     );
 
-    tokio::time::sleep(floor).await;
-    // The payload is queued on this advance; its write receipt reports on
-    // this or a following one.
-    let mut done = mux.advance_injects().await;
-    for _ in 0..50 {
-        if !done.is_empty() {
-            break;
+    // Advance with an explicit future instant so the test exercises the floor
+    // without sleeping for it. The PTY receipt remains real and is polled with
+    // a generous hang guard.
+    let mut done = mux.advance_injects_at(before_floor + floor).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while done.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            done = mux.advance_injects().await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        done = mux.advance_injects().await;
-    }
+    })
+    .await
+    .expect("PTY reports the payload write receipt");
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].ticket, ticket);
     assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);

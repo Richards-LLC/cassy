@@ -329,6 +329,59 @@ fi
                 self.assertFalse(runs(job, name, 'true', fast))
         self.assertTrue(runs('scoped-validation', rust, 'true', 'false', event='pull_request', ref='refs/pull/1/merge'))
 
+    def test_release_fixtures_run_only_for_scripts_changes_in_both_lane_paths(self):
+        scripts = ['test-release.sh', 'test-release-publish.sh', 'test-install-on-publish.sh']
+        calls = self.root / 'fixture-calls'
+        for name in scripts:
+            script = self.root / 'scripts' / name
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "${0##*/}" >> "$CALLS"\n'
+                              '[[ "${FAIL_FIXTURE:-}" != "${0##*/}" ]]\n')
+            script.chmod(0o755)
+        # Pre-push runs this suite with Git's repository-local variables set.
+        # Keep both fixture Git commands and workflow bodies in this repository.
+        environment = os.environ.copy()
+        for key in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
+            environment.pop(key, None)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.root), *args], env=environment, text=True).strip()
+        def run(step, base, failing=''):
+            return subprocess.run([shutil.which('bash'), '-euo', 'pipefail', '-c', step['run']],
+                                  cwd=self.root, env={**environment, 'HOME': str(self.root),
+                                  'BASE_SHA': base, 'CALLS': str(calls), 'FAIL_FIXTURE': failing},
+                                  text=True, capture_output=True)
+        git('init', '-q')
+        git('config', 'user.name', 'CI fixture')
+        git('config', 'user.email', 'fixture@example.test')
+        git('add', '.')
+        git('commit', '-qm', 'base')
+        for changed, expected in [('scripts/fixture.sh', scripts), ('docs/fixture.md', []),
+                                  ('.github/workflows/fixture.yml', [])]:
+            base = git('rev-parse', 'HEAD')
+            path = self.root / changed
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n')
+            git('add', changed)
+            git('commit', '-qm', changed)
+            for workflow in ['ci.yml', 'lane.yml']:
+                with self.subTest(workflow=workflow, changed=changed):
+                    job = policy.load(self.root / '.github/workflows' / workflow)['jobs']['scoped-validation']
+                    steps = [s for s in job['steps'] if './scripts/test-release.sh' in s.get('run', '')]
+                    self.assertEqual(len(steps), 1, 'release fixtures must be wired once in the existing scoped job')
+                    step = steps[0]
+                    signal = {'steps.pr-dedupe.outputs.covered': 'false'}
+                    self.assertTrue(self.gh_expr(step['if'], signal))
+                    self.assertFalse(self.gh_expr(step['if'], {**signal, 'steps.pr-dedupe.outputs.covered': 'true'}))
+                    calls.write_text('')
+                    result = run(step, base)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(calls.read_text().splitlines(), expected)
+                    if expected:
+                        calls.write_text('')
+                        result = run(step, base, scripts[1])
+                        self.assertNotEqual(result.returncode, 0, 'a red fixture must redden the lane')
+                        self.assertEqual(calls.read_text().splitlines(), scripts[:2])
+
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']
         def counts():

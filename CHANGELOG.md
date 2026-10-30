@@ -7,6 +7,131 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander
+
+- **Messages kept in two tabs all go out after an outage** — Was: with two
+  Commander tabs open, a message kept during an outage could stay "Waiting for
+  the connection" under a Live header after reconnecting, and was never sent
+  until the page was reloaded. → Now: each kept message is sent once when the
+  connection returns, whichever tab sends it.
+
+### Fixed — Delivery process
+
+- **Capture keeps its receipt when checkouts run out of time** — Was: if the
+  capture budget ran out while Git prepared the private before/after checkouts,
+  `cas deliverable capture` exited with a usage error and printed no receipt.
+  → Now: it prints a receipt with a capture-timeout finding, as it already did
+  for a slow server.
+
+### Fixed — factory reliability
+
+- **A removed Codex worker model stays removed** — Was: a Codex worker launch
+  whose model and effort were removed after setup still passed them to its CAS
+  tools. → Now: only the launch's final model and effort reach the CAS tools.
+
+## [3.90.0] - 2026-10-29
+
+### Added — Commander
+
+- **Supervisor model and effort appear** — Was: Commander could not say which model or
+  effort a supervisor was running. → Now: Panes record the reported model and effort in
+  the session catalog and status, and the conversation header shows them (for example
+  "Claude Opus 5.5"). Unreported effort is cleared rather than left stale,
+  and the model chooser no longer treats old history as confirmation after a failed
+  selection. This completes the header item planned in the 3.89 known limits.
+- **Ended sessions can be dismissed** — Was: Ended sessions stayed in the project list
+  with no way to tidy them. → Now: Each ended session offers Dismiss and each project
+  card offers Clear ended. Dismissal applies to this device only; session history stays
+  available.
+
+### Added — Delivery process
+
+- **Park requires a titled changelog entry** — Product-source deliveries need
+  a task-scoped Unreleased entry or a reasoned decision note before they park.
+
+### Changed — Commander
+
+- **Refreshed Accounts, left nav and header** — Was: Accounts, the left nav and the
+  conversation header used older, inconsistent shapes. → Now: One shape scale with
+  shared card, pill and avatar rules; provider marks as avatars; Accounts grouped by
+  machine with Default and Recommended badges; and a header and Accounts usage rows that
+  fit a phone while keeping the machine and codename. This is the visual refresh planned
+  in the 3.89 known limits.
+
+### Fixed — Commander
+
+- **Ended project cards read correctly** — Was: An ended session could read "Ended · 0
+  workers stopped" and still count toward live workers. → Now: The stopped count appears
+  only when workers stopped, with correct singular and plural wording, and ended sessions
+  no longer count as live.
+- **Load earlier keeps your place** — Was: Loading earlier history could drop the reader
+  far below the previous reading position. → Now: A pending pin to the latest message is
+  cancelled when the reader has scrolled up, so the prior position is kept.
+- **Revoked sends offer Re-pair** — Was: Revoking a device's access during a pending send
+  could offer Take control. → Now: The hub keeps the pairing or message-permission cause
+  on a refused send, so Commander offers Re-pair (or re-pairing with Send messages)
+  instead. This resolves the 3.89 known limit.
+
+### Fixed — Factory
+
+- **Shutdown no longer stalls messages** — Was: Worktree cleanup and target retirement
+  ran on the daemon control loop, which could hold up message delivery for over an hour.
+  → Now: Cleanup runs off the control loop, a long cleanup warns once, and daemon exit
+  waits a bounded time for owned cleanups and saves any unfinished work for the next
+  start.
+- **Dead-worker shutdown leaves the store free** — Was: Shutting down an already-dead
+  worker retired its target inline on the store write lane, without reserving its name.
+  → Now: Retirement runs off that lane, and the name stays reserved until queued cleanup
+  finishes.
+- **Held cleanups complete** — Was: Cleanup records for deliberately held retirements
+  never completed, replayed on every daemon start and piled up. → Now: Held retirements
+  complete their cleanup record.
+- **Idle daemons reclaim dead workers** — Was: Staged dead-worker cleanups ran only when a
+  spawn or another cleanup was pending. → Now: An idle daemon picks up staged cleanups on
+  its regular tick, and duplicate staging is removed.
+
+### Fixed — Delivery process
+
+- **Approved fast-row exceptions are honored** — Was: Push and park ignored an approved,
+  logged fast-row exception. → Now: Both accept an authenticated exception whose approval
+  covers the delivery's scope.
+- **Forged exception approvals are refused** — Was: Park trusted exception files in the
+  receipts directory without checking who approved them. → Now: The approver must be a
+  live registered supervisor and the approved draft scope must be complete. PASS
+  receipts written by the same user are still trusted; a stronger attestation is
+  tracked separately.
+- **Close uses the corrected push** — Was: After a refused push and a corrected delivery,
+  close could read the stale delivery tip. → Now: Close honors the explicitly pushed
+  tip.
+- **Older evidence ledgers still close** — Was: The stricter evidence grammar blocked
+  closing deliveries that had already shipped with older ledgers. → Now: A covering
+  review is trusted before the older ledger is checked.
+- **Proof checks are fast and use Git** — Was: The proof-surface checker ran one search
+  per symbol, could exceed the close budget, and could hang on a bundled ripgrep. → Now:
+  Symbol searches are combined into one Git search with color disabled, and committed
+  surfaces are resolved with Git rather than the host ripgrep.
+
+### Fixed — Releases
+
+- **Known limits stay out of shipped totals** — Release-report shipped totals
+  exclude Known limits sections while keeping their entries, tests and
+  documentation in the report prose.
+- **Release gates accept empty post-cut sections and reject placeholders** — Fast
+  rows accept an empty [Unreleased] section, and both fast and park gates reject
+  template entries, including angle-bracket descriptions with trailing punctuation.
+
+### Changed — Developer tooling
+
+- **Steadier tests and factory tooling** — Was: Several tests depended on timing,
+  entropy, shared environment or elapsed waits, and some tooling paths were untested.
+  → Now: Timing and calendar assertions are deterministic; fixture identities are
+  collision-free; process environment and fixture stores share one guard; async fixtures
+  are observed rather than waited on; socket, port and proxy fixtures keep exclusive
+  ownership; full-size journey video encoding is bounded; the clickable Commander
+  preview no longer imports Node test tooling; a real-hub exit journey covers typed
+  /exit; release fixtures run for script changes in scoped CI lanes; and the v3.89.0
+  release report and posted notes are archived.
+
 ## [3.89.0] - 2026-10-29
 
 ### Added — Installation

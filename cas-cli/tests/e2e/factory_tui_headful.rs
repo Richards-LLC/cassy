@@ -17,31 +17,12 @@ fn headful_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-struct EnvGuard {
-    saved: Vec<(String, Option<String>)>,
-}
-
+struct EnvGuard;
 impl EnvGuard {
-    fn set(vars: &[(&str, String)]) -> Self {
-        let mut saved = Vec::with_capacity(vars.len());
-        for (key, value) in vars {
-            let key = (*key).to_string();
-            let prev = std::env::var(&key).ok();
-            unsafe { std::env::set_var(&key, value) };
-            saved.push((key, prev));
-        }
-        Self { saved }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, prev) in self.saved.drain(..) {
-            match prev {
-                Some(val) => unsafe { std::env::set_var(&key, val) },
-                None => unsafe { std::env::remove_var(&key) },
-            }
-        }
+    fn set(vars: &[(&str, String)]) -> crate::test_env_guard::TestEnvGuard {
+        let mut env = crate::test_env_guard::TestEnvGuard::new();
+        for (key, value) in vars { env.set(key, value); }
+        env
     }
 }
 

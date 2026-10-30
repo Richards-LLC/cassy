@@ -1171,6 +1171,118 @@ async fn park_reads_the_pre_push_fast_rows_receipt_cas_eac2() {
     assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
 }
 
+/// A logged skip is not approval. Only a live supervisor can approve the
+/// exact failed draft result, and that approval never becomes a PASS receipt.
+#[tokio::test]
+async fn park_honors_only_authenticated_scoped_fast_row_exception_cas_e63e() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.cas_dir().join("worktrees").join(WORKER);
+    let file = "docs/release-notes/history-slack.md";
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("receipt-factory".into());
+        agents.update(&agent).unwrap();
+    }
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::create_dir_all(repo.join("docs/release-notes")).unwrap();
+    std::fs::write(repo.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
+    std::fs::write(repo.join(file), "Historical wording\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "fix(cas-e63e): archive approved wording"]);
+    git(&repo, &["push", "-q", "--no-verify", "origin", LANE]);
+    let id = "cas-e63e";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let tip = git(&repo, &["rev-parse", "HEAD"]);
+    let receipts = PathBuf::from(git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+        .join("cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    let failed = format!("fast-rows: FAIL {tip} rows=release-notes-draft base=main\nSCOPE release-notes-draft {file}\nFIX release-notes-draft: historical wording\nscope complete count=1\n");
+    let receipt = receipts.join(format!("{tip}.pass"));
+    std::fs::write(&receipt, &failed).unwrap();
+    std::fs::write(receipts.join("overrides.log"), format!("{tip} skipped fast rows: approved\n")).unwrap();
+    let close = serde_json::json!({"action":"close", "id":id, "reason":"Archived approved bodies"});
+    assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    let approval = serde_json::json!({"head":tip, "check":"release-notes-draft", "files":[file], "reason":"Preserve the exact historical Slack body"});
+    let notes = serde_json::json!({"action":"notes", "id":id, "note_type":"decision", "notes":format!("fast-rows-approved: {approval}")});
+    let rejected = f.worker.task(Parameters(serde_json::from_value(notes.clone()).unwrap())).await;
+    assert!(rejected.is_err(), "a worker cannot self-approve a failed check");
+    for (field, wrong) in [
+        ("head", serde_json::json!("0".repeat(40))),
+        ("check", serde_json::json!("test-env")),
+        ("files", serde_json::json!(["docs/release-notes/another-slack.md"])),
+        ("reason", serde_json::json!("")),
+        ("approver", serde_json::json!("claimed-supervisor")),
+    ] {
+        let mut wrong_approval = approval.clone();
+        wrong_approval[field] = wrong;
+        let mut wrong_note = notes.clone();
+        wrong_note["notes"] = format!("fast-rows-approved: {wrong_approval}").into();
+        let result = f.supervisor.task(Parameters(serde_json::from_value(wrong_note).unwrap())).await;
+        assert!(result.is_err(), "approval with invalid {field} must be refused");
+    }
+    call(&f.supervisor, notes.clone()).await;
+    // The real hook's reader must accept the record issued by the real MCP
+    // handler, so the two languages cannot silently drift apart.
+    let hook_reader = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/fast-rows-exception.py")))
+        .arg(&receipts).arg(&tip).output().unwrap();
+    assert!(hook_reader.status.success(), "{:?}", hook_reader);
+    let issued_path = receipts.join(format!("{tip}.{id}.exception.json"));
+    let issued = std::fs::read_to_string(&issued_path).unwrap();
+    let mut foreign: serde_json::Value = serde_json::from_str(&issued).unwrap();
+    foreign["task_id"] = "cas-other-task".into();
+    std::fs::write(&issued_path, foreign.to_string()).unwrap();
+    assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+    // A forged file must not turn arbitrary identity text into authority.
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let supervisor = agents.get("nocode-supervisor-session").unwrap();
+    for (approver, role, status, session) in [
+        ("invented-supervisor", AgentRole::Supervisor, cas_types::AgentStatus::Active, supervisor.factory_session.clone()),
+        ("nocode-worker-session", AgentRole::Supervisor, cas_types::AgentStatus::Active, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Worker, cas_types::AgentStatus::Active, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Supervisor, cas_types::AgentStatus::Shutdown, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Supervisor, cas_types::AgentStatus::Stale, supervisor.factory_session.clone()),
+        ("nocode-supervisor-session", AgentRole::Supervisor, cas_types::AgentStatus::Active, Some("other-factory".into())),
+    ] {
+        let mut changed = supervisor.clone();
+        changed.role = role;
+        changed.status = status;
+        changed.factory_session = session;
+        agents.update(&changed).unwrap();
+        let mut forged: serde_json::Value = serde_json::from_str(&issued).unwrap();
+        forged["approver"] = approver.into();
+        std::fs::write(&issued_path, forged.to_string()).unwrap();
+        let refused = call(&f.worker, close.clone()).await;
+        assert!(refused.contains("FAST ROWS REQUIRED"), "{approver} {role:?} {status:?}: {refused}");
+    }
+    agents.update(&supervisor).unwrap();
+    std::fs::write(&issued_path, issued).unwrap();
+
+    // A changed failure set on the same SHA invalidates the approval too.
+    for changed in [
+        failed.replace("rows=release-notes-draft", "rows=release-notes-draft,test-env"),
+        format!("{failed}UNSCOPED release-notes-draft docs/release-notes/unreadable-slack.md\n"),
+        failed.replace("scope complete count=1\n", ""),
+        failed.replace("scope complete count=1", "scope complete count=2"),
+        format!("{failed}SCOPE release-notes-draft docs/release-notes/later-slack.md\n"),
+    ] {
+        std::fs::write(&receipt, changed).unwrap();
+        assert!(call(&f.worker, close.clone()).await.contains("FAST ROWS REQUIRED"));
+        let rejected = f.supervisor.task(Parameters(serde_json::from_value(notes.clone()).unwrap())).await;
+        assert!(rejected.is_err(), "partial failure scope cannot be approved");
+    }
+    std::fs::write(&receipt, &failed).unwrap();
+    let parked = call(&f.worker, close).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), failed);
+    assert!(f.task(id).notes.contains("nocode-supervisor-session"));
+}
+
 /// Release preparation used a suffixed promotion branch, while the worker's
 /// plain lane still holds another task. The canonical task branch never existed.
 fn promotion_receipt(f: &Fixture, id: &str) -> (String, String) {

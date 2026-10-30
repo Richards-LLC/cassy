@@ -24,17 +24,21 @@ describe("project-first navigation", () => {
   });
   it("contains supervisors across machines in one project and renders only supplied identity", () => {
     const nav = setup();
-    new ProjectNavigation().render(nav, [row("nimble-fox-66", { project: "cassy", harness: "codex", account_email: "operator@example.test", machine_online: true, workerCount: 2, activityAt: 2 }), row("mighty-eagle-86", { machineId: "prowl", host: "prowl · macOS", projectDir: "/other/cassy", machine_online: false, activityAt: 1 }), row("solo", { projectDir: "/projects/pulse-card" })], vi.fn());
+    new ProjectNavigation().render(nav, [row("nimble-fox-66", { project: "cassy", harness: "codex", account_email: "operator@example.test", machine_online: true, workerCount: 2, activityAt: 2 }), row("mighty-eagle-86", { machineId: "prowl", host: "prowl · macOS", projectDir: "/other/cassy", machine_online: false, activityAt: 1 }), row("solo", { projectDir: "/projects/pulse-card", machine_online: true, workerCount: 0 }), row("ended", { projectDir: "/projects/pulse-card", machine_online: false, workerCount: 0, ended: { at: "2026-10-29T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } })], vi.fn(), undefined, { machines: [{ id: "soundwave", label: "soundwave · Linux", online: true }, { id: "prowl", label: "prowl · macOS", online: false }] });
     const cards = nav.querySelectorAll(".project-card");
     expect(cards).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".conversation-row")).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".project-machine-chip")).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".project-machine-chip")[1]!.getAttribute("aria-label")).toBe("Filter conversations on prowl, offline");
     expect(cards[0]!.textContent).toContain("2 live workers");
-    expect(cards[0]!.querySelector('[data-harness="codex"]')?.textContent).toBe(">_");
+    // DESIGN.md Avatars: the provider's drawn mark, never a tiny glyph.
+    expect(cards[0]!.querySelector('[data-harness="codex"]')?.getAttribute("title")).toBe("OpenAI");
+    expect(cards[0]!.querySelector('[data-harness="codex"] svg.provider-mark')).not.toBeNull();
     expect(cards[0]!.querySelector(".conversation-account")?.textContent).toBe("operator@example.test");
     expect(cards[1]!.querySelector(".conversation-account")).toBeNull();
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);
+    expect(cards[1]!.querySelector<HTMLElement>(".project-card-summary")?.hidden).toBe(true);
+    expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");
   });
 
   it("keeps a collapsed project on this device and retains its keyed toggle through a catalog tick and search", () => {

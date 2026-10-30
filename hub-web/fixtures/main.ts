@@ -58,6 +58,8 @@ export const FIXTURE_NAMES = [
   "launch-account-unavailable",
   "launch-account-default-out",
   "launch-grant-command",
+  "accounts",
+  "accounts-read-only",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -209,6 +211,33 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
 }
 
 /**
+ * The production Accounts sheet (cas-392c) over a host that answers like a hub:
+ * two machines, every provider, a stale duplicate and, read-only, the
+ * manage-access command instead of hidden actions.
+ */
+async function openAccountsSheet(readOnly: boolean): Promise<void> {
+  const { AccountsSheet } = await import("../src/accounts-panel");
+  const supported = { remove: null, disable: null, enable: "Already enabled.", rename: null, set_default: null };
+  const later = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+  const observed = new Date(Date.now() - 20 * 60_000).toISOString();
+  const soundwave = [
+    { key: "claude:support@gabber.studio", provider: "claude", name: "support@gabber.studio", display_name: "support@gabber.studio", location: "~/.claude-support@gabber.studio", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: false, recommendation: "Most weekly capacity left", windows: [{ name: "5h", used_percent: 6, resets_at: later(3) }, { name: "weekly", used_percent: 48, resets_at: later(60) }], usage_observed_at: observed, capabilities: supported },
+    { key: "claude:daniel@petrastella.io", provider: "claude", name: "daniel@petrastella.io", display_name: "daniel@petrastella.io", location: "~/.claude-daniel@petrastella.io", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [{ name: "5h", used_percent: 88, resets_at: later(1) }, { name: "weekly", used_percent: 99, resets_at: later(40) }], usage_observed_at: observed, capabilities: supported },
+    { key: "claude:main", provider: "claude", name: "main", display_name: "daniel@petrastella.io", location: "~/.claude", login_state: "stale_login", disabled: false, duplicate_of: "claude:daniel@petrastella.io", is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { ...supported, remove: "The main account is protected.", rename: "The main account is protected." } },
+    { key: "codex:support@gabber.studio", provider: "codex", name: "support@gabber.studio", display_name: "support@gabber.studio", location: "~/.codex-support@gabber.studio", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [{ name: "weekly", used_percent: 56, resets_at: later(120) }], usage_observed_at: observed, capabilities: supported },
+    { key: "codex:work", provider: "codex", name: "work", display_name: "work", location: "~/.codex-work", login_state: "never_logged_in", disabled: true, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { ...supported, disable: "Already disabled.", enable: null } },
+    { key: "grok:default", provider: "grok", name: "default", display_name: "Grok", location: "~/.grok", login_state: "unknown", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Grok has one account.", disable: "Grok has one account.", enable: "Grok has one account.", rename: "Grok has one account.", set_default: "Grok has one account." } },
+  ];
+  const control: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
+  const sheet = new AccountsSheet({
+    machines: () => [{ id: "soundwave", label: "soundwave", scopes: readOnly ? ["machine-read"] : [...control, "factory-manage"] }],
+    list: async () => ({ accounts: soundwave as never }),
+    change: async () => {}, changed: () => {}, copy: async () => {}, returnFocus: () => {},
+  });
+  sheet.open();
+}
+
+/**
  * A dialog fixture opens over the conversation list, where the app's Pair a
  * machine and New session controls live.
  */
@@ -217,6 +246,7 @@ function renderDialogFixture(): void {
   renderRestingToast();
   if (fixtureName.startsWith("pairing")) appendOpenPairingDialog(fixtureName as PairingFixture);
   if (fixtureName.startsWith("launch")) void openLaunchSheet(fixtureName as LaunchFixture);
+  if (fixtureName.startsWith("accounts")) void openAccountsSheet(fixtureName === "accounts-read-only");
 }
 
 /** The strict gate's self-test: ?broken=1 plants one deliberate contrast defect on the default fixture. */
@@ -232,6 +262,6 @@ function plantBrokenContrast(): void {
 
 if (fixtureName === "attention-notice-details") renderAttentionNoticeFixture(app);
 else if (fixtureName.startsWith("fleet-ops-")) renderFleetOpsFixture(app, fixtureName);
-else if (fixtureName.startsWith("pairing") || fixtureName.startsWith("launch")) renderDialogFixture();
+else if (fixtureName.startsWith("pairing") || fixtureName.startsWith("launch") || fixtureName.startsWith("accounts")) renderDialogFixture();
 else renderConversationFixture(app, fixtureName);
 if (fixtureName === "conversations-list" && new URLSearchParams(window.location.search).has("broken")) plantBrokenContrast();

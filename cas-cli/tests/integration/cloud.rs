@@ -1,6 +1,9 @@
 //! Cloud integration suites, linked once.
 //! Run with nextest for one-process-per-test environment/cwd isolation.
 
+#[path = "../../src/test_env_guard.rs"]
+mod test_env_guard;
+
 #[path = "../active_team_id_integration_test.rs"]
 mod active_team_id_integration_test;
 #[path = "../auth_integration_test.rs"]

@@ -65,6 +65,9 @@ export interface HubSession {
   cloud_project_id?: string;
   /** Additive session-read metadata; omitted by older hubs. */
   harness?: "claude" | "codex" | "grok" | "opencode";
+  /** The supervisor's model and effort (cas-2dcc); older hubs omit them. */
+  model?: string;
+  effort?: string;
   account_email?: string;
   project?: string;
   machine_online?: boolean;

@@ -7,6 +7,7 @@
 
 use assert_cmd::Command;
 use rusqlite::{Connection, params};
+use std::cell::Cell;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -16,6 +17,7 @@ pub struct CasInstance {
     pub temp_dir: TempDir,
     /// Path to the .cas directory
     pub cas_dir: PathBuf,
+    next_fixture_id: Cell<u64>,
 }
 
 impl CasInstance {
@@ -36,27 +38,25 @@ impl CasInstance {
         Connection::open(self.cas_dir.join("cas.db")).expect("Failed to open CAS database")
     }
 
-    /// Generate a task ID in `cas-XXXX` format (4 hex chars)
-    fn gen_task_id() -> String {
-        use rand::Rng;
-        let mut rng = rand::rng();
-        let n: u16 = rng.random();
-        format!("cas-{n:04x}")
-    }
-
-    /// Generate an entry ID in `YYYY-MM-DD-N` format
-    fn gen_entry_id() -> String {
-        use rand::Rng;
-        let now = chrono::Utc::now();
-        let n: u16 = rand::rng().random_range(1..=999);
-        format!("{}-{}", now.format("%Y-%m-%d"), n)
-    }
-
-    /// Generate a rule ID in `rule-XXX` format
-    fn gen_rule_id() -> String {
-        use rand::Rng;
-        let n: u16 = rand::rng().random_range(1..=999);
-        format!("rule-{n:03x}")
+    /// Allocate deterministic identities without colliding with preloaded rows.
+    fn allocate_id(&self, conn: &Connection, table: &str, format_id: fn(u64) -> String) -> String {
+        loop {
+            let n = self.next_fixture_id.get();
+            self.next_fixture_id
+                .set(n.checked_add(1).expect("fixture ID space exhausted"));
+            let id = format_id(n);
+            // Table names are fixed by the three insertion helpers below.
+            let occupied: bool = conn
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("check fixture ID occupancy");
+            if !occupied {
+                return id;
+            }
+        }
     }
 
     /// Get current timestamp in RFC3339 format
@@ -72,7 +72,7 @@ impl CasInstance {
     /// Add a memory entry with specific type
     pub fn add_memory_with_type(&self, content: &str, entry_type: &str) -> String {
         let conn = self.open_db();
-        let id = Self::gen_entry_id();
+        let id = self.allocate_id(&conn, "entries", |n| format!("2000-01-01-{n}"));
         let now = Self::now();
         conn.execute(
             "INSERT INTO entries (id, type, content, created, scope) VALUES (?1, ?2, ?3, ?4, 'project')",
@@ -96,7 +96,7 @@ impl CasInstance {
         start: bool,
     ) -> String {
         let conn = self.open_db();
-        let id = Self::gen_task_id();
+        let id = self.allocate_id(&conn, "tasks", |n| format!("cas-{n:04x}"));
         let now = Self::now();
         let tt = task_type.unwrap_or("task");
         let prio = priority.unwrap_or(2) as i32;
@@ -148,7 +148,7 @@ impl CasInstance {
     /// Create a rule and return its ID
     pub fn create_rule(&self, content: &str) -> String {
         let conn = self.open_db();
-        let id = Self::gen_rule_id();
+        let id = self.allocate_id(&conn, "rules", |n| format!("rule-{n:03x}"));
         let now = Self::now();
         conn.execute(
             "INSERT INTO rules (id, content, created, status, scope) VALUES (?1, ?2, ?3, 'draft', 'project')",
@@ -263,7 +263,11 @@ pub fn new_cas_instance() -> CasInstance {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    CasInstance { temp_dir, cas_dir }
+    CasInstance {
+        temp_dir,
+        cas_dir,
+        next_fixture_id: Cell::new(1),
+    }
 }
 
 fn configure_isolated_home(cmd: &mut Command, root: &std::path::Path) {
@@ -305,8 +309,8 @@ pub(crate) fn extract_entry_id(output: &str) -> Option<String> {
 }
 
 pub(crate) fn extract_task_id(output: &str) -> Option<String> {
-    // Match patterns like "Created task: cas-1234" or "cas-1234"
-    let re = regex::Regex::new(r"(cas-[a-f0-9]{4})").ok()?;
+    // Accept the full counter even when it grows beyond four hex digits.
+    let re = regex::Regex::new(r"(cas-[a-f0-9]{4,})").ok()?;
     re.captures(output)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())
@@ -323,6 +327,42 @@ pub(crate) fn extract_rule_id(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::fixtures::cas_instance::{extract_entry_id, extract_rule_id, extract_task_id};
+
+    #[test]
+    fn fixture_allocates_distinct_ids_through_sqlite_inserts() {
+        let cas = super::new_cas_instance();
+        let replay = super::new_cas_instance();
+        for (kind, insert, extract) in [
+            (
+                "memory",
+                super::CasInstance::add_memory as fn(&super::CasInstance, &str) -> String,
+                extract_entry_id as fn(&str) -> Option<String>,
+            ),
+            ("task", super::CasInstance::create_task, extract_task_id),
+            ("rule", super::CasInstance::create_rule, extract_rule_id),
+        ] {
+            // Exercise an occupied candidate and the old 16-bit task-ID boundary.
+            cas.next_fixture_id.set(u64::from(u16::MAX));
+            replay.next_fixture_id.set(u64::from(u16::MAX));
+            let first = insert(&cas, "first fixture row");
+            let first_replay = insert(&replay, "first fixture row");
+            cas.next_fixture_id.set(u64::from(u16::MAX));
+            replay.next_fixture_id.set(u64::from(u16::MAX));
+            let second = insert(&cas, "second fixture row");
+            let second_replay = insert(&replay, "second fixture row");
+            assert_ne!(first, second, "{kind} IDs must be distinct");
+            assert_eq!(
+                [&first, &second],
+                [&first_replay, &second_replay],
+                "{kind} allocation must replay independently of entropy"
+            );
+            assert_eq!(
+                extract(&second).as_deref(),
+                Some(second.as_str()),
+                "{kind} ID must survive output parsing"
+            );
+        }
+    }
 
     #[test]
     fn test_extract_entry_id() {

@@ -74,30 +74,21 @@ resolve_test_target_name() {
     printf '%s\n' "$wanted"
 }
 
-# GitHub-hosted runners do not guarantee ripgrep. Resolve the search backend
-# once, then keep every test-surface search on either rg or tracked git files.
-if command -v rg >/dev/null 2>&1; then
-    grep_backend=rg
-else
-    grep_backend=git
-fi
+# Proof scope comes from committed Git paths, so use Git for discovery too.
+# A PATH-provided rg is unnecessary and can stall before main (cas-81bc),
+# exhausting close's checker budget even for a tiny diff. No probe is needed.
+grep_backend=git
 tracked_rust_test_paths=('cas-cli/tests/*.rs' 'cas-cli/tests/**/*.rs')
 
 run_test_path_search() {
     local mode="$1"
     shift
-    case "${grep_backend}:${mode}" in
-        rg:regex)
-            rg -l --glob '*.rs' "$@" -- cas-cli/tests
+    case "$mode" in
+        regex)
+            git grep --no-color -n -E "$@" -- "${tracked_rust_test_paths[@]}"
             ;;
-        rg:fixed)
-            rg -l -F --glob '*.rs' -- "$1" cas-cli/tests
-            ;;
-        git:regex)
-            git grep -n -E "$@" -- "${tracked_rust_test_paths[@]}"
-            ;;
-        git:fixed)
-            git grep -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
+        fixed)
+            git grep --no-color -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
             ;;
         *)
             return 2
@@ -110,9 +101,7 @@ search_test_paths() {
     shift
     if matches="$(run_test_path_search "$mode" "$@")"; then
         [[ -n "$matches" ]] || return 0
-        if [[ "$grep_backend" == git ]]; then
-            matches="$(sed -E 's/:[0-9]+:.*$//' <<<"$matches")"
-        fi
+        matches="$(sed -E 's/:[0-9]+:.*$//' <<<"$matches")"
         printf '%s\n' "$matches" | sort -u
     else
         search_status=$?
@@ -381,8 +370,7 @@ source_public_symbols_for() {
 
 discover_source_integration_targets() {
     local source_path="$1" source_file module_path test_path symbol symbol_filter
-    local matched_paths search_status
-    local -a symbol_patterns=()
+    local matched_paths search_status symbol_alternation=""
     source_file="$repo_root/$source_path"
     [[ -f "$source_file" ]] || return 0
     module_path="$(source_module_path_for "$source_path")"
@@ -391,10 +379,7 @@ discover_source_integration_targets() {
         [[ -n "$symbol" ]] || continue
         symbol_filter="$symbol"
         [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
-        symbol_patterns+=(
-            -e
-            "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::${symbol_filter}([^[:alnum:]_]|$)"
-        )
+        symbol_alternation+="${symbol_alternation:+|}${symbol_filter}"
     done < <(source_public_symbols_for "$source_file")
 
     # Integration tests normally consume a service through its public parent
@@ -427,8 +412,12 @@ discover_source_integration_targets() {
     # Public integration tests must reference the changed module or a
     # qualified public symbol. Bare test-name collisions are not evidence that
     # a test exercises the source module.
-    if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
-        if matched_paths="$(search_test_paths regex "${symbol_patterns[@]}" 2>/dev/null)"; then
+    if [[ -n "$symbol_alternation" ]]; then
+        # Git evaluates separate -e patterns independently. One alternation
+        # shares the module/boundary scan even on symbol-heavy files.
+        if matched_paths="$(search_test_paths regex \
+            -e "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::(${symbol_alternation})([^[:alnum:]_]|$)" \
+            2>/dev/null)"; then
             :
         else
             search_status=$?

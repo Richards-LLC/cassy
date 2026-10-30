@@ -802,7 +802,10 @@ export class ConversationView {
       if (offeredEarlier && !hasEarlier) this.revealHistoryEnd();
     }
     this.restorePlace();
-    this.scrolledTo = this.element.scrollTop;
+    // An unseen move still awaits its scroll event (or a remount's deferred
+    // pin). Keep the observed baseline so that event can stop a pending pin
+    // when the reader has scrolled up to Load earlier.
+    if (!this.pinDeferred) this.scrolledTo = this.element.scrollTop;
     this.lastContentHeight = this.element.scrollHeight;
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();

@@ -189,6 +189,20 @@ pub struct HookInput {
     #[serde(default, rename = "machinePromptProvenance")]
     pub machine_prompt_provenance: Option<MachinePromptProvenance>,
 
+    /// Native current model at SessionStart (optional in the harness protocol).
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Completed model switch; PreModelSwitch is not a current observation.
+    #[serde(default)]
+    pub from_model: Option<String>,
+    #[serde(default)]
+    pub to_model: Option<String>,
+
+    /// Native effective effort object, e.g. {"level":"high"}.
+    #[serde(default)]
+    pub effort: Option<serde_json::Value>,
+
     /// Session start source (SessionStart)
     #[serde(default)]
     pub source: Option<String>,
@@ -930,6 +944,18 @@ impl HookOutput {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_model_and_effort_fields_survive_hook_decoding() {
+        let input: super::HookInput = serde_json::from_value(serde_json::json!({
+            "session_id":"pane", "model":"claude-opus-5-5", "from_model":"old",
+            "to_model":"new", "effort":{"level":"high"}
+        })).unwrap();
+        assert_eq!(input.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(input.from_model.as_deref(), Some("old"));
+        assert_eq!(input.to_model.as_deref(), Some("new"));
+        assert_eq!(input.effort.unwrap()["level"], "high");
+    }
+
     use crate::hooks::types::*;
 
     /// cas-8dbe: an advisory joins an allowed or empty PreToolUse response,

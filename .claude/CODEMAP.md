@@ -39,6 +39,8 @@
 
 ## CLI, hooks and application services
 
+- `cas-cli/src/agent_model.rs` - role-scoped pane model/effort observations shared by native hooks, Commander model selection, catalog and status.
+
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, module composition and command dispatch.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs` - initialization, recovery and provisioning.
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - recommendation policy, exclusions and thresholds.
@@ -87,6 +89,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep modules.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited replacement delivery branches.
+- `cas-cli/src/mcp/tools/core/task/fast_rows_exception.rs`, `scripts/fast-rows-exception.py` - supervisor-issued draft exception receipts, validated by push and park against the original failed result.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
 
 ## QA, storage and Commander
@@ -117,6 +120,7 @@
 - `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media streams, hashed chunks and sandboxed pages.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/context-resize.ts` - pairing, scoped folder grants and remembered layout width.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, isolated previews and real-hub recovery fixtures.
+- `hub-web/e2e/journeys/hub-double-runtime.ts`, `hub-web/preview/hub-double-runtime.ts` - Node and browser adapters for the shared protocol double; the preview build selects browser crypto, time and raw CSP without a test runner.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - routing and daemon entrypoints.
 
 ## Cross-cutting and entrypoints

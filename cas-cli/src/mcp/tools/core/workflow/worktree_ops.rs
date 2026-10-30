@@ -439,11 +439,15 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
             let state = if code_sha == tip || tip_has_code_checks {
                 tip_state
             } else {
-                classify_branch_ci_response(
-                    branch,
-                    &code_sha,
-                    fetch_branch_ci(&code_sha, cwd, &repo, &binary),
-                )
+                let output = fetch_branch_ci(&code_sha, cwd, &repo, &binary);
+                let settled = matches!(tip_state, BranchCiState::Green { .. })
+                    .then(|| {
+                        superseded_code_ci(branch, &code_sha, &output, |run_id| {
+                            workflow_run_cancelled(run_id, cwd, &repo, &binary)
+                        })
+                    })
+                    .flatten();
+                settled.unwrap_or_else(|| classify_branch_ci_response(branch, &code_sha, output))
             };
             require_code_validation(state)
         }
@@ -455,15 +459,87 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     }
 }
 
+/// cas-c59e: the lane's concurrency group cancels a commit's run when a newer push
+/// starts, so once the tip's run has finished, a code commit's cancelled jobs will
+/// never finish or rerun. That is not pending; judge what the run did prove. A docs
+/// tip proves nothing about the code, so with no passed code check this needs the
+/// same override as docs-only success. `None` when nothing was superseded, or a job
+/// is still running in a run that was not cancelled.
+fn superseded_code_ci(
+    branch: &str,
+    sha: &str,
+    output: &GhApiOutput,
+    run_cancelled: impl Fn(&str) -> bool,
+) -> Option<BranchCiState> {
+    if !output.success {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let mut superseded = false;
+    let mut kept = Vec::new();
+    for run in parsed.get("check_runs")?.as_array()? {
+        if run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled") {
+            superseded = true;
+        } else if check_run_unfinished(run) {
+            // GitHub can keep listing a job of a cancelled run as in progress.
+            if !check_run_workflow_id(run).is_some_and(&run_cancelled) {
+                return None;
+            }
+            superseded = true;
+        } else {
+            kept.push(run.clone());
+        }
+    }
+    if !superseded {
+        return None;
+    }
+    let remaining = GhApiOutput {
+        success: true,
+        status: output.status.clone(),
+        stdout: serde_json::json!({ "check_runs": kept }).to_string().into_bytes(),
+        stderr: Vec::new(),
+    };
+    let executed_code_check = has_code_check_runs(&remaining);
+    Some(match classify_branch_ci_response(branch, sha, remaining) {
+        state @ BranchCiState::Red { .. } => state,
+        state @ BranchCiState::Green { .. } if executed_code_check => state,
+        _ => BranchCiState::UnvalidatedCode {
+            sha: sha.to_string(),
+            reason: "a newer push cancelled its CI run before any code check passed".to_string(),
+        },
+    })
+}
+
+/// The workflow run in a check-run's Actions URL, which is `.../actions/runs/<id>/job/<job>`.
+fn check_run_workflow_id(run: &serde_json::Value) -> Option<&str> {
+    let tail = run
+        .get("html_url")
+        .and_then(serde_json::Value::as_str)?
+        .split_once("/actions/runs/")?
+        .1;
+    let id = tail.split('/').next()?;
+    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(id)
+}
+
+fn workflow_run_cancelled(run_id: &str, cwd: &Path, repo: &str, binary: &Path) -> bool {
+    let output = gh_api_get(&format!("repos/{repo}/actions/runs/{run_id}"), cwd, binary);
+    output.success
+        && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .is_ok_and(|run| run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled"))
+}
+
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
-    let endpoint = format!("repos/{repo}/commits/{sha}/check-runs");
+    gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
+}
+
+fn gh_api_get(endpoint: &str, cwd: &Path, binary: &Path) -> GhApiOutput {
     let mut command = Command::new(binary);
     command
         .current_dir(cwd)
         .env("GH_HOST", "github.com")
         .args(["api", "--method", "GET"]);
-    command.arg(&endpoint).args(["-F", "per_page=100"]);
+    command.arg(endpoint).args(["-F", "per_page=100"]);
     match crate::bounded_process::run_command(
         &mut command,
         crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),

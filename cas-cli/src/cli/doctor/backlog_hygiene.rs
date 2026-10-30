@@ -186,5 +186,10 @@ mod tests {
         assert!(only_reverted.message.contains("1 delivered then reverted"));
         assert!(!only_reverted.message.contains("commit_receipt=")
             && !only_reverted.message.contains("task action=close"));
+        // Keep subsequent evidence in the JSON diagnostic instead of
+        // accidentally parsing it as the reverted entry's remedy.
+        let mixed = check_for(&BacklogReport { reverted: report().delivered, ..report() });
+        let (diagnostic, _) = mixed.parts();
+        assert!(diagnostic.contains("finished epics open") && diagnostic.contains("cas-i1"), "{diagnostic}");
     }
 }

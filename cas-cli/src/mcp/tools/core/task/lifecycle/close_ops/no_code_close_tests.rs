@@ -1804,12 +1804,49 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         }
         let close = serde_json::json!({"action":"close", "id":first.id,"reason":"Delivered"});
         let closer = if park { &f.worker } else { &f.supervisor };
-        let queue_lock = park.then(|| crate::worker_task_queue::worker_lock(
+        let queue_lock = Some(crate::worker_task_queue::worker_lock(
             &f.cas_dir(), &agents.get("nocode-worker-session").unwrap(), "queue").unwrap());
-        let response = call(closer, close.clone()).await;
+        let response = if park {
+            call(closer, close.clone()).await
+        } else {
+            // Stop the real close at the handoff boundary, then advance only
+            // the response clock. No sleep or slow host/Git assumption.
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            close_race_hook::before_queue_handoff(&first.id, move || {
+                let _ = entered_tx.send(());
+                let _ = resume_rx.recv();
+            });
+            let service = closer.clone();
+            let sender = service.clone();
+            let arguments = close.clone();
+            let request = serde_json::from_value(close.clone()).unwrap();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let dispatch = tokio::spawn(async move {
+                service.call_with_deadline("task", arguments.as_object(),
+                    std::time::Duration::from_secs(55), async move {
+                        let result = sender.task(Parameters(request)).await;
+                        let _ = done_tx.send(());
+                        result
+                    }).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+                .await.expect("close must reach the handoff barrier").unwrap();
+            assert_eq!(f.task(&first.id).status, TaskStatus::Closed);
+            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(56)).await;
+            let error = dispatch.await.unwrap().unwrap_err();
+            tokio::time::resume();
+            let _ = resume_tx.send(());
+            done_rx.await.unwrap();
+            assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error}");
+            assert!(!error.message.contains("unchanged so far"), "{error}");
+            error.message.to_string()
+        };
         assert_eq!(f.task(&first.id).status,
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
-        if park {
+        {
             assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
             // The real park committed during another queue operation. Its
             // durable cursor survives the failed immediate handoff and restart.
@@ -1836,6 +1873,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             "action":"start", "id":"cas-8488-c",
         })).unwrap())).await;
         assert!(denied.is_err(), "A second task must not start beside B: {denied:?}");
+        assert!(denied.unwrap_err().message.contains("unrelated"),
+            "An unrelated start needs general active-work guidance");
         let _ = call(closer, close).await;
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         assert!(f.task("cas-8488-c").assignee.is_none());
@@ -1958,9 +1997,13 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     legacy.status = TaskStatus::Open;
     legacy.deliverables.work_target = None;
     f.put(&legacy);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let start_lock = crate::worker_task_queue::worker_lock(
+        &f.cas_dir(), &agents.get("nocode-worker-session").unwrap(), "start").unwrap();
     let legacy_start = call(&f.worker, serde_json::json!({
         "action":"start", "id":legacy.id,
     })).await;
+    drop(start_lock);
     assert_eq!(f.task(&legacy.id).status, TaskStatus::InProgress, "{legacy_start}");
     let _ = call(&f.worker, serde_json::json!({
         "action":"update", "id":legacy.id, "status":"blocked",

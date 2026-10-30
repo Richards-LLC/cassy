@@ -5566,6 +5566,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
             collect_heredoc_substitutions(&body, depth, found);
         }
     }
+    collect_quoted_shell_substitutions(&shell_command_without_heredoc_bodies(command), depth, found);
     for words in shell_statement_words(command) {
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
@@ -5592,6 +5593,74 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
             _ => {}
         }
         found.push((name.to_string(), args.to_vec()));
+    }
+}
+
+/// Unquoted `$(...)` scopes already reach the statement tokenizer. Quoted
+/// substitutions and backticks keep their own shell syntax, so inspect their
+/// original source before the outer tokenizer removes quote provenance.
+fn collect_quoted_shell_substitutions(
+    command: &str,
+    depth: usize,
+    found: &mut Vec<(String, Vec<String>)>,
+) {
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    let mut word_start = true;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if quote == Some(b'\'') {
+            if ch == b'\'' {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == b'\\' {
+            // A line continuation does not begin a new word or comment.
+            if bytes.get(index + 1) != Some(&b'\n') {
+                word_start = false;
+            }
+            index += 2;
+            continue;
+        }
+        if ch == b'"' || (ch == b'\'' && quote.is_none()) {
+            quote = if quote.is_some() { None } else { Some(ch) };
+            word_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == b'#' && quote.is_none() && word_start {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        let (start, end) = if quote == Some(b'"') && bytes.get(index..index + 2) == Some(b"$(") {
+            let end = shell_effects::literal_cat_heredoc_end(&command[index..])
+                .map(|end| index + end)
+                .or_else(|| shell_effects::substitution_end(bytes, index + 2, 0));
+            (index + 2, end)
+        } else if ch == b'`' {
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'`' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            (start, (end < bytes.len()).then_some(end))
+        } else {
+            if quote.is_none() {
+                word_start = ch.is_ascii_whitespace()
+                    || matches!(ch, b'(' | b')' | b';' | b'|' | b'&' | b'<' | b'>');
+            }
+            index += 1;
+            continue;
+        };
+        let Some(end) = end else { break };
+        collect_shell_invocations(&command[start..end], depth + 1, found);
+        word_start = false;
+        index = end + 1;
     }
 }
 
@@ -5841,6 +5910,14 @@ fn operator_policy_command_textual(command: &str) -> bool {
             body.is_none_or(|body| !delimiter.literal_body && runs_substitution(&[body]))
         });
     let statements = shell_statement_words(command);
+    // Keep literal single-quoted text as data. Statement words alone have
+    // already lost the distinction between '$()' and executable "$()".
+    let (tokens, literals) = factory_shell_tokens_with_literals(&shell_command);
+    let executable_substitution = tokens.iter().zip(literals).any(|(token, literal)| {
+        !literal
+            && matches!(token, ShellToken::Word(word)
+                if word == "$" || runs_substitution(std::slice::from_ref(word)))
+    });
     let clipboard = statements.iter().any(|words| {
         matches!(
             words.first().map(String::as_str),
@@ -5856,17 +5933,15 @@ fn operator_policy_command_textual(command: &str) -> bool {
             .any(|token| matches!(token, ShellToken::Operator('>' | '(' | ')')));
     expanding_policy
         || clipboard_effects
+        || executable_substitution
         || statements.is_empty()
         || !statements
             .iter()
-            .all(|words| !runs_substitution(words) && read_only_statement(words))
+            .all(|words| read_only_statement(words))
 }
 
-/// cas-b7b2: a word that runs a command when the shell expands it: `$(…)`,
-/// backticks, or process substitution. A read-only command with such an
-/// argument still runs whatever is inside it, so the statement is not read
-/// only. Quoting is not inspected: a single-quoted `$(` is refused too, which
-/// costs a rare search and never admits a run.
+/// cas-b7b2: substitution markers in expanding text. Shell-word callers must
+/// retain quote provenance; heredoc bodies expand markers regardless of quotes.
 fn runs_substitution(words: &[String]) -> bool {
     words
         .iter()
@@ -8420,6 +8495,11 @@ mod workspace_contract_tests {
             "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",
+            // cas-0ec8: substitutions execute inside double quotes, with
+            // their own quoting context and the full command tokenizer.
+            r#"echo "$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
+            r#"echo "$(printf '%s' "$(cas co"nfig" gr''ant-write --task cas-1234 --path /x --reason r)")""#,
+            r#"echo "`cas config gr''ant-write --task cas-1234 --path /x --reason r`""#,
             // cas-a809: the structural check must reach expanding bodies,
             // even when shell quoting hides the textual policy spelling.
             "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
@@ -8437,6 +8517,11 @@ mod workspace_contract_tests {
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
+            r#"echo '$(cas config gr""ant-write --task cas-1234 --path /x --reason r)'"#,
+            r#"echo '`cas config gr""ant-write --task cas-1234 --path /x --reason r`'"#,
+            "echo '$(cas config grant-write --task cas-1234 --path /x --reason r)'",
+            "echo '`cas config grant-write --task cas-1234 --path /x --reason r`'",
+            r#"echo "\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
             "cat <<'EOF'\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",

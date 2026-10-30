@@ -18,6 +18,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   requires override authority and a reason. The Codex coordination note now says
   the merge verdict closes or reopens the task, so workers do not re-close it.
 
+### Fixed — Policy commands in quoted substitutions
+
+- **Double-quoted substitutions enforce operator-only commands** — The shell
+  guard inspects executable substitution bodies with the full command tokenizer,
+  including quote-split command names. Single-quoted command text stays data.
+
 ### Fixed — Release draft linting
 
 - **Unused draft helper removed** — Delete the orphan failure classifier.

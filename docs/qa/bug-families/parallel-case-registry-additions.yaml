@@ -1,4 +1,4 @@
-title: Parallel bug fixes must merge their separate family files without losing registry or close-gate case coverage
-tasks: [cas-c968]
+title: Separate family files preserve parallel merges, close-gate case causality and working-tree drift detection
+tasks: [cas-c968, cas-d4d7]
 invariants: []
 journeys: []

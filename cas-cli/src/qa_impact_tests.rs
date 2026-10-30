@@ -623,6 +623,18 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         selected_added_journey,
         "parity must exercise catalog growth"
     );
+    let secondary_suite = analyze(
+        root,
+        &QaConfig::default(),
+        &[Change::modified("hub-web/e2e/journeys/phone-host-line.journey.ts")],
+        None,
+        Some(&head),
+    ).unwrap();
+    assert_eq!(
+        secondary_suite.journeys.iter().map(|journey| journey.id.as_str()).collect::<Vec<_>>(),
+        ["HUB-J3"],
+        "additional_specs suites retain their registered journey selection"
+    );
 }
 
 /// GH #1340: qa impact, `cas codemap status` and `cas qa journeys --status`

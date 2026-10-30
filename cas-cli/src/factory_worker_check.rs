@@ -3474,6 +3474,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             "nextest run -p cas -E test(hooks::handlers)",
             "nextest run -p cas --lib -E test(=module::name)",
             "nextest run -p cas --test integration_factory -E test(worker)",
+            "nextest run -p crossterm@0.25.0 --lib -E test(take_buffered)",
+            "nextest run -p crate-name@1.0.0-rc.1+build.5 --test harness -E test(worker)",
         ] {
             assert!(allowed_args(&words(accepted)), "{accepted}");
         }
@@ -3516,6 +3518,18 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             let mut args = words("nextest run -p cas -E");
             args.push(filter.into());
             assert!(!allowed_args(&args), "{filter}");
+        }
+        for package in [
+            "@0.25.0", "crossterm@", "crossterm@0.25", "crossterm@01.0.0",
+            "crossterm@0.25.0@0.29.0", "crossterm@*", "crossterm@^0.25.0",
+            "crossterm@0.25.0-", "crossterm@0.25.0+", "crossterm@0.25.0-01",
+            "crossterm@0.25.0 other", "crossterm@0.25.0\n", "crossterm@0.25.0\0",
+            "crossterm@0.25.0;echo", "crossterm@0.25.0$(echo)",
+            "https://example.test/#crossterm@0.25.0",
+        ] {
+            let mut args = words("nextest run -p cas --lib -E test(name)");
+            args[3] = package.into();
+            assert!(!allowed_args(&args), "{package:?}");
         }
     }
 
@@ -4621,10 +4635,15 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let slots = root.join("worker-check-slots");
         std::fs::create_dir_all(&slots).unwrap();
         let _held = acquire_slot(&slots, 1).unwrap();
-        let args: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(x)"]
-            .iter()
-            .map(|arg| arg.to_string())
-            .collect();
+        // Exercise the real verifier-test CLI transport before capped admission.
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas", "factory", "verifier-test", "--cas-root", root.to_str().unwrap(),
+            "--task-id", "cas-proof", "--head", &head, "--",
+            "nextest", "run", "-p", "crossterm@0.25.0", "--lib", "-E", "test(take_buffered)",
+        ]).unwrap();
+        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+        let Some(crate::cli::factory::FactoryCommands::VerifierTest { cargo_args: args, .. }) = factory.command else { panic!("verifier-test command") };
 
         crate::store::init_cas_dir(&repo).unwrap();
         crate::store::open_task_store(&root)

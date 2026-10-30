@@ -508,6 +508,12 @@ else:
         self.assertEqual(self.run_body(shard['run'], {'SHARDS':'success'}).returncode, 0)
         for result in ['failure', 'cancelled']:
             self.assertNotEqual(self.run_body(shard['run'], {'SHARDS':result}).returncode, 0)
+        publication = next(s for s in job['steps'] if 'PUBLICATION' in s.get('env', {}))
+        self.assertIn('queue-flake-publication',job['needs'])
+        for result in ['success','skipped','failure','cancelled','']:
+            with self.subTest(publication=result):
+                self.assertEqual(self.run_body(publication['run'],{'PUBLICATION':result}).returncode == 0,
+                                 result in ['success','skipped'])
 
     def test_real_markdown_step_filters_assets_and_skips_an_asset_only_diff(self):
         source = {'file': '.github/workflows/ci.yml', 'job': 'docs-lint'}

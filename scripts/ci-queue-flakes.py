@@ -13,9 +13,87 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from uuid import uuid4
 
 HERE = Path(__file__).resolve().parent
-QUARANTINE = '.config/flaky-quarantine.json'
+MARKER = re.compile(r'^<!-- cas-queue-flake: (.+?) -->$',re.MULTILINE)
+
+
+class GitHub:
+    """Single-attempt REST transport. Never retry an ambiguous mutation."""
+    def __init__(self, repo):
+        if not re.fullmatch(r'[\w.-]+/[\w.-]+', repo):
+            raise ValueError('an explicit owner/repo issue route is required')
+        self.repo = repo
+        self.root = os.environ.get('GITHUB_API_URL','https://api.github.com').rstrip('/')
+        self.token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+        if not self.token:
+            raise ValueError('GH_TOKEN or GITHUB_TOKEN is required for durable flake tracking')
+
+    def api(self, path='', method='GET', data=None):
+        request = Request(f'{self.root}/repos/{self.repo}{path}', method=method,
+                          data=json.dumps(data).encode() if data is not None else None,
+                          headers={'Authorization':f'Bearer {self.token}', 'Accept':'application/vnd.github+json',
+                                   'Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+        with urlopen(request,timeout=30) as response:
+            body = response.read()
+            return json.loads(body) if body else None
+
+    def issues(self, label=None):
+        result = []
+        for page in range(1,1001):
+            query = {'state':'open','per_page':100,'page':page}
+            if label: query['labels'] = label
+            batch = self.api('/issues?'+urlencode(query))
+            result.extend(i for i in batch if 'pull_request' not in i)
+            if len(batch)<100: return result
+        raise ValueError('issue pagination exceeded safety bound')
+
+    @contextmanager
+    def publication_lock(self):
+        # An atomic ref creation serializes issue creation and observation
+        # updates across workflow runs. It never changes the evaluated tree.
+        # Crash leftovers deliberately fail closed, rather than risking duplicates.
+        branch = self.api()['default_branch']
+        base = self.api('/git/ref/heads/'+branch)['object']['sha']
+        tree = self.api('/git/commits/'+base)['tree']['sha']
+        owner = self.api('/git/commits','POST',{'tree':tree,'parents':[base],
+                         'message':f'Queue flake publication lock {os.environ["GITHUB_RUN_ID"]} '+str(uuid4())})['sha']
+        ref = 'heads/cas-queue-flake-publication-lock'
+        try:
+            self.api('/git/refs','POST',{'ref':'refs/'+ref,'sha':owner})
+        except (HTTPError,OSError):
+            # A lost HTTP response can still have committed the ref.
+            if self.api('/git/ref/'+ref)['object']['sha'] != owner:
+                raise ValueError('flake publication is locked; preserve artifacts and reconcile after the owning job finishes')
+        try:
+            yield
+        finally:
+            if self.api('/git/ref/'+ref)['object']['sha'] != owner:
+                raise ValueError('flake publication lock ownership changed')
+            self.api('/git/refs/'+ref,'DELETE')
+
+    def ensure_labels(self):
+        for label,color in [('flaky','fbca04'),('flaky-quarantine','d93f0b'),('priority:p1','b60205')]:
+            try: self.api('/labels/'+label)
+            except HTTPError as error:
+                if error.code != 404: raise
+                self.api('/labels','POST',{'name':label,'color':color})
+
+
+def issue_state(issue):
+    matches = MARKER.findall(issue.get('body') or '')
+    if len(matches) != 1:
+        raise ValueError(f'flake issue #{issue["number"]} needs one machine-readable test id line')
+    data = json.loads(matches[0])
+    if data.get('schema') != 1 or not isinstance(data.get('runs'),list) or not all(isinstance(r,str) and r.isdigit() for r in data['runs']):
+        raise ValueError('invalid flake observation schema')
+    identity(data['test'])
+    return data
 
 
 def git(repo, *args):
@@ -27,19 +105,18 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False)+'\n')
 
 
-def quarantine(repo):
-    data = json.loads((repo/QUARANTINE).read_text())
-    if data.get('schema') != 1 or not isinstance(data.get('tests'), list):
-        raise ValueError('invalid quarantine schema')
+def quarantine(api):
+    tests = []
     seen = set()
-    for entry in data['tests']:
+    for issue in api.issues('flaky-quarantine'):
+        data = issue_state(issue)
+        entry = {**data['test'],'issue':issue['html_url'],'runs':data['runs']}
         key = identity(entry)
-        if key in seen or not re.fullmatch(r'https://github.com/[\w.-]+/[\w.-]+/issues/[1-9]\d*', entry.get('issue','')):
+        if key in seen or not entry['issue'].startswith(f'https://github.com/{api.repo}/issues/'):
             raise ValueError('quarantine entries need unique test identities and linked fix issues')
-        if len(set(entry.get('runs', []))) < 2:
-            raise ValueError('quarantine requires two independent flake runs')
         seen.add(key)
-    return data['tests']
+        tests.append(entry)
+    return tests
 
 
 def identity(test):
@@ -129,7 +206,7 @@ def run(args):
     head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
         raise ValueError('queue tests require a clean tracked tree')
-    active = quarantine(repo) if queued else []
+    active = quarantine(GitHub(args.issues_repo)) if queued else []
     excluded = [t for t in active if t['runner']==args.runner]
     summary = f'Queue quarantine: {len(excluded)} {args.runner} test(s)\n'+''.join(f'- {identity(t)} — {t["issue"]}\n' for t in excluded)
     print(summary,flush=True)
@@ -167,7 +244,7 @@ def run(args):
             elif excluded:selection += ['-E',f'not ({rust_filter(excluded)})']
         else:
             native = attempt/'playwright/report.json'
-            if index:selection += sorted({re.escape(t['file']) for t in failed})+['--workers=1']
+            if index:selection += sorted({'(^|/)'+re.escape(t['file'])+'$' for t in failed})+['--workers=1']
             if excluded:
                 skip = attempt/'quarantine.txt'
                 skip.write_text(playwright_list(excluded))
@@ -200,6 +277,80 @@ def run(args):
     return 0 if success else 1
 
 
+def reconcile(args):
+    if os.environ.get('GITHUB_EVENT_NAME') != 'merge_group':
+        raise ValueError('flake publication is merge-queue-only')
+    receipts = sorted(args.receipts.rglob('receipt.json'))
+    if not receipts:
+        raise ValueError('no queue receipts found; publication cannot silently pass')
+    observations = {}
+    slots = set()
+    for path in receipts:
+        receipt = json.loads(path.read_text())
+        if receipt.get('schema') != 1 or receipt.get('run_id') != os.environ['GITHUB_RUN_ID']:
+            raise ValueError('receipt does not belong to this workflow run')
+        if os.environ.get('GITHUB_SHA') and receipt['head'] != os.environ['GITHUB_SHA']:
+            raise ValueError('receipt is for a different evaluated commit')
+        slot = receipt['runner']+':'+receipt['shard']
+        if slot in slots: raise ValueError('duplicate shard receipt: '+slot)
+        slots.add(slot)
+        for test in receipt['flaky']:
+            observations[identity(test)] = (test,receipt)
+    if args.expect and slots != set(args.expect):
+        raise ValueError(f'incomplete queue evidence: expected {args.expect}; found {sorted(slots)}')
+    if not observations:
+        print('Queue flake publication: no recovered failures')
+        return 0
+    api = GitHub(args.issues_repo)
+    published = []
+    with api.publication_lock():
+        api.ensure_labels()
+        issues = api.issues()
+        for key,(test,receipt) in observations.items():
+            matches = [(i,issue_state(i)) for i in issues if MARKER.search(i.get('body') or '') and identity(issue_state(i)['test']) == key]
+            if len(matches)>1:
+                raise ValueError('duplicate open flake issues need reconciliation: '+key)
+            issue,state = matches[0] if matches else (None,{'schema':1,'runs':[]})
+            # Store the actual identity fields, not the presentation JSON list.
+            state['test'] = {k:test[k] for k in (('runner','binary','name') if test['runner']=='rust' else ('runner','project','file','titles'))}
+            run_id = receipt['run_id']
+            if not re.fullmatch(r'[1-9]\d*',run_id): raise ValueError('invalid GitHub run id')
+            if run_id not in state['runs']: state['runs'].append(run_id)
+            labels = set(l['name'] for l in issue['labels']) if issue else set()
+            labels.update(['flaky','priority:p1'])
+            if len(set(state['runs']))>=2: labels.add('flaky-quarantine')
+            runs = '\n'.join(f'- https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{r}' for r in state['runs'])
+            body = ('Merge-queue fail-then-pass: **FLAKY**. Fix this test; close this issue with the fix PR.\n\n'
+                    'An open `flaky-quarantine` issue excludes this identity from subsequent queue trees.\n\n'
+                    f'Test id: `{key}`\n\nIndependent runs:\n{runs}\n\n'
+                    f'Evaluated commit: {receipt["head"]}\n\nLatest initial failure:\n'
+                    '```text\n'+test['output'][:16000].replace('```','` ` `').replace('<!--','&lt;!--')+'\n```\n\n'
+                    '<!-- cas-queue-flake: '+json.dumps(state,ensure_ascii=True)+' -->\n')
+            payload = {'title':('Flaky queue test: '+(test['name'] if test['runner']=='rust' else ' › '.join(test['titles'])))[:240],
+                       'body':body,'labels':sorted(labels)}
+            if issue:
+                issue = api.api(f'/issues/{issue["number"]}','PATCH',payload)
+            else:
+                try: issue = api.api('/issues','POST',payload)
+                except (OSError,HTTPError):
+                    # Re-read after an ambiguous create; never blindly create twice.
+                    found = [i for i in api.issues() if MARKER.search(i.get('body') or '') and identity(issue_state(i)['test'])==key]
+                    if len(found)!=1: raise
+                    issue = found[0]
+                issues.append(issue)
+            saved = issue_state(issue)
+            if run_id not in saved['runs'] or (len(set(state['runs']))>=2 and 'flaky-quarantine' not in [l['name'] for l in issue['labels']]):
+                raise ValueError('GitHub did not persist the flake observation/quarantine')
+            published.append({'test':key,'issue':issue['html_url'],'runs':saved['runs'],
+                              'quarantined':'flaky-quarantine' in [l['name'] for l in issue['labels']]})
+    write_json(args.receipts/'publication.json',{'schema':1,'published':published})
+    for item in published: print(f'FLAKY: {item["test"]} — {item["issue"]}; quarantine={item["quarantined"]}')
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
+            summary.write('### Queue flakes\n'+''.join(f'- {p["issue"]}; quarantine={p["quarantined"]}\n' for p in published))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command',required=True)
@@ -208,9 +359,14 @@ def main():
     command.add_argument('--repo',type=Path,default=HERE.parent)
     command.add_argument('--shard',required=True)
     command.add_argument('--out',type=Path,required=True)
+    command.add_argument('--issues-repo',default=os.environ.get('CASSY_ISSUES_REPO',os.environ.get('GITHUB_REPOSITORY','')))
+    command = commands.add_parser('reconcile')
+    command.add_argument('--issues-repo',required=True)
+    command.add_argument('--receipts',type=Path,required=True)
+    command.add_argument('--expect',action='append',default=[],help='required runner:shard receipt (repeatable)')
     args = parser.parse_args()
     try:
-        return run(args)
+        return run(args) if args.command=='run' else reconcile(args)
     except (OSError,ValueError,KeyError,ET.ParseError,subprocess.SubprocessError) as error:
         print(f'ERROR: {error}',file=sys.stderr)
         return 1

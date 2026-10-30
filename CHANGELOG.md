@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Merge queue flake recovery
+
+- **A recovered test no longer ejects the release** — The merge queue reruns
+  failed Rust tests or journey specs once on the same tree, preserving both
+  attempts. A fail-then-pass files a deduplicated P1 issue; a second independent
+  flake quarantines that identity through an open issue label. Closing its fix
+  issue restores the test. Persistent failures still eject, and worker/lane
+  checks retain zero retries. Rust recovery adds at most 30 seconds.
+
 ### Fixed — QA impact for test fixtures
 
 - **Test fixtures stay outside product QA impact** — Changes confined to tests

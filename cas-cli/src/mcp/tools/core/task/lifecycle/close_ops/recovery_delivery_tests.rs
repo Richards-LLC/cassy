@@ -391,7 +391,6 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
         );
         let parked = tasks.get(TASK).unwrap();
         if !advances {
-            eprintln!("DEBUG {subject:?} explicit={explicit_receipt} status={:?} anchor={:?} red={red} green={green}\n{output}", parked.status, parked.deliverables.factory_branch_anchor);
             assert_eq!(
                 parked.deliverables.factory_branch_anchor.as_deref(),
                 Some(red.as_str()),

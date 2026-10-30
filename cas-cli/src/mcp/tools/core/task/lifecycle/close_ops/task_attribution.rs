@@ -809,6 +809,24 @@ pub(crate) fn paths(
     paths_from_ranges(repo, ranges)
 }
 
+/// cas-2a65: the (base, tip) bounds of the same task-attributed delivery
+/// ranges, so a gate can judge what this task's own segments introduced
+/// (including a same-task predecessor merge) without crediting target-sync
+/// or another task's merged work.
+pub(crate) fn range_bounds(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<(String, String)>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    Some(ranges.into_iter().map(|range| (range.base, range.tip)).collect())
+}
+
 /// cas-2d27: without a task delivery tip, a no-code supervisor close must
 /// not adopt unclaimed work from the closing checkout merely because it is
 /// unmerged and inside the task's clock window. Named/recorded task commits

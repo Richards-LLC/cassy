@@ -6506,6 +6506,8 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     let project = env.home().join("model-project");
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);
+    // A Claude host's own effort would otherwise answer for an unreported one.
+    env.remove("CLAUDE_EFFORT");
     let store = crate::store::open_agent_store(&root).unwrap();
     let session = SessionInfo { name: "model-session".into(),
         metadata: create_metadata("model-session", std::process::id(), "lead", &["helper".into()], None, project.to_str(), Some(4173)),

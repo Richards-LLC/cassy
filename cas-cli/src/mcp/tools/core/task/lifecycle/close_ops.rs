@@ -2997,30 +2997,40 @@ fn only_notes_changed(before: &Task, after: &Task) -> bool {
 #[cfg(test)]
 pub(crate) mod close_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
-    static HOOKS: std::sync::Mutex<Vec<(String, bool, Hook)>> = std::sync::Mutex::new(Vec::new());
+    #[derive(PartialEq)]
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff }
+    static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
-        HOOKS.lock().unwrap().push((task_id.to_string(), false, Box::new(hook)));
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeWrite, Box::new(hook)));
     }
 
     pub(crate) fn before_terminal_cas(task_id: &str, hook: impl FnOnce() + Send + 'static) {
-        HOOKS.lock().unwrap().push((task_id.to_string(), true, Box::new(hook)));
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeCas, Box::new(hook)));
+    }
+
+    pub(crate) fn before_queue_handoff(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeHandoff, Box::new(hook)));
     }
 
     pub(super) fn fire(task_id: &str) {
-        fire_at(task_id, false);
+        fire_at(task_id, Phase::BeforeWrite);
     }
 
     pub(super) fn fire_before_cas(task_id: &str) {
-        fire_at(task_id, true);
+        fire_at(task_id, Phase::BeforeCas);
     }
 
-    fn fire_at(task_id: &str, after_read: bool) {
+    pub(super) fn fire_before_handoff(task_id: &str) {
+        fire_at(task_id, Phase::BeforeHandoff);
+    }
+
+    fn fire_at(task_id: &str, at: Phase) {
         let hook = {
             let mut hooks = HOOKS.lock().unwrap();
             hooks
                 .iter()
-                .position(|(id, phase, _)| id == task_id && *phase == after_read)
+                .position(|(id, phase, _)| id == task_id && *phase == at)
                 .map(|index| hooks.remove(index).2)
         };
         if let Some(hook) = hook {
@@ -7540,10 +7550,11 @@ impl CasCore {
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let id = req.id.clone();
-        let queue_enabled = self.task_has_worker_queue(&id)?;
         let mut result = self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
             external_verification_receipt, negative_result, evidence_only,
-            inline_external_ref, inline_execution_note, queue_enabled).await;
+            inline_external_ref, inline_execution_note).await;
+        #[cfg(test)]
+        close_race_hook::fire_before_handoff(&id);
         let note = self.advance_queue_after_delivery(&id).await;
         match note {
             Ok(Some(note)) => if let Ok(result) = result.as_mut() {
@@ -7551,10 +7562,6 @@ impl CasCore {
             },
             Err(error) => tracing::warn!(task_id=%id, %error, "worker task queue advancement deferred"),
             Ok(None) => {},
-        }
-        if queue_enabled && self.open_task_store()?.get(&id)
-            .is_ok_and(|task| task.status == TaskStatus::Closed) {
-            crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&id);
         }
         result
     }
@@ -7568,7 +7575,6 @@ impl CasCore {
         evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
-        queue_enabled: bool,
     ) -> Result<CallToolResult, McpError> {
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
@@ -11594,9 +11600,7 @@ impl CasCore {
         // Everything below is post-commit work (indexing, reminders, the
         // lifecycle outbox, dependents, leases); the dispatch may answer
         // the caller while it finishes.
-        if !queue_enabled {
-            crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
-        }
+        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
 
         let epic_override_note_pending = deferred_epic_override_note.is_some();
         if let Some(note) = deferred_epic_override_note {

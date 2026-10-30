@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Conditional operand recognition
+
+- **Function and coprocess bodies keep arithmetic checks** — Unquoted `[[ … ]]`
+  operands receive numeric-only validation regardless of preceding command
+  words, including functions, coprocesses and nested substitutions.
+
 ### Fixed — QA overdue notice
 
 - **A running "3.92 batch QA round N" holds back the overdue notice** — Was: the hourly notice that merged tasks are waiting for QA only recognized a running round whose title started with "Batch QA round", so a round titled "3.92 batch QA round 8" was ignored and the notice fired anyway. → Now: "batch QA round" anywhere in the title, in any case, counts as a running round.

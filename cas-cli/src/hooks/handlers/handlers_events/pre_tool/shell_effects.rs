@@ -156,20 +156,8 @@ fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'stat
             index += 1;
             continue;
         }
-        let start = (0..index).rfind(|&at| matches!(lexed.tokens[at],
-            ShellToken::Operator(';' | '&' | '|' | '(' | ')'))).map_or(0, |at| at + 1);
-        let mut prefix: Vec<String> = lexed.tokens[start..=index].iter().filter_map(|token| {
-            if let ShellToken::Word(word) = token { Some(word.clone()) } else { None }
-        }).collect();
-        while prefix.first().is_some_and(|word| matches!(word.as_str(),
-            "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"))
-        {
-            prefix.remove(0);
-        }
-        if !unwrapped_command_index(&prefix).is_some_and(|at| prefix[at] == "[[") {
-            index += 1;
-            continue;
-        }
+        // Any raw unquoted conditional is checked, including function and
+        // coprocess bodies whose command prefixes this recognizer cannot prove.
         let end = (index + 1..lexed.tokens.len()).find(|&at| {
             matches!(&lexed.tokens[at], ShellToken::Word(word) if word == "]]") && raw(at) == "]]"
         }).ok_or("an unresolved conditional operand")?;

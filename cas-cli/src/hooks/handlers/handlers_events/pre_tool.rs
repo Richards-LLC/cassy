@@ -5996,7 +5996,12 @@ fn collect_shell_substitutions(
             continue;
         };
         let Some(end) = end else { break };
-        collect_shell_invocations(&command[start..end], depth + 1, found);
+        if ch == b'`' {
+            let body = shell_effects::backquote_body(&command[start..end]);
+            collect_shell_invocations(&body, depth + 1, found);
+        } else {
+            collect_shell_invocations(&command[start..end], depth + 1, found);
+        }
         word_start = false;
         index = end + 1;
     }
@@ -6046,7 +6051,12 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvo
             found.unresolved_heredoc = true;
             break;
         };
-        collect_shell_invocations(&logical[start..end], depth + 1, found);
+        if bytes[index] == b'`' {
+            let body = shell_effects::backquote_body(&logical[start..end]);
+            collect_shell_invocations(&body, depth + 1, found);
+        } else {
+            collect_shell_invocations(&logical[start..end], depth + 1, found);
+        }
         index = end + 1;
     }
 }

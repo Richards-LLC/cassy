@@ -47,6 +47,17 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
       await page.screenshot({ path: `${captures}/expanded-${width}-${colorScheme}.png` });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
+    for (const [name, query, media] of [
+      ["forced-colors", "(forced-colors: active)", { forcedColors: "active" }],
+      ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }],
+      ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }],
+    ] as const) {
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
+      expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
+      await expect(dialog).toBeVisible();
+      await page.screenshot({ path: `${captures}/a11y-${name}.png` });
+    }
+    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
   });
   await journey.stage("Zoom and pan with keyboard, mouse and touch", async () => {
     // At 1440 the 640 px fixture still fits at 1.5×, so it has nothing to pan.
@@ -63,11 +74,13 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2); await page.mouse.up();
     expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toBe(beforeDrag);
+    const beforePinch = await dialog.locator("output").textContent();
     await canvas.evaluate(canvas => {
       const box = canvas.getBoundingClientRect();
       const fire = (type: string, id: number, x: number) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "touch", pointerId: id, clientX: box.left + x, clientY: box.top + box.height / 2 }));
       fire("pointerdown", 1, 70); fire("pointerdown", 2, 170); fire("pointermove", 2, 210); fire("pointerup", 1, 70); fire("pointerup", 2, 210);
     });
+    await expect(dialog.locator("output")).not.toHaveText(beforePinch!);
     await dialog.getByRole("button", { name: "Fit image" }).click();
     await expect(dialog.locator("output")).toHaveText("Fit");
   });
@@ -76,7 +89,7 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     await expect(dialog.locator("h2")).toHaveText("Second screenshot.png");
     await expect(dialog).toHaveAttribute("data-state", "ready");
     await dialog.getByRole("button", { name: "Next image" }).click();
-    await expect(dialog.getByRole("status")).toContainText("Couldn't load Missing screenshot.png");
+    await expect(dialog.getByRole("status", { name: "Image load" })).toContainText("Couldn't load Missing screenshot.png");
     await expect(dialog.getByRole("button", { name: "Try image again" })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Next image" })).toBeDisabled();
     await page.keyboard.press("ArrowLeft");

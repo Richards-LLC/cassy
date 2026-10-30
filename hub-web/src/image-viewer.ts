@@ -21,7 +21,7 @@ export function openImageViewer(opener: HTMLElement, images: readonly GalleryIma
   dialog.setAttribute("aria-label", "Image viewer");
   dialog.innerHTML = `<header><div><h2></h2><p class="image-viewer-position" aria-live="polite"></p></div><button type="button" aria-label="Close image viewer">Close</button></header>
     <div class="image-viewer-canvas" role="region" aria-label="Image inspection" aria-describedby="image-viewer-help" tabindex="0"><img alt="" draggable="false" referrerpolicy="no-referrer"></div>
-    <p class="image-viewer-status" role="status"></p>
+    <p class="image-viewer-status" role="status" aria-label="Image load"></p>
     <footer><div class="image-viewer-gallery"><button type="button" aria-label="Previous image">← Previous</button><button type="button" aria-label="Next image">Next →</button></div><div class="image-viewer-zoom"><button type="button" aria-label="Zoom out">−</button><output aria-label="Image zoom">Fit</output><button type="button" aria-label="Zoom in">+</button><button type="button" aria-label="Fit image">Fit</button></div></footer>
     <p id="image-viewer-help">← → images · + − zoom · Shift + arrows pan · 0 fit · Escape close</p><button type="button" class="image-viewer-retry" aria-label="Try image again" hidden>Try again</button>`;
   const button = (name: string) => dialog.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;

@@ -188,6 +188,19 @@ pub(crate) fn valid_package(package: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+/// Targeted tests may disambiguate duplicate crate names with an exact version.
+/// Keep URLs, partial versions, ranges and shell syntax outside the capped lane.
+fn package_selector(package: &str) -> Option<(&str, Option<&str>)> {
+    let (name, version) = match package.split_once('@') {
+        Some((name, version)) => {
+            semver::Version::parse(version).ok()?;
+            (name, Some(version))
+        }
+        None => (package, None),
+    };
+    valid_package(name).then_some((name, version))
+}
+
 /// Deliberately excludes glob/package-ID expressions, aliases, flags that
 /// broaden the scope, and arbitrary Cargo configuration or toolchains.
 pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
@@ -222,7 +235,7 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
         return None;
     }
     let package = args.get(3)?.clone();
-    if !valid_package(&package) {
+    if package_selector(&package).is_none() {
         return None;
     }
     let mut index = 4;
@@ -287,6 +300,7 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
 }
 
 fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+    let (name, version) = package_selector(package).context("invalid package selector")?;
     let root = repo.join("Cargo.toml");
     let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
     let mut manifests = vec![root];
@@ -308,8 +322,21 @@ fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(toml::Value::as_str)
-            == Some(package)
+            == Some(name)
         {
+            if let Some(version) = version {
+                let declared = value.get("package").and_then(|p| p.get("version"));
+                let resolved = declared.and_then(toml::Value::as_str).or_else(|| {
+                    declared
+                        .and_then(|v| v.get("workspace"))
+                        .and_then(toml::Value::as_bool)
+                        .filter(|inherited| *inherited)
+                        .and_then(|_| manifest.get("workspace")?.get("package")?.get("version")?.as_str())
+                });
+                if resolved != Some(version) {
+                    continue;
+                }
+            }
             return Ok((path, value));
         }
     }
@@ -890,7 +917,15 @@ impl<'a> PassingTests<'a> {
 
     pub(crate) fn packages(&self) -> Vec<String> {
         let mut packages = self.records().iter()
-            .map(|(_, package, _)| package.clone()).collect::<Vec<_>>();
+            .filter_map(|(_, package, _)| {
+                let (name, version) = package_selector(package)?;
+                // A dependency's other version must never cover this workspace
+                // crate. The receipt/audit identity keeps the full selector.
+                if version.is_some() && package_manifest(self.repo, package).is_err() {
+                    return None;
+                }
+                Some(name.to_string())
+            }).collect::<Vec<_>>();
         packages.sort();
         packages.dedup();
         packages
@@ -1007,7 +1042,7 @@ fn read_passing_test_record(
     let test = record.test.take()?;
     if record.repo != repo
         || record.packages.len() != 1
-        || !valid_package(&record.packages[0])
+        || package_selector(&record.packages[0]).is_none()
         || !named_filter(&test.filter)
         || test.count == 0
         || test
@@ -3475,6 +3510,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             "nextest run -p cas -E test(hooks::handlers)",
             "nextest run -p cas --lib -E test(=module::name)",
             "nextest run -p cas --test integration_factory -E test(worker)",
+            "nextest run -p crossterm@0.25.0 --lib -E test(take_buffered)",
+            "nextest run -p crate-name@1.0.0-rc.1+build.5 --test harness -E test(worker)",
         ] {
             assert!(allowed_args(&words(accepted)), "{accepted}");
         }
@@ -3518,6 +3555,18 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             args.push(filter.into());
             assert!(!allowed_args(&args), "{filter}");
         }
+        for package in [
+            "@0.25.0", "crossterm@", "crossterm@0.25", "crossterm@01.0.0",
+            "crossterm@0.25.0@0.29.0", "crossterm@*", "crossterm@^0.25.0",
+            "crossterm@0.25.0-", "crossterm@0.25.0+", "crossterm@0.25.0-01",
+            "crossterm@0.25.0 other", "crossterm@0.25.0\n", "crossterm@0.25.0\0",
+            "crossterm@0.25.0;echo", "crossterm@0.25.0$(echo)",
+            "https://example.test/#crossterm@0.25.0",
+        ] {
+            let mut args = words("nextest run -p cas --lib -E test(name)");
+            args[3] = package.into();
+            assert!(!allowed_args(&args), "{package:?}");
+        }
     }
 
     #[test]
@@ -3525,7 +3574,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let repo = tempfile::tempdir().unwrap();
         std::fs::write(
             repo.path().join("Cargo.toml"),
-            "[workspace]\nmembers = [\"package\"]\n",
+            "[workspace]\nmembers = [\"package\"]\n[workspace.package]\nversion = \"0.25.0\"\n",
         )
         .unwrap();
         let package = repo.path().join("package");
@@ -3538,6 +3587,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             filter: "test(worker)".into(),
         };
         validate_harness(repo.path(), &test).unwrap();
+        for version in ["version = \"0.25.0\"", "version.workspace = true"] {
+            std::fs::write(package.join("Cargo.toml"), format!(
+                "[package]\nname = \"cas\"\n{version}\n[[test]]\nname = \"integration_factory\"\npath = \"harness.rs\"\n"
+            )).unwrap();
+            test.package = "cas@0.25.0".into();
+            validate_harness(repo.path(), &test).unwrap();
+            test.package = "cas@0.29.0".into();
+            assert!(validate_harness(repo.path(), &test).is_err());
+        }
+        test.package = "cas".into();
         test.harness = Some("source_suite_alias".into());
         assert!(validate_harness(repo.path(), &test).is_err());
         test.harness = Some("integration_factory".into());
@@ -4622,10 +4681,15 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let slots = root.join("worker-check-slots");
         std::fs::create_dir_all(&slots).unwrap();
         let _held = acquire_slot(&slots, 1).unwrap();
-        let args: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(x)"]
-            .iter()
-            .map(|arg| arg.to_string())
-            .collect();
+        // Exercise the real verifier-test CLI transport before capped admission.
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas", "factory", "verifier-test", "--cas-root", root.to_str().unwrap(),
+            "--task-id", "cas-proof", "--head", &head, "--",
+            "nextest", "run", "-p", "crossterm@0.25.0", "--lib", "-E", "test(take_buffered)",
+        ]).unwrap();
+        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+        let Some(crate::cli::factory::FactoryCommands::VerifierTest { cargo_args: args, .. }) = factory.command else { panic!("verifier-test command") };
 
         crate::store::init_cas_dir(&repo).unwrap();
         crate::store::open_task_store(&root)
@@ -4817,6 +4881,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         );
         assert!(passing_receipt(root.path(), &repo, &"b".repeat(40)).is_none());
         assert!(passing_receipt(root.path(), root.path(), &head).is_none());
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"cas\"\nversion = \"0.25.0\"\n").unwrap();
+        record_passing_test_for_tests(root.path(), &repo, &head, "cas@0.29.0", "test(worker)");
+        assert!(passing_test_packages(root.path(), &repo, &head).is_empty(),
+            "a passing dependency version cannot cover the workspace crate");
+        record_passing_test_for_tests(root.path(), &repo, &head, "cas@0.25.0", "test(worker)");
+        assert_eq!(passing_test_packages(root.path(), &repo, &head), ["cas"]);
+        assert_eq!(passing_test_receipts(root.path(), &repo, &head), [
+            format!("test: PASS {head} cas@0.25.0 test(worker) 1"),
+            format!("test: PASS {head} cas@0.29.0 test(worker) 1"),
+        ], "receipt identities and audit lines must retain each exact version");
     }
 
     #[cfg(unix)]

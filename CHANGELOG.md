@@ -250,6 +250,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   only within its 95-second outcome window, so an unrelated shutdown cannot
   relabel an old timed-out request as executed.
 
+### Fixed — Capped test package selection
+
+- **Duplicate crate names can select an exact version** — Capped worker and
+  verifier tests accept selectors such as `crossterm@0.25.0`, retain the version
+  in test receipts, and keep the existing named-test and resource guards.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

@@ -1716,7 +1716,7 @@ fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> 
     // Single quotes make the mandatory filter a literal shell argument. Match
     // the suffix after the filter so '&' within a filter is not backgrounding.
     if command.starts_with("cargo nextest ") {
-        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
+        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_@.+-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
         let matched = pattern.captures(command)?;
         let mut args = vec![
             "nextest".into(),

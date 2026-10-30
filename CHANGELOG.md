@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Async terminal output at exit
+
+- **Terminal waits keep the final output** — Async PTY waits observe buffered
+  output and reader completion together, so a short-lived command cannot
+  report an unexpected exit while its matching output is already available.
+
 ### Fixed — Worker guidance contracts
 
 - **Worker startup keeps its protected workflow** — Always-loaded guidance

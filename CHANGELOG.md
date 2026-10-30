@@ -9,7 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Compact merge and close receipts
 
-- **Routine merges now return their compact receipt** with the merge policy, CI commit and immutable detail reference. Overrides, unparked deliveries, push failures and close gates retain their full diagnostics; close summaries keep worktree warnings and verification skip reasons. Closed tasks correctly report no next action.
+- **Routine merges now return their compact receipt** — Includes the merge policy, CI commit and immutable detail reference. Overrides, unparked deliveries, push failures and close gates retain their full diagnostics; close summaries keep worktree warnings and verification skip reasons. Closed tasks correctly report no next action.
 
 ### Fixed — Supervisor idle alerts
 

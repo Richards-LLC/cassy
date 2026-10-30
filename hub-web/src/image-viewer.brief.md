@@ -18,4 +18,12 @@ Performance: lazy-load the viewer on an unmodified image tap; reuse the existing
 
 ## Critique
 
-Pending rendered 390/1440 light/dark and keyboard/pointer evidence.
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Glass dialog, violet focus and the existing evidence card form a continuous inspection path within the conversation. |
+| Fit to argument | 5 | One image owns the canvas; its filename and turn position explain exactly what is being compared. |
+| Hierarchy | 5 | Image first, filename next, compact gallery and zoom controls below; the 390px layout keeps every control visible. |
+| Craft | 4 | Strict visual-qa PASS at desktop/phone in both schemes; 390/1440 production captures show no clipping or horizontal scroll. |
+| Accessibility | 4 | Native modal plus explicit Tab boundaries; close restores focus and scroll; named loading/failure, keyboard controls and all three accessibility media modes exercised. JavaScript is required by Commander. |
+
+Scored by ready-cardinal-28 on 2026-10-30. Four production renders and a separate strict production-component polish fixture were inspected. Protocol traffic is doubled; touch pinch uses synthetic PointerEvents rather than a physical phone. Evidence lives in the task's durable qa directory.

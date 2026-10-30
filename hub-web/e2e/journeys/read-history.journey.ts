@@ -52,7 +52,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
       ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }],
       ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }],
     ] as const) {
-      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+      await page.emulateMedia(media);
       expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
       await expect(dialog).toBeVisible();
       await page.screenshot({ path: `${captures}/a11y-${name}.png` });

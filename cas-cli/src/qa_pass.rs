@@ -402,6 +402,18 @@ pub(crate) fn delivery_branch(
         .iter()
         .find(|pass| !pass.is_withdrawn() && !pass.branch.trim().is_empty())
         .map(|pass| normalize(&pass.branch));
+    // A current repark may land on the current assignee's plain lane. Once
+    // that lane has a fresh delivery anchor and still resolves, it is the
+    // active source even when an older QA round names a retired worker's
+    // branch. Without the anchor, keep preferring the round/task-specific
+    // branch so a stale worker lane cannot hide a per-task or companion tip.
+    if let Some(branch) = parked.as_ref().filter(|branch| {
+        branch.as_str() == own.as_str()
+            && task.deliverables.factory_branch_anchor.is_some()
+            && branch_exists(branch)
+    }) {
+        return branch.clone();
+    }
     for branch in [parked.as_ref(), round.as_ref()].into_iter().flatten() {
         if branch != &own {
             return branch.clone();

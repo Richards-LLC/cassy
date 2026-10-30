@@ -25,6 +25,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   another machine lost the cross-session supervisor hint. Now: recorded remote
   identities retain it; the unknown-session fallback stays unchanged.
 
+### Fixed — Factory QA
+
+- **QA waivers follow a current repark after handoff** — Was: an older passed
+  round on a retired worker's branch could override the current assignee's
+  anchored repark. Now: a validated current-worker parked lane with an active
+  delivery anchor is selected for the waiver, while the exact pushed head is
+  still required.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

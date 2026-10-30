@@ -205,10 +205,10 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expectOneRowHeading();
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
-    // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
-    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
-    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
-    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, "quiet-heron-7", OTTER]);
+    // cas-ade2: project cards sort by name (cas-src, gabber-studio, lighthouse). Rows are titled by project, then machine; the codename is tertiary.
+    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
+    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Studio Mac", "Forge build box with an unusual hostname"]);
+    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, OTTER, "quiet-heron-7"]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });

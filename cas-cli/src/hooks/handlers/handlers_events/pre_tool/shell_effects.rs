@@ -764,6 +764,12 @@ fn collect_script(
             }
             (CaseSyntax::Hidden, _) => continue,
             (CaseSyntax::FirstArm | CaseSyntax::NextArm, _) => Some(';'),
+            // The `&` of `>&file` and the `|` of `>|file` belong to the redirect.
+            (CaseSyntax::Code, Some(ShellToken::Operator('&' | '|')))
+                if end > 0 && matches!(tokens[end - 1], ShellToken::Operator('<' | '>')) =>
+            {
+                continue;
+            }
             (CaseSyntax::Code, Some(ShellToken::Operator(ch @ (';' | '&' | '|' | '(' | ')')))) => Some(*ch),
             (CaseSyntax::Code, None) => None,
             (CaseSyntax::Code, _) => continue,

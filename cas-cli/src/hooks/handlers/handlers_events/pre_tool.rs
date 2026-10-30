@@ -4612,6 +4612,14 @@ fn bash_write_targets(command: &str) -> Vec<String> {
             if let Some(ShellToken::Word(target)) = tokens.get(index + 1) {
                 add_target(target);
             }
+            // `>|file` and `>&file` write too; `>&2` and `>&-` name a descriptor.
+            if let (Some(ShellToken::Operator('|' | '&')), Some(ShellToken::Word(target))) =
+                (tokens.get(index + 1), tokens.get(index + 2))
+                && target != "-"
+                && !target.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                add_target(target);
+            }
         }
     }
     for target in script_write_targets_from_command(command) {
@@ -8793,6 +8801,8 @@ mod workspace_contract_tests {
             ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
             ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
             ("redirect before a write", ">out touch /outside/p\n".into(), true),
+            ("clobber redirect", "echo hi >|/outside/p\n".into(), true),
+            ("combined redirect", "echo hi >&/outside/p\n".into(), true),
             ("redirect before a delete", ">out rm -rf /outside/p\n".into(), true),
             ("descriptor redirect before a write", "2>out touch /outside/p\n".into(), true),
             ("redirect before a directory change", ">out cd /outside; touch p\n".into(), true),

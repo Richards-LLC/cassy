@@ -12,10 +12,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Parked delivery anchors stay on the branch** — Worker pushes refuse
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.
-- **Worker pushes keep required hooks** — Workers and reviewers cannot skip
-  anchor and fast-row checks with `--no-verify`, exported
-  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` overrides, or persistent
-  `core.hooksPath` changes. Inherited `GIT_CONFIG_GLOBAL` and
+- **Worker pushes keep required hooks** — Was: `--no-verify`, exported
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, persistent `core.hooksPath`
+  changes, `git config --unset` and `git config --unset-all` of
+  `core.hooksPath`, `git config unset` of the same key, assignment then export,
+  `declare -x`, and `set -a` could bypass factory push checks. → Now: Workers
+  and reviewers are refused these bypasses. Inherited `GIT_CONFIG_GLOBAL` and
   `GIT_CONFIG_NOSYSTEM` settings no longer block a plain worker push;
   supervisors retain the approved exception route.
 

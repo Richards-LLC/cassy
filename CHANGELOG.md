@@ -72,7 +72,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   probe. QA follows the same tiers, including batch rounds: Tier 0 walks no
   journeys, and Tier 2 needs an adversarial probe row in the task ledger.
   `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
-  per release.
+  per release. The verifier's scratch-checkout lifetime details moved to its evidence-gate
+  reference, keeping its definition under budget with every rule in place.
 - **Follow-ups from findings must clear the spawn threshold** — Was: nothing in
   the tools stopped a review finding becoming a task, and nothing showed when an
   epic's reviews were generating more work than they closed. → Now: `task create`

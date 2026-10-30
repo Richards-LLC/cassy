@@ -337,7 +337,7 @@ fi
         self.assertTrue(runs('scoped-validation', rust, 'true', 'false', event='pull_request', ref='refs/pull/1/merge'))
 
     def test_release_fixtures_run_only_for_scripts_changes_in_both_lane_paths(self):
-        scripts = ['test-release.sh', 'test-release-publish.sh', 'test-install-on-publish.sh']
+        scripts = ['test-release.sh', 'test-release-publish.sh', 'test-install-on-publish.sh', 'test-hub-pin.sh']
         calls = self.root / 'fixture-calls'
         for name in scripts:
             script = self.root / 'scripts' / name

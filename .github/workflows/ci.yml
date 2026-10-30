@@ -606,6 +606,7 @@ jobs:
           ./scripts/test-release.sh
           ./scripts/test-release-publish.sh
           ./scripts/test-install-on-publish.sh
+          ./scripts/test-hub-pin.sh
 
       - name: Detect runner lock fixture changes
         id: runner-lock-diff

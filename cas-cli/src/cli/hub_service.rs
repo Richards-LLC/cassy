@@ -1008,6 +1008,61 @@ fn refresh_installed_service_at(
     }
 }
 
+/// A hotfix pin written by `scripts/hub-pin.sh`.
+#[derive(Debug, serde::Deserialize)]
+struct HubPinReceipt {
+    slot: PathBuf,
+}
+
+/// Move a hotfixed hub onto the release this update just installed (cas-93356).
+/// Runs before the drift check, which would otherwise refuse the pinned bytes.
+/// Returns true when the pin moved, so the hub must restart even at an equal
+/// version: a hotfix and a release can share one. Only the exact managed path
+/// with a matching receipt moves; any other symlink is still binary drift.
+pub(crate) fn advance_managed_hub_pin() -> Result<bool> {
+    if native_platform() != ServicePlatform::Systemd {
+        return Ok(false);
+    }
+    let home = dirs::home_dir().context("cannot resolve home directory")?;
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"))
+        .join("cassy");
+    let installed = super::update::strip_deleted_suffix(std::env::current_exe()?);
+    advance_managed_hub_pin_at(
+        &home.join(".local/lib/cassy/hub/current"),
+        &state,
+        &installed,
+    )
+}
+
+fn advance_managed_hub_pin_at(current: &Path, state: &Path, installed: &Path) -> Result<bool> {
+    let receipt_path = state.join("hub-pin.json");
+    let Ok(receipt) = fs::read_to_string(&receipt_path) else {
+        return Ok(false);
+    };
+    let receipt: HubPinReceipt =
+        serde_json::from_str(&receipt).context("hub pin receipt is unreadable")?;
+    if fs::read_link(current).ok().as_deref() != Some(receipt.slot.as_path()) {
+        return Ok(false);
+    }
+    // The same lock `hub-pin.sh` takes around activate and rollback.
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("hub-pin.lock"))
+        .context("open hub pin lock")?;
+    fs2::FileExt::try_lock_exclusive(&lock).context("another hub pin operation is running")?;
+    let parent = current.parent().context("hub pin path has no parent")?;
+    let temporary = parent.join(format!(".current.{}.tmp", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    std::os::unix::fs::symlink(installed, &temporary).context("create hub pin link")?;
+    fs::rename(&temporary, current).context("advance hub pin")?;
+    fs::remove_file(&receipt_path).context("clear hub pin receipt")?;
+    Ok(true)
+}
+
 /// A service restart reuses the manager's executable, not the updating CLI.
 /// Refuse before rewriting or reloading anything when those executables differ.
 fn require_installed_service_binary(
@@ -2967,6 +3022,42 @@ exit 0
 
         assert!(!service_file_requests_tailscale(&loopback).unwrap());
         assert!(service_file_requests_tailscale(&published).unwrap());
+    }
+
+    /// cas-93356: `cas update` moves a hotfixed hub to the new release and clears
+    /// the pin, so the drift check passes. A link it cannot prove is its own stays
+    /// put, and that drift check still refuses it.
+    #[test]
+    fn update_advances_only_a_proven_hub_pin_cas_93356() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("bin/cas");
+        let slot = dir.path().join("hub/versions/abc/cas");
+        let other = dir.path().join("elsewhere/cas");
+        for binary in [&installed, &slot, &other] {
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            fs::write(binary, "binary").unwrap();
+        }
+        let current = dir.path().join("hub/current");
+        let state = dir.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        let receipt = state.join("hub-pin.json");
+        let unit = format!("[Service]\nExecStart={} hub serve\n", current.display());
+
+        std::os::unix::fs::symlink(&other, &current).unwrap();
+        assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "no receipt");
+        fs::write(&receipt, serde_json::json!({"slot": slot}).to_string()).unwrap();
+        assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "receipt names another target");
+        assert_eq!(fs::read_link(&current).unwrap(), other);
+        assert!(receipt.exists());
+        assert!(require_installed_service_binary(ServicePlatform::Systemd, &unit, &installed).is_err());
+
+        fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(&slot, &current).unwrap();
+        assert!(advance_managed_hub_pin_at(&current, &state, &installed).unwrap());
+        assert_eq!(fs::read_link(&current).unwrap(), installed);
+        assert!(!receipt.exists(), "the update clears the hotfix pin");
+        require_installed_service_binary(ServicePlatform::Systemd, &unit, &installed).unwrap();
+        assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "nothing left to advance");
     }
 
     #[test]

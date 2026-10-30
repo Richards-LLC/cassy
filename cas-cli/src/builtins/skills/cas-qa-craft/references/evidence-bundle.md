@@ -262,6 +262,7 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
+Use 10 fps for QA screencasts to reduce the encoder backlog.
 The worked example below is self-contained for other projects. Its chapter
 helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
 styles to the target project's DESIGN.md.
@@ -314,7 +315,7 @@ const visualChange = true; // match bundle.json visual_change for this delivery
 
 test('cas-1234 demo: filter to no matches', async ({ page }) => {
   if (visualChange) {
-    await page.screencast.start({ path: `${QA}/receipt.webm`, size: page.viewportSize()! });
+    await page.screencast.start({ path: `${QA}/receipt.webm`, size: page.viewportSize()!, fps: 10 });
     await page.screencast.showActions({ position: 'top-right' });
   }
   await page.goto('/');

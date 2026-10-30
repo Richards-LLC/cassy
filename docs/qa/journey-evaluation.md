@@ -73,9 +73,10 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
   - journey traces use DOM and ARIA snapshots, with screen snapshots and trace
     screenshots off; the stage screenshots and full-size screencast remain
   - `receipt.webm`, a full-size `page.screencast` recording at 10 fps with
-    `showActions` on and one `showChapter` per stage. The bounded encoding
-    cadence prevents a video backlog from consuming context teardown time;
-    the `Finalize journey recording` trace step exposes the encoder drain
+    `showActions` on and one `showRecordingChapter` per stage. This reduces
+    frame encoding by about 2.5× compared with 25 fps; a video backlog can
+    still consume context teardown time. Watch the `Finalize journey recording`
+    trace step for encoder drain on four-worker release runs
   - `J01.png`, `J02.png` and so on, one screenshot at the end of every stage
   - `final.aria.yml` and `final.aria.json`, aria snapshots of the goal state
   - `result.json`, with the id, the stage titles and durations, and the

@@ -3740,7 +3740,7 @@ mod tests {
         assert_eq!(got, WorkerLivenessState::Alive);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn background_processes_reports_a_real_long_running_child_and_no_child_case() {
         // This process is the fake pane PID. Its direct `sleep` child is the

@@ -75,6 +75,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
+- **Quick rich-content inspections are counted** — Was: opening and closing a
+  diagram source or unified diff in quick succession could collapse into one
+  toggle event, leaving the inspection uncounted. → Now: the usage counter
+  increments when the opening summary is activated, even if the browser
+  coalesces the toggles.
 - **Messages kept in two tabs all go out after an outage** — Was: with two
   Commander tabs open, a message kept during an outage could stay "Waiting for
   the connection" under a Live header after reconnecting, and was never sent

@@ -83,7 +83,7 @@ describe("work events (cas-ff22)", () => {
     expect(forA(), "a repaint of the same thread reads nothing").toBe(2);
   });
 
-  it.each([undefined, "worker"])("retains live append invalidations while the newest page is pending (agent: %s)", (agent) => {
+  it.each([{ agent: undefined, refused: false }, { agent: "worker", refused: false }, { agent: "worker", refused: true }])("retains live append invalidations while the newest page is pending (agent: $agent, refused: $refused)", ({ agent, refused }) => {
     let request = 0;
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: vi.fn(() => `r${++request}`), requestWorkEventDetail: () => undefined };
     const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {} } });
@@ -91,7 +91,8 @@ describe("work events (cas-ff22)", () => {
     else picture.watchThread("m", "s");
     picture.appended("m", "s"); picture.appended("m", "s");
     expect(transport.requestWorkEvents, "notices coalesce while the page is in flight").toHaveBeenCalledTimes(1);
-    picture.page("m", "s", workEventsPage({ request_id: "r1", events: [wire("read", 1, { agent })], has_earlier: false })!);
+    if (refused) picture.failed("m", "s", "r1", "temporarily unavailable");
+    else picture.page("m", "s", workEventsPage({ request_id: "r1", events: [wire("read", 1, { agent })], has_earlier: false })!);
     expect(transport.requestWorkEvents, "the answer cannot consume a newer append notice").toHaveBeenCalledTimes(2);
     picture.page("m", "s", workEventsPage({ request_id: "r2", events: [wire("read", 1, { agent }), wire("bash", 2, { agent })], has_earlier: false })!);
     expect(picture.stream("m", "s", agent).events.map(event => event.id)).toEqual(["read", "bash"]);

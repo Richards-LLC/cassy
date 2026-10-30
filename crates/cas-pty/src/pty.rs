@@ -361,6 +361,18 @@ pub fn claude_worker_contract(worker_name: &str) -> String {
 }
 
 /// The Codex worker contract, delivered as `--config developer_instructions`.
+/// The skills a factory worker's native listing keeps. Every other skill stays
+/// available by name through the `skill` MCP tool, which the contract names.
+/// OpenCode's verbose rows set the budget: six fit under 2,500 characters.
+pub const WORKER_ROLE_SKILLS: &[&str] = &[
+    "cas-diagnosing-bugs",
+    "cas-resolving-merge-conflicts",
+    "cas-search",
+    "cas-tdd",
+    "cas-worker",
+    "verify-before-claim",
+];
+
 pub fn codex_worker_instructions() -> String {
     worker_contract("mcp__cs__", None, WorkerContractHarness::Codex)
 }
@@ -397,6 +409,7 @@ pub fn worker_contract(
     worker_name: Option<&str>,
     harness: WorkerContractHarness,
 ) -> String {
+    let role_skills = WORKER_ROLE_SKILLS.join(", ");
     let named = worker_name
         .map(|name| format!(" ({name})"))
         .unwrap_or_default();
@@ -432,7 +445,9 @@ then `{prefix}task action=close id=<task-id> \
 reason=\"...\"` or hand off before starting another. Successful task action=start is authoritative \
 assignment acceptance; no prose ACK is required. Add milestone notes with `{prefix}task \
 action=notes id=<task-id> note_type=progress notes=\"...\"`. Read the cas-worker skill at \
-startup; its conditional references cover checks, delivery and recovery. Load \
+startup; its conditional references cover checks, delivery and recovery. Your role skills are \
+{role_skills}. Any other skill, such as cas-qa-craft, is on demand: `{prefix}skill action=list_all` \
+lists the catalog and `{prefix}skill action=show id=<skill>` returns its instructions. Load \
 `{prefix}task` and `{prefix}coordination`. For an assigned QA-pass task, also load \
 `{prefix}verification` and record your own verdict with `{prefix}verification action=qa_record \
 task_id=<delivery-id> status=approved|rejected summary=\"...\" ledger_path=<LEDGER.md>`. \

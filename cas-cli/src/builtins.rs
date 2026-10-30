@@ -2762,6 +2762,46 @@ pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFil
     }
 }
 
+/// One shipped skill, or one of its resources, on demand: `id` is `<skill>` or
+/// `<skill>/<relative path>`. Workers list only their role skills natively, so
+/// this serves the rest whether or not any project ever synced them.
+pub fn builtin_skill_file(harness: SupervisorCli, id: &str) -> Option<&'static BuiltinFile> {
+    let id = id.trim().trim_matches('/');
+    let entrypoint = format!("skills/{id}/SKILL.md");
+    let resource = format!("skills/{id}");
+    skill_catalog_for_harness(harness)
+        .iter()
+        .find(|file| file.path == entrypoint || file.path == resource)
+}
+
+/// The resource ids `builtin_skill_file` serves beside a skill's entrypoint.
+pub fn builtin_skill_resources(harness: SupervisorCli, skill: &str) -> Vec<&'static str> {
+    let prefix = format!("skills/{}/", skill.trim().trim_matches('/'));
+    skill_catalog_for_harness(harness)
+        .iter()
+        .filter(|file| file.path.starts_with(&prefix) && !file.path.ends_with("/SKILL.md"))
+        .filter_map(|file| file.path.strip_prefix("skills/"))
+        .collect()
+}
+
+/// `(name, description)` for every shipped skill of a harness, sorted by name.
+pub fn builtin_skill_index(harness: SupervisorCli) -> Vec<(&'static str, &'static str)> {
+    let mut index: Vec<_> = skill_catalog_for_harness(harness)
+        .iter()
+        .filter_map(|file| {
+            let name = file.path.strip_prefix("skills/")?.strip_suffix("/SKILL.md")?;
+            let description = file
+                .content
+                .lines()
+                .find_map(|line| line.strip_prefix("description:"))
+                .map_or("", str::trim);
+            Some((name, description))
+        })
+        .collect();
+    index.sort_unstable();
+    index
+}
+
 /// The agent catalog for a harness (cas-cc8c parity helpers).
 pub fn agent_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFile] {
     match harness {

@@ -476,6 +476,7 @@ impl Pane {
         resume_session: Option<&str>,
     ) -> Result<Self> {
         cli.backend().prepare_workdir(&cwd, config_dir)?;
+        cli.backend().prepare_worker_catalog(&cwd);
         let mut config = Self::build_worker_config(
             name,
             cwd,

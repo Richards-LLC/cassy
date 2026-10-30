@@ -3,6 +3,7 @@ import { test, expect, journeyPart } from "./journey";
 import { journeyNow, journeyStamp } from "./clock";
 import type { Page } from "@playwright/test";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+import { SCOPES } from "./hub-double";
 
 /** The operator's latest message group: its label time, and the day separator above it. */
 async function lastSend(page: Page): Promise<{ label: string; day: string }> {
@@ -350,5 +351,37 @@ test("HUB-J7 double-tapping the bookmark jumps without answering (cas-450b, cas-
     await page.getByRole("log").getByRole("button", { name: "Open PR", exact: true }).click();
     expect(await sent).toMatchObject({ text: "Open PR", in_reply_to: ask });
     await expect(page.locator(".pinned-ask")).toBeHidden();
+  });
+});
+
+test("HUB-J7 save a secret an agent asked for (cas-1996)", journeyPart, async ({ page, journey }) => {
+  const VALUE = "sk_live_journey_7f3a9c";
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
+  let request = 0;
+  const card = () => page.getByRole("log").locator(`.obj.secret[data-notification-id="${request}"]`);
+  await journey.stage("The supervisor asks for a secret", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
+    request = hub.supervisorSays(PELICAN, "Needed to publish the crate. Create one at crates.io under API Tokens.", { kind: "secret", summary: "CRATES_TOKEN" });
+    await expect(card().locator(".secret-name")).toHaveText("CRATES_TOKEN");
+    await expect(card()).toContainText("Needed to publish the crate.");
+    await expect(card().locator(".secret-scope")).toContainText("mode 600");
+    await expect(card().locator('input[type="password"]')).toHaveAttribute("autocomplete", "off");
+    await expect(page.locator('[aria-label="Conversation context"] [data-section="waiting"] .context-jump[data-kind="secret"]')).toHaveCount(1);
+  });
+  await journey.stage("Save it securely", async () => {
+    const framesBefore = hub.frames.length;
+    await card().locator('input[type="password"]').fill(VALUE);
+    await card().getByRole("button", { name: "Save securely" }).click();
+    await expect(card().locator(".chip.sent")).toHaveText("Saved to /home/operator/.cas/private/creds/cassy/CRATES_TOKEN");
+    expect(hub.secrets).toMatchObject([{ session: PELICAN, notification_id: request, body: { value: VALUE }, status: 200 }]);
+    // The value went only to the secrets route: no frame, send or stored page state carries it.
+    expect(JSON.stringify(hub.frames.slice(framesBefore))).not.toContain(VALUE);
+    expect(JSON.stringify(hub.sends)).not.toContain(VALUE);
+    expect(await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }))).not.toContain(VALUE);
+    await expect(page.getByRole("log")).not.toContainText(VALUE);
+    // Saved, it no longer waits on the operator.
+    await expect(page.locator('[aria-label="Conversation context"] [data-section="waiting"] .context-jump[data-kind="secret"]')).toHaveCount(0);
   });
 });

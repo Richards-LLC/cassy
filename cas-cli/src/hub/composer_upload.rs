@@ -252,7 +252,7 @@ fn private_directory(path: &FsPath) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn private_file(path: &FsPath, create_new: bool) -> anyhow::Result<File> {
+pub(super) fn private_file(path: &FsPath, create_new: bool) -> anyhow::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     if create_new {

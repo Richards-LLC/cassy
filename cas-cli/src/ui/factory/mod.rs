@@ -145,7 +145,7 @@ pub use protocol::{
     MessageAttribution, OperatorReplyPayload, OperatorTurnKind, PROTOCOL_VERSION, PaneBootstrap,
     PaneInfo, PaneKind, PaneSizeAuthority, ProtocolCapability, SessionMetadata, SessionState,
     WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, WorkTool, WorkToolCounts, WorkLifecycle, WorkReasoning,
-    WorkChangedFile, WorkChangedFiles, daemon_capabilities,
+    WorkChangedFile, WorkChangedFiles, daemon_capabilities, valid_secret_name,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{

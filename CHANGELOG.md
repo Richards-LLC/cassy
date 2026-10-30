@@ -127,6 +127,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Explicit headful tests fail when Claude is unavailable** — Was: an opted-in test could pass without launching Claude, and the fixture discarded the selected Claude account. Now: dependency and authentication failures are explicit, live fixtures retain Claude credentials, and documented capped operator runs preserve host PATH and show live success evidence.
 
+### Added — Commander secret requests
+
+- **An agent can ask for a secret, and it stays out of chat** — Was: an agent
+  that needed an API key had to ask in a message, and the key you pasted back
+  became part of the conversation, its history and the supervisor's
+  transcript. → Now: a supervisor sends `coordination action=message
+  target=operator kind=secret summary=<NAME> message=<what it is for>`, and
+  Commander shows an "Asking for a secret" card with a masked field, Save
+  securely and Decline. The value goes to the hub's new
+  `POST /v1/sessions/{session}/secrets/{id}` route (factory:manage pairings
+  only) and is written to a mode-600 file named after the request in a mode-700
+  folder. The supervisor gets a reply naming the file, never the value, and
+  the audit records the name and path only. The folder is
+  `secrets.destination` (`cas config set secrets.destination <path>`), with a
+  user default in `~/.cas/config.toml` and a built-in default of
+  `~/.cas/private/creds/<project>`; only the operator can change it. Saved
+  files are kept until you delete them.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

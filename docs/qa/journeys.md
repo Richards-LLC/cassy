@@ -288,6 +288,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 12. Read a question on a short phone screen — at 390px by 440px, the waiting bookmark remains visible
 13. A double tap jumps without sending — the full question in the thread gains focus, no reply is sent, and no duplicate card opens above the composer
 14. Deliberately choose an option in the thread — the chosen answer is sent in reply to that question, and the bookmark clears
+15. The supervisor asks for a secret — a separate part on a pairing with factory:manage: the card names the secret, says what it is for and that it is saved only on the machine as a private mode-600 file, offers a masked field (autocomplete off), Save securely and Decline, and the context rail lists it as waiting
+16. Save it securely — the value goes only to the hub's secrets route; the card clears its field and shows the saved file's path, and it no longer waits in the context rail; no session frame, send, page storage or thread text carries the value
 
 #### Expected experience
 

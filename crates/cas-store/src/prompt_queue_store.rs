@@ -829,7 +829,7 @@ fn conversation_open_attention_sql() -> String {
          FROM prompt_queue
          WHERE factory_session = ?1
            AND ((lower(target) = 'operator'
-                 AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker'))
+                 AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker', 'secret'))
              OR (source LIKE 'commander:%' AND operator_verified = 1 AND lower(target) <> 'operator')
              OR (source = 'terminal' AND target = 'terminal-history' AND processed_at IS NOT NULL))
          ORDER BY id DESC"
@@ -13023,6 +13023,9 @@ mod tests {
         }
         assert!(store.conversation_open_attention("factory-8", "phone-7").unwrap().is_empty());
         assert!(store.conversation_open_attention("factory-7", "").unwrap().is_empty());
+        // cas-1996: a secret request waits on the operator like an ask.
+        let secret = store.enqueue_with_session("supervisor", "operator", r#"{"kind":"secret"}"#, "factory-9").unwrap();
+        assert_eq!(store.conversation_open_attention("factory-9", "phone-7").unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![secret]);
         for (suffix, source, verified, processed, header, closes_ask, closes_blocker) in [
             ("unverified", "commander:test", false, false, "exact", false, false),
             ("pending-terminal", "terminal", false, false, "exact", false, false),

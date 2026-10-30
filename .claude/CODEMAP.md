@@ -117,6 +117,7 @@
 - `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs` - non-secret account projection and audited typed lifecycle routes.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth cache, durable phone input and recovery audits.
 - `cas-cli/src/hub/composer_upload.rs`, `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts` - bounded upload identity and persistent sent-file presentation.
+- `cas-cli/src/hub/secret_request.rs`, `cas-cli/src/config/meta/seed/secrets.rs` - Commander secret requests: the value is saved to a mode-600 file in `secrets.destination` and only its path is replied.
 - `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media streams, hashed chunks and sandboxed pages.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/context-resize.ts` - pairing, scoped folder grants and remembered layout width.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, isolated previews and real-hub recovery fixtures.

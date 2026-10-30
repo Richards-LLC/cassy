@@ -61,7 +61,7 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
     || !(value.reply_to === null || (Number.isSafeInteger(value.reply_to) && (value.reply_to as number) > 0))
     || !boundedText(value.message) || !boundedText(value.summary) || !boundedText(value.device_id, 2_000)) return undefined;
   const kind = value.kind ?? "answer";
-  if (!["answer", "status", "receipt", "ask", "blocker"].includes(kind as string)) return undefined;
+  if (!["answer", "status", "receipt", "ask", "blocker", "secret"].includes(kind as string)) return undefined;
   const attachments = value.attachments ?? [];
   if (!Array.isArray(attachments) || attachments.some(a => !object(a)
     || !["artifact_id", "name", "mime", "sha256"].every(key => boundedText(a[key], 2_000))

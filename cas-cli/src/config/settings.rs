@@ -159,6 +159,20 @@ impl HubTransportMode {
     }
 }
 
+/// Where Commander saves a secret the operator pastes for an agent
+/// (cas-1996). Lives at `[secrets]` in a project's `.cas/config.toml`, with a
+/// user default in `~/.cas/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    /// Folder for saved secrets. `~` expands to the home directory and
+    /// `<project>` to the project folder's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+/// The built-in `secrets.destination`.
+pub const DEFAULT_SECRETS_DESTINATION: &str = "~/.cas/private/creds/<project>";
+
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {

@@ -140,9 +140,100 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
   return object;
 }
 
-/** Register both objects on the Pebble 2 seam. Returns the unregister. */
+/**
+ * What this page's answer to a secret request said, by request id, until the
+ * hub's reply reaches the history (cas-1996). Never the value.
+ */
+const secretOutcomes = new Map<number, string>();
+
+/**
+ * cas-1996: an agent asks for a credential. The card reuses the ask's fused
+ * tray (no new shape): the request names the secret and says what it is for
+ * and who can read it; the tray holds a masked field, Save securely and
+ * Decline. The value goes to the hub's secrets route through
+ * `context.answerSecret`, never a send, so it is in no message, journal or
+ * history. The hub replies to the supervisor with the saved file's path.
+ */
+export function renderSecretObject(reply: OperatorReply, context: TurnRenderContext): HTMLElement {
+  const { document } = context;
+  const name = reply.summary.trim();
+  const object = document.createElement("div");
+  object.className = "obj t-a secret";
+  object.setAttribute("role", "group");
+  object.setAttribute("aria-label", `Secret ${name} requested by ${context.supervisor}`);
+  object.dataset.notificationId = String(reply.notification_id);
+  const body = document.createElement("div"); body.className = "obj-body";
+  const title = document.createElement("p"); title.className = "secret-title";
+  const label = document.createElement("span"); label.textContent = "Asking for a secret: ";
+  const code = document.createElement("code"); code.className = "secret-name"; code.textContent = name;
+  title.append(label, code);
+  const scope = document.createElement("p"); scope.className = "secret-scope";
+  scope.textContent = `Saved only on ${context.machine ?? "the session's machine"}, as a private file (mode 600) that ${context.supervisor} can read. It never appears in chat or history.`;
+  body.append(title, ...context.body(), scope);
+  const foot = document.createElement("div"); foot.className = "obj-foot";
+  const answer = context.history?.answered(reply.notification_id);
+  const outcome = answer ? sentMessageLabel(answer.text) : secretOutcomes.get(reply.notification_id);
+  const retired = outcome ? undefined : context.history?.retirement(reply.notification_id);
+  if (outcome) {
+    object.dataset.answered = "true";
+    const sent = document.createElement("span"); sent.className = "chip sent";
+    if (answer) sent.dataset.state = answer.state;
+    sent.append(tick(document), document.createTextNode(outcome));
+    foot.append(sent);
+  } else if (retired && retired !== "dismissed") {
+    object.dataset.answered = "false";
+    object.dataset.retired = retired;
+    const note = document.createElement("p"); note.className = "ask-retired"; note.textContent = RETIRED_LINES[retired];
+    foot.append(note);
+  } else {
+    object.dataset.answered = "false";
+    const form = document.createElement("form"); form.className = "secret-form";
+    const input = document.createElement("input");
+    input.type = "password"; input.className = "secret-value"; input.name = "secret";
+    input.autocomplete = "off"; input.spellcheck = false;
+    input.setAttribute("autocapitalize", "off"); input.setAttribute("autocorrect", "off");
+    input.setAttribute("aria-label", `Value for ${name}`);
+    input.placeholder = "Paste the value";
+    const save = document.createElement("button"); save.type = "submit"; save.className = "chip secret-save"; save.textContent = "Save securely";
+    const decline = document.createElement("button"); decline.type = "button"; decline.className = "chip secret-decline"; decline.textContent = "Decline";
+    const status = document.createElement("p"); status.className = "secret-status"; status.setAttribute("role", "status");
+    const controls = [input, save, decline];
+    if (!context.answerSecret) for (const control of controls) control.disabled = true;
+    const send = async (answerWith: { value: string } | { decline: true }): Promise<void> => {
+      if (!context.answerSecret) return;
+      for (const control of controls) control.disabled = true;
+      status.textContent = "decline" in answerWith ? "Declining…" : "Saving on the machine…";
+      try {
+        const saved = await context.answerSecret(reply, answerWith);
+        input.value = "";
+        const text = "decline" in answerWith ? "Declined" : `Saved to ${saved.path ?? "the machine"}`;
+        secretOutcomes.set(reply.notification_id, text);
+        object.dataset.answered = "true";
+        const sent = document.createElement("span"); sent.className = "chip sent";
+        sent.append(tick(document), document.createTextNode(text));
+        foot.replaceChildren(sent);
+      } catch (error) {
+        status.textContent = error instanceof Error && error.message ? error.message : "Could not save the secret. Try again.";
+        for (const control of controls) control.disabled = false;
+      }
+    };
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      if (!input.value.trim()) { status.textContent = "Paste the value first."; input.focus(); return; }
+      void send({ value: input.value });
+    };
+    decline.onclick = () => { void send({ decline: true }); };
+    form.append(input, save, decline);
+    foot.append(form, status);
+  }
+  object.append(body, foot);
+  return object;
+}
+
+/** Register the objects on the Pebble 2 seam. Returns the unregister. */
 export function installAttentionObjects(): () => void {
   const ask = registerTurnRenderer("ask", renderAskObject);
   const blocker = registerTurnRenderer("blocker", renderBlockerObject);
-  return () => { ask(); blocker(); };
+  const secret = registerTurnRenderer("secret", renderSecretObject);
+  return () => { ask(); blocker(); secret(); };
 }

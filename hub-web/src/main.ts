@@ -42,7 +42,7 @@ import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, schemePreference, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
-import { HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
+import { AuthenticationError, HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, fatalConnectionRecovery, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
@@ -541,6 +541,19 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // A quick-reply chip answers the ask through the same leased path as
       // the composer, with in_reply_to = the ask's notification id.
       respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
+      // cas-1996: a secret goes straight to the hub's secrets route, never
+      // through submitSupervisorMessage, the journal or the history.
+      answerSecret: async (request, answer) => {
+        const connection = connections.get(threadMachineId);
+        if (!connection) throw new Error("The machine is disconnected. Reconnect, then save again.");
+        try {
+          return await connection.answerSecret(threadSession, request.notification_id, answer);
+        } catch (error) {
+          if (error instanceof HubRequestError && error.detail) throw new Error(error.detail);
+          if (error instanceof AuthenticationError && error.kind === "scope-mismatch") throw new Error("This device cannot save secrets: its pairing needs factory:manage.");
+          throw error;
+        }
+      },
       // Retry sends the refused text again through the same leased path,
       // keeping its original in_reply_to; the refused bubble leaves the
       // thread only once the new send is actually on the wire.

@@ -523,6 +523,10 @@ impl Config {
             ("issues.components.cassy".to_string(), issue_repos.cassy),
             ("issues.components.violet".to_string(), issue_repos.violet),
             ("issues.components.cloud".to_string(), issue_repos.cloud),
+            (
+                "secrets.destination".to_string(),
+                self.get("secrets.destination").unwrap_or_default(),
+            ),
             // History section
             (
                 "history.github_repo".to_string(),

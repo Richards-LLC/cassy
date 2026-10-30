@@ -2220,6 +2220,15 @@ dialog form > *,
 .pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
 .pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
 .pinned-ask .obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--pin-chip-hover); }
+/* cas-1996: a secret request is an ask's tray holding a masked field, Save
+ * securely and Decline. Same object, same tokens; no new shape. */
+.obj.t-a.secret .secret-form { display: flex; flex-wrap: wrap; gap: 9px; flex: 1 1 100%; margin: 0; }
+.obj.t-a.secret .secret-value { flex: 1 1 100%; min-width: 0; padding: 8px 14px; border: 1px solid var(--tray-chip-line); border-radius: 999px; background: var(--panel); color: var(--ink); font: var(--weight-regular) 15px/1.4 var(--font-mono); }
+.obj.t-a.secret .secret-value:focus-visible { outline: 2px solid var(--tray-focus); outline-offset: 1px; }
+.obj.t-a.secret .secret-save { font-weight: var(--weight-semibold); }
+.obj.t-a.secret .secret-status:empty { display: none; }
+.obj.t-a.secret .secret-status { flex: 1 1 100%; font: var(--weight-medium) 12.5px/1.3 var(--font-ui); }
+.obj.t-a.secret .secret-scope { font-size: 13px; opacity: 0.85; }
 .obj p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .obj p + p { margin-top: 8px; }
 .obj .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }

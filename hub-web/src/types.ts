@@ -93,7 +93,7 @@ export interface SessionState {
   rows: number;
 }
 
-export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker";
+export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker" | "secret";
 
 export interface ArtifactRef {
   artifact_id: string;

@@ -277,6 +277,8 @@ export class HubDouble {
   readonly deliveredRefusals: string[] = [];
   /** POST /v1/sessions/<s>/write-grants calls, in order, with what the double answered (cas-ab04). */
   readonly writeGrants: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
+  /** POST /v1/sessions/<s>/secrets/<id> calls, in order, with what the double answered (cas-1996). */
+  readonly secrets: Array<{ machine: string; session: string; notification_id: number; body: Record<string, unknown>; status: number }> = [];
   /** POST /v1/sessions/<s>/operations calls, in order, with what the double answered (cas-a474). */
   readonly operations: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
   private readonly operationOutcomes = new Map<string, Record<string, unknown>>();
@@ -562,6 +564,27 @@ export class HubDouble {
     if (!(path.startsWith("/") || path.startsWith("~/"))) return answer(400, { error: "invalid_write_grant", detail: `write root \`${path}\` must be an absolute path (or start with ~/)` });
     const resolved = path.startsWith("~/") ? `/home/operator/${path.slice(2)}` : path;
     return answer(200, { grant: { task, path: resolved, modes: String(body.mode ?? "create+edit").split("+"), reason: body.reason, granted_by: "commander-device:journey-device" } });
+  }
+
+  /**
+   * As the hub's secrets route answers (cas-1996): factory:manage only, one
+   * answer per request, the path of a mode-600 file, never the value.
+   */
+  private async answerSecret(route: Route, machineId: string, session: string, notificationId: number): Promise<void> {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    const answer = async (status: number, json: Record<string, unknown>) => {
+      this.secrets.push({ machine: machineId, session, notification_id: notificationId, body, status });
+      this.observed();
+      await route.fulfill({ status, json });
+    };
+    if (!this.scopesFor(machineId).includes("factory-manage")) return answer(403, { error: "scope_denied", required_scope: "factory:manage" });
+    const request = this.live.get(session)?.replies.find((reply) => reply.notification_id === notificationId && (reply as { kind?: string }).kind === "secret");
+    if (!request || this.secrets.some((call) => call.notification_id === notificationId && call.status === 200)) {
+      return answer(409, { error: "secret_not_open", detail: "This secret request is not waiting in this session. It may already be answered." });
+    }
+    const name = String((request as { summary?: string }).summary ?? "").trim();
+    if (body.decline === true) return answer(200, { name, declined: true });
+    return answer(200, { name, path: `/home/operator/.cas/private/creds/cassy/${name}`, saved: true });
   }
 
   /** The brief's operations endpoint: scope, op_id dedupe, `expected` preconditions (409 stale), effects, FleetChanged. */
@@ -1143,6 +1166,8 @@ export class HubDouble {
     }
     if (path.endsWith("/operations") && method === "POST") return this.operation(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
     if (path.endsWith("/write-grants") && method === "POST") return this.writeGrant(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
+    const secretRoute = /^\/v1\/sessions\/([^/]+)\/secrets\/(\d+)$/.exec(path);
+    if (secretRoute && method === "POST") return this.answerSecret(route, machineId, decodeURIComponent(secretRoute[1]!), Number(secretRoute[2]));
     return route.fulfill({ json: {} });
   }
 

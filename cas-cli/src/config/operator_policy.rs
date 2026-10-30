@@ -652,6 +652,9 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     // cas-d58d: the operator's privacy rule for same-repo peers; `team`
     // admits other users' supervisors again.
     "peers.same_repo_scope",
+    // cas-1996: an agent pointing the destination into a tracked or shared
+    // folder would publish the secrets the operator pastes in Commander.
+    "secrets.destination",
 ];
 
 /// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.

@@ -9067,6 +9067,8 @@ EOF
             r#"echo "$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
             r#"echo "$(printf '%s' "$(cas co"nfig" gr''ant-write --task cas-1234 --path /x --reason r)")""#,
             r#"echo "`cas config gr''ant-write --task cas-1234 --path /x --reason r`""#,
+            // Backquotes remove an escape layer before shell word parsing.
+            r#"echo "`cas config gr\\ant-write --task cas-1234 --path /x --reason r`""#,
             // cas-a809: the structural check must reach expanding bodies,
             // even when shell quoting hides the textual policy spelling.
             "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",

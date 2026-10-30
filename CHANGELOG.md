@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Exit confirmation
+
+- **Old Exit requests stay unconfirmed** — A later session end confirms Exit
+  only within its 95-second outcome window, so an unrelated shutdown cannot
+  relabel an old timed-out request as executed.
+
 ### Fixed — Posted release notes
 
 - **Posted drafts keep their historical wording** — Was: later pushes could

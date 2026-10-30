@@ -897,6 +897,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Only an exact supported first token reserves a command. Paths such as `/home/pippenz/notes.md`, unknown slash text and `//usage` send as ordinary messages; prefix suggestions still require an explicit choice (cas-62ea). A leading space also sends a supported command as ordinary text.
 - Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
 - After a disconnect refusal followed by an authenticated ended catalog, Exit is observed without a not-sent/retry claim or mutation replay; an earlier Usage keeps its own observed result (cas-7f2a).
+- Exit settlement uses the same 95-second window as outcome polling. A timed-out Exit stays unconfirmed when an unrelated session end arrives later; late status or reconnect refusals do not borrow that end as execution proof (cas-a031).
 - Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.
 
 #### Edge paths

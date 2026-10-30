@@ -77,7 +77,7 @@ describe("supervisor command receipts", () => {
     expect(document.activeElement).toBe(parent.querySelector("summary"));
   });
 
-  it("settles Exit after disconnect, timeout or late status without claiming other commands completed", async () => {
+  it("settles a recent Exit after disconnect or late status without claiming other commands completed", async () => {
     vi.useFakeTimers();
     try {
       for (const command of ["exit", "finish", "usage"] as const) {
@@ -90,7 +90,10 @@ describe("supervisor command receipts", () => {
           if (ordering === "reject-ended") session.reject(ref, disconnected);
           session.ended("prompt_input_exit");
           if (ordering === "ended-reject") session.reject(ref, disconnected);
-          if (ordering === "ended-status") session.receive({ client_ref: ref, command, phase: "submitted", detail: "Awaiting harness", output: "", interactive: false });
+          if (ordering === "ended-status") {
+            await vi.advanceTimersByTimeAsync(125_000);
+            session.receive({ client_ref: ref, command, phase: "submitted", detail: "Awaiting harness", output: "", interactive: false });
+          }
           const receipt = session.receipts.get(ref)!;
           expect(receipt.phase, `${command}/${ordering}`).toBe(command === "exit" ? "observed" : "unconfirmed");
           expect(receipt.detail).toContain("prompt_input_exit");

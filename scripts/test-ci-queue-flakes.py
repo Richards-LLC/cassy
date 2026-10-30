@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,11 @@ args = sys.argv[1:]
 with state.open('a') as log: log.write(json.dumps(args)+'\n')
 attempt = len(state.read_text().splitlines())
 name = os.environ.get('FIXTURE_TEST', 'sometimes')
-failed = attempt == 1 or name == 'always-fail'
+excluded = ('-E' in args and 'not (' in args[args.index('-E')+1] and name in args[args.index('-E')+1])
+if '--test-list-invert' in args:
+    excluded = name in pathlib.Path(args[args.index('--test-list-invert')+1]).read_text()
+failed = not excluded and (attempt == 1 or name == 'always-fail')
+if excluded: name = 'healthy-control'
 if pathlib.Path(sys.argv[0]).name == 'cargo':
     report = root/'target/nextest/queue/junit.xml'
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +70,7 @@ class QueueRecovery(unittest.TestCase):
         return subprocess.check_output(['git', *args], cwd=self.repo, text=True).strip()
 
     def run_queue(self, engine, test="sometimes", event="merge_group"):
+        shutil.rmtree(self.repo/'receipts',ignore_errors=True)
         return subprocess.run([sys.executable,str(SCRIPT),'run',engine,'--repo',str(self.repo),
                                '--shard','1/3','--out',str(self.repo/'receipts')],
                               env={**self.env,"FIXTURE_TEST":test,"GITHUB_EVENT_NAME":event},
@@ -96,6 +102,24 @@ class QueueRecovery(unittest.TestCase):
                 result = self.run_queue(engine,event='workflow_dispatch')
                 self.assertNotEqual(result.returncode,0)
                 self.assertEqual(len((self.repo/'attempts.jsonl').read_text().splitlines()),1)
+
+    def test_checked_in_quarantine_excludes_only_the_named_test(self):
+        for engine in ('rust','playwright'):
+            with self.subTest(engine=engine):
+                test = {'runner':engine,'binary':'fixture::lib','name':'sometimes',
+                        'project':'journeys','file':'fixture.journey.ts','titles':['sometimes'],
+                        'issue':'https://github.com/fixture/repo/issues/1','runs':['100','101']}
+                (self.repo/'.config/flaky-quarantine.json').write_text(json.dumps({'schema':1,'tests':[test]}))
+                self.git('add','.config')
+                self.git('commit','-qm','Quarantine flaky fixture; fix #1')
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                result = self.run_queue(engine)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual(receipt['outcome'],'PASS')
+                self.assertEqual(receipt['quarantine'],[test])
+                self.assertEqual(len((self.repo/'attempts.jsonl').read_text().splitlines()),1)
+                self.assertIn(test['issue'],result.stdout)
 
 
 if __name__ == '__main__':

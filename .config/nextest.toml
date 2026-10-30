@@ -31,6 +31,17 @@ fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
 
+# Queue recovery is explicit in ci-queue-flakes.py, not a native retry policy.
+# Reporting alone is added here; workers and lane CI never select this profile.
+[profile.queue]
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 10 }
+failure-output = "immediate-final"
+fail-fast = false
+
+[profile.queue.junit]
+path = "junit.xml"
+
 # The explicitly ignored disposable production probe owns a 15-minute
 # lifecycle deadline plus bounded HTTP cleanup. Never select this in assembly.
 [profile.live-presence]

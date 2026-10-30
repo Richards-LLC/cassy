@@ -27613,7 +27613,7 @@ mod merge_state_gate_tests {
             let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].prompt.contains("task_awaiting_merge"));
-    
+
             cas_store::request_changes_for_parked_delivery(
                 dir.path(), &task.id, "relay-supervisor-id", "Correct the delivery before parking again",
             ).unwrap();

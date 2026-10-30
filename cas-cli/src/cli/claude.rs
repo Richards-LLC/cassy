@@ -33,8 +33,8 @@ use serde::Deserialize;
 
 use super::Cli;
 use super::account_picker::{
-    LoginState, Profile, ProfileLayout, Selection, login_state_label, report_seeding,
-    scan_profiles_with, seed_profile_dir, should_prompt_for_profile,
+    LoginState, Profile, ProfileLayout, Selection, report_seeding, scan_profiles_with,
+    seed_profile_dir, should_prompt_for_profile,
 };
 use super::factory::FactoryArgs;
 
@@ -154,30 +154,18 @@ fn probe_login_state_command(command: Command, timeout: Duration) -> LoginState 
     }
 }
 
-fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
+fn profile_listing(home: &Path, active_dir: Option<&Path>, full: bool) -> Result<String> {
     let profiles = scan_profiles(home, active_dir)
         .with_context(|| format!("could not inspect Claude profiles under {}", home.display()))?;
     let mut output = String::from(
         "Usage: cas claude <profile> [factory-args...]\n\nDetected Claude profiles:\n",
     );
+    let mut truncated = false;
 
     for profile in with_usage(home, profiles) {
-        let login = login_state_label(profile.login_state);
-        let active = if profile.active { " (active)" } else { "" };
-        // cas-e1f4: two short lines per account, so the list fits 80 columns.
-        let directory = profile
-            .directory
-            .strip_prefix(home)
-            .map(|rest| format!("~/{}", rest.display()))
-            .unwrap_or_else(|_| profile.directory.display().to_string());
-        output.push_str(&format!(
-            "  {} ({login}){active}\n    {directory}\n",
-            if profile.display_name == profile.name {
-                profile.name.clone()
-            } else {
-                format!("{} ({})", profile.display_name, profile.name)
-            },
-        ));
+        let (row, shortened) = super::account_picker::profile_listing_row(home, &profile, full);
+        output.push_str(&row);
+        truncated |= shortened;
         if let Some(usage) = &profile.usage {
             for line in usage.split("; ") {
                 output.push_str(&format!("    {}\n", line.trim_start()));
@@ -185,6 +173,9 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
         }
     }
     output.push('\n');
+    if truncated {
+        output.push_str("Full profile names and folders: cas claude --list-profiles --full\n");
+    }
     output.push_str(&crate::cloud::presence::wrap_line(
         "Hit a usage limit? Switch in one step: cas claude <profile>. Resume the last session here: cas claude --bare <profile> --continue.",
     ));
@@ -577,7 +568,10 @@ pub fn execute(args: &ClaudeArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
         let home =
             dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
         let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-        print!("{}", profile_listing(&home, active_dir.as_deref())?);
+        print!(
+            "{}",
+            profile_listing(&home, active_dir.as_deref(), cli.full || cli.json)?
+        );
         return Ok(());
     }
 
@@ -1044,7 +1038,13 @@ mod tests {
 
         let (fresh, pending) = prepare_login_profile(&home, "fresh@x.com").unwrap();
         assert!(pending.is_some());
-        assert!(!home.join(".claude-fresh@x.com").exists());
+        let final_alias = home.join(".claude-fresh@x.com");
+        if cfg!(target_os = "macos") {
+            // Claude's Keychain service is bound to this final path on macOS.
+            assert_eq!(fresh, final_alias);
+        } else {
+            assert!(!final_alias.exists());
+        }
         assert_eq!(
             std::fs::read_link(fresh.join("skills")).unwrap(),
             home.join(".claude/skills")

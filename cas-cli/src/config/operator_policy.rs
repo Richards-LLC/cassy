@@ -655,6 +655,8 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     // cas-1996: an agent pointing the destination into a tracked or shared
     // folder would publish the secrets the operator pastes in Commander.
     "secrets.destination",
+    // cas-2f55: whether pasted secrets are deleted is the operator's choice.
+    "secrets.auto_delete",
 ];
 
 /// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.

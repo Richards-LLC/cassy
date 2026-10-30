@@ -1984,10 +1984,11 @@ fn verify_dpop(
     {
         return Err(AuthRefusal::InvalidProof.into());
     }
-    // Checked last, so a stale verdict means the proof was otherwise good:
-    // most often signed before the device slept and sent after it woke.
+    // Checked last, so a stale verdict means the proof was otherwise good.
+    // Never accept future iat: a restart forgets the jti replay set, and its
+    // boot cutoff can only fence proofs dated at or before the restart.
     let skew_secs = claims.iat - now.timestamp();
-    if skew_secs.abs() > DPOP_SKEW_SECONDS {
+    if skew_secs > 0 || skew_secs < -DPOP_SKEW_SECONDS {
         return Err(AuthRefusal::StaleProof { skew_secs }.into());
     }
     Ok(VerifiedDpop {

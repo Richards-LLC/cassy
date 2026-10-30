@@ -455,6 +455,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - A network switch never needs a reload, and never leaves the page claiming Live on a dead socket.
+- A client clock 1–4 seconds ahead recovers after one retry on the hub's clock; future-dated DPoP proofs are refused before and after a hub restart (cas-3b22; auth and connection regression tests).
 - Working requires recent pane activity, a live authenticated machine and an unanswered message. An idle prompt repaint, Reconnecting or Needs pairing never claims work (cas-a252).
 - A message is never silently lost: it goes out once when it can, or says "Not sent" with Retry.
 - Recovery is bounded: at most 10 s after the network returns, sooner when the browser says it changed.

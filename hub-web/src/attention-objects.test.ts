@@ -96,6 +96,23 @@ describe("secret request (cas-1996)", () => {
     await vi.waitFor(() => expect(declined.querySelector(".chip.sent")?.textContent).toBe("Declined"));
     expect(answerSecret).toHaveBeenLastCalledWith(other, { decline: true });
   });
+
+  it("keeps the file unless the operator chooses deletion, then says when it is deleted (cas-2f55)", async () => {
+    const history = new ConversationHistory();
+    const request = reply(72, "secret", "For one deploy.", { summary: "DEPLOY_KEY" });
+    history.reply(request, at(9, 58));
+    const answerSecret = vi.fn(async () => ({ path: "/creds/DEPLOY_KEY", auto_delete: "after_use" }));
+    const node = renderSecretObject(request, { ...context(request, history), answerSecret });
+    const choice = node.querySelector<HTMLSelectElement>("select.secret-auto-delete")!;
+    expect(choice.value).toBe("");
+    expect(choice.getAttribute("aria-label")).toBe("After saving DEPLOY_KEY");
+    choice.value = "after_use";
+    node.querySelector<HTMLInputElement>("input.secret-value")!.value = "dk_value";
+    node.querySelector<HTMLButtonElement>("button.secret-save")!.click();
+    await vi.waitFor(() => expect(node.dataset.answered).toBe("true"));
+    expect(answerSecret).toHaveBeenCalledWith(request, { value: "dk_value", auto_delete: "after_use" });
+    expect(node.querySelector(".chip.sent")?.textContent).toBe("Saved to /creds/DEPLOY_KEY · deleted once used");
+  });
 });
 
 describe("one complete question in the thread", () => {

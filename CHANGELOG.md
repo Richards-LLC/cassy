@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Hub authentication clock correction
+
+- **Fast device clocks recover automatically** — The hub refuses future-dated
+  authentication proofs to prevent replay after a restart. Commander retries
+  on the hub's clock even when the device is only 1–4 seconds ahead.
+
+### Fixed — Worker recycle recipe
+
+- **A recycled Codex worker stays on Codex** — Was: a hook or `cas` command in
+  a Codex worker's pane re-registered its session without the harness, so its
+  row lost `worker_cli`, read as Claude, and `recycle_worker` refused the
+  recipe (`cli=claude, model=gpt-6.1-sol`). Now: the Codex pane names its own
+  harness, a re-registration keeps the original spawn's harness, model,
+  effort and account when it lacks them, and a row that already lost its
+  harness relaunches on the harness its model belongs to.
+
+### Fixed — Delayed lifecycle holding causes
+
+- **Delayed notices keep their last recorded hold** — Lifecycle delay markers
+  name busy-pane, debounce or rate-limit holds when recorded, and say when the
+  cause is unrecorded. Message status retains the cause after hook acknowledgment
+  without changing delivery or confirmation receipts.
+
+### Fixed — Commander daemon replacement
+
+- **An open conversation reconnects to a replacement daemon** — If Commander
+  sees the old daemon's ended session before its replacement becomes live,
+  it resumes the requested conversation automatically. Ended sessions still
+  stop retries and sends while no replacement is available.
+
 ### Fixed — Merge readiness
 
 - **A worker's ready message counts, and the supervisor waits for it** — Was:
@@ -27,11 +57,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory QA
 
+- **Task-specific QA branches survive a parked anchor** — Was: an anchored
+  plain worker lane could hide the task's per-task or companion delivery
+  branch. Now: QA selects recorded delivery branches before the anchored lane,
+  while retaining exact pushed-head validation.
+
 - **QA waivers follow a current repark after handoff** — Was: an older passed
   round on a retired worker's branch could override the current assignee's
   anchored repark. Now: a validated current-worker parked lane with an active
   delivery anchor is selected for the waiver, while the exact pushed head is
   still required.
+
+### Fixed — Profile listing parity
+
+- **Claude and Codex profiles use the terminal width consistently** — Both
+  listings shorten long names and folders by display cells, including CJK and
+  emoji, while preserving login and active states. `--full` and `--json` retain
+  exact values; the full-value hint appears only when a value was shortened.
+
+### Added — Commander secret auto-delete
+
+- **A saved secret can delete itself** — Was: a secret saved from Commander's secret card stayed on the machine until someone deleted it. Now: the card offers to keep the file, delete it once the agent has used it, or delete it after 1 or 24 hours. The project setting `secrets.auto_delete` (default `off`) sets the default. Each deletion leaves a receipt in `.cas/secret-receipts.jsonl` that never contains the value.
 
 ### Fixed — Codex profile listing width
 

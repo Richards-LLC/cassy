@@ -690,9 +690,16 @@ fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
         .metadata
         .get("worker_model")
         .and_then(|model| cas_factory::model_harness(model));
+    // cas-9153: and a row that lost `worker_cli` reads as Claude, the
+    // fallback, so a model only another harness runs (a Codex worker's
+    // gpt-6.1-sol) names the harness it was spawned on.
     match model_cli {
-        Some(cas_mux::SupervisorCli::Claude) if recorded != cas_mux::SupervisorCli::Claude => {
-            cas_mux::SupervisorCli::Claude
+        Some(model_cli)
+            if model_cli != recorded
+                && (model_cli == cas_mux::SupervisorCli::Claude
+                    || recorded == cas_mux::SupervisorCli::Claude) =>
+        {
+            model_cli
         }
         _ => recorded,
     }
@@ -19939,8 +19946,118 @@ effort = "high"
         agent.metadata.insert("worker_cli".into(), "codex".into());
         agent.metadata.insert("worker_model".into(), "gpt-6-luna".into());
         assert_eq!(worker_spec_from_agent(&agent).cli, cas_mux::SupervisorCli::Codex);
+
+        // cas-9153: a Codex worker whose row lost `worker_cli` (read as the
+        // Claude fallback) still relaunches on Codex.
+        agent.metadata.remove("worker_cli");
+        agent.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+        let spec = worker_spec_from_agent(&agent);
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+        cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+            .expect("the repaired Codex recipe relaunches");
     }
 
+    /// cas-9153: a Codex worker spawned, then recycled twice, keeps its
+    /// harness, model and effort on its row each time, even when a process in
+    /// its pane (a hook or a `cas` command) re-registers the same session.
+    #[test]
+    fn codex_worker_recycled_twice_keeps_its_harness_model_and_effort_cas_9153() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut spec = cas_mux::WorkerSpec {
+            name: Some("happy-spider-16".into()),
+            cli: cas_mux::SupervisorCli::Codex,
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some(cas_mux::Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+        for generation in 0..3 {
+            let effort = spec.effort.map(|effort| effort.to_string());
+            let pane = cas_pty::PtyConfig::codex(
+                "happy-spider-16",
+                "worker",
+                temp.path().to_path_buf(),
+                None,
+                None,
+                None,
+                spec.model.as_deref(),
+                effort.as_deref(),
+                None,
+            );
+            let pane_value = |key: &str| {
+                pane.env
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            };
+            let session = pane_value("CAS_SESSION_ID").expect("pane session");
+            let pane_cli = pane_value("CAS_FACTORY_WORKER_CLI");
+            let pane_model = pane_value("CAS_FACTORY_WORKER_MODEL");
+            let pane_effort = pane_value("CAS_FACTORY_WORKER_EFFORT");
+            // The pane's own registration, then a bare `cas` re-registration.
+            for vars in [
+                vec![
+                    ("CAS_AGENT_ROLE", Some("worker")),
+                    ("CAS_FACTORY_WORKER_CLI", pane_cli.as_deref()),
+                    ("CAS_FACTORY_WORKER_MODEL", pane_model.as_deref()),
+                    ("CAS_FACTORY_WORKER_EFFORT", pane_effort.as_deref()),
+                    ("CAS_FACTORY_WORKER_ACCOUNT_DIR", None),
+                ],
+                vec![
+                    ("CAS_AGENT_ROLE", Some("worker")),
+                    ("CAS_FACTORY_WORKER_CLI", None),
+                    ("CAS_FACTORY_WORKER_MODEL", None),
+                    ("CAS_FACTORY_WORKER_EFFORT", None),
+                    ("CAS_FACTORY_WORKER_ACCOUNT_DIR", None),
+                ],
+            ] {
+                let _env = crate::test_support::TestEnvGuard::with_optional_vars(&vars);
+                let mut agent = cas_types::Agent::new(session.clone(), "happy-spider-16".into());
+                agent.role = cas_types::AgentRole::Worker;
+                crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+                crate::mcp::daemon::register_with_role_reconciliation(
+                    store.as_ref(),
+                    &agent,
+                    Some(cas_types::AgentRole::Worker),
+                )
+                .unwrap();
+            }
+            let row = store.get(&session).unwrap();
+            assert_eq!(
+                row.metadata.get("worker_cli").map(String::as_str),
+                Some("codex"),
+                "generation {generation}"
+            );
+            assert_eq!(
+                row.metadata.get("worker_effort").map(String::as_str),
+                Some("high"),
+                "generation {generation}"
+            );
+            spec = worker_spec_from_agent(&row);
+            assert_eq!(
+                spec.cli,
+                cas_mux::SupervisorCli::Codex,
+                "generation {generation}"
+            );
+            assert_eq!(
+                spec.model.as_deref(),
+                Some("gpt-6.1-sol"),
+                "generation {generation}"
+            );
+            assert_eq!(
+                spec.effort,
+                Some(cas_mux::Effort::High),
+                "generation {generation}"
+            );
+            cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+                .unwrap_or_else(|error| {
+                    panic!("generation {generation} recipe must relaunch: {error}")
+                });
+        }
+    }
     #[test]
     fn worker_cli_from_agent_defaults_to_claude_when_missing_or_invalid() {
         let agent = cas_types::Agent::new("sess-1".to_string(), "legacy-worker".to_string());

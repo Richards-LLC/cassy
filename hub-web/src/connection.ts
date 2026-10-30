@@ -325,6 +325,8 @@ export class HubConnectionSupervisor {
   private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
   private readonly endedSessions = new Set<string>();
+  /** Requested streams paused by an end receipt, until a live replacement appears. */
+  private readonly endedAttachRequests = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private healthPing?: { id: number; startedAt: number };
   private attachStarts: number[] = [];
@@ -378,6 +380,7 @@ export class HubConnectionSupervisor {
     this.machineSocketReady = false;
     this.machineSocketOpening = undefined;
     this.desiredSessions.clear();
+    this.endedAttachRequests.clear();
     this.machineSubscriptions.clear();
     this.paneBootstraps.clear();
     this.healthPing = undefined;
@@ -670,9 +673,9 @@ export class HubConnectionSupervisor {
 
   private adoptHubClock(serverTime: number | undefined): void {
     if (serverTime === undefined) return;
-    const offset = serverTime * 1000 - Date.now();
-    // Inside a few seconds is latency and rounding, not drift.
-    this.clockOffsetMs = Math.abs(offset) > 5_000 ? offset : 0;
+    // The hub refuses any future iat, so even sub-second corrections matter.
+    // Its integer second also rounds the retry down conservatively.
+    this.clockOffsetMs = serverTime * 1000 - Date.now();
   }
 
   uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string; mime: string }> {
@@ -923,7 +926,7 @@ export class HubConnectionSupervisor {
    * hub writes the value to a private file on its machine and replies to the
    * supervisor with the path; the value never travels as a message.
    */
-  async answerSecret(session: string, notificationId: number, answer: { value: string } | { decline: true }): Promise<{ name?: string; path?: string; saved?: boolean; declined?: boolean }> {
+  async answerSecret(session: string, notificationId: number, answer: { value: string; auto_delete?: string } | { decline: true }): Promise<{ name?: string; path?: string; saved?: boolean; declined?: boolean; auto_delete?: string | null }> {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/secrets/${notificationId}`, answer);
   }
 
@@ -1313,9 +1316,18 @@ export class HubConnectionSupervisor {
 
   /** A durable end receipt stops retries; transport closure alone does not. */
   setSessionEnded(session: string, ended: boolean): void {
-    if (!ended) { this.endedSessions.delete(session); return; }
+    if (!ended) {
+      if (this.endedSessions.delete(session) && this.endedAttachRequests.delete(session)) {
+        void this.attach(session);
+      }
+      return;
+    }
     this.endedSessions.add(session);
-    this.desiredSessions.delete(session);
+    // A daemon replacement can be preceded by the old daemon's end receipt.
+    // Keep the requested stream separate from active demand: ended sessions
+    // still fence traffic and retries, but the next live catalog can resume it.
+    if (this.desiredSessions.delete(session)) this.endedAttachRequests.add(session);
+    this.machineSubscriptions.delete(session);
     const timer = this.attachRetryTimers.get(session);
     if (timer !== undefined) window.clearTimeout(timer);
     this.attachRetryTimers.delete(session);

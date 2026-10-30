@@ -1,14 +1,14 @@
-# `cas codex --list-profiles`
+# `cas claude --list-profiles` and `cas codex --list-profiles`
 
 | Field | Contract |
 | --- | --- |
-| First two lines | Show the existing launch syntax, then identify detected Codex profiles. |
+| First two lines | Show the provider's existing launch syntax, then identify its detected profiles. |
 | Scannable | Each profile keeps one header with its login and active state, followed by its folder and any usage detail. |
-| Readable | Headers and folders fit 80 columns by shortening long displayed identities; login and active words remain complete. |
-| Machine output | This listing remains plain text; `cas accounts list --json` is the existing structured account read model. |
-| Omitted | Long labels and folders are shortened with ASCII `...`; `cas codex --list-profiles --full` exposes their exact values. |
+| Readable | Headers and folders fit 80 display cells, including CJK and emoji identities; login and active words remain complete. |
+| Machine output | Both legacy listings remain plain text under `--json`, which preserves exact values like `--full`; `cas accounts list --json` is the structured account read model. |
+| Omitted | Long labels and folders use ASCII `...`; only a shortened listing shows the provider's `--list-profiles --full` escape. |
 
-The existing global `--full` flag is the escape for this listing. Its normal
+The existing global `--full` flag is the escape for both listings. Their normal
 layout stays within 80 columns even on a 120-column terminal. Aliases and
 profile folders remain unchanged; shortening affects display only. Codex
 currently has no proven non-secret email source, so its display label normally
@@ -16,6 +16,50 @@ equals the folder alias. Do not infer an email from credentials to reproduce
 the historical email-plus-alias presentation.
 
 ## Critique
+
+### Provider parity follow-up
+
+Baseline `2404ec18`: the same fixtures at 80 and 120 columns show Claude
+headers of 196 (ASCII), 242 (CJK), and 202 (emoji) cells. Codex fits but wastes
+display cells on multibyte names; it also prints the full-value hint for short
+names, and its `--json` listing still truncates values. Baseline captures live
+under `<artifacts>/cas-f972/baseline/`, with `baseline-RECEIPT.json` binding the
+supervisor-built candidate. The historical critique below describes the prior
+Codex-only change.
+
+Treatment `e8d0bb358`: all six provider/identity cases have 80-cell headers,
+complete login/active suffixes, and exact names/folders under both `--full`
+and `--json`. Short listings omit the hint; both providers' help mentions
+profile listings. Folder and Claude metadata read-back confirm no identity
+mutation. Captures and assertions: `<artifacts>/cas-f972/terminal-qa/`;
+binary receipt: `candidate/RECEIPT.json`.
+
+```text
+terminal-qa: PASS claude-profiles-ascii · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS claude-profiles-cjk · 11 runs · 0 fail · 0 warn · 1 allowed
+terminal-qa: PASS claude-profiles-emoji · 11 runs · 0 fail · 0 warn · 1 allowed
+terminal-qa: PASS codex-profiles-ascii · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS codex-profiles-cjk · 11 runs · 0 fail · 0 warn · 1 allowed
+terminal-qa: PASS codex-profiles-emoji · 11 runs · 0 fail · 0 warn · 1 allowed
+```
+
+Each CJK/emoji run allows only `unicode-without-fallback` under C locale:
+the non-ASCII text is the account's identity, not an authored UI glyph.
+Renderer punctuation remains ASCII. The legacy listing's plain-text
+`--json` contract is explicit above; the structured account command remains
+available. Both providers' 80-column renders were inspected on dark, light
+and Solarized palettes; the same fixtures also passed at 120 columns,
+NO_COLOR, and through a pipe.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Existing launch syntax leads into provider profiles and complete states. |
+| Fit | 4 | All six long identity cases fit 80 cells without losing state words. |
+| Craft | 4 | Shared rows keep indentation and show the escape only when needed. |
+| Theme safety | 5 | All four palettes, NO_COLOR and pipe pass with no authored SGR. |
+| Machine contract | 4 | Both full-value flags preserve exact aliases, folders and Claude emails; the listing stays plain text. |
+
+### Prior Codex-only change
 
 Baseline `9b1c55f3`: `terminal-qa: FAIL codex-list-profiles · 11 runs · 8 fail · 0 warn · 0 allowed`.
 The four 80-column palette captures each contain a 100-cell header and a

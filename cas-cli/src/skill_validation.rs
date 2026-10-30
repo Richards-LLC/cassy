@@ -11,10 +11,12 @@ use crate::types::Skill;
 /// Keeping this bound short prevents a create/update request from holding the
 /// MCP server on an unavailable dependency.
 pub(crate) const VALIDATION_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const BUBBLEWRAP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_VALIDATION_OUTPUT_BYTES: usize = 8 * 1024;
 
 /// User-visible notice attached to successful and failed degraded probes.
-pub(crate) const NETWORK_ISOLATION_WARNING: &str = "WARNING: network isolation is unavailable; bubblewrap was not found, so validation ran in degraded plain-shell mode";
+pub(crate) const NETWORK_ISOLATION_WARNING: &str = "WARNING: network isolation is unavailable; bubblewrap is missing or could not create a network namespace, so validation ran in degraded plain-shell mode";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidationReport {
@@ -26,6 +28,13 @@ enum ValidationMode {
     #[cfg(target_os = "linux")]
     Bubblewrap(PathBuf),
     Plain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BubblewrapCapability {
+    Missing,
+    Usable(PathBuf),
+    Unusable(PathBuf),
 }
 
 /// Run a skill's optional validation script before it is persisted.
@@ -49,31 +58,89 @@ pub(crate) fn validate_skill_with_policy(
         return Ok(ValidationReport { warning: None });
     }
 
-    #[cfg(target_os = "linux")]
-    let bubblewrap = find_executable("bwrap");
-    #[cfg(not(target_os = "linux"))]
-    let bubblewrap = None;
-    let mode = select_validation_mode(require_sandbox, bubblewrap)?;
+    let capability = bubblewrap_capability();
+    let mode = select_validation_mode(require_sandbox, capability)?;
     validate_skill_with_mode(skill, mode)
 }
 
 fn select_validation_mode(
     require_sandbox: bool,
-    bubblewrap: Option<PathBuf>,
+    capability: BubblewrapCapability,
 ) -> Result<ValidationMode, String> {
     #[cfg(target_os = "linux")]
-    if let Some(bubblewrap) = bubblewrap {
-        return Ok(ValidationMode::Bubblewrap(bubblewrap));
+    let unavailable_reason = match &capability {
+        BubblewrapCapability::Missing => {
+            "bubblewrap was not found, so network isolation cannot be provided"
+        }
+        BubblewrapCapability::Unusable(_) => {
+            "bubblewrap could not create the required network namespace, so network isolation cannot be provided"
+        }
+        BubblewrapCapability::Usable(_) => "bubblewrap is available",
+    };
+
+    #[cfg(target_os = "linux")]
+    match capability {
+        BubblewrapCapability::Usable(bubblewrap) => {
+            return Ok(ValidationMode::Bubblewrap(bubblewrap));
+        }
+        BubblewrapCapability::Missing | BubblewrapCapability::Unusable(_) if !require_sandbox => {
+            return Ok(ValidationMode::Plain);
+        }
+        BubblewrapCapability::Unusable(_) | BubblewrapCapability::Missing => {}
     }
 
+    #[cfg(not(target_os = "linux"))]
+    let unavailable_reason = {
+        let _ = capability;
+        "bubblewrap is unavailable on this platform"
+    };
+
     if require_sandbox {
-        return Err(
-            "validation sandbox unavailable: skill_validation.require_sandbox is enabled, but network isolation via bubblewrap is unavailable"
-                .to_string(),
-        );
+        return Err(format!(
+            "validation sandbox unavailable: skill_validation.require_sandbox is enabled, but {unavailable_reason}"
+        ));
     }
 
     Ok(ValidationMode::Plain)
+}
+
+fn bubblewrap_capability() -> BubblewrapCapability {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(path) = find_executable("bwrap") else {
+            return BubblewrapCapability::Missing;
+        };
+        if probe_bubblewrap(&path) {
+            BubblewrapCapability::Usable(path)
+        } else {
+            BubblewrapCapability::Unusable(path)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        BubblewrapCapability::Missing
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_bubblewrap(bubblewrap: &Path) -> bool {
+    let Ok(cwd) = tempfile::tempdir() else {
+        return false;
+    };
+    let mode = ValidationMode::Bubblewrap(bubblewrap.to_path_buf());
+    let Ok(mut command) = validation_command("true", cwd.path(), &mode) else {
+        return false;
+    };
+    command.current_dir(cwd.path()).env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    run_command(
+        &mut command,
+        Deadline::after(BUBBLEWRAP_PROBE_TIMEOUT),
+        BUBBLEWRAP_PROBE_TIMEOUT,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn validate_skill_with_mode(
@@ -258,23 +325,40 @@ mod tests {
     #[test]
     fn required_sandbox_rejects_unavailable_fallback() {
         assert_eq!(
-            select_validation_mode(false, None).expect("default policy should use fallback"),
+            select_validation_mode(false, BubblewrapCapability::Missing)
+                .expect("default policy should use fallback"),
             ValidationMode::Plain
         );
-        let error = select_validation_mode(true, None).expect_err("required sandbox must fail");
+        assert_eq!(
+            select_validation_mode(
+                false,
+                BubblewrapCapability::Unusable("/usr/bin/bwrap".into())
+            )
+            .expect("default policy should fall back when bwrap is unusable"),
+            ValidationMode::Plain
+        );
+        let error = select_validation_mode(
+            true,
+            BubblewrapCapability::Unusable("/usr/bin/bwrap".into()),
+        )
+        .expect_err("required sandbox must fail closed when bwrap is unusable");
         assert!(error.contains("require_sandbox"));
         assert!(error.contains("network isolation"));
+        let missing = select_validation_mode(true, BubblewrapCapability::Missing)
+            .expect_err("required sandbox must fail closed when bwrap is missing");
+        assert!(missing.contains("bubblewrap"));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn probe_has_no_network_by_default() {
-        if find_executable("bwrap").is_none() {
+        let BubblewrapCapability::Usable(path) = bubblewrap_capability() else {
             return;
-        }
-        let result = validate_skill(&skill_with_script(
-            "test \"$(grep -c '^[^[:space:]]' /proc/net/route)\" -eq 1",
-        ));
+        };
+        let result = validate_skill_with_mode(
+            &skill_with_script("test \"$(grep -c '^[^[:space:]]' /proc/net/route)\" -eq 1"),
+            ValidationMode::Bubblewrap(path),
+        );
         assert!(result.is_ok(), "probe had a network route: {result:?}");
     }
 

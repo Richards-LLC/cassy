@@ -70,6 +70,9 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
 
+`qa.user_facing_labels` require `demo_statement` before creation/assignment:
+`As a <user>, I <do X> and see <Y>`; epics/internal tasks are exempt.
+
 Human-facing output follows [DESIGN.md first](../../design-spec/references/design-md-first.md)
 without being told; the brief adds only the target project when it is not the
 checkout the worker runs in. Review the close's `design:` line against the output.
@@ -205,6 +208,10 @@ clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource
 
+A green push alone is not ready: a test-first checkpoint can be green and
+incomplete. The role's readiness triggers require a completed delivery. Keep CI
+and QA gates; pending/red CI needs override authority and a reason.
+
 Finish delivered work before expanding noncritical work. Apply this closure
 pass every turn, including startup and simultaneous worker completions:
 
@@ -251,6 +258,11 @@ Before landing a worker lane, do these two checks. Workers may carry capped
 evidence; verify they name the delivered commit and affected scope. The full
 Rust build and suite run once, at the Phase 4 final gate: the merge queue where
 base has one, otherwise local assembly.
+
+For public surfaces, score distinctiveness, fit and hierarchy 1–5 using
+cas-codebase-design before merge; the floor is 4/5. Record exceptions/remedies.
+A script used on several platforms needs more than Linux proof unless a fixture
+covers the difference.
 
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling

@@ -248,6 +248,10 @@ task action=notes id=cas-abc1 notes="Progress update" note_type=progress
 
 ## Peer supervisors on the same repo
 
+Request one child with `factory action=epic_split id=<epic> target=<peer> mine=<id>`;
+the peer accepts or rejects. Use the grants/shared-epic rules below for the
+other peer operations.
+
 Other supervisors of this GitHub repo, on this machine or another one logged in to Cassy Cloud, are peers. They are not workers. You cannot spawn, assign or direct them, and they cannot do any of that to your fleet either.
 
 - **See peers.** Run `coordination action=peers`, or look under **Peers** in `factory action=worker_status`. Each peer shows its machine, session, epic focus and heartbeat age. A stale peer may be gone.

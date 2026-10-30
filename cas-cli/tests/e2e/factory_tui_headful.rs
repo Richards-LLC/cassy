@@ -156,6 +156,42 @@ fn count_worker_replies(output: &str, token: &str) -> usize {
 }
 
 #[test]
+fn explicit_headful_missing_claude_fails_cas_7e12() {
+    let empty_path = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "e2e::factory_tui_headful::factory_tui_headful_reuse_window", "--nocapture"])
+        .env("CAS_HEADFUL_E2E", "1")
+        .env("PATH", empty_path.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "explicit live opt-in must not pass without Claude");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("headful dependency unavailable"));
+}
+
+#[test]
+fn headful_fixture_preserves_selected_claude_credentials_cas_7e12() {
+    let keys = ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+    let _ambient = keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, "headful-fixture-value"));
+    let _unrelated = crate::test_env_guard::AmbientEnvRestore::set("VIKTOR_API_KEY", "unrelated-fixture");
+    {
+        let _guard = EnvGuard::set(&[("TUI_TEST_HEADFUL", "1".into())]);
+        let child = Command::new("/bin/sh").args(["-c",
+            "[ \"$CLAUDE_CONFIG_DIR\" = headful-fixture-value ] && \
+             [ \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" = headful-fixture-value ] && \
+             [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = headful-fixture-value ] && \
+             [ \"$ANTHROPIC_API_KEY\" = headful-fixture-value ] && \
+             [ \"$ANTHROPIC_AUTH_TOKEN\" = headful-fixture-value ] && \
+             [ \"$TUI_TEST_HEADFUL\" = 1 ] && [ -z \"${VIKTOR_API_KEY+x}\" ] && [ -z \"${CAS_ROOT+x}\" ]"])
+            .status().unwrap();
+        assert!(child.success(), "live fixture must preserve Claude account selection and credentials in children");
+    }
+    for key in keys { assert_eq!(std::env::var(key).unwrap(), "headful-fixture-value"); }
+    let _ordinary = crate::test_env_guard::TestEnvGuard::new();
+    for key in keys { assert!(std::env::var_os(key).is_none(), "ordinary fixtures still scrub {key}"); }
+}
+
+#[test]
 fn factory_tui_headful_reuse_window() {
     if std::env::var("CAS_HEADFUL_E2E").ok().as_deref() != Some("1") {
         eprintln!("Skipping: CAS_HEADFUL_E2E=1 not set");

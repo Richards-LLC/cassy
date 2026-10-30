@@ -2857,6 +2857,49 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
 
     #[cfg(unix)]
     #[test]
+    fn live_headful_profile_requires_reason_and_preserves_credentials_cas_7e12() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        env.set("CAS_HEADFUL_E2E", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname='cas'\nversion='0.1.0'\n[[test]]\nname='e2e_test'\npath='tests/e2e.rs'\n").unwrap();
+        std::fs::write(repo.join("tests/e2e.rs"), "").unwrap();
+        fixture_commit_as(&repo, "explicit e2e harness");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, "printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\\n'");
+        let args = ["nextest", "run", "-p", "cas", "--test", "e2e_test", "-E",
+            "test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)"].map(str::to_string);
+        let error = execute_at(&root, &args, &repo, &cargo).unwrap_err().to_string();
+        assert!(error.contains("CAS_WORKER_TEST_ALLOW_HOST_PATH"), "{error}");
+        env.set(HOST_PATH_OPT_OUT, "operator live headful credential proof");
+        let xdg = dir.path().join("private-config");
+        std::fs::create_dir(&xdg).unwrap();
+        let error = execute_at_with_scope(&root, &args, &repo, &cargo, None, Some(&xdg)).unwrap_err().to_string();
+        assert!(error.contains("credential-free"), "{error}");
+        let lib_args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(selected)"].map(str::to_string);
+        let error = execute_at(&root, &lib_args, &repo, &cargo).unwrap_err().to_string();
+        assert!(error.contains("exact headful"), "{error}");
+        if !cfg!(target_os = "macos") { return; }
+        env.set("CLAUDE_CONFIG_DIR", "/fixture/selected-account");
+        env.set("CLAUDE_CODE_OAUTH_TOKEN", "fixture-token");
+        env.set("XDG_CONFIG_HOME", &xdg);
+        fake_cargo(&cargo, r#"[ "$CAS_HEADFUL_E2E" = 1 ] || exit 21
+[ "$CLAUDE_CONFIG_DIR" = /fixture/selected-account ] || exit 22
+[ "$CLAUDE_CODE_OAUTH_TOKEN" = fixture-token ] || exit 23
+[ -d "$XDG_CONFIG_HOME" ] || exit 24
+[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 25
+case "$*" in *'--success-output immediate'*) ;; *) exit 26 ;; esac
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+        execute_at(&root, &args, &repo, &cargo).unwrap();
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].contains("operator live headful credential proof"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn private_fake_cas_fixture_preserves_process_path_cas_a9fc() {
         let _env = crate::test_support::TestEnvGuard::new();
         let original = std::env::var_os("PATH");

@@ -43,11 +43,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
-- **Worker timelines keep live updates that arrive during a page read** —
-  Was: an append notification could be dropped while the current page was
-  loading, leaving the newest work missing. → Now: the timeline reads once
-  more after that page finishes, keeping concurrent notifications together.
-
 - **Late file layout keeps the newest turn in view** — Was: a file preview
   could shrink and grow before its scroll event arrived, leaving the thread
   above the latest reply. → Now: layout keeps following the tail, while an

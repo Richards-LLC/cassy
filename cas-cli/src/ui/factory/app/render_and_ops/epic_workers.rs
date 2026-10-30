@@ -6793,6 +6793,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_cleanup_adoption_waits_for_file_commit_cas_c35a() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+        let store = open_agent_store(&root).unwrap();
+        let mut agent = cas_types::Agent::new("pending-stage-id".into(), "pending-stage".into());
+        agent.metadata.insert("clone_path".into(), root.join("worktrees/pending-stage").display().to_string());
+        store.register(&agent).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_cleanup_mark BEFORE UPDATE ON agents
+            WHEN NEW.metadata LIKE '%shutdown_target_cleanup_staged%'
+            BEGIN SELECT RAISE(ABORT, 'fixture: stage mark refused'); END;").unwrap();
+        assert!(FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).is_err());
+        conn.execute_batch("DROP TRIGGER fail_cleanup_mark").unwrap();
+        // A database mark alone must not make an incomplete file adoptable.
+        // It also must not strand the file when the staging call is retried.
+        agent.metadata.insert(WORKER_CLEANUP_STAGED.into(), "true".into());
+        store.update(&agent).unwrap();
+        let mut app = FactoryApp::for_test_at(root.clone());
+        app.resume_deferred_worker_cleanups();
+        assert!(!app.worker_worktree_cleanups_pending(), "adoption must use file readiness, not reread the database mark");
+        FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).unwrap();
+        app.resume_deferred_worker_cleanups();
+        assert!(app.worker_worktree_cleanups_pending(), "a retry must commit the existing intent even if its database mark is set");
+        app.join_worker_worktree_cleanups();
+        assert_eq!(std::fs::read_dir(root.join("worker-cleanups/incoming")).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn restart_replays_deferred_cleanup_intent_cas_af63() {
         use std::process::Command;
         let env = crate::test_support::TestEnvGuard::temp_home();
@@ -6812,7 +6840,7 @@ mod tests {
             cleanup_on_close: false, promote_entries_on_merge: false,
         }).unwrap();
         for (name, disposition) in [
-            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"), ("stage-retry", "retry"),
+            ("held-wip", "wip"), ("held-unowned", "unowned"), ("dead-recycle", "duplicates"), ("dead-shutdown", "staged"), ("stage-retry", "retry"), ("stage-upgrade", "upgrade"),
             ("interrupted-worker", "interrupted"), ("failed-worker", "error"),
         ] {
             manager.create_for_worker(name).unwrap();
@@ -6832,7 +6860,7 @@ mod tests {
                 std::fs::create_dir_all(&target).unwrap();
                 std::fs::write(target.join("unverified.log"), "preserve").unwrap();
             }
-            if disposition == "retry" {
+            if disposition == "retry" || disposition == "upgrade" {
                 let agents = open_agent_store(&root).unwrap();
                 agent.role = cas_types::AgentRole::Worker;
                 agent.status = cas_types::AgentStatus::Stale;
@@ -6852,7 +6880,22 @@ mod tests {
                 // Reconstruct a partial batch through the actual staging API.
                 FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).unwrap();
                 let incoming = root.join("worker-cleanups/incoming");
-                let original = std::fs::read_dir(&incoming).unwrap().next().unwrap().unwrap().path();
+                let mut original = std::fs::read_dir(&incoming).unwrap().next().unwrap().unwrap().path();
+                if disposition == "upgrade" {
+                    // Before stable IDs/file readiness, a failed metadata mark
+                    // left a random-ID intent behind. Retry must reuse it.
+                    let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&original).unwrap()).unwrap();
+                    let occurrence = uuid::Uuid::new_v4().to_string();
+                    legacy["occurrence"] = occurrence.clone().into();
+                    legacy.as_object_mut().unwrap().remove("staging_complete");
+                    let path = incoming.join(format!("{occurrence}.json"));
+                    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+                    std::fs::remove_file(original).unwrap();
+                    original = path;
+                    let mut current = agents.get(&agent.id).unwrap();
+                    current.metadata.remove(WORKER_CLEANUP_STAGED);
+                    agents.update(&current).unwrap();
+                }
                 let captured = std::fs::read(&original).unwrap();
                 let saved = root.join("worker-cleanups/saved");
                 std::fs::rename(&incoming, &saved).unwrap();
@@ -6864,7 +6907,11 @@ mod tests {
                 assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee, "failed staging retains WIP bindings");
                 crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None).unwrap();
                 assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 2, "partial retry stages each registration once");
-                assert_eq!(std::fs::read(original).unwrap(), captured, "retry must not overwrite original task facts");
+                let mut before: serde_json::Value = serde_json::from_slice(&captured).unwrap();
+                let mut after: serde_json::Value = serde_json::from_slice(&std::fs::read(original).unwrap()).unwrap();
+                before.as_object_mut().unwrap().remove("staging_complete");
+                after.as_object_mut().unwrap().remove("staging_complete");
+                assert_eq!(after, before, "retry must not overwrite original task facts");
                 let mut app = FactoryApp::for_test_at(root.clone());
                 for _ in 0..2 { app.resume_deferred_worker_cleanups(); app.join_worker_worktree_cleanups(); }
                 continue;
@@ -6894,6 +6941,8 @@ mod tests {
                 let mut app = FactoryApp::for_test_at(root.clone());
                 if disposition == "staged" {
                     crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, name, None).unwrap();
+                    assert_eq!(std::fs::read_dir(root.join("worker-cleanups/incoming")).unwrap().count(), 1,
+                        "registrations sharing one checkout must stage one cleanup with all owner facts");
                     let parked = crate::store::open_task_store_cached(&root).unwrap().get(&task.id).unwrap();
                     assert!(parked.assignee.is_none(), "MCP cleanup releases the binding after capturing it");
                     app.shutdown_worker(name, true).await.unwrap();
@@ -6907,8 +6956,7 @@ mod tests {
                 } else {
                     app.shutdown_worker_for_recycle(name).await.unwrap();
                 }
-                // Two registrations share a name; each has its own immutable
-                // intent, consumed in separate reservation phases.
+                // The batch has one immutable intent for this shared checkout.
                 for _ in 0..2 { app.poll_worker_worktree_cleanups(); app.join_worker_worktree_cleanups(); }
                 assert!(proof.is_file(), "{disposition}: original WIP facts must protect retired output");
                 app.resume_deferred_worker_cleanups();

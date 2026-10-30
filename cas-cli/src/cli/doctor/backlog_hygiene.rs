@@ -48,6 +48,11 @@ pub(super) fn check_for(report: &crate::backlog_hygiene::BacklogReport) -> Check
         &mut lines,
     );
     section(
+        "delivered then reverted (review; no close receipt)",
+        report.reverted.iter().map(|f| hygiene::reverted_line(f, reference)).collect(),
+        &mut lines,
+    );
+    section(
         "finished epics open",
         report.finished_epics.iter().map(hygiene::epic_line).collect(),
         &mut lines,
@@ -72,7 +77,7 @@ pub(super) fn check_for(report: &crate::backlog_hygiene::BacklogReport) -> Check
     if let Some(reason) = report.delivery_unknown.as_deref() {
         lines.push(format!("delivered-on-default-branch check unknown: {reason}"));
     }
-    let status = if !report.delivered.is_empty() || !report.finished_epics.is_empty() {
+    let status = if !report.delivered.is_empty() || !report.reverted.is_empty() || !report.finished_epics.is_empty() {
         CheckStatus::Warning
     } else if !report.idle.is_empty()
         || !report.stale_citations.is_empty()
@@ -97,6 +102,7 @@ mod tests {
         BacklogReport {
             default_ref: Some("origin/main".into()),
             delivery_unknown: None,
+            reverted: vec![],
             delivered: vec![DeliveredOpen {
                 task_id: "cas-d1".into(),
                 title: "a delivered task".into(),
@@ -171,5 +177,19 @@ mod tests {
 
         let unknown = check_for(&BacklogReport { delivery_unknown: Some("no git repository".into()), ..BacklogReport::default() });
         assert!(unknown.message.contains("no git repository"), "{}", unknown.message);
+
+        let only_reverted = check_for(&BacklogReport {
+            reverted: report().delivered,
+            ..BacklogReport::default()
+        });
+        assert!(matches!(only_reverted.status, CheckStatus::Warning));
+        assert!(only_reverted.message.contains("1 delivered then reverted"));
+        assert!(!only_reverted.message.contains("commit_receipt=")
+            && !only_reverted.message.contains("task action=close"));
+        // Keep subsequent evidence in the JSON diagnostic instead of
+        // accidentally parsing it as the reverted entry's remedy.
+        let mixed = check_for(&BacklogReport { reverted: report().delivered, ..report() });
+        let (diagnostic, _) = mixed.parts();
+        assert!(diagnostic.contains("finished epics open") && diagnostic.contains("cas-i1"), "{diagnostic}");
     }
 }

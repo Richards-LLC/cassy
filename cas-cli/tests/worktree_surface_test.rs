@@ -4061,6 +4061,10 @@ async fn post_merge_generated_tip_preserves_changed_bug_case_cas_3712() {
             assert_eq!(final_task.status, TaskStatus::Open, "{case}: {text}");
         }
         env.set_current_dir(cas::test_paths::runtime_fixture_parent());
+        // TempDir::drop ignores cleanup failures. A passing integration must
+        // not leave a fixture that invalidates the runner's clean-tip receipt.
+        repo._temp.close().expect("remove merged delivery fixture");
+        remote.close().expect("remove merged delivery remote");
     }
 }
 

@@ -35,9 +35,14 @@ fn quote(word: &str) -> String {
 fn render(tokens: &[ShellToken]) -> String {
     let mut command = String::new();
     let mut previous_operator = false;
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         let operator = matches!(token, ShellToken::Operator(_));
-        if !command.is_empty() && !(operator && previous_operator) {
+        // `<<-` is one operator, but the tokenizer leaves its dash on the delimiter
+        // word. A space would turn it into a heredoc delimited by `-EOF`.
+        let tab_stripping_delimiter = matches!(token, ShellToken::Word(word) if word.starts_with('-'))
+            && index >= 2
+            && tokens[index - 2..index] == [ShellToken::Operator('<'), ShellToken::Operator('<')];
+        if !command.is_empty() && !(operator && previous_operator) && !tab_stripping_delimiter {
             command.push(' ');
         }
         match token {

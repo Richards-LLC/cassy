@@ -9,9 +9,16 @@ import { join } from "node:path";
 
 async function choose(page: Page) {
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  // Selecting a row can finish before the conversation has attached. Do not
+  // take its hub offline while the thread is still opening (cas-05f7).
+  await expect(page.getByRole("log")).toBeVisible();
 }
 async function send(page: Page, text: string) {
-  await page.getByRole("textbox", { name: "Your message" }).fill(text);
+  const composer = page.getByRole("textbox", { name: "Your message" });
+  // A missing composer should fail at the assertion deadline, with its state,
+  // rather than spending the remainder of the whole journey in fill().
+  await expect(composer).toBeEditable();
+  await composer.fill(text);
   await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
 }
 

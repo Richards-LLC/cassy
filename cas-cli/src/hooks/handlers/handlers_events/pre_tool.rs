@@ -3071,6 +3071,54 @@ fn factory_shell_tokens_for_projection(
     (lexed.tokens, lexed.literals)
 }
 
+/// ANSI-C quoting is a constant word part, not a parameter or command
+/// substitution. Unsupported escapes, NULs and non-UTF8 bytes stay unresolved
+/// so the effect guard refuses them rather than matching a different word.
+fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = command.as_bytes();
+    if bytes.get(start..start + 2) != Some(b"$'") {
+        return None;
+    }
+    let mut decoded = Vec::new();
+    let mut index = start + 2;
+    while let Some(&ch) = bytes.get(index) {
+        index += 1;
+        match ch {
+            b'\'' => return Some((String::from_utf8(decoded).ok()?, index)),
+            b'\\' => {
+                let escape = *bytes.get(index)?;
+                index += 1;
+                let value = match escape {
+                    b'a' => 7, b'b' => 8, b'e' | b'E' => 27, b'f' => 12,
+                    b'n' => b'\n', b'r' => b'\r', b't' => b'\t', b'v' => 11,
+                    b'\\' | b'\'' | b'"' | b'?' => escape,
+                    b'x' | b'0'..=b'7' => {
+                        let (radix, limit, mut value, mut digits) = if escape == b'x' {
+                            (16, 2, 0, 0)
+                        } else {
+                            (8, 3, u32::from(escape - b'0'), 1)
+                        };
+                        while digits < limit {
+                            let Some(digit) = bytes.get(index).and_then(|ch| (*ch as char).to_digit(radix)) else { break };
+                            value = value * radix + digit;
+                            digits += 1;
+                            index += 1;
+                        }
+                        if digits == 0 { return None; }
+                        value as u8
+                    }
+                    _ => return None,
+                };
+                if value == 0 { return None; }
+                decoded.push(value);
+            }
+            0 => return None,
+            _ => decoded.push(ch),
+        }
+    }
+    None
+}
+
 /// The same lexer backs ordinary commands and substitution boundaries. Source
 /// positions avoid recovering syntax from cooked words or quoted/comment text.
 fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> ShellLexed {
@@ -3140,6 +3188,25 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
             continue;
         }
         let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        // Shell line continuations disappear before word matching, including
+        // inside double quotes; single-quoted backslash/newline stays data.
+        if active_quote != Some('\'') && ch == '\\'
+            && chars.peek().is_some_and(|(_, next)| *next == '\n')
+        {
+            chars.next();
+            continue;
+        }
+        if quote.is_none() && expansions.is_empty() && ch == '$'
+            && chars.peek().is_some_and(|(_, next)| *next == '\'')
+        {
+            if let Some((decoded, end)) = shell_ansi_c_word(command, index) {
+                word.push_str(&decoded);
+                for _ in command[index + 1..end].chars() { chars.next(); }
+                word_quoted = true;
+                continue;
+            }
+            unresolved_at.get_or_insert(index);
+        }
         if active_quote != Some('\'') && ch == '$' {
             let expansion = match command.as_bytes().get(index + 1..) {
                 Some([b'{', ..]) => Some(('{', '}', 1, 1)),
@@ -3456,11 +3523,34 @@ fn env_split_string_payload(words: &[String]) -> Option<String> {
 }
 
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
+    executable_word_index_with_alternatives(words, &mut |_| {})
+}
+
+fn executable_word_index_with_alternatives(
+    words: &[String],
+    alternative: &mut dyn FnMut(usize),
+) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
         match shell_word_basename(word) {
-            "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
+            "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
+            "coproc" => {
+                index += 1;
+                // A name can precede any compound command. Otherwise the
+                // policy scanner must inspect both possible command words.
+                if words.get(index).is_some_and(|name| is_shell_variable_name(name))
+                    && words.get(index + 1).is_some_and(|word| matches!(word.as_str(),
+                        "{" | "}" | "(" | "((" | "[[" | "]]" | "while" | "until" | "if"
+                        | "then" | "elif" | "else" | "fi" | "for" | "select" | "case" | "in"
+                        | "esac" | "do" | "done" | "function" | "coproc" | "time" | "!"))
+                {
+                    index += 1;
+                } else if index + 1 < words.len() {
+                    alternative(index + 1);
+                }
+            }
+            "function" => index += 2, // Skip the function name to inspect its body.
             "env" => {
                 // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
                 // value; skipping only the flag made `env -u X cargo …` name
@@ -5413,6 +5503,7 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
 struct ShellInvocationScan {
     commands: Vec<(String, Vec<String>)>,
     unresolved_heredoc: bool,
+    unresolved_ansi_c: bool,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5438,28 +5529,40 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
         }
-        let Some(index) = unwrapped_command_index(&words) else {
-            continue;
-        };
-        let args = &words[index + 1..];
-        let name = shell_word_basename(&words[index]);
-        match name {
-            // Wrappers whose option value is itself a shell command.
-            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
-                for (position, arg) in args.iter().enumerate() {
-                    let flags_c =
-                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
-                    if (flags_c || arg == "--command")
-                        && let Some(payload) = args.get(position + 1)
-                    {
-                        collect_shell_invocations(payload, depth + 1, found);
+        let mut pending = vec![0];
+        let mut visited = vec![false; words.len()];
+        let mut indices = Vec::new();
+        while let Some(start) = pending.pop() {
+            if start >= words.len() || visited[start] { continue; }
+            visited[start] = true;
+            if let Some(relative) = unwrapped_command_index_with_alternatives(
+                &words[start..], &mut |offset| pending.push(start + offset),
+            ) {
+                let index = start + relative;
+                if !indices.contains(&index) { indices.push(index); }
+            }
+        }
+        for index in indices {
+            let args = &words[index + 1..];
+            let name = shell_word_basename(&words[index]);
+            match name {
+                // Wrappers whose option value is itself a shell command.
+                "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
+                    for (position, arg) in args.iter().enumerate() {
+                        let flags_c =
+                            arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                        if (flags_c || arg == "--command")
+                            && let Some(payload) = args.get(position + 1)
+                        {
+                            collect_shell_invocations(payload, depth + 1, found);
+                        }
                     }
                 }
+                "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
+                _ => {}
             }
-            "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
-            _ => {}
+            found.commands.push((name.to_string(), args.to_vec()));
         }
-        found.commands.push((name.to_string(), args.to_vec()));
     }
 }
 
@@ -5502,6 +5605,15 @@ fn collect_shell_substitutions(
             while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
+            continue;
+        }
+        if quote.is_none() && bytes.get(index..index + 2) == Some(b"$'") {
+            let Some((_, end)) = shell_ansi_c_word(command, index) else {
+                found.unresolved_ansi_c = true;
+                break;
+            };
+            index = end;
+            word_start = false;
             continue;
         }
         let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
@@ -5604,6 +5716,9 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
+    if scan.unresolved_ansi_c {
+        return Some("🚫 OPERATOR-ONLY: Cannot inspect an unsupported ANSI-C shell word.".into());
+    }
     if scan.unresolved_heredoc {
         return Some("🚫 Cannot inspect an unresolved command substitution in an expanding heredoc.".into());
     }
@@ -5693,7 +5808,14 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
 pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
-    let mut index = executable_word_index(words)?;
+    unwrapped_command_index_with_alternatives(words, &mut |_| {})
+}
+
+fn unwrapped_command_index_with_alternatives(
+    words: &[String],
+    alternative: &mut dyn FnMut(usize),
+) -> Option<usize> {
+    let mut index = executable_word_index_with_alternatives(words, alternative)?;
     for _ in 0..16 {
         let name = shell_word_basename(&words[index]);
         if !COMMAND_WRAPPERS.contains(&name) {
@@ -5726,7 +5848,9 @@ pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
             }
         }
         let rest = words.get(next..)?;
-        index = next + executable_word_index(rest)?;
+        index = next + executable_word_index_with_alternatives(
+            rest, &mut |offset| alternative(next + offset),
+        )?;
     }
     Some(index)
 }
@@ -8222,11 +8346,33 @@ mod workspace_contract_tests {
                     .to_string(),
             )
         };
+        // cas-9685: each independent spelling/command-position bypass must
+        // reach the real hook; collect failures so RED proves every vector.
+        let mut bypasses = Vec::new();
+        for (vector, command) in [
+            ("brace command position", "{ cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("continued verb", "cas config gr\\\nant-write --task cas-1234 --path /x --reason r"),
+            ("ANSI-C verb", r"cas config $'gr\x61nt-write' --task cas-1234 --path /x --reason r"),
+            ("coproc group", "coproc { cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("coproc command", "coproc cas config gr''ant-write --task cas-1234 --path /x --reason r"),
+            ("function body", "function f { cas config gr''ant-write --task cas-1234 --path /x --reason r; }; f"),
+            ("named coproc while", "coproc NAME while cas config gr''ant-write --task cas-1234 --path /x --reason r; do :; done"),
+            ("named coproc until", "coproc NAME until cas config gr''ant-write --task cas-1234 --path /x --reason r; do :; done"),
+            ("named coproc if", "coproc NAME if cas config gr''ant-write --task cas-1234 --path /x --reason r; then :; fi"),
+        ] {
+            let (status, reason) = decision(command);
+            if status != "deny" || !reason.contains("operator") {
+                bypasses.push(format!("{vector}: {status}: {reason}"));
+            }
+        }
+        assert!(bypasses.is_empty(), "operator-policy bypasses: {bypasses:#?}");
         for command in [
             "cas config set factory.write_roots ~/soundwave-config",
             "/home/u/.local/bin/cas config set factory.write_roots ''",
             "env -u CLAUDECODE -u CAS_AGENT_ROLE cas config set factory.write_roots /x",
             "cas config grant-write --task cas-1 --path /x --reason r",
+            // cas-9685: the second possible command is denied too (native RED).
+            "coproc NAME cas config gr''ant-write --task cas-1234 --path /x --reason r",
             "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",

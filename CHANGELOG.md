@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Shell policy command recognition
+
+- **Shell syntax cannot hide operator-only commands** — Agent checks now
+  recognize brace, loop, coprocess and function-body command positions,
+  inspect both possible command words in ambiguous coprocess syntax,
+  remove shell line continuations,
+  and decode common ANSI-C quoted words before matching policy commands.
+  Unsupported ANSI-C escapes are refused; quoted data remains literal.
+
 ## [3.91.1] - 2026-10-30
 
 ### Fixed — Commander daemon replacement

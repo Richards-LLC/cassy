@@ -535,7 +535,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       editMessage: (text, send) => {
         const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
         if (!composer || composer.dataset.threadKey !== threadKey) return;
-        if (composer.value.trim() || composerUploads?.draftFor(threadKey).hasFiles()) { showComposerStatus("Your draft already has text or files. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+        if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+        if (composerUploads?.draftFor(threadKey).hasFiles()) { showComposerStatus("Your draft already has files. Remove them before editing the refused message.", "info"); composer.focus(); return; }
         const restore = (draftText: string) => {
           if (!composer.isConnected || composer.value.trim()) return;
           composer.value = draftText; composer.dispatchEvent(new Event("input")); composer.focus();

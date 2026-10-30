@@ -2885,11 +2885,11 @@ before writing the skill to SQLite or syncing its `SKILL.md`; a zero exit status
 admits the change and a non-zero status (or timeout) rejects it without creating
 a version row. The probe runs through the platform shell from a fresh temporary
 directory, with a scrubbed environment that retains only `PATH` for executable
-lookup. On Linux, bubblewrap is used when available to provide a network
-namespace with no routes. On hosts without bubblewrap, the default is a
-degraded plain-shell sandbox with the same temporary cwd and scrubbed
-environment; Cassy reports an explicit warning that network isolation is
-unavailable. Set `skill_validation.require_sandbox = true` to fail closed
+lookup. On Linux, bubblewrap is used when it can create a network namespace
+with no routes. Hosts without usable bubblewrap use a degraded plain-shell
+sandbox by default with the same temporary cwd and scrubbed environment; Cassy
+reports an explicit warning that network isolation is unavailable. Set
+`skill_validation.require_sandbox = true` to fail closed
 instead. The five-second timeout and process-group cleanup bound the MCP
 request. Scripts are local, deterministic availability checks: they must not
 depend on network access, inherited CAS credentials, project files, or

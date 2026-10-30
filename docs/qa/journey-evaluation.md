@@ -107,8 +107,10 @@ Runtime source ownership includes both existing import users and journeys whose
 browser roots or specs name a literal class or ID queried through `closest`,
 `matches`, `querySelector` or `querySelectorAll`. Both base and head contribute,
 so extracting a DOM handler into an already-shared module retains its UI's
-journey. Dynamic selectors do not supply inferred owners; existing composition
-and unknown-source fallbacks remain in effect.
+journey. DOM owners only add coverage to files with an import or Touches owner;
+an unmapped source still selects the whole surface, even if it queries known
+UI. Dynamic selectors do not supply inferred owners; existing composition
+fallbacks remain in effect.
 
 A release that changes a user-facing surface must carry a journey evaluation
 of exactly the UI it ships.

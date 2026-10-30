@@ -17,7 +17,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Rich inspection stays in source-impact selection** — Literal DOM lookups
   retain the journeys that own their UI when a handler moves into an existing
-  shared module. Existing import ownership and conservative fallbacks remain.
+  shared module. Existing import ownership remains; unmapped source still
+  selects the whole surface even when it queries known UI.
 
 ### Fixed — Changelog category validation
 

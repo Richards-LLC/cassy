@@ -1865,6 +1865,7 @@ posted = False
 receipt = re.compile(
     r"\bmessage_id=[0-9]+(?:\.[0-9]+)?\b"
     r"|https://(?:[A-Za-z0-9-]+\.)?slack\.com/archives/[A-Za-z0-9]+/p[0-9]+\b"
+    r"|\b[0-9]{10}\.[0-9]{6}\b"
 )
 for line in Path(sys.argv[1]).read_text().splitlines():
     if fence:

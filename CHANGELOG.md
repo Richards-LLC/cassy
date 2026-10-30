@@ -17,9 +17,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Posted drafts keep their historical wording** — Was: later pushes could
   re-lint release notes already posted to Slack. Now: the fast check skips
-  drafts with an unfenced `## POSTED` section containing a Slack permalink or
-  message receipt and names each skipped file. Fenced examples, empty sections
-  and placeholders still pass through their usual release or diary lint.
+  drafts with an unfenced `## POSTED` section containing a Slack permalink,
+  message receipt or root/reply timestamp and names each skipped file. Fenced
+  examples, empty sections and placeholders still pass through their usual
+  release or diary lint.
 
 ### Fixed — Worker pre-push guard
 

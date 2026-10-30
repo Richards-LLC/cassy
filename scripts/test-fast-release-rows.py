@@ -828,10 +828,12 @@ sleep 2
             "\n## POSTED\n")[0]
         receipt = "message_id=1790000000.000001"
         permalink = "<https://example.slack.com/archives/C0123456789/p1790000000000001>"
+        timestamp_receipt = "- User thread: #cas-internal root 1793326626.677139, reply 1793326628.503689"
         cases = (
             ("unposted", draft, False),
             ("posted permalink", draft + f"\n## POSTED\n\n{permalink}\n", True),
             ("posted message id", draft + f"\n## POSTED\n\n{receipt}\n", True),
+            ("posted root/reply timestamps", draft + f"\n## POSTED\n\n{timestamp_receipt}\n", True),
             ("fenced heading", draft.replace("\nInstall:", f"\n## POSTED\n{receipt}\n\nInstall:", 1), False),
             ("empty heading", draft + "\n## POSTED\n", False),
             ("placeholder receipt", draft + "\n## POSTED\n\nmessage_id={{MESSAGE_ID}}\n", False),

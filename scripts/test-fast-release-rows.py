@@ -827,10 +827,20 @@ sleep 2
         # wording. Only its posting status should change admission.
         draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().partition(
             "\n## POSTED\n")[0]
-        for posted in (False, True):
-            with self.subTest(posted=posted):
-                receipt = "\n## POSTED\n\n- Posted at: 2026-10-14T12:00:00Z\n" if posted else ""
-                self.write(path, draft + receipt)
+        receipt = "message_id=1790000000.000001"
+        permalink = "<https://example.slack.com/archives/C0123456789/p1790000000000001>"
+        cases = (
+            ("unposted", draft, False),
+            ("posted permalink", draft + f"\n## POSTED\n\n{permalink}\n", True),
+            ("posted message id", draft + f"\n## POSTED\n\n{receipt}\n", True),
+            ("fenced heading", draft.replace("\nInstall:", f"\n## POSTED\n{receipt}\n\nInstall:", 1), False),
+            ("empty heading", draft + "\n## POSTED\n", False),
+            ("placeholder receipt", draft + "\n## POSTED\n\nmessage_id={{MESSAGE_ID}}\n", False),
+            ("receipt in next section", draft + f"\n## POSTED\n\n## Other links\n\n{permalink}\n", False),
+        )
+        for name, body, posted in cases:
+            with self.subTest(case=name):
+                self.write(path, body)
                 self.commit()
                 result = self.fast()
                 self.assertEqual(result.returncode, 0 if posted else 1, result.stdout + result.stderr)

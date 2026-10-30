@@ -8,9 +8,9 @@
 //! - the evidence gate requires only journeys whose owned files the delivery
 //!   diff touched;
 //! - the batch QA receipt wait is skipped, so each fix merges as it lands;
-//! - the post-release check is an asynchronous watch, not a gate.
 //!
-//! The safety floor never reads this mode: build proofs, the touched-test
+//! The post-release check stays a full gate inside a window (its relaxation
+//! is cas-9462). The safety floor never reads this mode: build proofs, the touched-test
 //! receipt, the evidence secret check and every other close gate keep
 //! refusing. A delivery that touches a migration path never gets rapid
 //! treatment, so migrations keep their full review, and the operator states a
@@ -334,76 +334,6 @@ fn recorded_delivery(repo: &Path, task: &Task) -> Option<Delivery> {
     let base = task.deliverables.factory_branch_start.as_ref()?.base_sha.as_str();
     let head = task.deliverables.factory_branch_anchor.as_deref()?;
     diff_between(repo, &[base, head, "--"])
-}
-
-/// Whether a release of `epic` may treat its post-release check as a watch:
-/// what the release merge shipped carries no migration and no secret-shaped
-/// line, on every release branch (the post-release `release_branches`, else
-/// the default branch).
-///
-/// Only origin refs are read; the agent-writable post-release receipt SHA is
-/// not trusted. The release merge is derived from Git: the first commit on
-/// `origin/<release>`'s first-parent history that contains the epic tip
-/// (`origin/<epic branch>`). It must be a merge whose first parent lacks
-/// that tip, and `<merge>^1..<merge>` is everything it brought in: every
-/// child round and every direct supervisor commit. An unreleased epic, a
-/// fast-forward release (the tip on the release's first-parent history), a
-/// missing ref, a Git failure or an empty range keeps the gate.
-fn epic_release_clear(cas_root: &Path, epic: &Task) -> bool {
-    let (Some(branch), Some(repo)) = (epic.branch.as_deref(), cas_root.parent()) else {
-        return false;
-    };
-    let mut targets = crate::qa_post_release::configured(cas_root)
-        .map(|config| config.release_branches)
-        .unwrap_or_default();
-    if targets.is_empty() {
-        targets.push(crate::worktree::GitOperations::new(repo.to_path_buf()).detect_default_branch());
-    }
-    let epic_ref = format!("origin/{branch}");
-    targets.iter().all(|target| {
-        target != branch
-            && released_merge(repo, &format!("origin/{target}"), &epic_ref)
-                .is_some_and(|shipped| !shipped.paths.is_empty() && floor_clear(&shipped, &[]))
-    })
-}
-
-fn commit_of(repo: &Path, reference: &str) -> Option<String> {
-    let spec = format!("{reference}^{{commit}}");
-    git_text(repo, &["rev-parse", "--verify", "--quiet", "--end-of-options", &spec]).map(|sha| sha.trim().to_string())
-}
-
-fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
-    git_text(repo, &["merge-base", "--is-ancestor", ancestor, descendant]).is_some()
-}
-
-/// What the merge that released `epic_ref` into `release_ref` brought in.
-fn released_merge(repo: &Path, release_ref: &str, epic_ref: &str) -> Option<Delivery> {
-    let tip = commit_of(repo, epic_ref)?;
-    let release = commit_of(repo, release_ref)?;
-    if !is_ancestor(repo, &tip, &release) {
-        return None;
-    }
-    let first_parent = git_text(repo, &["rev-list", "--first-parent", &release, "--"])?;
-    if first_parent.lines().any(|sha| sha == tip) {
-        return None;
-    }
-    let range = format!("{tip}..{release}");
-    let merge = git_text(repo, &["rev-list", "--first-parent", "--ancestry-path", "--reverse", &range, "--"])?
-        .lines()
-        .next()?
-        .to_string();
-    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", &merge, "--"])?;
-    let first = parents.split_whitespace().nth(1)?.to_string();
-    if parents.split_whitespace().count() < 3 || is_ancestor(repo, &tip, &first) {
-        return None;
-    }
-    diff_between(repo, &[first.as_str(), merge.as_str(), "--"])
-}
-
-/// The open window that makes `epic`'s post-release check a watch, if any.
-pub fn active_for_release(cas_root: &Path, epic: &Task, now: DateTime<Utc>) -> Option<Window> {
-    let window = active_window(cas_root, &epic.id, now)?;
-    epic_release_clear(cas_root, epic).then_some(window)
 }
 
 /// Close refusal for a migration delivery under an open window until the
@@ -736,52 +666,14 @@ mod tests {
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
-    /// A release cut in a window keeps the post-release run as a watch only
-    /// when the release merge on origin is clean. An unreleased epic, or a
-    /// release whose earlier commit is a migration behind a clean child merge
-    /// at the tip, keeps the gate. The receipt SHA is never trusted.
+    /// The post-release check stays a full gate inside a window.
     #[test]
-    fn window_makes_the_post_release_check_a_watch() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let (dir, cas, store, _delivery) = epic_fixture();
-        let repo = dir.path();
-        std::fs::write(
-            cas.join("config.toml"),
-            "[qa.post_release]\ncommand = \"echo healthy\"\nrelease_branches = [\"main\"]\n",
-        )
-        .unwrap();
-        let origin = repo.join("origin.git");
-        git(repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
-        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
-        git(repo, &["push", "-q", "origin", "main", "epic/hot"]);
+    fn window_keeps_the_post_release_gate() {
+        let (_dir, cas, store, _delivery) = epic_fixture();
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
         let epic = store.get("cas-ep1c").unwrap();
         let window = open(&cas, store.as_ref());
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "an unreleased epic keeps the gate");
-        let release = || {
-            git(repo, &["push", "-q", "origin", "epic/hot"]);
-            git(repo, &["checkout", "-q", "main"]);
-            git(repo, &["merge", "-q", "--no-ff", "-m", "release", "epic/hot"]);
-            git(repo, &["push", "-q", "origin", "main"]);
-            git(repo, &["checkout", "-q", "epic/hot"]);
-        };
-        release();
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none(), "a clean release is a watch");
-        assert_eq!(ledger(&cas, &window)[0].check, "post-release-gate");
-        // A direct migration, then a clean child merged at the epic tip.
-        std::fs::create_dir_all(repo.join("db/migrate")).unwrap();
-        std::fs::write(repo.join("db/migrate/001_add.sql"), "alter table t add c int;\n").unwrap();
-        git(repo, &["add", "db/migrate/001_add.sql"]);
-        git(repo, &["commit", "-q", "-m", "supervisor: direct migration"]);
-        git(repo, &["checkout", "-q", "-b", "factory/child"]);
-        std::fs::write(repo.join("app.txt"), "clean\n").unwrap();
-        git(repo, &["add", "app.txt"]);
-        git(repo, &["commit", "-q", "-m", "child"]);
-        git(repo, &["checkout", "-q", "epic/hot"]);
-        git(repo, &["merge", "-q", "--no-ff", "-m", "merge child", "factory/child"]);
-        release();
-        assert!(
-            crate::qa_post_release::gate(&cas, &epic, true).is_some(),
-            "a released migration behind a clean child merge keeps the gate"
-        );
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty(), "nothing is skipped");
     }
 }

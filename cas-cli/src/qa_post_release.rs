@@ -522,19 +522,6 @@ fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
 pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
     configured(cas_root)?;
     let now = Utc::now();
-    // cas-1b4d: a release cut in an operator's rapid-response window keeps
-    // its post-release run as an asynchronous watch, not a gate.
-    if let Some(window) = crate::rapid_response::active_for_release(cas_root, epic, now)
-        && crate::rapid_response::record_skip(
-            cas_root,
-            &window,
-            &epic.id,
-            "post-release-gate",
-            if release_notes { "release notes did not wait for the post-release watch" } else { "epic close did not wait for the post-release watch" },
-        )
-    {
-        return None;
-    }
     let waiting = fs::read(
         receipt_path(cas_root, &epic.id)
             .ok()?

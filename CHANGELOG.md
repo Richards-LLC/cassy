@@ -21,8 +21,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   --rollback ...` (at most 12 hours; it expires on its own). While it is open,
   per-task independent QA is skipped, close verification runs for one task in four,
   evidence is needed only for journeys whose own files changed, fixes close without
-  waiting for a batch QA receipt, and the post-release check watches instead of
-  gating. Build, touched-test and evidence secret checks still refuse. A change
+  waiting for a batch QA receipt; the post-release check stays a full gate.
+  Build, touched-test and evidence secret checks still refuse. A change
   whose diff has a secret-shaped line, or whose diff cannot be read, keeps every
   gate; a change that touches a migration keeps every gate and also waits for the
   operator's `cas qa rapid-response review-migration`. A task with a verifier

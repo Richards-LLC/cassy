@@ -666,6 +666,7 @@ journeys:
   - hub-web/e2e/journeys/phone-host-line.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
   - hub-web/src/machine-version.ts
+  - hub-web/src/supervisor-version.brief.md
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/attachment-sheet.ts

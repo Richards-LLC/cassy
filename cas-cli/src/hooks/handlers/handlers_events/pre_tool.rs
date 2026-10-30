@@ -8507,6 +8507,11 @@ mod workspace_contract_tests {
             "cat <<EOF\n`cas config gr''ant-write --task cas-1234 --path /x --reason r`\nEOF",
             "cat <<EOF\n'$(cas config gr''ant-write --task cas-1234 --path /x --reason r)'\nEOF",
             "cat <<EOF\n$\\\n(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            // Fix-forward: pattern/comment ')' tokens do not close $().
+            "cat <<EOF\n$(case x in x) cas config gr''ant-write --task cas-1234 --path /x --reason r;; esac)\nEOF",
+            "cat <<EOF\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "echo \"$(case x in x) cas config gr''ant-write --task cas-1234 --path /x --reason r;; esac)\"",
+            "echo \"$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\"",
         ] {
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
@@ -8526,6 +8531,8 @@ mod workspace_contract_tests {
             "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",
             "cat <<EOF\ncas config gr''ant-write --task cas-1234 --path /x --reason r\nEOF",
+            "cat <<'EOF'\n$(case x in x) cas config gr''ant-write --task cas-1234 --path /x --reason r;; esac)\nEOF",
+            "cat <<'EOF'\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
         ] {
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");

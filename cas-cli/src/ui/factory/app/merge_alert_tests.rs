@@ -748,8 +748,13 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     f.app.merge_alert_retries.now = Some(minute);
     let retries = f.app.merge_alert_retry_events_at(minute);
     assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
+    assert!(f.app.revalidate_and_prompt_for_delivery(&retries).1.is_empty(),
+        "cas-0ea7: a wait ending a minute after the alert does not repeat it");
+    let quiet = now + chrono::Duration::minutes(11);
+    f.app.merge_alert_retries.now = Some(quiet);
+    let retries = f.app.merge_alert_retry_events_at(quiet);
     assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
-        "after the wake ends, an idle worker must still alert without a new detector event");
+        "after the quiet window, an idle worker must still alert without a new detector event");
     // A same-SHA rerun is visible when the settled-failure backoff expires.
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     f.ci(None);
@@ -771,6 +776,17 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
+
+    // cas-0ea7: the worker's own status to the supervisor covers its idle turn.
+    crate::store::open_prompt_queue_store(&f.app.cas_dir).unwrap()
+        .enqueue("merge-w", "test-supervisor", "status: in_progress\nneed: nothing. Not blocked; tests rerunning.")
+        .unwrap();
+    let reported = Utc::now();
+    f.app.merge_alert_retries.now = Some(reported + chrono::Duration::minutes(1));
+    f.ci(Some("failure"));
+    assert!(f.relay().is_empty(), "a status the worker just sent covers even a changed idle signal");
+    f.app.merge_alert_retries.now = Some(reported + chrono::Duration::minutes(11));
+    assert_eq!(f.relay().len(), 1, "the worker's status quiets the alert, never hides it for good");
 }
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
@@ -1055,6 +1071,7 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
         &f.app.director_data,
         f.repo.path(),
         now + chrono::Duration::minutes(11),
+        "test-supervisor",
     );
     assert!(ready.is_none() && wait.is_none(), "held delivery must not reuse READY");
 

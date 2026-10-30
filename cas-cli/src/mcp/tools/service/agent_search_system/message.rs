@@ -7466,18 +7466,27 @@ mod cas_89e1_post_merge_message_type_tests {
             ("unknown-device", None, false, "No verified Commander message"),
             ("Daniel@Soundwave", None, true, "requires an active factory session"),
         ] {
-            if sessionless {
+            let caller = if sessionless {
                 let mut sessionless_supervisor = supervisor.clone();
                 sessionless_supervisor.id = "sessionless-supervisor-id".into();
+                sessionless_supervisor.name = "sessionless-supervisor".into();
                 sessionless_supervisor.factory_session = None;
                 agents.register(&sessionless_supervisor).expect("register sessionless sender");
-                service.inner.set_agent_id_for_testing(sessionless_supervisor.id);
-            }
+                sessionless_supervisor.id
+            } else {
+                supervisor.id.clone()
+            };
+            let error_core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            error_core.set_agent_id_for_testing(caller);
+            #[cfg(feature = "mcp-proxy")]
+            let error_service = CasService::new(error_core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let error_service = CasService::new(error_core);
             let request = serde_json::from_value(serde_json::json!({
                 "action": "message", "target": format!("commander:{selector}"),
                 "in_reply_to": in_reply_to, "summary": "refused alias", "message": "Status response.",
             })).unwrap();
-            let error = service.message_send(request).await.expect_err("invalid alias reply must be refused");
+            let error = error_service.message_send(request).await.expect_err("invalid alias reply must be refused");
             assert!(error.message.contains(cause), "{selector}: {error:?}");
             assert!(error.message.contains("Reply once in this pane"), "{selector}: {error:?}");
             assert!(error.message.contains("disabled or unmirrored delivery"), "{selector}: {error:?}");

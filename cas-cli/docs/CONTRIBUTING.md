@@ -3356,6 +3356,10 @@ Commander checks; this adds no CI stage or duplicate gate.
 `python3 scripts/check-test-shape.py` checks tracked Rust tests and test-only
 helpers for constant/literal equality and reads of Rust source as text.
 `--changed-since <ref>` checks the merge-base diff, including working changes;
+files imported only by a released-trunk sync merge are excluded, while task
+edits before and after that merge remain checked. As with task attribution,
+every side parent must belong to `origin/<trunk>` (or local trunk when the
+remote ref is absent); other merges stay in scope.
 the release fast rows and Scoped Validation run this form. Intentional external
 wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker test-shape scope
+
+- **Syncing released trunk preserves the task's test scope** — The test-shape
+  guard excludes files imported only by a trunk sync merge, while checking the
+  task's committed and working edits on either side of the sync.
+
 ### Added — Readable published reasoning
 
 - **Published reasoning stays easy to skim** — Commander shows a folded summary preview with formatted detail and an exact raw-text fallback. Opening or updating it preserves focus and reading position; Thinking and Thought labels require reported lifecycle events.

@@ -10,7 +10,8 @@ env!("CARGO_BIN_EXE_<name>"); this archive-portability rule cannot be exempted.
 Text-pin checks cover changed test files, so legacy pins do not block unrelated
 work. With --changed-since, only added or modified lines are checked for text
 pins; without it, changed test files are scanned in full. --changed-since uses
-merge-base(ref, HEAD), including working changes.
+merge-base(ref, HEAD), including working changes, excluding files imported only
+by a released-trunk sync merge.
 """
 import argparse
 from pathlib import Path
@@ -302,6 +303,45 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
     return sorted(hits)
 
 
+def released_trunk():
+    """Match task attribution: prefer origin's default trunk, then local-only trunk."""
+    remote = subprocess.run(['git', 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'],
+                            capture_output=True, text=True)
+    prefix = 'refs/remotes/origin/'
+    branches = ([remote.stdout.strip()[len(prefix):]]
+                if remote.returncode == 0 and remote.stdout.strip().startswith(prefix)
+                else ['main', 'master'])
+    for branch in branches:
+        for ref in [f'refs/remotes/origin/{branch}', f'refs/heads/{branch}']:
+            if subprocess.run(['git', 'show-ref', '--verify', '--quiet', ref]).returncode == 0:
+                return ref
+    return None
+
+
+def task_changed_paths(base):
+    """Keep task edits on either side of syncs, including tracked working edits."""
+    trunk = released_trunk()
+    history = subprocess.check_output(
+        ['git', 'rev-list', '--first-parent', '--parents', f'{base}..HEAD'], text=True,
+    )
+    paths = set()
+    for row in history.splitlines():
+        commit, first, *side = row.split()
+        if trunk and side and all(subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', parent, trunk],
+        ).returncode == 0 for parent in side):
+            # Like cas-985f, the released side parents vouch for the sync,
+            # including its resolutions. An unrecognized merge stays checked.
+            continue
+        paths.update(subprocess.check_output(
+            ['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', first, commit], text=True,
+        ).split('\0'))
+    paths.update(subprocess.check_output(
+        ['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', 'HEAD'], text=True,
+    ).split('\0'))
+    return paths
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--changed-since')
@@ -310,6 +350,8 @@ def main():
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()
             paths = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', base], text=True).split('\0')
+            owned = task_changed_paths(base)
+            paths = [path for path in paths if path in owned]
             text_pin_paths = {path for path in paths if path}
             changed_text_lines = {}
             for path in text_pin_paths:

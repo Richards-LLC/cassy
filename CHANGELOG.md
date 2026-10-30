@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Case checks after registry repairs
+
+- **Registry repairs retain ownership and regression checks** — Fixing a base
+  duplicate evaluates the delivered registry and compares every old case variant.
+  Registry escape notes cannot bypass the case gate; duplicates still present in
+  the delivery refuse with a named error.
+
 ### Fixed — Image viewer recovery
 
 - **Repeated image failures leave one clear note** — Unavailable previews and

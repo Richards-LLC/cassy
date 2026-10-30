@@ -8662,6 +8662,8 @@ mod workspace_contract_tests {
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
             // Rejected review: a nearby final pair does not prove arithmetic.
             // Shell comments and quotes cannot certify arithmetic boundaries.
+            "echo $((touch /outside/cas-0c9c-p\\) && (true))",
+            "echo \"$[ $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ]\"",
             "x=$((true #)\ntouch /outside/cas-0c9c-p\n))",
             "echo $((true #)\ntouch /outside/cas-0c9c-p\n))",
             "echo \"$((true #))\nrm -rf /outside/cas-0c9c-dir\n))\"",

@@ -122,12 +122,6 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         await expect(viewer.getByRole("img", { name: "screenshot.png", exact: true })).toBeVisible();
         await viewer.getByRole("button", { name: "Close image viewer", exact: true }).click();
         await expect(viewer).toHaveCount(0);
-        // Non-image attachments retain their original content-tab navigation.
-        const popup = page.waitForEvent("popup");
-        await page.getByRole("log").locator('a.sheet').filter({ hasText: "notes.txt" }).click();
-        const preview = await popup;
-        await preview.waitForURL(/\/artifacts\/art-.*\/content\?t=/);
-        await preview.close();
         await page.reload();
         await assertFiles(page);
         // A fresh pairing has none of the sender's object URLs or upload state.

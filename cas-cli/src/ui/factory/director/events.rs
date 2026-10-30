@@ -486,9 +486,17 @@ pub(crate) fn delivery_marked_ready(task: &cas_types::Task, tip: &str) -> bool {
         let body = body.strip_prefix("📝 PROGRESS")
             .or_else(|| body.strip_prefix(DECISION_NOTE_MARKER)).unwrap_or(body).trim_start();
         let mut fields = body.lines();
-        let declared_ready = fields.next() == Some("status: ready")
+        // cas-fc42: a worker's ready message often names a short SHA. A hex
+        // prefix of at least seven characters names this pushed tip
+        // unambiguously; a later push moves the tip and no longer matches.
+        let names_tip = |value: &str| value == tip
+            || (value.len() >= 7 && value.len() < tip.len()
+                && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && tip.starts_with(&value.to_ascii_lowercase()));
+        let declared_ready = fields.next().map(str::trim_end) == Some("status: ready")
             && fields.next().and_then(|line| line.strip_prefix("tip:"))
-                .and_then(|value| value.split_whitespace().next()) == Some(tip);
+                .and_then(|value| value.split_whitespace().next())
+                .is_some_and(names_tip);
         let words = words_lowercase(entry);
         let checkpoint = words.iter().any(|word| word == "checkpoint")
             && (words.iter().any(|word| word == "red")

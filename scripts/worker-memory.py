@@ -105,6 +105,10 @@ def estimate(command, cwd=None, depth=0):
         if script == 'run-verified-tests.mjs' and args[1:2] == ['vitest']:
             # This entry point enforces maxWorkers=2 itself.
             return 2 * host_memory.GIB
+        if script == 'run-verified-node-tests.mjs':
+            # The wrapper starts five concurrent Node test copies for its
+            # stability receipt, so reserve the same bounded lane as Vitest.
+            return 2 * host_memory.GIB
         # hub-web's token generators are small single-process file transforms.
         if script in ('generate-tokens.mjs', 'build-cassy-tokens.mjs'):
             return host_memory.GIB

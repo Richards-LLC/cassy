@@ -1376,6 +1376,36 @@ pub(crate) fn record_stability_with_durations_for_tests(cas_root: &Path, repo: &
     std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
 }
 
+#[cfg(test)]
+pub(crate) fn record_web_stability_for_tests(
+    cas_root: &Path, repo: &Path, head: &str, base: &str, runner: &str, id: &str, failed_trial: bool,
+) {
+    let repo = repo.canonicalize().unwrap();
+    let package = "web-tests";
+    let filter = "test(worker-stability)";
+    let test = TargetedTest { package: package.into(), harness: Some(runner.into()), filter: filter.into() };
+    let path = test_receipt_path(cas_root, &repo, head, &test);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let proof = serde_json::json!({
+        "version": 2, "base": base, "head": head, "tests": [id], "names": [id],
+        "runs": 5, "parallelism": 5, "retries": 0,
+        "trials": (0..5).map(|index| serde_json::json!({
+            "exit_code": if failed_trial && index == 2 { 1 } else { 0 }, "count": 1,
+            "started": 0.0, "ended": 1.0, "log": "web fixture"
+        })).collect::<Vec<_>>(),
+        "cases": {id: [id]}, "durations": {id: vec![0.01; 5]},
+    });
+    let record = CheckReceipt {
+        head: head.into(), repo, packages: vec![package.into()],
+        test: Some(TestReceipt {
+            filter: filter.into(), harness: Some(runner.into()), count: 1,
+            host_path_opt_out: None, supervisor_recorded: None,
+            stability: Some(serde_json::from_value(proof).unwrap()),
+        }),
+    };
+    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+}
+
 // Shared with parked-cache eviction: a cache cannot be evicted while its
 // capped builder owns the lane, even between process inspection and spawn.
 pub(crate) struct LaneLock {

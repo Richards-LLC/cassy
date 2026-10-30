@@ -10,6 +10,8 @@ import sys
 import threading
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -20,12 +22,35 @@ sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location('worker_stability', SCRIPTS / 'worker-test-stability.py')
 STABILITY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STABILITY)
-SPEC = importlib.util.spec_from_file_location('verified_pytest', SCRIPTS / 'run-verified-pytest.py')
-VERIFIED_PYTEST = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(VERIFIED_PYTEST)
 
 
 class ChangedStrings(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dependencies = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.dependencies.cleanup)
+        shared = Path(__file__).parents[1] / 'hub-web/node_modules'
+        use_shared = (
+            os.environ.get('CAS_TEST_WORKER_PROOF_NO_SHARED_DEPS') != '1'
+            and (shared / 'vitest/vitest.mjs').is_file()
+            and (shared / 'typescript/lib/typescript.js').is_file()
+        )
+        if use_shared:
+            cls.node_modules = shared
+            return
+
+        fixture = Path(__file__).parents[1] / 'hub-web/test-fixtures/vitest-stability'
+        install_root = Path(cls.dependencies.name)
+        shutil.copy(fixture / 'package.json', install_root / 'package.json')
+        shutil.copy(fixture / 'package-lock.json', install_root / 'package-lock.json')
+        install = subprocess.run(
+            ['npm', 'ci', '--prefix', str(install_root), '--ignore-scripts', '--no-audit', '--no-fund'],
+            capture_output=True, text=True,
+        )
+        if install.returncode:
+            raise RuntimeError(f'could not install pinned Vitest fixture dependencies:\n{install.stdout}\n{install.stderr}')
+        cls.node_modules = install_root / 'node_modules'
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -33,6 +58,11 @@ class ChangedStrings(unittest.TestCase):
         (self.repo / 'scripts').mkdir()
         for name in ['check-test-shape.py', 'rust_test_source.py']:
             shutil.copy(SCRIPTS / name, self.repo / 'scripts' / name)
+        shutil.copy(SCRIPTS / 'worker-js-test-source.mjs', self.repo / 'scripts' / 'worker-js-test-source.mjs')
+        hub = self.repo / 'hub-web'
+        hub.mkdir()
+        (hub / 'package.json').write_text('{}')
+        (hub / 'node_modules').symlink_to(self.node_modules)
         self.git('init', '-q')
 
     def git(self, *args):
@@ -229,13 +259,24 @@ else:
                      for runner in ('vitest', 'playwright', 'pytest')}
         self.assertEqual(STABILITY.adapter_args('vitest', by_runner['vitest'])[:2],
                          ['--testNamePattern', "^(?:changed)$"])
-        self.assertEqual(STABILITY.adapter_args('playwright', by_runner['playwright']),
-                         ['hub-web/e2e/worker.spec.ts:3'])
-        self.assertEqual(STABILITY.adapter_args('pytest', by_runner['pytest']),
-                         ['scripts/test_worker.py::test_changed'])
+        self.assertEqual(len(by_runner['playwright']), 1)
+        with self.assertRaisesRegex(ValueError, 'Playwright.*not supported yet'):
+            STABILITY.adapter_args('playwright', by_runner['playwright'])
+        self.assertEqual(len(by_runner['pytest']), 1)
+        with self.assertRaisesRegex(ValueError, 'pytest.*not supported yet'):
+            STABILITY.adapter_args('pytest', by_runner['pytest'])
 
         with self.assertRaisesRegex(ValueError, 'dynamic test title'):
             STABILITY.source_tests('dynamic.test.ts', "test(`case ${value}`, () => {});", 'vitest')
+
+        escaped = r'''import test from 'node:test';
+test('it\'s fine', () => assert.match("say \"hi\"", /["']/));
+test("say \"hi\"", () => {});
+test.each(['first', 'second'])('%s case', () => {});
+'''
+        self.assertEqual(STABILITY.ecosystem('checkout-ports.test.mjs', escaped), 'node-test')
+        parsed = STABILITY.source_tests('checkout-ports.test.mjs', escaped, 'node-test', self.repo)
+        self.assertEqual([case['function'] for case in parsed], ["it's fine", 'say "hi"', 'first case', 'second case'])
 
     def test_web_stability_receipt_is_bound_and_one_failed_copy_blocks_it(self):
         source = self.repo / 'hub-web/src/worker.test.ts'
@@ -280,24 +321,55 @@ else:
                         self.assertEqual((proof['base'], proof['head'], proof['runs'], proof['parallelism'], proof['retries']),
                                          (base, head, 5, 5, 0))
 
-    def test_pytest_wrapper_counts_junit_and_disables_configured_reruns(self):
-        with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            count = root / 'count'
-            report = root / 'evidence.xml'
-            env = {'CAS_WORKER_STABILITY_TRIAL': '1',
-                   'VERIFIED_TEST_COUNT_FILE': str(count),
-                   'VERIFIED_TEST_REPORT_FILE': str(report)}
-            def spawn(command, *, cwd, env, stdout, stderr, close_fds):
-                self.assertIn('--override-ini=addopts=', command)
-                self.assertTrue(command[-1].startswith('--junitxml='))
-                xml = Path(command[-1].split('=', 1)[1])
-                xml.write_text('<testsuite><testcase name="test_selected" time="0.02"/></testsuite>')
-                return subprocess.CompletedProcess(command, 0)
-            self.assertEqual(VERIFIED_PYTEST.run_verified(['tests/test_sample.py::test_selected'],
-                             cwd=root, env=env, spawn=spawn), 0)
-            self.assertEqual(count.read_text(), '1\n')
-            self.assertIn('test_selected', report.read_text())
+    def test_real_vitest_runs_five_copies_and_writes_bound_receipt(self):
+        source = self.repo / 'hub-web/src/receipt.test.ts'
+        source.parent.mkdir(parents=True)
+        (self.repo / 'hub-web/scripts').mkdir(parents=True)
+        shutil.copy(Path(__file__).parents[1] / 'hub-web/scripts/run-verified-tests.mjs',
+                    self.repo / 'hub-web/scripts/run-verified-tests.mjs')
+        source.write_text("import { test, expect } from 'vitest';\ntest('changed receipt case', () => expect('old').toBe('old'));\n")
+        base = self.commit()
+        source.write_text("import { test, expect } from 'vitest';\ntest('changed receipt case', () => expect('new').toBe('new'));\n")
+        head = self.commit()
+        cas_root = self.repo / '.cas'
+        with patch.dict(os.environ, {
+            'CAS_WORKER_STABILITY_BASE': base,
+            'CAS_WORKER_STABILITY_HEAD': head,
+            'CAS_ROOT': str(cas_root),
+        }, clear=False):
+            output = StringIO()
+            try:
+                with redirect_stdout(output):
+                    STABILITY.run_adapter_stability(self.repo, 'vitest', None)
+            except ValueError as error:
+                raise ValueError(f'{error}\nVitest copy output:\n{output.getvalue()}') from error
+        receipts = list((cas_root / 'worker-checks').rglob(f'{head}-test-*.json'))
+        receipt, = receipts
+        data = json.loads(receipt.read_text())
+        self.assertEqual((data['head'], data['test']['harness'], data['test']['stability']['runs']),
+                         (head, 'vitest', 5))
+
+    def test_node_test_runner_selects_changed_case_and_writes_bound_receipt(self):
+        source = self.repo / 'hub-web/e2e/receipt.test.mjs'
+        source.parent.mkdir(parents=True)
+        (self.repo / 'hub-web/scripts').mkdir(parents=True, exist_ok=True)
+        shutil.copy(Path(__file__).parents[1] / 'hub-web/scripts/run-verified-node-tests.mjs',
+                    self.repo / 'hub-web/scripts/run-verified-node-tests.mjs')
+        source.write_text("import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('changed receipt case', () => assert.equal('old', 'old'));\n")
+        base = self.commit()
+        source.write_text("import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('changed receipt case', () => assert.equal('new', 'new'));\n")
+        head = self.commit()
+        cas_root = self.repo / '.cas'
+        with patch.dict(os.environ, {
+            'CAS_WORKER_STABILITY_BASE': base,
+            'CAS_WORKER_STABILITY_HEAD': head,
+            'CAS_ROOT': str(cas_root),
+        }, clear=False):
+            STABILITY.run_adapter_stability(self.repo, 'node-test', None)
+        receipt, = (cas_root / 'worker-checks').rglob(f'{head}-test-*.json')
+        data = json.loads(receipt.read_text())
+        self.assertEqual((data['head'], data['test']['harness'], data['test']['stability']['runs']),
+                         (head, 'node-test', 5))
 
     def test_native_reports_resolve_exact_touched_case_durations(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -308,14 +380,18 @@ else:
                 'assertionResults': [{'ancestorTitles': ['suite'], 'title': 'changed', 'duration': 24}]}]}))
             self.assertEqual(STABILITY.report_durations('vitest', report, vitest),
                              {'src/worker.test.ts::suite::changed': [0.024]})
-            playwright = [{'id': 'tests/worker.spec.ts::suite::changed', 'file': 'tests/worker.spec.ts',
-                           'function': 'suite::changed'}]
-            report.write_text(json.dumps({'suites': [{'title': 'worker.spec.ts', 'file': '/repo/tests/worker.spec.ts',
-                'specs': [{'title': 'changed', 'tests': [{'results': [{'status': 'expected', 'duration': 31}]}]}],
-                'suites': [{'title': 'suite', 'specs': [{'title': 'changed', 'tests': [
-                    {'results': [{'status': 'expected', 'duration': 45}]}]}]}]}]}))
-            self.assertEqual(STABILITY.report_durations('playwright', report, playwright),
-                             {'tests/worker.spec.ts::suite::changed': [0.045]})
+            node = [{'id': 'e2e/worker.test.mjs::suite::changed', 'file': 'e2e/worker.test.mjs',
+                     'function': 'suite::changed'}]
+            report.write_text('<testsuites><testcase name="suite changed" time="0.045"/></testsuites>')
+            self.assertEqual(STABILITY.report_durations('node-test', report, node),
+                             {'e2e/worker.test.mjs::suite::changed': [0.045]})
+
+    def test_pytest_wrapper_fails_closed_as_unsupported(self):
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'run-verified-pytest.py')],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('pytest', result.stderr)
+        self.assertIn('not supported yet', result.stderr)
 
 
 if __name__ == '__main__':

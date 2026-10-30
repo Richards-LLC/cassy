@@ -17,6 +17,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
+- **Large proof discoveries stay within Git's regex limit** — Source references
+  are searched in bounded batches, preserving all required test targets when
+  deliveries contain hundreds of paths.
 - **Mac worker background jobs suppress idle alerts** — macOS now walks the
   worker's own process tree, excluding persistent Cassy and Playwright MCP
   sidecars with the same rules as Linux.

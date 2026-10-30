@@ -670,9 +670,9 @@ export class HubConnectionSupervisor {
 
   private adoptHubClock(serverTime: number | undefined): void {
     if (serverTime === undefined) return;
-    const offset = serverTime * 1000 - Date.now();
-    // Inside a few seconds is latency and rounding, not drift.
-    this.clockOffsetMs = Math.abs(offset) > 5_000 ? offset : 0;
+    // The hub refuses any future iat, so even sub-second corrections matter.
+    // Its integer second also rounds the retry down conservatively.
+    this.clockOffsetMs = serverTime * 1000 - Date.now();
   }
 
   uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string; mime: string }> {

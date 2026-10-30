@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Hub authentication clock correction
+
+- **Fast device clocks recover automatically** — The hub refuses future-dated
+  authentication proofs to prevent replay after a restart. Commander retries
+  on the hub's clock even when the device is only 1–4 seconds ahead.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

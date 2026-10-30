@@ -71,7 +71,7 @@
   .code-frame .code-frame-content pre.markdown-code { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
 }
 
-/* Syntax roles are independent of action and status colors; see DESIGN.md. */
+/* Syntax roles are independent of action and status colors; see code-syntax.brief.md. */
 .code-frame {
   --syntax-keyword: #5B3FE0;
   --syntax-string: #14635F;

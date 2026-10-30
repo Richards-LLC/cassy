@@ -8835,6 +8835,13 @@ mod workspace_contract_tests {
             ("redirect target substitution", "echo hi > \"$(touch /outside/p)\"\n".into(), true),
             ("redirect before a harmless command", ">out.txt echo hi\n".into(), false),
             ("descriptor duplication", ">&2 echo hi\n".into(), false),
+            // ver-94604cd718e7: bash runs the `touch` in `{fd}>/dev/null touch x`.
+            ("named descriptor before a write", "{fd}>/dev/null touch /outside/x\n".into(), true),
+            ("named descriptor before a delete", "{fd}>/dev/null rm -rf /outside/x\n".into(), true),
+            ("named descriptor before a directory change", "{fd}>/dev/null cd /outside && touch y\n".into(), true),
+            ("named descriptor redirect target named case", "({fd}>case touch in /outside/p) {fd}>esac\n".into(), true),
+            ("substituted named descriptor target named case", "echo \"$({fd}>case touch in /outside/p) {fd}>esac)\"\n".into(), true),
+            ("named descriptor before a harmless command", "{fd}>out.txt echo hi\n".into(), false),
             ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
             ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
             ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),

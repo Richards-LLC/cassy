@@ -7,9 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Maintenance — Release draft linting
+### Fixed — Release draft linting
 
-- Remove an unused draft-failure classification helper from the release gate.
+- **Unused draft helper removed** — Delete the orphan failure classifier.
   Draft routing, lint failures and posted-receipt matching keep their behavior.
 
 ### Fixed — Factory guidance size

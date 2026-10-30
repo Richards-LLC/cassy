@@ -107,43 +107,68 @@ pub(super) fn apply_claude(config: &mut PtyConfig, account: &Path, cwd: &Path) {
 
 /// Grok lists a project skill ahead of a same-named personal one, so an
 /// explicit-only copy in the worker's checkout hides the personal row and keeps
-/// `/name` working. Only Cassy-managed skills are copied; a user's own personal
-/// skills stay listed, because their contents are never read.
+/// `/name` working. A Cassy-managed copy already in the checkout gets the same
+/// treatment. A user's own skills stay listed, whether personal or in the project,
+/// and so do skills the repository tracks: changing those would dirty the checkout.
 pub(super) fn prepare_grok_project_skills(cwd: &Path, grok_home: &Path) -> std::io::Result<usize> {
     if !is_cassy_worktree(cwd) {
         return Ok(0);
     }
-    let source = grok_home.join("skills");
-    let Ok(entries) = std::fs::read_dir(&source) else {
-        return Ok(0);
-    };
     let target = cwd.join(GROK_PROJECT_SKILLS);
     let tracked = git_lines(cwd, &["ls-files", "--", GROK_PROJECT_SKILLS]);
-    let mut projected = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str().filter(|name| !is_role_skill(name)) else {
+    let is_tracked = |name: &str| {
+        let prefix = format!("{GROK_PROJECT_SKILLS}/{name}/");
+        tracked.iter().any(|file| file.starts_with(&prefix))
+    };
+    let mut projected = BTreeSet::new();
+    for skill in skill_dirs(&grok_home.join("skills")) {
+        let Some(name) = projectable_name(&skill).filter(|name| !is_tracked(name)) else {
             continue;
         };
-        let skill = entry.path();
         let Ok(body) = std::fs::read_to_string(skill.join("SKILL.md")) else {
             continue;
         };
-        let destination = target.join(name);
-        let prefix = format!("{GROK_PROJECT_SKILLS}/{name}/");
+        let destination = target.join(&name);
         let customized = std::fs::read_to_string(destination.join("SKILL.md"))
             .is_ok_and(|existing| !is_cassy_managed(&existing));
-        if !is_cassy_managed(&body) || customized || tracked.iter().any(|file| file.starts_with(&prefix)) {
+        if !is_cassy_managed(&body) || customized {
             continue;
         }
         copy_tree(&skill, &destination)?;
         std::fs::write(destination.join("SKILL.md"), explicit_only(&body))?;
-        projected += 1;
+        projected.insert(name);
     }
-    if projected > 0 {
-        exclude_from_git(cwd)?;
+    for skill in skill_dirs(&target) {
+        let Some(name) = projectable_name(&skill)
+            .filter(|name| !is_tracked(name) && !projected.contains(name))
+        else {
+            continue;
+        };
+        let file = skill.join("SKILL.md");
+        let Ok(body) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if is_cassy_managed(&body) {
+            std::fs::write(file, explicit_only(&body))?;
+            projected.insert(name);
+        }
     }
-    Ok(projected)
+    if !projected.is_empty() {
+        ignore_projection(cwd, &target)?;
+    }
+    Ok(projected.len())
+}
+
+fn skill_dirs(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+/// A skill directory's name, unless it is a role skill and so stays listed.
+fn projectable_name(skill: &Path) -> Option<String> {
+    let name = skill.file_name()?.to_str()?;
+    (!is_role_skill(name)).then(|| name.to_string())
 }
 
 fn is_cassy_managed(content: &str) -> bool {
@@ -197,25 +222,16 @@ fn git_lines(cwd: &Path, args: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Keep the projection out of `git status` without editing a tracked file.
-fn exclude_from_git(cwd: &Path) -> std::io::Result<()> {
+/// Keep the projection out of this checkout's `git status`. The directory ignores
+/// itself because Git has no per-worktree exclude: it reads `info/exclude` only
+/// from the common dir, which would also hide the main checkout's untracked files.
+fn ignore_projection(cwd: &Path, target: &Path) -> std::io::Result<()> {
     let probe = format!("{GROK_PROJECT_SKILLS}/probe/SKILL.md");
-    if !git_lines(cwd, &["check-ignore", &probe]).is_empty() {
-        return Ok(());
+    let marker = target.join(".gitignore");
+    if git_lines(cwd, &["check-ignore", &probe]).is_empty() && !marker.exists() {
+        std::fs::write(marker, "*\n")?;
     }
-    let Some(exclude) = git_lines(cwd, &["rev-parse", "--git-path", "info/exclude"]).pop() else {
-        return Ok(());
-    };
-    let exclude = cwd.join(PathBuf::from(exclude));
-    if let Some(parent) = exclude.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(&format!("/{GROK_PROJECT_SKILLS}/\n"));
-    std::fs::write(exclude, text)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -326,15 +342,14 @@ mod tests {
         assert_eq!(settings["skillOverrides"]["init"], "user-invocable-only");
     }
 
-    /// Copies are explicit-only with their resources; role skills, personal
-    /// skills, tracked copies and project customizations are left alone, and
-    /// the checkout stays clean.
+    /// Copies are explicit-only with their resources. Role skills, personal
+    /// skills, tracked copies and project customizations are left alone. The
+    /// worktree stays clean without hiding the main checkout's untracked files.
     #[test]
     fn grok_projection_copies_only_what_it_owns() {
         let dir = tempfile::tempdir().unwrap();
-        let (home, repo) = (dir.path().join("home"), dir.path().join(".cas/worktrees/probe"));
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q"]);
+        let (home, main) = (dir.path().join("home"), dir.path().join("main"));
+        let repo = main.join(".cas/worktrees/probe");
         for (name, body) in [
             ("cas-release-report", MANAGED),
             ("cas-worker", MANAGED),
@@ -346,27 +361,42 @@ mod tests {
             std::fs::write(home.join("skills").join(name).join("SKILL.md"), body).unwrap();
             std::fs::write(home.join("skills").join(name).join("references/a.md"), "A").unwrap();
         }
-        let project = repo.join(GROK_PROJECT_SKILLS);
-        std::fs::create_dir_all(project.join("customized")).unwrap();
-        let customization = "---\nname: customized\n---\nMINE\n";
-        std::fs::write(project.join("customized/SKILL.md"), customization).unwrap();
-        std::fs::create_dir_all(project.join("tracked")).unwrap();
-        std::fs::write(project.join("tracked/SKILL.md"), "tracked\n").unwrap();
-        git(&repo, &["add", ".grok/skills/tracked/SKILL.md"]);
-        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"]);
+        std::fs::create_dir_all(main.join(GROK_PROJECT_SKILLS).join("tracked")).unwrap();
+        std::fs::write(main.join(GROK_PROJECT_SKILLS).join("tracked/SKILL.md"), "tracked\n").unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["add", ".grok/skills/tracked/SKILL.md"]);
+        git(&main, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"]);
+        git(&main, &["worktree", "add", "-q", "-b", "probe", ".cas/worktrees/probe"]);
 
-        assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 1);
-        let copy = std::fs::read_to_string(project.join("cas-release-report/SKILL.md")).unwrap();
-        assert!(copy.contains("\ndisable-model-invocation: true\n---\nBODY"), "{copy}");
+        let project = repo.join(GROK_PROJECT_SKILLS);
+        let customization = "---\nname: customized\n---\nMINE\n";
+        for (name, body) in [("customized", customization), ("project-only", MANAGED)] {
+            std::fs::create_dir_all(project.join(name)).unwrap();
+            std::fs::write(project.join(name).join("SKILL.md"), body).unwrap();
+        }
+        let main_untracked = main.join(GROK_PROJECT_SKILLS).join("in-progress");
+        std::fs::create_dir_all(&main_untracked).unwrap();
+        std::fs::write(main_untracked.join("SKILL.md"), "draft\n").unwrap();
+
+        assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 2);
         let read = |path: PathBuf| std::fs::read_to_string(path).unwrap();
-        assert_eq!(read(project.join("cas-release-report/references/a.md")), read(home.join("skills/cas-release-report/references/a.md")));
+        for name in ["cas-release-report", "project-only"] {
+            let copy = read(project.join(name).join("SKILL.md"));
+            assert!(copy.contains("\ndisable-model-invocation: true\n---\nBODY"), "{copy}");
+        }
+        assert_eq!(
+            read(project.join("cas-release-report/references/a.md")),
+            read(home.join("skills/cas-release-report/references/a.md"))
+        );
         assert!(!project.join("cas-worker").exists() && !project.join("own-skill").exists());
         assert_eq!(read(project.join("customized/SKILL.md")), customization);
-        // Clean status: the tracked copy is untouched and the rest is excluded.
+        // Clean status: the tracked copy is untouched and the rest ignores itself.
         assert!(git_lines(&repo, &["status", "--porcelain"]).is_empty());
+        let main_status = ["status", "--porcelain", "--untracked-files=all", "--", ".grok/skills"];
+        assert!(!git_lines(&main, &main_status).is_empty(), "the main checkout's draft stays visible");
         // A later launch refreshes in place rather than stacking frontmatter.
-        assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 1);
-        let again = std::fs::read_to_string(project.join("cas-release-report/SKILL.md")).unwrap();
+        assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 2);
+        let again = read(project.join("project-only/SKILL.md"));
         assert_eq!(again.matches("disable-model-invocation").count(), 1);
     }
 }

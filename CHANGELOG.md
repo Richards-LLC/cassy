@@ -76,8 +76,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   stays available: `/name` or `$name` still expands, and `skill action=list_all`
   and `skill action=show` now serve the shipped catalog and its references even
   when no project synced it. Grok workers in a Cassy-managed worktree run with
-  `GROK_FOLDER_TRUST=false` and a generated, git-excluded `.grok/skills`; other
-  checkouts keep the full listing. A user's own Grok skills stay listed,
+  `GROK_FOLDER_TRUST=false` and a generated `.grok/skills` that ignores itself, so
+  the shared exclude file stays untouched; other checkouts keep the full listing.
+  A user's own Grok skills and skills a repository tracks stay listed,
   as do Claude plugin skills, which Claude's control does not reach.
 
 ### Fixed — Delivery process

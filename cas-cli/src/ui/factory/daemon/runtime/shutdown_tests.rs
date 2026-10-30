@@ -1599,10 +1599,20 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         assert_ne!(replacement_pid, old_pid, "recycle started a new process");
         // The old registration is retired, but the replacement has not
         // registered. A write makes this a changed-DB director snapshot.
-        let old_registration = open_agent_store(&cas_dir)
-            .unwrap()
-            .get(&format!("agent-{NAME}"))
-            .unwrap();
+        // Under load the bounded first attempt can lose to a busy store: the row is
+        // marked stale and retirement is deferred to the store worker, which must
+        // still finish it.
+        let retirement_deadline = Instant::now() + Duration::from_secs(30);
+        let old_registration = loop {
+            let row = open_agent_store(&cas_dir)
+                .unwrap()
+                .get(&format!("agent-{NAME}"))
+                .unwrap();
+            if row.status == cas_types::AgentStatus::Shutdown || Instant::now() >= retirement_deadline {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
         assert_eq!(old_registration.status, cas_types::AgentStatus::Shutdown);
         let mut held = tasks.get("cas-recycled-held").unwrap();
         held.notes = "Replacement is waiting to register".into();

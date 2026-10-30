@@ -1,4 +1,4 @@
-title: Separate family files preserve parallel merges, close-gate case causality and working-tree drift detection
-tasks: [cas-c968, cas-d4d7]
+title: Separate family files preserve parallel merges, reject duplicate base keys, retain close-gate case causality and detect working-tree drift
+tasks: [cas-c968, cas-d4d7, cas-a207]
 invariants: []
 journeys: []

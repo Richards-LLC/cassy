@@ -29,4 +29,15 @@ inside the viewport; unusually tall captions scroll within their own box.
 
 ## Critique
 
-Pending native recording capture.
+| Dimension | Score | Native evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Commander's own surface, type and accent rule identify the recording caption. |
+| Fit | 5 | A frame extracted from the actual recording shows the cell title over native Commander. |
+| Hierarchy | 4 | One centered title precedes the recorded stage; the conversation remains recognizable. |
+| Craft | 4 | Phone and desktop captures in both schemes fit the viewport; a long literal markup title wraps without clipping. |
+| Accessibility | 4 | Caption contrast is 17.25:1 light and 14.76:1 dark; focus, typing and clicks remain with Commander, and the caption clears afterward. |
+
+The native recording probe checks caption bounds, text overflow, pointer input,
+cleanup and zero style-policy events. It does not claim whole-page visual polish
+certification. The annotation requires JavaScript, introduces no animation and
+does not render in print.

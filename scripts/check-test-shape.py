@@ -321,6 +321,9 @@ def released_trunk():
 def task_changed_paths(base):
     """Keep task edits on either side of syncs, including tracked working edits."""
     trunk = released_trunk()
+    if trunk and subprocess.run(['git', 'merge-base', '--is-ancestor', 'HEAD', trunk]).returncode == 0:
+        # Released trunk CI must check the whole diff, not waive its own merges.
+        trunk = None
     history = subprocess.check_output(
         ['git', 'rev-list', '--first-parent', '--parents', f'{base}..HEAD'], text=True,
     )

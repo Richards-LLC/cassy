@@ -292,6 +292,12 @@ class SyncMergeScope(unittest.TestCase):
         self.assertIn('own.rs:1:', result.stdout)
         self.assertIn('lib.rs:1:', result.stdout)
         self.assertNotIn('upstream.rs:', result.stdout)
+        # Once the lane is released, trunk CI still checks its full diff.
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        released = self.run_guard()
+        self.assertEqual(released.returncode, 1, released.stdout)
+        self.assertIn('own.rs:1:', released.stdout)
+        self.assertIn('upstream.rs:1:', released.stdout)
 
 
 if __name__ == '__main__':

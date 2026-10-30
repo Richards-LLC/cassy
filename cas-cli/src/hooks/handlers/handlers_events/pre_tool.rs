@@ -8654,6 +8654,16 @@ mod workspace_contract_tests {
             assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
+        // Arithmetic data still executes nested command substitutions. A
+        // separated closing pair can instead denote a subshell substitution.
+        for command in [
+            r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
+            r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
         for allowed in [
             "cas config get factory.write_roots",
             "cas config set factory.prompt_retention_days 7",
@@ -8672,8 +8682,11 @@ mod workspace_contract_tests {
             "cat <<'EOF'\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "echo \"$(echo ${x:-\"a)b\"})\"",
             "echo \"$(echo ${x:-${y:-)}})\"",
-            "echo \"$((1 + (2)))\"",
-            "echo \"$[1 + (2)]\"",
+            // cas-0c9c: multiplication is arithmetic, never a glob executable.
+            "echo $(( (1+2)*3 ))",
+            "echo \"$(( (1+2)*3 ))\"",
+            "echo $[ (1+2)*3 ]",
+            "echo \"$[ (1+2)*3 ]\"",
         ] {
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");

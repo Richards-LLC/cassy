@@ -13,6 +13,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   viewer loads share a single notice that clears on recovery. Phone checks keep
   Try again visible without scrolling in light and dark.
 
+### Fixed — Arithmetic workspace checks
+
+- **Multiplication stays arithmetic in shell arguments** — Workspace checks
+  keep arithmetic operators out of filesystem resolution while still checking
+  nested command substitutions and refusing unresolved effects.
+
 ### Added — Emoji in Commander conversations
 
 - **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.

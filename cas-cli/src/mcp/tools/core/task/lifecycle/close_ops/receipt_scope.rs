@@ -119,11 +119,18 @@ pub(super) fn park_refusal(
             crates = untested.join(", "),
         ));
     }
-    // A workspace may live below the repository root; any changed Rust file
-    // inside a Cargo package turns the touched-test check on.
-    if changed_paths.iter().any(|path| path.ends_with(".rs")
-        && Path::new(path).ancestors().skip(1).any(|dir| proof_repo.join(dir).join("Cargo.toml").is_file()))
-    {
+    // A workspace may live below the repository root; changed Rust tests,
+    // web tests and pytest files all enter the touched-test receipt gate.
+    let touched_web_tests = changed_paths.iter().any(|path| {
+        let file = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let suffix = Path::new(file).extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+        (matches!(suffix, "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx")
+            && [".test.", ".spec.", ".journey."].iter().any(|marker| file.contains(marker)))
+            || (suffix == "py" && (file.starts_with("test_") || file.ends_with("_test.py")))
+    });
+    let touched_rust_tests = changed_paths.iter().any(|path| path.ends_with(".rs")
+        && Path::new(path).ancestors().skip(1).any(|dir| proof_repo.join(dir).join("Cargo.toml").is_file()));
+    if touched_rust_tests || touched_web_tests {
         let evidence = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head);
         let refusal = match evidence.touched(target) {
             Ok(touched) => touched_test_refusal(task, &touched),
@@ -170,6 +177,12 @@ fn waived(task: &Task, kind: &str, id: &str) -> bool {
 /// a failing run before the change, and the runtime budget.
 fn touched_test_refusal(task: &Task, touched: &crate::factory_worker_check::Touched) -> Option<String> {
     let mut reasons = Vec::new();
+    if !touched.unsupported.is_empty() {
+        reasons.push(format!(
+            "stability receipts are not supported yet for {}; pytest and Playwright adapters are follow-up work.",
+            touched.unsupported.join(", ")
+        ));
+    }
     if !touched.unstable.is_empty() {
         reasons.push(format!(
             "missing five-run evidence for {}; five concurrent zero-retry passes are required.",

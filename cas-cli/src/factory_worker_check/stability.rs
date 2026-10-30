@@ -42,7 +42,12 @@ pub(super) struct Plan {
 }
 
 #[derive(Deserialize)]
-pub(super) struct PlannedTest { pub(super) id: String, pub(super) fingerprint: String }
+pub(super) struct PlannedTest {
+    pub(super) id: String,
+    pub(super) fingerprint: String,
+    #[serde(default)]
+    pub(super) runner: String,
+}
 
 /// Touched tests at a delivery that lack each kind of commit-bound evidence.
 #[derive(Debug, Default, PartialEq)]
@@ -51,6 +56,8 @@ pub(crate) struct Touched {
     pub(crate) unstable: Vec<String>,
     /// No failing run before the change (fail-first).
     pub(crate) never_red: Vec<String>,
+    /// Runner was intentionally left unsupported and must fail closed.
+    pub(crate) unsupported: Vec<String>,
     /// Over the runtime budget, with the measured median.
     pub(crate) over_budget: Vec<(String, String)>,
 }
@@ -132,6 +139,10 @@ pub(super) fn evaluate(
     let plan = plan(repo, target, head)?;
     let mut touched = Touched::default();
     for test in &plan.tests {
+        if matches!(test.runner.as_str(), "playwright" | "pytest") {
+            touched.unsupported.push(test.id.clone());
+            continue;
+        }
         let proofs = records.iter().filter_map(|(receipt_head, _, receipt)| {
             receipt.stability.as_ref()
                 .filter(|proof| proof.valid(&plan.base, receipt_head) && proof.tests.contains(&test.id))
@@ -152,7 +163,7 @@ pub(super) fn evaluate(
                 touched.over_budget.push((test.id.clone(), reason));
             }
         }
-        if !reds.iter().any(|red| red.proves(repo, head, test)) {
+        if test.runner == "rust" && !reds.iter().any(|red| red.proves(repo, head, test)) {
             touched.never_red.push(test.id.clone());
         }
     }

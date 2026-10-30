@@ -7763,6 +7763,7 @@ async fn validated_epic_merge_returns_compact_receipt() {
     let path = text.split_once("Details: ").expect("immutable detail reference").1
         .split_once(" (SHA-256 ").unwrap().0;
     let detail = std::fs::read_to_string(path).unwrap();
+    // pin: immutable details retain the original successful merge receipt.
     assert!(detail.contains("Merged worktree") && detail.contains(&source_sha), "{detail}");
     // pin: the public receipt must state why CI admitted this merge.
     assert!(text.contains("Merge policy: merge proceeded on successful validation."), "{text}");

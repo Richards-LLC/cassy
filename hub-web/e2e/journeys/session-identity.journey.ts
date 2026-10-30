@@ -77,7 +77,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
     // A useful incoming preview can grow the last row beyond the list's
     // available height. Keep it reachable in the list's own scroll region.
-    const incoming = row("noble-cheetah-84");
+    const incoming = rows.last();
     await incoming.scrollIntoViewIfNeeded();
     await expect(incoming).toBeInViewport({ ratio: 1 });
   });

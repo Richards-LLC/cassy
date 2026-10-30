@@ -282,6 +282,11 @@ for (const width of [1280, 390]) {
       await journey.open();
       const list = page.getByRole("navigation", { name: "Choose a supervisor" });
       await expect(list.locator(".conversation-row")).toHaveCount(4);
+      // cas-ade2: activity no longer reorders rows, so a card starting or
+      // ending above them is what moves a row under the finger. A scrolled
+      // list's scroll anchoring would hold the row still, which this part
+      // must not rely on.
+      await page.addStyleTag({ content: "#conversation-list { overflow-anchor: none; }" });
       // Raw input, as a hand gives it: a press and a release with nothing
       // between them but the live updates (no action overlay pauses).
       const input = await page.context().newCDPSession(page);

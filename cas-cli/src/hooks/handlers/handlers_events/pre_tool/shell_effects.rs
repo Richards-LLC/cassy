@@ -747,12 +747,17 @@ fn collect_script(
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
             if matches!(name, Some("test" | "[")) {
+                let args = if name == Some("[") && args.last().is_some_and(|arg| arg == "]") {
+                    &args[..args.len() - 1]
+                } else { args };
                 let mut at = 0;
                 while at < args.len() {
                     // Binary operators consume both data operands. In
                     // particular, a string comparison's RHS may be "-eq".
                     let binary = args.get(at + 1).map(String::as_str);
-                    if matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge")) {
+                    if at + 2 < args.len()
+                        && matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge"))
+                    {
                         numeric_arithmetic(&args[at])?;
                         numeric_arithmetic(args.get(at + 2)
                             .ok_or("an unresolved conditional operand")?)?;

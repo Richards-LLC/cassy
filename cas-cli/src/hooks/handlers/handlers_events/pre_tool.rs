@@ -9017,6 +9017,7 @@ EOF
         for allowed in [
             "[[ 1 -eq 1 ]]",
             "test 1 -eq 1",
+            "test -n -eq",
             "echo \"${b[0]}\"",
             "echo \"${s:0:2}\"",
             "cat <<EOF\n${s:0:2}\nEOF",

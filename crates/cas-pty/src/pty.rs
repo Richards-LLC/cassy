@@ -1717,6 +1717,13 @@ impl PtyConfig {
         push_worker_build_cache_env(&mut env, role);
 
         let mut args = vec!["--yolo".to_string(), "--no-alt-screen".to_string()];
+        // cas-6c4e: when a newer Codex exists, launch shows an "Update now"
+        // dialog with that option preselected. The daemon's first Enter, meant
+        // for the startup prompt, accepted it: Codex ran `npm install -g
+        // @openai/codex`, mutating the host's global npm, and the session
+        // died. A factory pane never updates its harness, for either role.
+        args.push("-c".to_string());
+        args.push("check_for_update_on_startup=false".to_string());
         if role == "worker" {
             // Factory workers have no human at the pane. Keep the Default-mode
             // request_user_input feature off even if the account enables it.
@@ -5843,6 +5850,7 @@ echo SMOKE_DONE
                 v.starts_with("mcp_servers.cs.")
                     || *v == "features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]"
                     || *v == "features.default_mode_request_user_input=false"
+                    || *v == "check_for_update_on_startup=false"
             }),
             "with effort=None the only -c overrides should be the cas MCP server injection, direct namespace projection, and worker input-prompt guard; got: {c_values:?}"
         );
@@ -6409,6 +6417,24 @@ echo SMOKE_DONE
                         "{role} must keep {key}={want}"
                     );
                 }
+            }
+        }
+
+        /// cas-6c4e: Codex's launch-time "Update now" dialog must never appear
+        /// in a factory pane, where the daemon's first Enter would accept it
+        /// and run `npm install -g`.
+        #[test]
+        fn codex_launch_disables_the_startup_update_check_for_both_roles_cas_6c4e() {
+            let _env = TestEnvGuard::new();
+            for role in ["worker", "supervisor"] {
+                let config = PtyConfig::codex(
+                    "c1", role, PathBuf::from("/tmp"), None, None, None, None, None, None,
+                );
+                assert!(
+                    config.args.windows(2).any(|pair| pair == ["-c", "check_for_update_on_startup=false"]),
+                    "codex {role} must launch with its update check off; got {:?}",
+                    config.args
+                );
             }
         }
 

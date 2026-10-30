@@ -97,8 +97,10 @@ class QueueRecovery(unittest.TestCase):
                     del owner.refs['refs/'+path.removeprefix('/git/refs/')]
                 elif path.startswith('/labels'): result = {}
                 elif path == '/issues' and method == 'GET':
-                    result = [i for i in owner.issues if i['state']=='open' and
-                              all(label in [l['name'] for l in i['labels']] for label in query.get('labels',[]))]
+                    # GitHub's state/label indexes can lag behind successful
+                    # mutations; the unfiltered history and direct issue GET
+                    # expose the current record (live acceptance regression).
+                    result = owner.issues if query.get('state')==['all'] and not query.get('labels') else []
                     if query.get('page',['1'])[0] != '1': result = []
                 elif path == '/issues' and method == 'POST':
                     result = {**data,'number':len(owner.issues)+1,'state':'open',
@@ -109,6 +111,8 @@ class QueueRecovery(unittest.TestCase):
                 elif path.startswith('/issues/') and method == 'PATCH':
                     result = owner.issues[int(path.split('/')[-1])-1]
                     result.update({**data,'labels':[{'name':l} for l in data['labels']]})
+                elif path.startswith('/issues/') and method == 'GET':
+                    result = owner.issues[int(path.split('/')[-1])-1]
                 else: code = 404
                 self.send_response(code)
                 self.send_header('Content-Type','application/json')

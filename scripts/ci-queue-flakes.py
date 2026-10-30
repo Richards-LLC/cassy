@@ -46,10 +46,19 @@ class GitHub:
     def issues(self, label=None):
         result = []
         for page in range(1,1001):
-            query = {'state':'open','per_page':100,'page':page}
-            if label: query['labels'] = label
+            # State/label-filtered lists lag behind acknowledged mutations.
+            # Enumerate history, then read authoritative candidate records.
+            # This also makes an ambiguous issue-create response recoverable
+            # without creating a duplicate during an indexing delay.
+            query = {'state':'all','per_page':100,'page':page}
             batch = self.api('/issues?'+urlencode(query))
-            result.extend(i for i in batch if 'pull_request' not in i)
+            for issue in batch:
+                if 'pull_request' in issue: continue
+                labels = [l['name'] for l in issue['labels']]
+                if not MARKER.search(issue.get('body') or '') and 'flaky-quarantine' not in labels: continue
+                current = self.api(f'/issues/{issue["number"]}')
+                if current['state']=='open' and (not label or label in [l['name'] for l in current['labels']]):
+                    result.append(current)
             if len(batch)<100: return result
         raise ValueError('issue pagination exceeded safety bound')
 

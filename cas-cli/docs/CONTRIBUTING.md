@@ -2907,7 +2907,10 @@ failure. Impact recall still records the original failing status and log.
 Open issues labeled `flaky-quarantine` are the quarantine source of truth. Each
 has one `<!-- cas-queue-flake: JSON -->` test identity/observation line. Shards
 read them with an issues-read `GITHUB_TOKEN`, exclude only those identities and
-print the issue links in the job summary. Reconciliation adds that label after
+print the issue links in the job summary. State/label-filtered GitHub lists can
+lag acknowledged updates, so discovery enumerates unfiltered issue history and
+reads each flake candidate directly before deciding its open state and labels.
+Reconciliation adds that label after
 two distinct GitHub run IDs; duplicate shards and run attempts count once.
 The fix PR uses `Fixes #N`: closing the issue removes the exclusion from the next
 queue run. No bot PR, new credential or evaluated-tree edit is needed.

@@ -927,8 +927,13 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       const plain = log.getByTitle("Flagged page.html, a page from the supervisor");
       await plain.scrollIntoViewIfNeeded();
       await expect(tab.frameLocator('iframe[title="Flagged page.html, a page from the supervisor"]').getByRole("heading", { name: "Hostile page" })).toBeVisible();
-      const box = (await plain.boundingBox())!;
-      expect(Math.min(...await paintedPixel(tab, Math.round(box.x + box.width - 6), Math.round(box.y + box.height - 6))), "the plain page is legible on a light backdrop").toBeGreaterThan(200);
+      // A tall frame can extend below the scrollable thread and behind the composer.
+      const probe = await plain.evaluate((element) => {
+        const frame = element.getBoundingClientRect();
+        const thread = element.closest(".conversation-reading.thread")!.getBoundingClientRect();
+        return { x: Math.round(Math.min(frame.right, thread.right) - 6), y: Math.round(Math.min(frame.bottom, thread.bottom) - 6) };
+      });
+      expect(Math.min(...await paintedPixel(tab, probe.x, probe.y)), "the plain page is legible on a light backdrop").toBeGreaterThan(200);
       await tab.emulateMedia({ colorScheme: "light" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
     });

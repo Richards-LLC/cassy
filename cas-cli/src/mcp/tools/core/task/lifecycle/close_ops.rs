@@ -2973,9 +2973,12 @@ fn concurrent_close_change(start: &Task, closing: &Task, current: &Task) -> Opti
 /// A final-write conflict may be retried once only for a note-only edit.
 /// Comparing the serialized row also protects fields outside the close gates.
 fn only_notes_changed(before: &Task, after: &Task) -> bool {
-    if before.notes == after.notes {
-        return false;
-    }
+    before.notes != after.notes && same_except_close_audit(before, after)
+}
+
+/// Close-owned projections or a replay can advance only the store clock.
+/// Refreshing that clock is safe only when every non-audit field agrees.
+fn same_except_close_audit(before: &Task, after: &Task) -> bool {
     let (Ok(mut before), Ok(mut after)) = (
         serde_json::to_value(before),
         serde_json::to_value(after),
@@ -19612,7 +19615,7 @@ impl<'a> CloseNoteTracker<'a> {
 }
 
 /// A long close can overlap receipt/upkeep note appends. Refresh only an
-/// append-only timeline change, then CAS against that exact refreshed row.
+/// append-only timeline or clock-only change, then CAS against that exact row.
 /// Other fields, rewritten history and request_changes still invalidate the
 /// snapshot. Keep the generic store and replication CAS strict.
 fn update_close_snapshot_preserving_notes(
@@ -19634,9 +19637,9 @@ fn update_close_snapshot_preserving_notes(
             }
             Err(error @ cas_store::StoreError::Other(_)) if attempt < 2 => {
                 let current = task_store.get(&expected.id)?;
-                if !only_notes_changed(&baseline, &current)
+                if !same_except_close_audit(&baseline, &current)
                     || !current.notes.strip_prefix(&baseline.notes).is_some_and(|suffix| {
-                        baseline.notes.is_empty() || suffix.starts_with("\n\n")
+                        suffix.is_empty() || baseline.notes.is_empty() || suffix.starts_with("\n\n")
                     })
                 {
                     return Err(error);

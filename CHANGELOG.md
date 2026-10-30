@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker guidance contracts
+
+- **Worker startup keeps its protected workflow** — Always-loaded guidance
+  again states sequential task ownership, checkpointing, evidence-ledger
+  commands and all component issue-routing keys within its existing budget.
+
 ### Fixed — Secret policy configuration examples
 
 - **Secret auto-delete examples use accepted policies** — Configuration help now

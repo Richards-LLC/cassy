@@ -8994,6 +8994,9 @@ EOF
             ("coproc group", "coproc { cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
             ("coproc command", "coproc cas config gr''ant-write --task cas-1234 --path /x --reason r"),
             ("function body", "function f { cas config gr''ant-write --task cas-1234 --path /x --reason r; }; f"),
+            ("named coproc while", "coproc NAME while cas config gr''ant-write --task cas-1234 --path /x --reason r; do :; done"),
+            ("named coproc until", "coproc NAME until cas config gr''ant-write --task cas-1234 --path /x --reason r; do :; done"),
+            ("named coproc if", "coproc NAME if cas config gr''ant-write --task cas-1234 --path /x --reason r; then :; fi"),
         ] {
             let (status, reason) = decision(command);
             if status != "deny" || !reason.contains("operator") {

@@ -30,9 +30,10 @@ function tokensFor(source: string, language: string): readonly Token[] | null {
   const hit = cache.get(key);
   if (hit) { cache.delete(key); cache.set(key, hit); return hit.tokens; }
   // Rust apostrophes introduce either a closed character or a plain lifetime.
-  // Other single-quoted strings stop at a line boundary, including a dangling
-  // escape. Word apostrophes in JSX text do not start a script string.
-  const singleQuoted = mode === "rust"
+  // Shell single quotes are raw and may span lines. Other single-quoted
+  // strings stop at a line boundary, including a dangling escape. Word
+  // apostrophes in JSX text do not start a script string.
+  const singleQuoted = mode === "shell" ? String.raw`'[^']*(?:'|$)` : mode === "rust"
     ? String.raw`'(?:[^'\\\r\n]|\\(?:u\{[\da-fA-F_]+\}|x[\da-fA-F]{2}|[^\r\n]))'|'[A-Za-z_]\w*`
     : `${mode === "script" ? String.raw`(?<![\w$])` : ""}${String.raw`'(?:[^'\\\r\n]|\\[^\r\n])*(?:'|\\?(?=[\r\n]|$))`}`;
   // Anchored string bodies contain no nested quantifiers. No recursion.

@@ -8712,6 +8712,20 @@ mod workspace_contract_tests {
                     .to_string(),
             )
         };
+        // cas-9685: each independent spelling/command-position bypass must
+        // reach the real hook; collect failures so RED proves all three.
+        let mut bypasses = Vec::new();
+        for (vector, command) in [
+            ("brace command position", "{ cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("continued verb", "cas config gr\\\nant-write --task cas-1234 --path /x --reason r"),
+            ("ANSI-C verb", r"cas config $'gr\x61nt-write' --task cas-1234 --path /x --reason r"),
+        ] {
+            let (status, reason) = decision(command);
+            if status != "deny" || !reason.contains("operator") {
+                bypasses.push(format!("{vector}: {status}: {reason}"));
+            }
+        }
+        assert!(bypasses.is_empty(), "operator-policy bypasses: {bypasses:#?}");
         for command in [
             "cas config set factory.write_roots ~/soundwave-config",
             "/home/u/.local/bin/cas config set factory.write_roots ''",

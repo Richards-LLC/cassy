@@ -3410,15 +3410,10 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     );
     assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), persisted,
         "ordinary DPoP traffic must not rewrite durable identities");
-    // cas-3b22: future proofs must never enter the volatile replay set.
-    // Otherwise a restart forgets the jti before its future iat is reached.
-    for ahead in [1, 60] {
-        let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(ahead), "future");
-        let refused = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now).unwrap_err();
-        let refusal = refused.downcast_ref::<super::AuthRefusal>().unwrap();
-        assert_eq!(*refusal, super::AuthRefusal::StaleProof { skew_secs: ahead });
-        assert!(refusal.retryable());
-    }
+    // cas-3b22: the old skew window accepts this proof before a restart.
+    // Delay the assertion so the red run also exercises the replay itself.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(60), "future");
+    let before_restart = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now);
     // A pre-boot proof with an unused jti must also be refused: after restart
     // the previous process's in-memory replay set no longer exists.
     let pre_boot = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now, "pre-boot-unused");
@@ -3428,9 +3423,16 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
 
     // Replaying the formerly accepted +60s proof after restarting must fail
     // even though its iat clears the boot cutoff and its jti was forgotten.
-    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(60), "future");
     let refused = restarted.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
     assert_eq!(refused.downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 58 }));
+    assert_eq!(before_restart.unwrap_err().downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 60 }));
+    // Even one second ahead is a retryable stale proof, rather than a
+    // credential failure or an entry in the volatile replay set.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(1), "slightly-fast");
+    let refused = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now).unwrap_err();
+    let refusal = refused.downcast_ref::<super::AuthRefusal>().unwrap();
+    assert_eq!(*refusal, super::AuthRefusal::StaleProof { skew_secs: 1 });
+    assert!(refusal.retryable());
 
     let wrong_method = sign_dpop(
         &signing,

@@ -54,7 +54,7 @@ fn dispatch_receipt(log: ReceiptLog, response: ResponseTemplate) -> impl wiremoc
             assert!(
                 log.text()
                     .lines()
-                    .any(|line| line.contains("phase=pre_dispatch") && line.contains(id)),
+                    .any(|line| line.contains("phase=\"pre_dispatch\"") && line.contains(id)),
                 "the local receipt must exist before the server receives the request"
             );
         } else {
@@ -589,12 +589,13 @@ async fn correlation_response_headers_are_bounded_and_keep_status_semantics() {
         let text = log.text();
         let line = text
             .lines()
-            .find(|line| line.contains("phase=response_headers"))
+            .find(|line| line.contains("phase=\"response_headers\""))
             .expect("response receipt");
         assert!(line.contains("status=404"));
         if let Some(id) = expected {
             assert!(line.contains(id), "{line}");
         } else {
+            assert!(line.contains("request_id=\"unavailable\""), "{line}");
             assert!(!line.contains("xxxxxxxx"));
         }
         if task == "primary" {
@@ -662,7 +663,7 @@ async fn correlation_body_complete_records_parse_failure_without_logging_body() 
         let text = log.text();
         let line = text
             .lines()
-            .find(|line| line.contains("phase=body_complete"))
+            .find(|line| line.contains("phase=\"body_complete\""))
             .expect("body receipt");
         assert!(line.contains(outcome), "{line}");
         assert!(!text.contains("secret-"));
@@ -722,11 +723,11 @@ fn correlation_transport_error_retains_attempt_and_unknown_claim_outcome() {
         2,
         "one pre-dispatch and one absent-response receipt"
     );
-    assert!(lines[0].contains("phase=pre_dispatch") && lines[0].contains(id));
-    assert!(lines[1].contains("phase=transport_error") && lines[1].contains(id));
-    assert!(lines[1].contains("mutation_outcome=unknown"));
+    assert!(lines[0].contains("phase=\"pre_dispatch\"") && lines[0].contains(id));
+    assert!(lines[1].contains("phase=\"transport_error\"") && lines[1].contains(id));
+    assert!(lines[1].contains("mutation_outcome=\"unknown\""));
     for secret in ["secret-url", "credential-path", "secret-body", "test-token"] {
         assert!(!text.contains(secret));
     }
-    assert!(text.contains("dns_connect_tls_ttfb=unknown"));
+    assert!(text.contains("dns_connect_tls_ttfb=\"unknown\""));
 }

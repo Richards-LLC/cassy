@@ -2021,6 +2021,8 @@ fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
     }
 
     let mut exported_override = false;
+    let mut auto_export = false;
+    let mut assigned_overrides = std::collections::BTreeSet::new();
     for words in shell_statement_words(command) {
         if let Some(payload) = env_split_string_payload(&words)
             && git_config_environment_bypass_in_shell(&payload, depth + 1)
@@ -2028,14 +2030,70 @@ fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
             return true;
         }
 
-        let Some(command_index) = unwrapped_command_index(&words) else {
+        let command_index = unwrapped_command_index(&words);
+        let assignments_end = command_index.unwrap_or(words.len());
+        for word in &words[..assignments_end] {
+            if let Some((name, value)) = word.split_once('=')
+                && name.starts_with("GIT_CONFIG_")
+            {
+                let bypasses_hooks = git_config_env_value_bypasses_hooks(name, value);
+                if bypasses_hooks {
+                    assigned_overrides.insert(name.to_string());
+                    if auto_export {
+                        exported_override = true;
+                    }
+                } else {
+                    assigned_overrides.remove(name);
+                }
+            }
+        }
+
+        let Some(command_index) = command_index else {
             continue;
         };
         let name = shell_word_basename(&words[command_index]);
         let args = &words[command_index + 1..];
 
+        if name == "set" {
+            let enables_auto_export = args.iter().any(|argument| {
+                matches!(argument.as_str(), "-a" | "--allexport")
+            }) || args
+                .windows(2)
+                .any(|options| options[0] == "-o" && options[1] == "allexport");
+            let disables_auto_export = args.iter().any(|argument| {
+                matches!(argument.as_str(), "+a" | "--no-allexport")
+            }) || args
+                .windows(2)
+                .any(|options| options[0] == "+o" && options[1] == "allexport");
+            if enables_auto_export {
+                auto_export = true;
+            } else if disables_auto_export {
+                auto_export = false;
+            }
+            continue;
+        }
+
         if name == "export" {
-            exported_override |= git_config_environment_override(args);
+            exported_override |= git_config_environment_override(args)
+                || args
+                    .iter()
+                    .any(|argument| assigned_overrides.contains(argument));
+            continue;
+        }
+
+        if matches!(name, "declare" | "typeset")
+            && args
+                .iter()
+                .any(|argument| matches!(argument.as_str(), "-x" | "--export"))
+        {
+            exported_override |= git_config_environment_override(args)
+                || args.iter().any(|argument| {
+                    let variable = argument
+                        .split_once('=')
+                        .map(|(name, _)| name)
+                        .unwrap_or(argument);
+                    assigned_overrides.contains(variable)
+                });
             continue;
         }
 
@@ -2144,7 +2202,7 @@ fn git_invocation_writes_hooks_path(git_words: &[String]) -> bool {
 
     options
         .iter()
-        .any(|option| matches!(option.as_str(), "--unset" | "--unset-all"))
+        .any(|option| matches!(option.as_str(), "--unset" | "--unset-all" | "unset"))
         || arguments.get(key_index + 1).is_some()
 }
 
@@ -11140,7 +11198,11 @@ mod worker_commit_guard_tests {
             "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" && git push origin factory/guard-test".to_string(),
             "git config core.hooksPath /tmp/empty-hooks && git push origin factory/guard-test".to_string(),
             "git config --worktree core.hooksPath /tmp/empty-hooks".to_string(),
+            "git config unset core.hooksPath".to_string(),
             "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" bash -c 'git push origin factory/guard-test'".to_string(),
+            "GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/tmp/empty-hooks; export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; git push origin factory/guard-test".to_string(),
+            "declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
+            "set -a; GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
         ];
 
         let mut mismatches = Vec::new();

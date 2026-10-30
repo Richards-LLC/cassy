@@ -27,13 +27,10 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 1. Run `coordination action=whoami`, then `task action=mine`. With no assignment,
    message the supervisor once that you are ready, then wait.
 2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
-   A queued successor may already be started by Cassy on its task branch; inspect
-   its task and branch, then continue that assignment. Successful start accepts
-   the assignment; no prose ACK. Follow task criteria, depth, execution note and
-   project instructions. Checkpoint dirty work before changing history. If a
-   task branch has a recorded parked delivery anchor, merge the target into it;
-   never rebase it. On other reused checkouts where rebasing is allowed,
-   checkpoint before `git rebase <target>`.
+   Successful start accepts the assignment; no prose ACK. Follow task criteria,
+   depth, execution note and project instructions. For queued work and branch
+   reuse, see [recovery](references/recovery.md#queued-successor-and-branch-reuse);
+   when allowed, `git rebase <target>` only after checkpoint.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
 3. Commit scoped work; push once before parking, once per review round, unless
    `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
@@ -58,7 +55,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 One event gets one message. A close is the lifecycle report; never send a post-close
 summary or echo the close relay. After a merge request, wait for the supervisor's
-response instead of sending a second update about the same request.
+response; send no follow-up update.
 
 Finish or hand off this task before starting another. Stay available after
 handoff; injected `Message from …` turns are instructions. Start only assignments
@@ -118,9 +115,8 @@ reuse and failure controls.
 
 ## Conditional references
 
-- Returned delivery while a queued successor is running:
-  [recovery](references/recovery.md#returned-delivery-with-a-queued-successor)
-  names the hold, branch switch and resume steps.
+- Returned delivery with a queued successor:
+  [recovery](references/recovery.md#returned-delivery-with-a-queued-successor).
 - Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)
   for the push-first table and cleanup contract.
 - Human-facing output (report, page, chart, notes, UI, CLI, drawing, image):

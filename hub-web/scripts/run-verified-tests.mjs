@@ -18,6 +18,7 @@ export function passedCount(runner, report) {
 
 export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd(), env = process.env } = {}) {
   if (!['vitest', 'playwright'].includes(runner)) throw new Error('runner must be vitest or playwright');
+  const requestedArgs = [...args];
   const countFile = env.VERIFIED_TEST_COUNT_FILE;
   if (countFile) rmSync(countFile, { force: true });
   const scratch = mkdtempSync(join(tmpdir(), 'cas-web-tests-'));
@@ -35,7 +36,10 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     });
     args = args.filter((arg, index) => !/^--(?:maxWorkers|workers)(?:=|$)/.test(arg) && !/^--(?:maxWorkers|workers)$/.test(args[index - 1] ?? ''));
     const workers = /^\d+$/.test(requested ?? '') ? Math.min(Math.max(Number(requested), 1), 4) : 1;
-    args.push(runner === 'vitest' ? '--maxWorkers=2' : `--workers=${workers}`);
+    args.push(runner === 'vitest'
+      ? `--maxWorkers=${env.CAS_WORKER_STABILITY_TRIAL === '1' ? 1 : 2}`
+      : `--workers=${env.CAS_WORKER_STABILITY_TRIAL === '1' ? 1 : workers}`);
+    if (runner === 'playwright' && env.CAS_WORKER_STABILITY_TRIAL === '1') args.push('--retries=0');
     const nativeArgs = runner === 'vitest'
       ? ['run', ...args, '--reporter=default', '--reporter=json', `--outputFile=${report}`]
       : ['test', ...args, '--reporter=list,json'];
@@ -59,6 +63,25 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     if (result.status !== 0) return result.status ?? 1;
     const count = passedCount(runner, JSON.parse(raw));
     if (countFile) writeFileSync(countFile, `${count}\n`);
+    if (env.VERIFIED_TEST_REPORT_FILE) {
+      writeFileSync(resolve(env.VERIFIED_TEST_REPORT_FILE), raw);
+    }
+    if (env.CAS_WORKER_STABILITY_TRIAL !== '1') {
+      let repo = resolve(cwd);
+      while (repo !== resolve('/') && !existsSync(join(repo, 'scripts/worker-test-stability.py'))) {
+        repo = resolve(repo, '..');
+      }
+      if (existsSync(join(repo, 'scripts/worker-test-stability.py'))) {
+        const stability = spawn('python3', [
+          join(repo, 'scripts/worker-test-stability.py'), '--run-adapter', runner,
+          '--report', report, '--', ...requestedArgs,
+        ], { cwd: repo, stdio: 'inherit', env });
+        if (stability.error) throw stability.error;
+        if (stability.status !== 0) return stability.status ?? 1;
+      } else if (env.CAS_FACTORY_MODE === '1') {
+        throw new Error('cannot find worker stability adapter; no bound receipt');
+      }
+    }
     console.log(`verified-web-tests: PASS (${count} ${runner} tests passed)`);
     return 0;
   } finally {

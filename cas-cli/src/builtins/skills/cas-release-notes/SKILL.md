@@ -14,17 +14,18 @@ Use the project's release rubric as the contract. The procedure is:
    `references/RUBRIC-template.md`, fill its project placeholders, and preserve
    every hard rule. If it exists, read it; local additions may tighten the
    contract but may not relax its hard rules.
-2. **Start the post-release check.** If `.cas/config.toml` sets
-   `[qa.post_release] command`, run
-   `cas qa post-release start --epic <id> --sha <released-sha>` now (a repeat
-   for the same SHA keeps its window), and draft while it runs. Post only once
-   `cas qa post-release status --epic <id>` reads `clean`, about 30 minutes
-   after deploy; Cassy refuses release-notes posts while it is `pending` or
-   `failed`. A failed check is an incident: report it to the supervisor and
-   post nothing until a fix-forward release's check is clean or the operator
-   records a `POST-RELEASE OVERRIDE:` note on the epic. Without that config,
-   a production release still waits for the supervisor's manual
-   post-release check.
+2. **Check the post-release observation.** If `.cas/config.toml` sets
+   `[qa.post_release] command`, keep `cas serve` running and read
+   `cas qa post-release status --epic <id>`; the merge-request reminder
+   starts it against the verified release merge. If no check started, ask
+   the operator to run `cas qa post-release start --epic <id> --sha <released-sha>`
+   from their own terminal; recording the SHA is operator-only. Draft while
+   it runs. Post once the verdict is `clean` (about 30 minutes after deploy),
+   or Cassy records a verified rapid-response deferral. A failed check is
+   an incident: report it to the supervisor; outside that deferral, wait
+   for a clean fix-forward check or an operator `POST-RELEASE OVERRIDE:`
+   note. Without that config, a production release still waits for the
+   supervisor's manual post-release check.
 3. **Gather the merge.** Read the merged change set, for example
    `gh pr view <n> --json title,body,commits,files`. Describe what changed for
    the person on the other side of the screen, not an inventory of touched

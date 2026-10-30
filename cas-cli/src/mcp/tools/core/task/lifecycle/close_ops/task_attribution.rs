@@ -3844,8 +3844,19 @@ mod tests {
             rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Closed task:"), "{text}");
-        assert!(text.contains("first.md") && text.contains("second.md"), "{text}");
-        assert!(!text.contains("next.md"), "next task's diff was attributed to the old delivery: {text}");
+        let detail_path = text
+            .split_once("Details: ")
+            .expect("close receipt detail reference")
+            .1
+            .split_once(" (SHA-256 ")
+            .unwrap()
+            .0;
+        let detail = std::fs::read_to_string(detail_path).expect("close detail artifact exists");
+        assert!(detail.contains("first.md") && detail.contains("second.md"), "{detail}");
+        assert!(
+            !detail.contains("next.md"),
+            "next task's diff was attributed to the old delivery: {detail}"
+        );
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
         assert_eq!(store.get(&next.id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), next_tip);

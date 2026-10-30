@@ -1135,54 +1135,54 @@ async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
 /// those checks. The normal merge requirement still applies.
 #[tokio::test]
 async fn park_accepts_delivery_without_fast_rows_receipt_cas_51ff() {
-  for union_during_park in [false, true] {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main");
-    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
-    std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
-    std::fs::write(worker_path.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
-    std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
-    git(&worker_path, &["add", "."]);
-    git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
-    git(&worker_path, &["push", "-q", "--no-verify", "origin", LANE]);
-    let id = "cas-fr02";
-    let mut task = assigned(id, TaskType::Task, "main");
-    task.notes = "Unstamped original context\n\n[2026-01-02 00:00] Worker progress".into();
-    f.put(&task);
-    claim(&f, id);
-    if union_during_park {
-        let root = f.cas_dir();
-        lifecycle_race_hook::before_park(id, move || {
-            let store = crate::store::open_task_store_local(&root).unwrap();
-            let before = store.get(id).unwrap();
-            let mut merged = before.clone();
-            merged.notes = crate::cloud::syncer::pull::merge_task_notes(
-                &before.notes, "[2026-01-01 00:00] Receipt imported from another machine",
-            );
-            merged.updated_at = chrono::Utc::now();
-            assert!(store.update_from_sync(&merged, &before).unwrap().is_some());
-            let current = serde_json::to_value(store.get(id).unwrap()).unwrap();
-            let before = serde_json::to_value(before).unwrap();
-            let changed: Vec<_> = before.as_object().unwrap().iter()
-                .filter_map(|(key, value)| (current.get(key) != Some(value)).then_some(key.as_str()))
-                .collect();
-            assert_eq!(changed, ["notes", "updated_at"], "audit the actual sync write");
-        });
-    }
-    let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
+    for union_during_park in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
+        std::fs::write(worker_path.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
+        std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+        git(&worker_path, &["add", "."]);
+        git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
+        git(&worker_path, &["push", "-q", "--no-verify", "origin", LANE]);
+        let id = "cas-fr02";
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.notes = "Unstamped original context\n\n[2026-01-02 00:00] Worker progress".into();
+        f.put(&task);
+        claim(&f, id);
+        if union_during_park {
+            let root = f.cas_dir();
+            lifecycle_race_hook::before_park(id, move || {
+                let store = crate::store::open_task_store_local(&root).unwrap();
+                let before = store.get(id).unwrap();
+                let mut merged = before.clone();
+                merged.notes = crate::cloud::syncer::pull::merge_task_notes(
+                    &before.notes, "[2026-01-01 00:00] Receipt imported from another machine",
+                );
+                merged.updated_at = chrono::Utc::now();
+                assert!(store.update_from_sync(&merged, &before).unwrap().is_some());
+                let current = serde_json::to_value(store.get(id).unwrap()).unwrap();
+                let before = serde_json::to_value(before).unwrap();
+                let changed: Vec<_> = before.as_object().unwrap().iter()
+                    .filter_map(|(key, value)| (current.get(key) != Some(value)).then_some(key.as_str()))
+                    .collect();
+                assert_eq!(changed, ["notes", "updated_at"], "audit the actual sync write");
+            });
+        }
+        let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
 
-    let parked = call(&f.worker, close.clone()).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
-    if union_during_park {
-        assert!(f.task(id).notes.contains("Receipt imported from another machine"));
-        assert!(f.task(id).notes.contains("Unstamped original context"));
-    }
+        let parked = call(&f.worker, close.clone()).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+        if union_during_park {
+            assert!(f.task(id).notes.contains("Receipt imported from another machine"));
+            assert!(f.task(id).notes.contains("Unstamped original context"));
+        }
 
-    let again = call(&f.worker, close).await;
-    assert!(again.contains("MERGE REQUIRED"), "unmerged work must not close: {again}");
-    assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
-  }
+        let again = call(&f.worker, close).await;
+        assert!(again.contains("MERGE REQUIRED"), "unmerged work must not close: {again}");
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
+    }
 }
 
 /// Release preparation used a suffixed promotion branch, while the worker's

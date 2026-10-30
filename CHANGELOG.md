@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Parking during note sync
+
+- **Synced note order does not block an unchanged delivery** — A worker can park
+  while cloud sync collates its audit notes. Earlier notes must remain intact;
+  review rejections and changes to task scope still invalidate the close.
+
 ### Fixed — Commander clock correction
 
 - **A refused proof cannot shift the clock by an arbitrary amount** — Commander

@@ -19777,8 +19777,22 @@ impl<'a> CloseNoteTracker<'a> {
     }
 }
 
-/// A long close can overlap receipt/upkeep note appends. Refresh only an
-/// append-only timeline or clock-only change, then CAS against that exact row.
+/// Cloud note union can reorder or deduplicate blocks without changing any
+/// audit text. Match complete lines so a correction that only starts with an
+/// older note cannot masquerade as retained history. Duplicate blocks have
+/// the same meaning here as in the sync union; every distinct block survives.
+fn preserves_close_note_history(before: &str, after: &str) -> bool {
+    cas_store::task_note_markers::note_blocks(before).iter().all(|block| {
+        after.match_indices(block).any(|(start, _)| {
+            let end = start + block.len();
+            (start == 0 || after.as_bytes()[start - 1] == b'\n')
+                && (end == after.len() || after.as_bytes()[end] == b'\n')
+        })
+    })
+}
+
+/// A long close can overlap receipt/upkeep appends or a cloud note union.
+/// Refresh only retained note history or clock changes, then CAS against that row.
 /// Other fields, rewritten history and request_changes still invalidate the
 /// snapshot. Keep the generic store and replication CAS strict.
 fn update_close_snapshot_preserving_notes(
@@ -19801,9 +19815,7 @@ fn update_close_snapshot_preserving_notes(
             Err(error @ cas_store::StoreError::Other(_)) if attempt < 2 => {
                 let current = task_store.get(&expected.id)?;
                 if !same_except_close_audit(&baseline, &current)
-                    || !current.notes.strip_prefix(&baseline.notes).is_some_and(|suffix| {
-                        suffix.is_empty() || baseline.notes.is_empty() || suffix.starts_with("\n\n")
-                    })
+                    || !preserves_close_note_history(&baseline.notes, &current.notes)
                 {
                     return Err(error);
                 }

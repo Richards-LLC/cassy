@@ -3756,11 +3756,14 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
             "command" | "builtin" => {
                 let command = word == "command";
                 index += 1;
-                // Query flags print names without invoking the operand.
-                if command && words.get(index).is_some_and(|word| matches!(word.as_str(), "-v" | "-V")) {
-                    return None;
-                }
-                if command && words.get(index).is_some_and(|word| word == "-p") {
+                while command && let Some(option) = words.get(index)
+                    && option.starts_with('-') && option != "--"
+                {
+                    // Query/invalid flags do not invoke an operand. Repeated
+                    // and combined -p flags still select the real command.
+                    if option.len() == 1 || !option[1..].bytes().all(|ch| ch == b'p') {
+                        return None;
+                    }
                     index += 1;
                 }
                 if words.get(index).is_some_and(|word| word == "--") {
@@ -8649,7 +8652,7 @@ mod workspace_contract_tests {
             format!("flag=-i; declare \"$flag\" y='{operand}'"),
             format!("typeset -ix y='{operand}'"),
             format!("builtin -- let 'y={operand}'"),
-            format!("command -p let 'y={operand}'"),
+            format!("command -pp -p -- let 'y={operand}'"),
             format!("op=declare; builtin \"$op\" -i y='{operand}'"),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();

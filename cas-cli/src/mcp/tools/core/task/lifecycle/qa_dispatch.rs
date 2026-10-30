@@ -3201,16 +3201,24 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
         let mut task = f.task.clone();
         task.deliverables.factory_branch_anchor = Some(helper.clone());
-        for (receipt, expected) in [(None, &helper), (Some(tip.as_str()), &tip)] {
-            let parking = f.core.advance_commit_time_anchor_before_park_with_receipt(
-                tasks.as_ref(), &task, repo, "main", Some(WORKER_TASK_BRANCH), Some(&tip), receipt,
-            );
-            assert_eq!(
-                parking.deliverables.factory_branch_anchor.as_deref(),
-                Some(expected.as_str()),
-                "receipt {receipt:?}"
-            );
-        }
+        let park = |tip: &str, receipt: Option<&str>| {
+            f.core
+                .advance_commit_time_anchor_before_park_with_receipt(
+                    tasks.as_ref(), &task, repo, "main", Some(WORKER_TASK_BRANCH), Some(tip), receipt,
+                )
+                .deliverables
+                .factory_branch_anchor
+        };
+        assert_eq!(park(&tip, None), Some(helper.clone()));
+        assert_eq!(park(&tip, Some(&tip)), Some(tip.clone()));
+        // Adversarial: the exact tip receipt cannot adopt another task's commit.
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        std::fs::write(repo.join("other.txt"), "x\n").unwrap();
+        git(repo, &["add", "other.txt"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-f0a6): someone else's change"]);
+        let foreign = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        assert_eq!(park(&foreign, Some(&foreign)), Some(helper));
     }
 
     /// cas-ba4a still holds: a commit claiming another task stops the advance.

@@ -91,7 +91,19 @@ pub(super) fn delivery_snapshot(
         && integrated != head
         && crate::git_evidence::git_commit_parent_count(repo, &integrated) > 1
     {
-        return Ok((base, integrated, None));
+        // A reused lane can carry a successor beyond this task's parked tip.
+        // Only an integration of the exact anchor owns its entire merge delta.
+        let merged_parent = resolve_branch_sha(repo, &format!("{integrated}^2"));
+        if merged_parent.as_deref() == Some(head.as_str()) {
+            return Ok((base, integrated, None));
+        }
+        tracing::warn!(
+            task_id = %task.id,
+            parked_tip = %head,
+            integration = %integrated,
+            ?merged_parent,
+            "UPKEEP INTEGRATION PARENT MISMATCH: using task-only delivery attribution"
+        );
     }
     let (base, head) = snapshot_range(task, repo, target, window, receipt)?;
     let paths = window.and_then(|w| task_attribution::paths(repo, target, w, Some(&head)));

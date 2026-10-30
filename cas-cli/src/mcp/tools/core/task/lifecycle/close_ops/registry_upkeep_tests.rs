@@ -119,10 +119,24 @@ fn registry_upkeep_mismatched_merge_parent_uses_task_only_delta() {
             known_commits: vec![parked.clone()],
         },
     };
-    let (base, head, paths) = delivery_snapshot(&f.task, repo, "main", Some(&window), Some(&parked)).unwrap();
+    let mut log = tempfile::tempfile().unwrap();
+    let capture = log.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || capture.try_clone().unwrap()).finish();
+    let (base, head, paths) = tracing::subscriber::with_default(subscriber, || {
+        delivery_snapshot(&f.task, repo, "main", Some(&window), Some(&parked)).unwrap()
+    });
     assert_eq!(head, parked, "a mismatched merge cannot replace the parked delivery");
     assert_eq!(base, f.base);
     assert_eq!(paths, Some(vec!["src/pages/signup.ts".into()]));
+    use std::io::{Read, Seek};
+    log.rewind().unwrap();
+    let mut diagnostic = String::new();
+    log.read_to_string(&mut diagnostic).unwrap();
+    // pin: operators can identify the nonblocking attribution fallback by name.
+    assert!(diagnostic.contains("UPKEEP INTEGRATION PARENT MISMATCH"), "{diagnostic}");
+    f.qa.registry.enforce = RegistryEnforcement::Enforce;
     let mut config = crate::config::Config::default();
     config.qa = Some(f.qa.clone());
     config.save(f._db.path()).unwrap();

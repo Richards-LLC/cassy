@@ -7426,7 +7426,7 @@ mod cas_89e1_post_merge_message_type_tests {
             .id();
 
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        core.set_agent_id_for_testing(supervisor.id);
+        core.set_agent_id_for_testing(supervisor.id.clone());
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -7455,6 +7455,29 @@ mod cas_89e1_post_merge_message_type_tests {
             serde_json::from_str(&reply.prompt).expect("operator reply payload");
         assert_eq!(payload.reply_to, Some(commander));
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
+
+        for (selector, in_reply_to, sessionless, cause) in [
+            ("Daniel@Soundwave", Some(commander + 1), false, "resolves to notification_id="),
+            ("unknown-device", None, false, "No verified Commander message"),
+            ("Daniel@Soundwave", None, true, "requires an active factory session"),
+        ] {
+            if sessionless {
+                supervisor.factory_session = None;
+                agents.register(&supervisor).expect("clear sender session");
+            }
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": format!("commander:{selector}"),
+                "in_reply_to": in_reply_to, "summary": "refused alias", "message": "Status response.",
+            })).unwrap();
+            let error = service.message_send(request).await.expect_err("invalid alias reply must be refused");
+            assert!(error.message.contains(cause), "{selector}: {error:?}");
+            assert!(error.message.contains("Reply once in this pane"), "{selector}: {error:?}");
+            assert!(error.message.contains("disabled or unmirrored delivery"), "{selector}: {error:?}");
+            assert!(error.message.contains(COMMANDER_REPLY_CONTRACT_POINTER), "{selector}: {error:?}");
+            assert!(!error.message.contains("coordination action=message target=operator"), "no second-send command for mirrored replies: {error:?}");
+        }
+        assert_eq!(queue.peek_operator_replies("factory-commander-alias", 10).unwrap().len(), 1,
+            "error guidance must not queue another answer");
     }
 
     #[tokio::test(flavor = "current_thread")]

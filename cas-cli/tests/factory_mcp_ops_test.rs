@@ -6448,6 +6448,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     // Named cache consent must never enter ordinary GC's evidence-retention
     // or process-reaping paths, even when the named path is refused.
     let mut named = factory_req("gc_cleanup");
+    named.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     named.force = Some(true);
     named.dry_run = Some(false);
     named.reclaim_unknown_target = Some(env.cas_root.join("unknown/target").display().to_string());
@@ -6471,6 +6472,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
                 .set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
         }
         let mut named = factory_req("gc_cleanup");
+    named.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
         named.force = Some(true);
         named.dry_run = Some(false);
         named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
@@ -6493,6 +6495,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     }
 
     let mut preview = factory_req("gc_cleanup");
+    preview.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     preview.force = Some(true);
     preview.dry_run = Some(false);
     let preview = env
@@ -6572,6 +6575,7 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
         .unwrap();
 
     let mut request = factory_req("gc_cleanup");
+    request.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     request.force = Some(true);
     request.dry_run = Some(false);
     request.artifacts = Some(true);
@@ -6706,6 +6710,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
+    preview.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     preview.force = Some(true);
     let preview = env
         .service
@@ -6721,6 +6726,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_preserved(); // force alone/omitted dry_run never deletes.
 
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let cleanup = env
@@ -6850,6 +6856,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     closed.status = TaskStatus::Closed;
     env.task_store().update(&closed).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
@@ -6915,6 +6922,7 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
         .truncate(false).open(slots.join("review-trash.lock")).unwrap();
     collector.lock_exclusive().unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     cleanup.full = Some(true);
@@ -6998,6 +7006,7 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
         failures.push(format!("stale owner temp must leave 11 reclaimable and 23 pending bytes: {review}"));
     }
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service.factory_request(Parameters(cleanup)).await.unwrap();
@@ -7067,6 +7076,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
             assert_ne!(next.id, dispatch.id);
         }
         let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
         cleanup.force = Some(true);
         cleanup.dry_run = Some(false);
         let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
@@ -7154,6 +7164,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     std::fs::create_dir_all(checkout.join("target")).unwrap();
     std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7318,6 +7329,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7434,6 +7446,7 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
     let control = PathBuf::from(std::env::var_os("REVIEW_GC_RACE_CONTROL_75AE").unwrap());
     std::fs::write(&control, format!("{}\n", checkout.display())).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let output = env
@@ -7500,6 +7513,7 @@ async fn test_gc_reports_large_unmanaged_scratch_cas_3fb4() {
         "{text}"
     );
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7520,8 +7534,12 @@ async fn test_gc_cleanup_without_force() {
     let pq = env.prompt_queue();
     pq.enqueue("src", "wolf", "test").expect("enqueue");
 
-    let req = factory_req("gc_cleanup");
-    let result = env.service.factory_request(Parameters(req)).await;
+    // Exercise the public action allowlist, including CLI's explicit false
+    // presentation flags, rather than bypassing dispatch via factory_request.
+    let mut req = coord_req("gc_cleanup");
+    req.json = Some(false);
+    req.full = Some(false);
+    let result = env.service.factory(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -7534,6 +7552,10 @@ async fn test_gc_cleanup_without_force() {
         "Should report process-group cleanup outcome: {text}"
     );
 
+    assert!(text.starts_with("[INFO] GC cleanup complete:"), "{text}");
+    assert!(text.lines().all(|line| line.len() <= 79), "{text}");
+    assert!(!text.contains("_STATUS_JSON="), "machine payload must be opt-in");
+    assert!(text.contains("cleanup --full") && text.contains("cleanup --json"));
     // Prompts should still be pending
     assert_eq!(pq.pending_count().expect("count"), 1);
 }
@@ -7598,6 +7620,7 @@ async fn test_gc_cleanup_with_force_prunes_by_retention_window() {
     }
 
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
 
     let result = env.service.factory_request(Parameters(req)).await;
@@ -7624,6 +7647,7 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
     let id = pq.enqueue("src", "dead-worker", "poison").expect("enqueue");
 
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
     req.older_than_secs = Some(0);
     let result = env.service.factory_request(Parameters(req)).await.unwrap();
@@ -7668,6 +7692,7 @@ async fn test_c384_gc_cleanup_aggregates_notices_per_sender() {
         }
     }
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
     req.older_than_secs = Some(0);
     let result = env.service.factory_request(Parameters(req)).await.unwrap();

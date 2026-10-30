@@ -31,6 +31,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   now names the key and file in a registry error instead of skipping the gate.
   Unavailable Git inputs retain their existing nonblocking warning.
 
+### Fixed — Factory cleanup feedback
+
+- **Cleanup stays readable while large inventories run** — Factory GC shows
+  bounded counts and the largest items, with complete details under `--full`
+  or `--json`. Human cleanup reports progress on stderr; JSON stays silent
+  until its single result. Existing deletion consent gates are unchanged.
+
 ### Added — Emoji in Commander conversations
 
 - **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.

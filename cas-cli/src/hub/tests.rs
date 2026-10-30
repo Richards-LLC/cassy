@@ -6582,15 +6582,15 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
         is_running: true, socket_exists: true,
     };
     let observed = ServerVersion { name: "lead".into(), role: AgentRole::Supervisor,
-        session: Some("badge-session".into()), pid: 42, version: Some("3.90.0".into()), older: true };
+        session: Some("badge-session".into()), pid: 42, version: Some("9.99.1".into()), older: true };
     for (name, role, owner, version, duplicate, live, expected) in [
-        ("lead", AgentRole::Supervisor, "badge-session", Some("3.90.0"), None, true, Some("3.90.0")),
-        ("lead", AgentRole::Supervisor, "another-session", Some("3.90.0"), None, true, None),
-        ("another-lead", AgentRole::Supervisor, "badge-session", Some("3.90.0"), None, true, None),
-        ("lead", AgentRole::Worker, "badge-session", Some("3.90.0"), None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, Some("9.99.1")),
+        ("lead", AgentRole::Supervisor, "another-session", Some("9.99.1"), None, true, None),
+        ("another-lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Worker, "badge-session", Some("9.99.1"), None, true, None),
         ("lead", AgentRole::Supervisor, "badge-session", None, None, true, None),
-        ("lead", AgentRole::Supervisor, "badge-session", Some("3.90.0"), Some("3.91.1"), true, None),
-        ("lead", AgentRole::Supervisor, "badge-session", Some("3.90.0"), None, false, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), Some("9.99.2"), true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, false, None),
     ] {
         let model = LocalSessionReadModel::default();
         let mut servers = vec![ServerVersion { name: name.into(), role, session: Some(owner.into()),
@@ -6602,13 +6602,13 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
         // exercise the real registry/session projection and wire omission below.
         model.versions.lock().unwrap().insert(root.clone(), CachedVersions {
             read_at: std::time::Instant::now(),
-            snapshot: Some(Snapshot { installed: "3.91.1".into(), servers }),
+            snapshot: Some(Snapshot { installed: "9.99.2".into(), servers }),
         });
         let row = model.project(&[SessionInfo { is_running: live, ..session.clone() }]).remove(0);
         let wire = serde_json::to_value(row).unwrap();
         assert_eq!(wire.get("mcp_version").and_then(|value| value.as_str()), expected, "{name}/{role:?}/{owner}/{live}");
         if expected.is_some() {
-            assert_eq!(wire["installed_version"], "3.91.1");
+            assert_eq!(wire["installed_version"], "9.99.2");
         }
     }
 }

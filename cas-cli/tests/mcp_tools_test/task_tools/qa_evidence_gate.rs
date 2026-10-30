@@ -204,7 +204,7 @@ impl Fx {
 }
 
 #[tokio::test]
-async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
+async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source_alias_cas_ad505() {
     use super::independent_qa::{reviewer_core, round_evidence};
     use cas::mcp::CasService;
     use cas_mcp::types::VerificationRequest;
@@ -226,6 +226,10 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let producer = fx.write_bundle(&head);
+    // Keep the original citation: on macOS TempDir spells it /var, while
+    // publication records /private/var. Save the canonical spelling before
+    // hiding the source so peer restores exercise both identities below.
+    let canonical_producer = producer.canonicalize().unwrap();
     // Real cas-qa-craft/journey bundles mix path fields with descriptive
     // metadata in files.parts. Shared pairs live alongside qa/, inside task.
     let pairs_dir = fx.artifacts.join(TASK).join("pairs");
@@ -372,6 +376,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         "{:?}",
         published_bundle.disposition
     );
+    assert_eq!(published_bundle.source, canonical_producer);
     // A peer cannot see any producer files. Merely fetching bundle.json is
     // insufficient: its trace and all relative evidence must travel too.
     let hidden = producer.parent().unwrap().with_extension("source-only");
@@ -415,7 +420,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
             .mount(&server)
             .await;
     }
-    for (team, newer_local) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (team, newer_local) in [(true, false), (false, false), (true, true), (false, true)] {
         let (peer, peer_core) = setup_cas(&mut env);
         let root = peer.path().join(".cas");
         std::fs::write(root.join("config.toml"), format!(
@@ -512,6 +517,14 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         assert!(!tasks.get(TASK).unwrap().notes.contains("qapass-invalid"));
         if newer_local {
             assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata");
+        }
+        if team {
+            // Team pulls exercise an exact canonical citation; personal
+            // pulls retain the original platform alias. Neither source exists.
+            let mut task = tasks.get(TASK).unwrap();
+            task.notes
+                .push_str(&format!("\nqa-bundle: {}", canonical_producer.display()));
+            tasks.update(&task).unwrap();
         }
         assert!(
             tasks

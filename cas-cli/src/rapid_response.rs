@@ -666,14 +666,84 @@ mod tests {
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
-    /// The post-release check stays a full gate inside a window.
-    #[test]
-    fn window_keeps_the_post_release_gate() {
-        let (_dir, cas, store, _delivery) = epic_fixture();
-        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
+    fn post_release_fixture() -> (tempfile::TempDir, PathBuf, std::sync::Arc<dyn cas_store::TaskStore>, Task, Window) {
+        let (dir, cas, store, _) = epic_fixture();
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\nrelease_branches = [\"main\"]\n").unwrap();
+        git(dir.path(), &["remote", "add", "origin", "."]);
         let epic = store.get("cas-ep1c").unwrap();
         let window = open(&cas, store.as_ref());
+        (dir, cas, store, epic, window)
+    }
+
+    fn publish_main(dir: &Path) -> String {
+        let sha = git(dir, &["rev-parse", "main"]);
+        git(dir, &["update-ref", "refs/remotes/origin/main", &sha]);
+        sha
+    }
+
+    #[test]
+    fn window_relaxes_only_for_automatic_release_merge() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        let tip = git(dir.path(), &["rev-parse", "epic/hot"]);
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
-        assert!(ledger(&cas, &window).is_empty(), "nothing is skipped");
+        crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "-q", "--no-ff", "epic/hot", "-m", "release"]);
+        let release = publish_main(dir.path());
+        crate::qa_post_release::tick(&cas).unwrap();
+        let receipt = crate::qa_post_release::load(&cas, &epic.id).unwrap().unwrap();
+        assert_ne!(release, tip);
+        assert_eq!(receipt.sha, release, "observe the introducing release merge");
+        assert!(cas.join("operator/post-release").join(format!("{}.json", epic.id)).exists(), "release identity is protected from agent writes");
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none());
+        assert_eq!(ledger(&cas, &window)[0].check, "post-release");
+    }
+
+    #[test]
+    fn fast_forward_release_keeps_the_post_release_gate() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        // Even a merge at the epic tip is not a release-branch merge.
+        git(dir.path(), &["checkout", "-q", "-b", "fix"]);
+        std::fs::write(dir.path().join("fix.txt"), "fix\n").unwrap();
+        git(dir.path(), &["add", "fix.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix"]);
+        git(dir.path(), &["checkout", "-q", "epic/hot"]);
+        git(dir.path(), &["merge", "-q", "--no-ff", "fix", "-m", "epic delivery"]);
+        crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "-q", "--ff-only", "epic/hot"]);
+        let release = publish_main(dir.path());
+        crate::qa_post_release::tick(&cas).unwrap();
+        assert!(crate::qa_post_release::load(&cas, &epic.id).unwrap().is_none(), "FF has no introducing release merge");
+        crate::qa_post_release::start(&cas, &epic.id, &release).unwrap();
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty());
+    }
+
+    #[test]
+    fn foreign_merge_keeps_the_post_release_gate() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        publish_main(dir.path());
+        git(dir.path(), &["checkout", "-q", "-b", "foreign", "main"]);
+        git(dir.path(), &["merge", "-q", "--no-ff", "epic/hot", "-m", "foreign merge"]);
+        let sha = git(dir.path(), &["rev-parse", "HEAD"]);
+        crate::qa_post_release::start(&cas, &epic.id, &sha).unwrap();
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty());
+    }
+
+    #[test]
+    fn squash_release_keeps_the_post_release_gate() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "-q", "--squash", "epic/hot"]);
+        git(dir.path(), &["commit", "-q", "-m", "squash release"]);
+        let release = publish_main(dir.path());
+        crate::qa_post_release::tick(&cas).unwrap();
+        assert!(crate::qa_post_release::load(&cas, &epic.id).unwrap().is_none());
+        crate::qa_post_release::start(&cas, &epic.id, &release).unwrap();
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty());
     }
 }

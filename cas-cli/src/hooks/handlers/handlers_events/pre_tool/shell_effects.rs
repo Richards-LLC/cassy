@@ -369,6 +369,13 @@ fn heredoc_substitution_bodies(body: &str) -> Result<Vec<String>, &'static str> 
             index += 2;
             continue;
         }
+        if bytes.get(index..index + 2) == Some(b"${") {
+            let tail = &logical[index + 2..];
+            let end = tail.find('}').ok_or("an unresolved parameter operand")?;
+            parameter_arithmetic(&tail[..end])?;
+            index += 2; // Nested parameter expansions retain their own checks.
+            continue;
+        }
         let end = if bytes.get(index..index + 2) == Some(b"$(") {
             literal_cat_heredoc_end(&logical[index..])
                 .map(|end| index + end)

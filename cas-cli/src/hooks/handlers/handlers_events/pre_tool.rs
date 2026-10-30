@@ -8888,6 +8888,7 @@ EOF
             "echo \"${s:x}\"",
             "echo \"${s:0:x}\"",
             "echo \"${!x}\"",
+            "cat <<EOF\n${b[x]}\nEOF",
             r#"echo "\${default:-'${b[x]}'}""#,
             r#"echo "${default:-'${b[x]}'}""#,
         ] {
@@ -8900,6 +8901,7 @@ EOF
             "[[ 1 -eq 1 ]]",
             "echo \"${b[0]}\"",
             "echo \"${s:0:2}\"",
+            "cat <<EOF\n${s:0:2}\nEOF",
             "[[ \"literal\" == \"-eq\" ]]",
             r#"echo "\${b[x]}""#,
             r#"echo '${b[x]}'"#,

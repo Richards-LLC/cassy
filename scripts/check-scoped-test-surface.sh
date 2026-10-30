@@ -474,18 +474,19 @@ while IFS= read -r path; do
             ;;
     esac
 done < <(printf '%s\n' "${changed_paths[@]}")
-if [[ ${#source_module_patterns[@]} -gt 0 ]]; then
-    # Factor shared anchors around the path union instead of repeating the
-    # complete expression per path. This reduces regex compiler overhead.
-    printf -v module_alternation '%s|' "${source_module_patterns[@]}"
-    printf -v path_alternation '%s|' "${source_path_patterns[@]}"
+for ((source_batch_offset = 0; source_batch_offset < ${#source_module_patterns[@]}; source_batch_offset += 200)); do
+    # Bound each union so large deliveries stay within Git's regex compiler
+    # limit. Small deliveries still use one search; discovered targets are
+    # deduplicated across batches by add_required_test_target.
+    printf -v module_alternation '%s|' "${source_module_patterns[@]:source_batch_offset:200}"
+    printf -v path_alternation '%s|' "${source_path_patterns[@]:source_batch_offset:200}"
     module_alternation="(${module_alternation%|})"
     path_alternation="(${path_alternation%|})"
     discover_test_targets regex \
         "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_alternation}([[:space:];:{]|$)" \
         "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_alternation}::[[:alnum:]_]" \
         "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${path_alternation}"
-fi
+done
 
 # These guardrails are file-class contracts, not optional path discoveries:
 # an integration-test source must remain readable in nextest archives, and a

@@ -9049,6 +9049,7 @@ EOF
             "echo \"${s:0:x}\"",
             "echo \"${!x}\"",
             "cat <<EOF\n${b[x]}\nEOF",
+            "cat <<EOF\n$(function f { [[ x -eq 0 ]]; }; f)\nEOF",
             r#"echo "\${default:-'${b[x]}'}""#,
             r#"echo "${default:-'${b[x]}'}""#,
         ] {

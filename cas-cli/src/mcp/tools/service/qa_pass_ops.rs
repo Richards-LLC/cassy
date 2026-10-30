@@ -553,6 +553,7 @@ impl CasService {
             }
         };
         let mut tracked = Vec::new();
+        let mut below_threshold = Vec::new();
         for issue in issues {
             // cas-2849: a finding that names its existing follow-up is linked,
             // not filed again.
@@ -564,6 +565,11 @@ impl CasService {
                 let _ = store.add_dependency(&related);
                 let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
                 tracked.push(format!("{label} by {existing}"));
+                continue;
+            }
+            if !issue.clears_spawn_threshold() {
+                let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
+                below_threshold.push(label.to_string());
                 continue;
             }
             let id = match store.generate_id() {
@@ -592,6 +598,9 @@ impl CasService {
         }
         let mut out = String::new();
         if !filed.is_empty() {
+            if let Some(epic) = epic.as_ref() {
+                crate::mcp::tools::core::task::lifecycle::review_loop::notify_when_tripped(&self.inner.cas_root, &epic.id);
+            }
             let note = format!(
                 "[{}] Independent QA round {} recorded {} pre-existing issue(s) as follow-ups: {} (not counted against this delivery; ledger {ledger_path})",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -605,6 +614,12 @@ impl CasService {
             out.push_str(&format!(
                 "\nPre-existing follow-ups filed (related to {delivery_id}): {}.",
                 filed.join(", ")
+            ));
+        }
+        if !below_threshold.is_empty() {
+            out.push_str(&format!(
+                "\nLeft in the verdict, below the spawn threshold (no repro or affected): {}.",
+                below_threshold.join("; ")
             ));
         }
         if !tracked.is_empty() {

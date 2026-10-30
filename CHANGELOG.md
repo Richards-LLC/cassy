@@ -58,6 +58,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   journeys, and Tier 2 needs an adversarial probe row in the task ledger.
   `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
   per release.
+- **Follow-ups from findings must clear the spawn threshold** — Was: nothing in
+  the tools stopped a review finding becoming a task, and nothing showed when an
+  epic's reviews were generating more work than they closed. → Now: `task create`
+  refuses a follow-up from a finding without `repro` and `affected`, and a P0/P1
+  bug an operator or supervisor observed directly stays exempt. QA's automatic
+  pre-existing follow-ups need the same two fields; the rest stay in the verdict.
+  With at least 5 completed reviews, at 0.5 follow-ups per review over an epic's
+  last 10, the supervisor gets one notice, and
+  `epic_status` shows the ratio.
 
 ### Fixed — Hub pin safety
 

@@ -8654,12 +8654,16 @@ mod workspace_contract_tests {
             assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
-        // Arithmetic data still executes nested command substitutions.
-        let (status, reason) = decision(
+        // Arithmetic data still executes nested command substitutions. A
+        // separated closing pair can instead denote a subshell substitution.
+        for command in [
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
-        );
-        assert_eq!(status, "deny", "arithmetic must not hide a write: {reason}");
-        assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+            r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
         for allowed in [
             "cas config get factory.write_roots",
             "cas config set factory.prompt_retention_days 7",

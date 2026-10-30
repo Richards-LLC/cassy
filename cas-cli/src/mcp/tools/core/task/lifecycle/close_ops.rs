@@ -24716,9 +24716,9 @@ pub(crate) fn parked_anchor_advance_is_attributable(
 }
 
 /// cas-9668: an epic sync imports sibling commits without transferring the
-/// task's delivery identity. Only side parents already on the declared target
-/// may bypass the foreign-task check; direct worker commits and lease cutoffs
-/// still apply. The recorded anchor must lie on the first-parent chain, so a
+/// task's delivery identity. Each side parent must belong to the declared
+/// target or released trunk to bypass the foreign-task check; direct commits
+/// and lease cutoffs still apply. The recorded anchor must lie on the first-parent chain, so a
 /// supervisor's integration merge cannot become a worker continuation.
 fn parked_anchor_advance_with_target_is_attributable(
     repo_path: &std::path::Path,
@@ -24782,14 +24782,13 @@ fn parked_anchor_advance_with_target_is_attributable(
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
     }) && commits.iter().all(|(parents, epoch, message)| {
-        let imports_from = |upstream: &str| {
-            parents
-                .iter()
-                .skip(1)
-                .all(|parent| git_commit_is_ancestor(repo_path, parent, upstream))
-        };
         let target_import = parents.len() > 1
-            && (imports_from(target_ref) || released.as_deref().is_some_and(imports_from));
+            && parents.iter().skip(1).all(|parent| {
+                git_commit_is_ancestor(repo_path, parent, target_ref)
+                    || released.as_deref().is_some_and(|upstream| {
+                        git_commit_is_ancestor(repo_path, parent, upstream)
+                    })
+            });
         (target_import
             || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
             && foreign_since

@@ -475,8 +475,8 @@ fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
 }
 
 /// The ref whose history counts as released upstream for a lane bound to
-/// `target`: `origin/<trunk>` when it exists (cas-3d57: a local trunk can be
-/// ahead of origin or moved by hand, so it never vouches for release), else
+/// `target`: `refs/remotes/origin/<trunk>` when it exists (cas-3d57: a local
+/// trunk can be ahead of origin or moved by hand, so it never vouches for release), else
 /// the local trunk in a repository without that remote ref. None when the
 /// trunk is the target itself or unresolvable.
 pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
@@ -485,9 +485,12 @@ pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
     if trunk == target || !is_safe_git_refname(&trunk) {
         return None;
     }
-    [format!("origin/{trunk}"), trunk]
-        .into_iter()
-        .find(|reference| git_ref_exists(repo, reference))
+    [
+        format!("refs/remotes/origin/{trunk}"),
+        format!("refs/heads/{trunk}"),
+    ]
+    .into_iter()
+    .find(|reference| git_ref_exists(repo, reference))
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {

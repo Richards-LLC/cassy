@@ -17,6 +17,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the released trunk count as upstream, and a merge that only brings in that
   trunk is a sync merge. Another task's unreleased work is still refused.
 
+### Fixed — QA recording guidance
+
+- **Native Commander chapter captions respect its security policy** — QA
+  examples use the CSP-safe `showRecordingChapter` helper. The native upload
+  journey records its chapter and waits for it only when recording is enabled.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

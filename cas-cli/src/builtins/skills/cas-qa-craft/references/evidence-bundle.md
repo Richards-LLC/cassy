@@ -262,11 +262,15 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
+For Commander chapters, import `showRecordingChapter` from
+`hub-web/e2e/journeys/receipt-directory.mjs` (adjust the relative path for the
+spec). It uses constructed stylesheets compatible with native `style-src 'self'`.
 
 ```ts
 // tests/qa-evidence.spec.ts
 import { test, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
+import { showRecordingChapter } from '../hub-web/e2e/journeys/receipt-directory.mjs';
 
 const QA = process.env.QA_ARTIFACTS!;
 const visualChange = true; // match bundle.json visual_change for this delivery
@@ -279,8 +283,8 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   await page.goto('/');
 
   if (visualChange) {
-    await page.screencast.showChapter('M01 submit a task filter', {
-      description: 'expect: matching rows update', duration: 1000,
+    await showRecordingChapter(page, 'M01 submit a task filter — expect matching rows update', {
+      duration: 1000,
     });
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('fix');
@@ -289,8 +293,8 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   await page.screenshot({ path: `${QA}/M01.png` });
 
   if (visualChange) {
-    await page.screencast.showChapter('M02 query with no matches', {
-      description: 'expect: clear no-results copy', duration: 1000,
+    await showRecordingChapter(page, 'M02 query with no matches — expect clear no-results copy', {
+      duration: 1000,
     });
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('zzz');
@@ -383,8 +387,10 @@ and repeat that path in the close reason.
   filmstrip, so it reports “No screenshot found”.
 - `page.screencast.start()` without `size` records 800×450. Pass
   `page.viewportSize()`.
-- `showChapter` blocks for its `duration` (default 2000 ms). `showActions`
-  returns a disposable; the annotations stop when it is disposed.
+- `showRecordingChapter(page, title, { duration })` blocks for its `duration`
+  (default 1000 ms). Call it only while recording; put the expected result in
+  the title. `showActions` returns a disposable; the annotations stop when it
+  is disposed.
 - `emulateMedia` keeps every feature you omit, so reset all three modes each
   time. A matching `matchMedia` query is the proof that the mode took effect;
   a screenshot identical to the default is not.

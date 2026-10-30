@@ -195,8 +195,12 @@ matching local run (see step 4). The files, all listed in `bundle.json`:
 - `trace-actions.txt`: the output of `npx playwright trace actions`
 - `receipt.webm`, only for `visual_change: true`: start it with
   `page.screencast.start({ path, size: page.viewportSize() })` and
-  `showActions`, and add one `showChapter('F01 …', { duration: 1000 })` per
-  finding; omit screencast and chapter calls for non-visual changes
+  `showActions`, and add one
+  `showRecordingChapter(page, 'F01 …', { duration: 1000 })` per finding. Import
+  the helper from `hub-web/e2e/journeys/receipt-directory.mjs`, adjusting the
+  relative path for the spec; its constructed stylesheets work under native
+  Commander's `style-src 'self'`. Omit screencast and chapter calls for
+  non-visual changes
 - `final.aria.yml` and `final.aria.json`
 - `F01.png`, `F02.png`, …: one capture per finding, listed in `files.cells`
 - `visual-qa/` and `visual-qa.stdout`

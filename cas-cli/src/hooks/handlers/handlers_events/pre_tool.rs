@@ -9042,6 +9042,7 @@ EOF
             "coproc [[ x -eq 0 ]]",
             "coproc C { [[ x -eq 0 ]]; }",
             "coproc { [[ x -eq 0 ]]; }",
+            "echo [[ x -eq 0 ]]",
             "echo \"$(function f { [[ x -eq 0 ]]; }; f)\"",
             "test x -eq 0",
             "echo \"${b[x]}\"",

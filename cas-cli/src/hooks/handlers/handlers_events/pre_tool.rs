@@ -3325,6 +3325,54 @@ fn factory_shell_tokens_for_projection(
     (lexed.tokens, lexed.literals)
 }
 
+/// ANSI-C quoting is a constant word part, not a parameter or command
+/// substitution. Unsupported escapes, NULs and non-UTF8 bytes stay unresolved
+/// so the effect guard refuses them rather than matching a different word.
+fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = command.as_bytes();
+    if bytes.get(start..start + 2) != Some(b"$'") {
+        return None;
+    }
+    let mut decoded = Vec::new();
+    let mut index = start + 2;
+    while let Some(&ch) = bytes.get(index) {
+        index += 1;
+        match ch {
+            b'\'' => return Some((String::from_utf8(decoded).ok()?, index)),
+            b'\\' => {
+                let escape = *bytes.get(index)?;
+                index += 1;
+                let value = match escape {
+                    b'a' => 7, b'b' => 8, b'e' | b'E' => 27, b'f' => 12,
+                    b'n' => b'\n', b'r' => b'\r', b't' => b'\t', b'v' => 11,
+                    b'\\' | b'\'' | b'"' | b'?' => escape,
+                    b'x' | b'0'..=b'7' => {
+                        let (radix, limit, mut value, mut digits) = if escape == b'x' {
+                            (16, 2, 0, 0)
+                        } else {
+                            (8, 3, u32::from(escape - b'0'), 1)
+                        };
+                        while digits < limit {
+                            let Some(digit) = bytes.get(index).and_then(|ch| (*ch as char).to_digit(radix)) else { break };
+                            value = value * radix + digit;
+                            digits += 1;
+                            index += 1;
+                        }
+                        if digits == 0 { return None; }
+                        value as u8
+                    }
+                    _ => return None,
+                };
+                if value == 0 { return None; }
+                decoded.push(value);
+            }
+            0 => return None,
+            _ => decoded.push(ch),
+        }
+    }
+    None
+}
+
 /// The same lexer backs ordinary commands and substitution boundaries. Source
 /// positions avoid recovering syntax from cooked words or quoted/comment text.
 fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> ShellLexed {
@@ -3394,6 +3442,25 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
             continue;
         }
         let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        // Shell line continuations disappear before word matching, including
+        // inside double quotes; single-quoted backslash/newline stays data.
+        if active_quote != Some('\'') && ch == '\\'
+            && chars.peek().is_some_and(|(_, next)| *next == '\n')
+        {
+            chars.next();
+            continue;
+        }
+        if quote.is_none() && expansions.is_empty() && ch == '$'
+            && chars.peek().is_some_and(|(_, next)| *next == '\'')
+        {
+            if let Some((decoded, end)) = shell_ansi_c_word(command, index) {
+                word.push_str(&decoded);
+                for _ in command[index + 1..end].chars() { chars.next(); }
+                word_quoted = true;
+                continue;
+            }
+            unresolved_at.get_or_insert(index);
+        }
         if active_quote != Some('\'') && ch == '$' {
             let expansion = match command.as_bytes().get(index + 1..) {
                 Some([b'{', ..]) => Some(('{', '}', 1, 1)),
@@ -3723,7 +3790,7 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
     while index < words.len() {
         let word = &words[index];
         match shell_word_basename(word) {
-            "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
+            "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
             "env" => {
                 // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
                 // value; skipping only the flag made `env -u X cargo …` name
@@ -5692,6 +5759,7 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
 struct ShellInvocationScan {
     commands: Vec<(String, Vec<String>)>,
     unresolved_heredoc: bool,
+    unresolved_ansi_c: bool,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5781,6 +5849,15 @@ fn collect_shell_substitutions(
             while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
+            continue;
+        }
+        if quote.is_none() && bytes.get(index..index + 2) == Some(b"$'") {
+            let Some((_, end)) = shell_ansi_c_word(command, index) else {
+                found.unresolved_ansi_c = true;
+                break;
+            };
+            index = end;
+            word_start = false;
             continue;
         }
         let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
@@ -5883,6 +5960,9 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
+    if scan.unresolved_ansi_c {
+        return Some("🚫 OPERATOR-ONLY: Cannot inspect an unsupported ANSI-C shell word.".into());
+    }
     if scan.unresolved_heredoc {
         return Some("🚫 Cannot inspect an unresolved command substitution in an expanding heredoc.".into());
     }

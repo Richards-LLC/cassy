@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Conversation keyboard navigation
+
+- **Machine filters keep keyboard focus during catalog refreshes** — An unchanged
+  project list refresh retains the focused machine button, so Tab navigation and
+  its visible focus ring continue to work while machines report their status.
+
 ### Fixed — macOS automatic release installation
 
 - **LaunchAgent reinstall tolerates shutdown delay** — Reinstalling the release

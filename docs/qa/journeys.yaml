@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  machine-chip-catalog-focus:
+    title: Unchanged catalog ticks preserve the focused project machine chip
+    tasks: [cas-2e1c]
+    invariants: [HUB-J3-MACHINE-CHIP-FOCUS]
+    journeys: [HUB-J3]
   staffed-epic-delivery-budget:
     title: Staffed release delivery reads precede idle history even after the last active worker parks
     tasks: [cas-9d2a, cas-c5fa]
@@ -72,6 +77,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J3-MACHINE-CHIP-FOCUS:
+    statement: An unchanged catalog refresh retains the focused project machine button and its keyboard focus ring.
+    check: Run project-navigation.test.ts focus retention through an unchanged catalog tick, then the long-machine-name keyboard stage in find-conversation.journey.ts with ten repeats and four workers.
+    bug: {task: cas-2e1c}
   HUB-J27-GOAL:
     statement: The operator chooses curated supervisor controls from slash input or the header on desktop and phone, confirms destructive commands, and reads a truthful outcome.
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
@@ -651,6 +660,7 @@ journeys:
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
   - HUB-J3-MACHINE-VERSIONS
+  - HUB-J3-MACHINE-CHIP-FOCUS
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

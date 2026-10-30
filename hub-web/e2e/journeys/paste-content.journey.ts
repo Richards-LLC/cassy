@@ -196,10 +196,14 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
           // 1 MiB/s keeps the browser walk bounded; the 512 kbit/s + 25%
           // deadline boundary is covered by the deterministic transport test.
           await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: 1024 * 1024 });
-          const bytes = Buffer.alloc(10 * 1024 * 1024); Buffer.from(PNG, "base64").copy(bytes);
-          const chooser = page.waitForEvent("filechooser");
-          await page.getByRole("button", { name: "Attach files", exact: true }).click();
-          await (await chooser).setFiles({ name: "slow-photo.png", mimeType: "image/png", buffer: bytes });
+          await field.evaluate((element, png) => {
+            const bytes = new Uint8Array(10 * 1024 * 1024);
+            bytes.set(Uint8Array.from(atob(png), c => c.charCodeAt(0)));
+            const image = new DataTransfer();
+            image.items.add(new File([bytes], "slow-photo.png", { type: "image/png" }));
+            element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: image, bubbles: true, cancelable: true }));
+          }, PNG);
+          await expect(page.getByRole("button", { name: "Remove slow-photo.png", exact: true })).toBeVisible();
           const next = hub.nextSend();
           await send.click();
           const progress = page.getByRole("progressbar", { name: "Upload slow-photo.png" });

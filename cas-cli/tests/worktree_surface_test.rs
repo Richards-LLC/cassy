@@ -1238,7 +1238,18 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
         "normal close must resolve the intended bound clone: {close_text}"
     );
     assert!(!close_text.contains("AMBIGUOUS WORK TARGET"));
-    assert!(!close_text.contains(home.path().to_string_lossy().as_ref()));
+    // The local Details artifact may live under HOME; the binding itself must not.
+    let (summary, reference) = close_text
+        .split_once("\nDetails: ")
+        .expect("compact close receipt references its full detail");
+    assert!(!summary.contains(home.path().to_string_lossy().as_ref()), "{summary}");
+    let detail_path = reference
+        .split_once(" (SHA-256 ")
+        .expect("detail reference carries its integrity receipt")
+        .0;
+    let detail = std::fs::read_to_string(detail_path).expect("close detail artifact exists");
+    assert!(detail.contains(&format!("Closed task: {task_id} - Bound lifecycle updated")), "{detail}");
+    assert!(!detail.contains(home.path().to_string_lossy().as_ref()), "{detail}");
 
     let persisted = task_store.get(&task_id).unwrap();
     let portable = serde_json::to_string(&persisted.deliverables).unwrap();

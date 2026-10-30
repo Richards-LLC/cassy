@@ -1151,16 +1151,22 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
 }
 
 fn contains_fixture_home(text: &str, home: &Path) -> bool {
+    let canonical = std::fs::canonicalize(home).expect("canonical fixture HOME");
     text.contains(home.to_string_lossy().as_ref())
+        || text.contains(canonical.to_string_lossy().as_ref())
 }
 
 fn portable_close_detail(close_text: &str, home: &Path) -> Result<String, String> {
     let (summary, reference) = close_text
         .split_once("\nDetails: ")
         .ok_or("compact close receipt references its full detail")?;
-    let (detail_path, _digest) = reference
+    let (detail_path, digest) = reference
         .split_once(" (SHA-256 ")
         .ok_or("detail reference carries its integrity receipt")?;
+    let digest = digest.strip_suffix(')').ok_or("detail digest must end the receipt")?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("detail reference must end with only its SHA-256 digest".into());
+    }
     let detail = std::fs::read_to_string(detail_path).map_err(|error| error.to_string())?;
     for text in [summary, detail.as_str()] {
         if contains_fixture_home(text, home) {

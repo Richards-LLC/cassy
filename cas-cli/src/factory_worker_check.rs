@@ -1712,7 +1712,7 @@ pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_tes
 }
 
 #[cfg(test)]
-fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
+pub(crate) fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
 }
 

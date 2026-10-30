@@ -6768,6 +6768,48 @@ mod tests {
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn dead_pane_recycle_reports_and_retries_retirement_failure_cas_f501() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        for busy in [true, false] {
+            let project = env.home().join(if busy { "busy" } else { "shutdown-failure" });
+            std::fs::create_dir_all(&project).unwrap();
+            let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let mut agent = cas_types::Agent::new_with_role("old-id".into(), "dead-worker".into(), cas_types::AgentRole::Worker);
+            agent.pid = Some(i32::MAX as u32);
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
+            agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
+            agents.register(&agent).unwrap();
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            if busy {
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            } else {
+                conn.execute_batch("CREATE TRIGGER fail_retirement BEFORE UPDATE OF status ON agents
+                    WHEN NEW.status = 'shutdown'
+                    BEGIN SELECT RAISE(ABORT, 'injected retirement failure'); END;").unwrap();
+            }
+            let mut app = FactoryApp::for_test_at(cas_dir.clone());
+            let result = {
+                let _budget = cas_store::wait_budget::bound_waits_for(std::time::Duration::from_millis(1));
+                app.shutdown_worker_for_recycle("dead-worker").await
+            };
+            let status_before_retry: String = conn.query_row("SELECT status FROM agents WHERE id = ?", [&agent.id], |row| row.get(0)).unwrap();
+            conn.execute_batch(if busy { "ROLLBACK" } else { "DROP TRIGGER fail_retirement" }).unwrap();
+            let (done, receive) = std::sync::mpsc::channel();
+            crate::ui::factory::daemon::runtime::store_worker::global().submit("retirement retry sentinel", move || { done.send(()).unwrap(); });
+            receive.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            app.join_worker_worktree_cleanups();
+            result.unwrap();
+            assert!(app.error_message.as_deref().is_some_and(|error| error.contains("old-id") && error.contains("deferred")),
+                "retirement failure must be surfaced even without a pane: {:?}", app.error_message);
+            if !busy {
+                assert_eq!(status_before_retry, "stale", "failed shutdown falls back to stale");
+            }
+            assert_eq!(agents.get(&agent.id).unwrap().status, cas_types::AgentStatus::Shutdown);
+        }
+    }
+
     #[test]
     fn exit_joins_held_cleanup_before_releasing_name_cas_af63() {
         use std::sync::mpsc;

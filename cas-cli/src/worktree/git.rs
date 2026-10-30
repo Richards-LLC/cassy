@@ -1432,7 +1432,7 @@ impl GitOperations {
         let note = format!(
             "\n⚠️  Generated output not regenerated after merging {}: {REGENERATE_ARTIFACTS_SCRIPT} failed ({failure}). \
              The merge kept the target's copy of the generated files; rebuild them from the merged \
-             sources and commit (for hub-web: `cd hub-web && npm run build`; for the builtin \
+             sources and commit (for hub-web: `cd hub-web && npm ci && npm run build`; for the builtin \
              reference-history ledger: `scripts/gen-builtin-reference-history.sh`), or CI's dist \
              check and the release gate fail.",
             short_tip(&merged),

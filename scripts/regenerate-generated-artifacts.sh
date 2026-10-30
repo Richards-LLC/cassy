@@ -24,12 +24,30 @@ regenerate_hub_web_dist() {
   fi
   (
     cd hub-web
-    # Existing modules can predate the merged lockfile. Reinstall here before
-    # building; detach legacy shared links so npm cannot change another checkout.
+    # Detach legacy shared links so npm cannot change another checkout.
     if [ -L node_modules ]; then
       rm node_modules
     fi
-    npm ci --prefer-offline --no-audit --no-fund
+    # npm's hidden lock omits the root package and uninstalled optional packages.
+    # Compare package metadata, not file bytes; stale or unreadable locks reinstall.
+    if ! node <<'JS'
+const fs = require('node:fs');
+const {isDeepStrictEqual} = require('node:util');
+try {
+  const wanted = JSON.parse(fs.readFileSync('package-lock.json')).packages;
+  const installed = JSON.parse(fs.readFileSync('node_modules/.package-lock.json')).packages;
+  for (const [path, entry] of Object.entries(wanted)) {
+    if (!path || (!installed[path] && entry.optional)) continue;
+    if (!isDeepStrictEqual(entry, installed[path]) || !fs.existsSync(path)) process.exit(1);
+  }
+  if (Object.keys(installed).some(path => !Object.hasOwn(wanted, path))) process.exit(1);
+} catch {
+  process.exit(1);
+}
+JS
+    then
+      npm ci --prefer-offline --no-audit --no-fund
+    fi
     npm run build
   )
   if [ -n "$(git status --porcelain -- hub-web/dist)" ]; then
@@ -87,6 +105,7 @@ regenerate_reference_history() {
 logs=$(mktemp -d)
 steps=(hub-web/dist reference-history)
 failed=()
+failed_steps=()
 trap 'if [ "${#failed[@]}" = 0 ]; then rm -rf "$logs"; fi' EXIT
 for step in "${steps[@]}"; do
   log=$logs/${step//\//-}
@@ -100,6 +119,7 @@ for step in "${steps[@]}"; do
   set -e
   if [ "$status" != 0 ]; then
     failed+=("$step failed (exit $status, log: $log)")
+    failed_steps+=("$step")
   else
     cat "$log"
   fi
@@ -107,7 +127,7 @@ done
 if [ "${#failed[@]}" != 0 ]; then
   summary=$(IFS=';'; echo "${failed[*]}")
   echo "regenerate-generated-artifacts: ${summary//;/; }" >&2
-  for step in "${steps[@]}"; do
+  for step in "${failed_steps[@]}"; do
     log=$logs/${step//\//-}
     if [ -s "$log" ]; then
       echo "--- $step" >&2

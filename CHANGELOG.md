@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Generated artifact regeneration
+
+- **Current dependencies survive regeneration** — Was: every changed hub-web
+  merge reinstalled dependencies, and failures repeated successful-step logs.
+  Now: matching installed lockfiles skip the reinstall, failure diagnostics
+  show only failed steps, and the recovery hint installs before building.
+
 ### Fixed — Source highlighting
 
 - **Apostrophes keep nearby code readable** — Rust lifetimes stay plain while character literals receive string color. JSX word apostrophes and unfinished single-quoted strings no longer color following lines as strings. A block too large to cache preserves previously cached source.

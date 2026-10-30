@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.91.1] - 2026-10-30
+
 ### Fixed — Commander daemon replacement
 
 - **An open conversation reconnects to a replacement daemon** — Was: if

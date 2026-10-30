@@ -95,6 +95,31 @@ by the existing `--json` check object.
 
 ## Critique
 
+### ASCII status contrast (cas-506d)
+
+Exact-build comparison, `e5d99081` → `47c23acbc`, using the same initialized
+fixture and terminal-qa commands:
+
+- UTF-8: `terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 0 warn · 0 allowed`.
+- `LANG=C` across four palettes: 152 contrast failures before; after,
+  `terminal-qa: PASS cas-doctor-lang-c · 12 runs · 0 fail · 4 warn · 0 allowed`.
+- The four unchanged warnings are unconfirmed word-split heuristics: an
+  intentionally truncated path ends in `...`; the next line starts a new
+  sentence, `Will be created`. No token continues across that boundary.
+- An explicit real PTY confirms `NO_COLOR=1` emits zero SGR, and `LANG=C`
+  alone emits ASCII status words. NO_COLOR needed no production repair.
+
+Captures and candidate receipt: `<artifacts>/cas-506d/terminal-green/`,
+`terminal-lang-c-green/`, and `candidate/RECEIPT.json`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | After the existing consent prompt, the verdict gives four warnings and 31 healthy checks. |
+| Fit | 4 | Healthy checks share grouped rows; findings expand with the existing verbose escape. |
+| Craft | 4 | Both widths fit; ASCII words keep their alignment, with hanging cause lines. |
+| Theme safety | 5 | Four-palette C and UTF-8 matrices pass; status words use terminal foreground. |
+| Machine contract | 5 | Piped output stays plain; JSON remains one checks array; NO_COLOR has zero SGR. |
+
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.
 
 After (with the doctor self-heal epic merged): `terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 4 warn · 0 allowed · docs/design/cli/captures/after/cas-doctor/report.md` — the four warns are one unconfirmed `word-split` heuristic on a remedy line that word-wraps exactly at the column edge.

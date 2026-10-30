@@ -4596,6 +4596,26 @@ impl ParenPositions {
     }
 }
 
+/// A redirect's filename is not the command: `>out touch /x` runs touch. Leaves
+/// command position as it was.
+fn skip_redirect(tokens: &[ShellToken], index: &mut usize, parens: &mut ParenPositions) {
+    while let Some(ShellToken::Operator('<' | '>' | '&' | '|')) = tokens.get(*index) {
+        parens.operator();
+        *index += 1;
+    }
+    if matches!(tokens.get(*index), Some(ShellToken::Word(_))) {
+        parens.word(false);
+        *index += 1;
+    }
+}
+
+/// The descriptor number in `2>out touch /x`, which is not the command either.
+fn is_redirect_descriptor(word: &str, next: Option<&ShellToken>) -> bool {
+    !word.is_empty()
+        && word.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(next, Some(ShellToken::Operator('<' | '>')))
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
@@ -4616,6 +4636,14 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     for (index, token) in tokens.iter().enumerate() {
         if token == &ShellToken::Operator('>') {
             if let Some(ShellToken::Word(target)) = tokens.get(index + 1) {
+                add_target(target);
+            }
+            // `>|file` and `>&file` write too; `>&2` and `>&-` name a descriptor.
+            if let (Some(ShellToken::Operator('|' | '&')), Some(ShellToken::Word(target))) =
+                (tokens.get(index + 1), tokens.get(index + 2))
+                && target != "-"
+                && !target.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 add_target(target);
             }
         }
@@ -4647,8 +4675,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                 command_position = true;
                 index += 1;
             }
+            ShellToken::Operator('<' | '>') => skip_redirect(&tokens, &mut index, &mut parens),
             ShellToken::Operator(_) => {
                 parens.operator();
+                index += 1;
+            }
+            ShellToken::Word(word) if command_position && is_redirect_descriptor(word, tokens.get(index + 1)) => {
+                parens.word(false);
                 index += 1;
             }
             ShellToken::Word(command) if command_position => {
@@ -4819,8 +4852,13 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
                 command_position = true;
                 index += 1;
             }
+            ShellToken::Operator('<' | '>') => skip_redirect(&tokens, &mut index, &mut parens),
             ShellToken::Operator(_) => {
                 parens.operator();
+                index += 1;
+            }
+            ShellToken::Word(word) if command_position && is_redirect_descriptor(word, tokens.get(index + 1)) => {
+                parens.word(false);
                 index += 1;
             }
             ShellToken::Word(word) if command_position => {
@@ -8777,6 +8815,26 @@ mod workspace_contract_tests {
             ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), true),
             ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), true),
             ("earlier arm directory", format!("cd /outside; case x in a) cd {} ;; b) touch p ;; esac\n", project.path().display()), true),
+            // ver-e69b5575c18c: a redirect's filename is no keyword, so bash runs
+            // `touch in /outside/p` here; it must not be read as a case statement.
+            ("redirect target named case", "(>case touch in /outside/p) >esac\n".into(), true),
+            ("substituted redirect target named case", "echo \"$(>case touch in /outside/p) >esac)\"\n".into(), true),
+            ("append target named case", "(>>case touch in /outside/p) >esac\n".into(), true),
+            ("fd redirect target named case", "(>&case touch in /outside/p) >&esac\n".into(), true),
+            ("clobber target named case", "(>|case touch in /outside/p) >|esac\n".into(), true),
+            ("input target named case", "(<case touch in /outside/p) <esac\n".into(), true),
+            ("subshell after a redirect target named case", ">case x in\n(touch /outside/p)\nesac\n".into(), true),
+            ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
+            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
+            ("redirect before a write", ">out touch /outside/p\n".into(), true),
+            ("clobber redirect", "echo hi >|/outside/p\n".into(), true),
+            ("combined redirect", "echo hi >&/outside/p\n".into(), true),
+            ("redirect before a delete", ">out rm -rf /outside/p\n".into(), true),
+            ("descriptor redirect before a write", "2>out touch /outside/p\n".into(), true),
+            ("redirect before a directory change", ">out cd /outside; touch p\n".into(), true),
+            ("redirect target substitution", "echo hi > \"$(touch /outside/p)\"\n".into(), true),
+            ("redirect before a harmless command", ">out.txt echo hi\n".into(), false),
+            ("descriptor duplication", ">&2 echo hi\n".into(), false),
             ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
             ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
             ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),

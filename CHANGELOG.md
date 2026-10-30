@@ -19,7 +19,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Workspace guard and `case`
 
-- **A `case` statement no longer reads as an unmatched scope** — Was: the workspace guard denied any `case` arm, even a harmless heredoc, because it took the pattern's `)` for the end of a subshell. → Now: pattern text and `)` are read as `case` syntax, and what an arm runs is checked as before. A pattern with a substitution or `$`, and an unterminated `case`, stay denied, and a `cd` in one arm no longer hides the directory the next arm runs in.
+- **A `case` statement no longer reads as an unmatched scope** — Was: the workspace guard denied any `case` arm, even a harmless heredoc, because it took the pattern's `)` for the end of a subshell. → Now: pattern text and `)` are read as `case` syntax, and what an arm runs is checked as before. A pattern with a substitution or `$`, and an unterminated `case`, stay denied, and a `cd` in one arm no longer hides the directory the next arm runs in. A redirect's filename is no longer read as the command, so `>out touch /x` is judged as `touch /x`.
 
 ### Fixed — Source-bound QA candidates
 
@@ -27,7 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   candidate checkout now builds production web assets before compiling Cassy.
   Its receipt records the source and served web digests, and publication fails
   if the candidate serves different bytes. The previous candidate stays intact
-  when verification fails.
+  when verification fails. Homepage verification uses the hub's canonical
+  Commander route, so a valid candidate no longer fails with an HTML 404.
+
+### Fixed — Independent batch QA
+
+- **A worker's own QA walk no longer counts as independent QA** — Was: a batch QA receipt and a QA-backed close accepted a ledger walked by the worker that delivered the task, as long as a different supervisor recorded it. → Now: `batch_receipt` requires `ledger_author` and records its id and role. It refuses an author in any listed tier 1 or 2 task's implementation lineage, and close rechecks receipts and passed QA rounds the same way. QA reviewers, verifiers and non-delivering workers, including on another machine, are accepted. Only an operator's `QA AUTHOR OVERRIDE:` task note lets a lineage author through. Receipts recorded before authors were tracked still count.
 
 ### Added — Supervisor Cassy versions in Commander
 

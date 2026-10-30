@@ -421,7 +421,8 @@ Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-deli
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 Every hour with new deliveries, build a candidate at the exact epic tip, walk the
 combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
-with `task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`; every listed
+with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and
+`ledger_author`, who walked it and did not implement a listed task; every listed
 delivery anchor must be contained in that reviewed target commit. Then close those
 deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
 remain available.

@@ -657,6 +657,7 @@
         "id",
         "issues",
         "ledger_artifact_id",
+        "ledger_author",
         "ledger_path",
         "limit",
         "local_proof_reference",

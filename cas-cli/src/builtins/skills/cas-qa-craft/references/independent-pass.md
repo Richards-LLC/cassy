@@ -21,7 +21,8 @@ reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defau
 For batch work, capture before/after evidence during implementation. The supervisor
 builds an hourly candidate at the exact epic tip and walks one combined matrix.
 Publish the PASS ledger, then record `verification action=batch_receipt` with
-`task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`. Every listed
+`task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author`
+(a non-implementer). Every listed
 task's delivery anchor must be contained in that reviewed target commit. Close
 after the receipt covers those anchors. A deferred close reports "waiting for
 batch receipt" until then. Explicit `qa_request` reviews use the procedure below.

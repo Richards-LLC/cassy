@@ -121,9 +121,17 @@ def plan(root, base, head):
     return {'version': 1, 'base': base, 'head': head, 'tests': tests}
 
 
-def package_root(root, name):
+def package_root(root, name, sources=()):
     import tomllib
-    pending = [root / 'Cargo.toml']
+    pending = [root / 'Cargo.toml'] if (root / 'Cargo.toml').is_file() else []
+    for source in sources:
+        for parent in (root / source).parents:
+            if not parent.is_relative_to(root):
+                break
+            manifest = parent / 'Cargo.toml'
+            if manifest.is_file():
+                pending.append(manifest)
+                break
     visited = set()
     while pending:
         manifest = pending.pop()
@@ -138,13 +146,13 @@ def package_root(root, name):
     raise ValueError('unknown selected package: '+name)
 
 
-def source_graph(root, package, harness, target=None):
+def source_graph(root, package, harness, target=None, sources=()):
     if target is not None:
         if target['package'] != package or target['harness'] != harness:
             raise ValueError('worker target metadata does not match requested scope')
         entry = Path(target['entry'])
     else:
-        directory, manifest = package_root(root, package)
+        directory, manifest = package_root(root, package, sources)
         if harness is None:
             entry = directory / manifest.get('lib', {}).get('path', 'src/lib.rs')
         else:
@@ -239,7 +247,7 @@ def selected_cases(root, touched, requested, cargo, target=None):
         return {}
     package = requested[requested.index('-p')+1]
     harness = requested[requested.index('--test')+1] if '--test' in requested else None
-    graph = source_graph(root, package, harness, target)
+    graph = source_graph(root, package, harness, target, (t['file'] for t in touched['tests']))
     candidates = [t for t in touched['tests'] if (root / t['file']).resolve() in graph]
     if not candidates:
         return {}
@@ -323,6 +331,15 @@ def run_requested(root, base, requested, cargo, script, count, target=None, head
     for stale in (receipt, red_receipt):
         stale.unlink(missing_ok=True)
     touched = plan(root, base, head or git(root, 'rev-parse', 'HEAD').strip())
+    if touched['tests'] and not (root / 'Cargo.toml').is_file() and '--manifest-path' not in requested:
+        # Rust metadata avoids requiring tomllib on older Python installations.
+        manifest = target.get('manifest') if target is not None else None
+        if manifest is None:
+            package = requested[requested.index('-p')+1]
+            directory, _ = package_root(root, package, (t['file'] for t in touched['tests']))
+            manifest = str(directory / 'Cargo.toml')
+        index = requested.index('-E')
+        requested = [*requested[:index], '--manifest-path', str(manifest), *requested[index:]]
     # Compile and execute the user's requested affected scope once, as before.
     try:
         result = verified(script, cargo, requested, count, log=log)

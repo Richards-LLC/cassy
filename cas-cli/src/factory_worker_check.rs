@@ -295,31 +295,40 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
     Ok(())
 }
 
-fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+/// Seed discovery from the nearest manifest of each tracked Rust source,
+/// including changed tests in independent workspaces below the Git root.
+fn manifest_roots(repo: &Path) -> Vec<PathBuf> {
+    let mut roots = BTreeSet::new();
     let root = repo.join("Cargo.toml");
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
-    let mut manifests = vec![root];
-    if let Some(members) = manifest
-        .get("workspace")
-        .and_then(|w| w.get("members"))
-        .and_then(toml::Value::as_array)
-    {
-        for member in members.iter().filter_map(toml::Value::as_str) {
-            manifests.extend(
-                glob::glob(&repo.join(member).join("Cargo.toml").to_string_lossy())?
-                    .collect::<std::result::Result<Vec<_>, _>>()?,
-            );
+    if root.is_file() { roots.insert(root); }
+    if let Ok(sources) = git(repo, &["ls-files", "-z", "--", "*.rs"]) {
+        for source in sources.split('\0').filter(|path| path.ends_with(".rs")) {
+            for dir in Path::new(source).ancestors().skip(1) {
+                let manifest = repo.join(dir).join("Cargo.toml");
+                if manifest.is_file() {
+                    roots.insert(manifest);
+                    break;
+                }
+            }
         }
     }
-    for path in manifests {
+    roots.into_iter().collect()
+}
+
+fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+    let mut manifests = std::collections::VecDeque::from(manifest_roots(repo));
+    let mut visited = BTreeSet::new();
+    while let Some(path) = manifests.pop_front() {
+        if !visited.insert(path.clone()) { continue; }
         let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-        if value
-            .get("package")
-            .and_then(|p| p.get("name"))
-            .and_then(toml::Value::as_str)
-            == Some(package)
-        {
+        if value.get("package").and_then(|p| p.get("name")).and_then(toml::Value::as_str) == Some(package) {
             return Ok((path, value));
+        }
+        if let Some(members) = value.get("workspace").and_then(|w| w.get("members")).and_then(toml::Value::as_array) {
+            for member in members.iter().filter_map(toml::Value::as_str) {
+                manifests.extend(glob::glob(&path.parent().context("manifest directory")?.join(member).join("Cargo.toml").to_string_lossy())?
+                    .collect::<std::result::Result<Vec<_>, _>>()?);
+            }
         }
     }
     bail!("Worker test refused: package {package} not found in workspace")
@@ -1993,6 +2002,13 @@ fn run_capped(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_
         && cargo_args.get(4).is_some_and(|arg| arg == "-E")
     {
         cargo_args.insert(4, "--lib".into());
+    }
+    // Keep Git planning rooted at the checkout, but tell Cargo which nested
+    // workspace to use. This is internal argv, not a new user-admitted flag.
+    if !repo.join("Cargo.toml").is_file() && !manifest_roots(&repo).is_empty() {
+        let (manifest, _) = package_manifest(&repo, &packages[0])?;
+        let index = cargo_args.iter().position(|arg| arg == "-E").unwrap_or(cargo_args.len());
+        cargo_args.splice(index..index, ["--manifest-path".into(), manifest.to_string_lossy().into_owned()]);
     }
     command
         .args(&cargo_args)

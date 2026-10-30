@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Stability proof for nested Rust workspaces
+
+- **Subdirectory Rust workspaces can produce park evidence** — Capped checks
+  and touched-test stability runs discover the nearest Cargo manifest below the
+  Git root and direct Cargo to that workspace, while retaining repository-bound
+  selection and receipts. Root workspace behavior and user command limits stay intact.
+
 ## [3.91.0] - 2026-10-30
 
 ### Fixed — Factory workflow

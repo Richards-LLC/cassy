@@ -429,6 +429,7 @@ invariants:
   HUB-J24-PHONE-UPLOAD:
     statement: A supported phone attachment up to 10 MiB has at least 25% transfer deadline margin at 512 kbit/s, shows byte progress then Saving before Delivered, retains its sniffed media type, and shows a refused file and hub reason once.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 throttled loopback upload and single-refusal stages at 1440/390px in light/dark, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
+    bug: {task: cas-03d2}
   HUB-J3-LIST-SCROLL-BOUNDS:
     statement: Project-list accessibility labels remain inside the scrolling navigation and never extend the viewport-sized conversation shell.
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.

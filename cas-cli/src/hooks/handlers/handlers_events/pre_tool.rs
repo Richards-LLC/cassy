@@ -8393,6 +8393,7 @@ mod workspace_contract_tests {
     #[test]
     fn cas_3147_agent_shell_cannot_run_operator_policy_commands() {
         let mut env = TestEnvGuard::temp_home();
+        env.set("PATH", "/usr/bin:/bin");
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_FACTORY_MODE", "1");
         let project = tempfile::tempdir().unwrap();
@@ -8420,6 +8421,10 @@ mod workspace_contract_tests {
             "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",
+            // cas-0ec8: substitutions execute inside double quotes, with
+            // their own quoting context and the full command tokenizer.
+            r#"echo "$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
+            r#"echo "`cas config gr''ant-write --task cas-1234 --path /x --reason r`""#,
             // cas-a809: the structural check must reach expanding bodies,
             // even when shell quoting hides the textual policy spelling.
             "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
@@ -8437,6 +8442,10 @@ mod workspace_contract_tests {
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
+            r#"echo '$(cas config gr""ant-write --task cas-1234 --path /x --reason r)'"#,
+            r#"echo '`cas config gr""ant-write --task cas-1234 --path /x --reason r`'"#,
+            r#"echo "\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
+            r#"echo "\`cas config gr''ant-write --task cas-1234 --path /x --reason r\`""#,
             "cat <<'EOF'\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",

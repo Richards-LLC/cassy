@@ -295,6 +295,11 @@ describe("Commander attention triage queue", () => {
     });
   });
 
+  it("raises nothing for a command error, which its receipt already answers", () => {
+    expect(machineEventRaisesAttention("daemon_error", { message: "supervisor command failed: The supervisor is busy." })).toBe(false);
+    expect(machineEventRaisesAttention("daemon_error", { message: "targeted interrupt failed: no pane" })).toBe(true);
+  });
+
   it("raises nothing for a deliberate supervisor exit and the clean daemon exit after it (cas-c095)", () => {
     expect(machineEventRaisesAttention("pane_exited", { exit_code: 0, role: "supervisor" })).toBe(false);
     expect(machineEventRaisesAttention("daemon_disconnected", { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log." })).toBe(false);

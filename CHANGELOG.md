@@ -19,6 +19,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander conversation
 
+- **A refused slash command keeps one row** — Was: each resend of a command the supervisor refused added another row to the conversation and another Attention event, and the rows stayed. Now: one row per command says why it was refused and how many times you tried, it clears once that command is accepted, and a refusal no longer raises Attention. A command that may have run still shows as uncertain.
 - **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages. Each is matched on the whole message, so a typed message that pastes such a block after your own words still reaches Commander.
 
 ### Fixed — Forced colors in Commander

@@ -7263,7 +7263,7 @@ mod workspace_contract_tests {
         let input = tool_input(
             "apply_patch",
             serde_json::json!({
-                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n - Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n-- Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
             }),
             root.path(),
         );

@@ -444,6 +444,13 @@ pub(super) fn worker_has_pending_reminder(
 }
 
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
+    worker_work_pending_with_probe(data, cas_dir, worker, |_| false)
+}
+
+pub(super) fn worker_work_pending_with_probe(
+    data: &DirectorData, cas_dir: &Path, worker: &str,
+    _background_active: impl FnOnce(&cas_types::Agent) -> bool,
+) -> bool {
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
     let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
         return false;

@@ -772,9 +772,31 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
 }
 
+#[test]
+fn cas_06b3_background_work_suppresses_idle_until_the_child_finishes() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.ci(Some("failure"));
+    let events = [f.event.clone()];
+    for background_active in [true, false] {
+        let mut inputs = f.app.delivery_request(&events).read(None);
+        let waiting = merge_alert::worker_work_pending_with_probe(
+            inputs.data.as_ref().unwrap(), &f.app.cas_dir, "merge-w", |agent| {
+                assert_eq!(agent.id, "merge-w", "probe only this worker's process tree");
+                background_active
+            },
+        );
+        inputs.worker_waits.get_mut("merge-w").unwrap().waiting = waiting;
+        let prompts = f.app.revalidate_and_prompt_for_delivery_from(&events, inputs).1;
+        assert_eq!(prompts.len(), usize::from(!background_active),
+            "a finished harness turn with a live child is working; child completion restores idle");
+    }
+    assert!(f.relay().is_empty(), "the genuinely idle worker alerts only once");
+}
+
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
 #[test]
-fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
+fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_cas_06b3() {
     let mut f = Fixture::new();
     f.in_progress();
     // Green delivery tips have a one-shot merge signal, not an idle backoff.
@@ -787,7 +809,9 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_
         assert!(f.relay().is_empty(), "identical idle signal must not wake again at minute {minutes}");
     }
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(1));
-    assert_eq!(f.relay().len(), 1, "a long backoff permits a reminder about a genuinely stuck worker");
+    assert!(f.relay().is_empty(), "elapsed time alone must not repeat the same idle alert");
+    std::fs::write(f.repo.path().join("delivery.rs"), "// work in progress\n").unwrap();
+    assert!(f.relay().is_empty(), "worktree progress must not repeat the idle alert");
     std::fs::write(f.repo.path().join("delivery.rs"), "// new tip\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "new tip"]);
     assert_eq!(f.relay().len(), 1, "new tip is a changed idle signal");

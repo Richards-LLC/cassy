@@ -4504,22 +4504,28 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 2\n").unwrap();
         let fake = dir.path().join("fake-cargo");
-        // A pipe handshake holds admitted payloads until all N+1 processes
-        // report admission/refusal. No compiler, host load, or sleep race.
+        // A per-payload FIFO holds admitted slots until all N+1 processes
+        // answer. Cargo's verified wrapper deliberately gives it null stdin.
         fake_cargo(&fake, r#"printf 'PAYLOAD_STARTED\n'
-IFS= read -r release
+IFS= read -r release < target/release.fifo
 printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut children = Vec::new();
         let mut readers = Vec::new();
+        let mut releases = Vec::new();
         for index in 0..3 {
             let repo = root.join(format!("worktrees/worker-{index}"));
             fixture_commit(&repo);
             std::fs::create_dir(repo.join("target")).unwrap();
+            let fifo = repo.join("target/release.fifo");
+            assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            // Hold both ends so opening/writing cannot block during failure
+            // cleanup, even for the refused child which never opens its FIFO.
+            releases.push(std::fs::OpenOptions::new().read(true).write(true).open(&fifo).unwrap());
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
                 .env(CHILD, serde_json::to_string(&[&root, &repo, &fake]).unwrap())
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit())
                 .spawn().unwrap();
             let output = child.stdout.take().unwrap();
             let sender = sender.clone();
@@ -4528,7 +4534,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
                 for line in std::io::BufReader::new(output).lines() {
                     let line = line.unwrap();
                     if line == "PAYLOAD_STARTED" || line.starts_with("RUNNER_RESULT refused:") {
-                        sender.send(line.clone()).unwrap();
+                        sender.send((index, line.clone())).unwrap();
                     }
                     lines.push(line);
                 }
@@ -4545,9 +4551,11 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         }
         // Release before assertions, including a failed handshake, so no
         // payload survives a failed regression.
-        for child in &mut children {
-            if let Some(mut input) = child.stdin.take() {
-                let _ = writeln!(input, "release");
+        for (index, release) in releases.iter_mut().enumerate() {
+            if events.len() != 3 || events.iter().any(|(child, line)|
+                *child == index && line == "PAYLOAD_STARTED")
+            {
+                let _ = writeln!(release, "release");
             }
         }
         for child in &mut children {
@@ -4555,8 +4563,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         }
         let logs: Vec<_> = readers.into_iter().map(|reader| reader.join().unwrap()).collect();
         assert_eq!(events.len(), 3, "all runner processes must answer: {logs:?}");
-        assert_eq!(events.iter().filter(|line| *line == "PAYLOAD_STARTED").count(), 2);
-        let refusal = events.iter().find(|line| line.starts_with("RUNNER_RESULT refused:")).unwrap();
+        assert_eq!(events.iter().filter(|(_, line)| line == "PAYLOAD_STARTED").count(), 2);
+        let (_, refusal) = events.iter().find(|(_, line)| line.starts_with("RUNNER_RESULT refused:")).unwrap();
         assert!(refusal.contains("Waiting for build admission"), "{refusal}");
         assert!(refusal.contains("max_concurrent_builders=2"), "{refusal}");
         let mut held_slots = Vec::new();

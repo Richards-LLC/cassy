@@ -39,7 +39,7 @@ class ChangedStrings(unittest.TestCase):
             cls.node_modules = shared
             return
 
-        fixture = Path(__file__).parent / 'fixtures/vitest-stability'
+        fixture = Path(__file__).parents[1] / 'hub-web/test-fixtures/vitest-stability'
         install_root = Path(cls.dependencies.name)
         shutil.copy(fixture / 'package.json', install_root / 'package.json')
         shutil.copy(fixture / 'package-lock.json', install_root / 'package-lock.json')

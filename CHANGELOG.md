@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merge admission after a cancelled lane run
+
+- **A cancelled code run no longer reads as pending forever** — Was: when a docs push cancelled the code commit's lane run, `worktree_merge` refused with "CI PENDING", though that run could never finish. → Now: once the tip's run is green, the code commit's cancelled and lingering jobs are set aside. A passed code check admits the merge, and with none it needs the docs-only override, because a docs tip validates no code. A job still running in a live run stays refused.
+
 ### Fixed — Hub pin safety
 
 - **The hub pin refuses agents, partial installs and a stale update** — Was: only a hook stopped a worker running `scripts/hub-pin.sh`; the installed copy could start `install` and stop partway without its drop-ins; and `cas update` could overwrite a rollback that finished just before it took the pin lock. → Now: the script refuses every factory agent role except an operator command in a supervisor pane, `install` says to run from a checkout before changing anything, and the update checks the pin again under the lock.

@@ -73,29 +73,37 @@ pub(crate) fn is_harness_prompt(prompt: &str) -> bool {
         "<task-notification",
         "<teammate-message",
         "<system-reminder",
-        // cas-7cd1: Codex records its own launch context as user turns.
-        "<environment_context>",
-        "# AGENTS.md instructions for ",
     ];
     prompt.lines().any(|line| {
         let line = line.trim_start();
         MACHINE_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
-            || is_daemon_pane_delivery(line)
-    })
+    }) || is_harness_whole_message(prompt.trim())
 }
 
-/// cas-7cd1: the factory daemon types agent messages into a pane as
-/// `Message from <sender>: [cas #…]` (`delivery::attribute_for_pty`), and its
-/// lifecycle wakes as `Message from lifecycle-…: …`. Neither is the operator.
-fn is_daemon_pane_delivery(line: &str) -> bool {
-    line.strip_prefix("Message from ").is_some_and(|rest| {
-        rest.starts_with("lifecycle")
-            || rest.split_once(": ").is_some_and(|(sender, body)| {
-                !sender.is_empty()
-                    && !sender.contains(char::is_whitespace)
-                    && body.starts_with("[cas #")
-            })
-    })
+/// cas-7cd1: Codex records its launch context as user turns of their own
+/// (`# AGENTS.md instructions for …`, or a whole `<environment_context>`
+/// block), and the factory daemon types agent mail into a pane as
+/// `Message from <sender>: [cas #…]` (`delivery::attribute_for_pty`) and its
+/// wakes as `Message from lifecycle-…: …`. These shapes are classified on the
+/// whole trimmed message, never per line, so an operator who pastes one of
+/// them inside their own text still reaches Commander.
+fn is_harness_whole_message(message: &str) -> bool {
+    if message.starts_with("# AGENTS.md instructions for ")
+        || (message.starts_with("<environment_context>")
+            && message.ends_with("</environment_context>"))
+    {
+        return true;
+    }
+    message
+        .strip_prefix("Message from ")
+        .and_then(|rest| rest.split_once(": "))
+        .is_some_and(|(sender, body)| {
+            !sender.is_empty()
+                && !sender.contains(char::is_whitespace)
+                && (body.starts_with("[cas #")
+                    || sender.starts_with("lifecycle-")
+                    || sender.starts_with("lifecycle:"))
+        })
 }
 
 pub fn handle_user_prompt_submit(

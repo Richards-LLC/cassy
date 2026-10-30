@@ -24,7 +24,8 @@ struct PendingRestart { killed_at: Instant, exited: bool }
 /// descendant holding the PTY open must not leave the factory without a supervisor.
 const RESTART_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 /// PTY silence required before a command is typed. Codex hides its busy text
-/// while it streams a reply, so an idle-looking screen alone is insufficient.
+/// while it streams a reply, so an idle-looking screen alone is insufficient;
+/// Codex's own turn markers are the busy signal, this is a second guard.
 const COMMAND_SETTLE: Duration = Duration::from_secs(2);
 impl CommandState {
     /// Drop finished receipts past the replay window. An in-flight command or
@@ -224,16 +225,44 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
     false
 }
 
-fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
+fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
     let store = crate::store::open_agent_store(cas_dir).ok()?;
     let agent = store.list(None).ok()?.into_iter().find(|agent|
         (agent.name == supervisor || agent.id == supervisor)
             && agent.role == cas_types::AgentRole::Supervisor
             && agent.factory_session.as_deref() == Some(session))?;
-    let path = crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
+    crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
         cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
-        agent.metadata.get("supervisor_account_dir").map(String::as_str))?;
+        agent.metadata.get("supervisor_account_dir").map(String::as_str))
+}
+
+/// Codex streams silently for seconds under an idle-looking prompt (cas-3980),
+/// so its rollout decides: busy while the last turn marker is a start. Only the
+/// last marker counts; a killed or forked session leaves earlier starts unclosed.
+/// The window grows until it holds a marker, as one turn can outgrow any tail.
+/// `None` means the rollout could not be read.
+fn codex_turn_open(path: &std::path::Path) -> Option<bool> {
+    const MAX_WINDOW: u64 = 64 * 1024 * 1024;
+    let mut window = 256 * 1024;
+    loop {
+        let (start, tail) = crate::mcp::tools::service::worker_liveness::read_jsonl_tail(path, window)?;
+        // A last line without its newline is still being written.
+        let marker = tail.split_inclusive('\n').filter(|line| line.ends_with('\n')).rev()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|row| {
+                if crate::mcp::tools::service::harness_observation::codex_turn_end_kind(&row).is_some() { return Some(false) }
+                (row["type"] == "event_msg" && matches!(row["payload"]["type"].as_str(), Some("task_started" | "turn_started"))).then_some(true)
+            });
+        if marker.is_some() { return marker; }
+        if start == 0 { return Some(false); }
+        if window >= MAX_WINDOW { return None; }
+        window *= 2;
+    }
+}
+
+fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = supervisor_transcript(cas_dir, session, supervisor, cli)?;
     let mut file = std::fs::File::open(path).ok()?;
     let start = file.metadata().ok()?.len().saturating_sub(512 * 1024);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -292,6 +321,14 @@ impl FactoryDaemon {
             anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "Too many supervisor commands in the last 10 minutes. Try again shortly.");
             anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
             anyhow::ensure!(!self.supervisor_commands.records.values().any(|r| r.receipt.phase == Phase::Submitted || r.receipt.interactive), "Another supervisor command is awaiting an outcome.");
+            if self.app.mux.supervisor().is_some_and(|pane| pane.harness() == cas_mux::SupervisorCli::Codex) {
+                let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
+                let open = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cas_mux::SupervisorCli::Codex)
+                    .and_then(|path| codex_turn_open(&path))).await.ok().flatten();
+                // An unreadable rollout leaves the screen and settle checks below in charge.
+                if open.is_none() { tracing::warn!("Codex supervisor rollout unavailable; command readiness falls back to output settle"); }
+                anyhow::ensure!(open != Some(true), "The supervisor is busy: its Codex turn has not ended. Wait until its turn ends.");
+            }
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
             let before = screen(pane);
@@ -538,6 +575,25 @@ mod tests {
             assert!(finish_turn_handled(&[prompt.clone(), done.clone()], cli, at));
             assert!(!finish_turn_handled(&[prompt, done], cli, at + chrono::Duration::seconds(1)));
         }
+    }
+    #[test]
+    fn codex_rollout_is_busy_from_turn_start_until_its_end_even_past_one_tail_window() {
+        use std::io::Write;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let event = |kind: &str, turn: &str| json!({"type":"event_msg","payload":{"type":kind,"turn_id":turn}}).to_string() + "\n";
+        // A killed earlier turn left its start unclosed; the last marker decides.
+        std::fs::write(&path, event("task_started", "killed") + &event("task_started", "t1") + &event("task_complete", "t1")).unwrap();
+        assert_eq!(codex_turn_open(&path), Some(false));
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        // Streamed output larger than the first tail window, quoting an end marker as text.
+        let text = format!("{} \"type\":\"task_complete\"", "7\n".repeat(200 * 1024));
+        let item = json!({"type":"event_msg","payload":{"type":"item_completed","item":{"text":text}}}).to_string() + "\n";
+        write!(file, "{}{item}", event("task_started", "t2")).unwrap();
+        assert_eq!(codex_turn_open(&path), Some(true), "Codex is mid-turn while its output is silent");
+        write!(file, "{}", event("task_complete", "t2")).unwrap();
+        assert_eq!(codex_turn_open(&path), Some(false));
     }
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {

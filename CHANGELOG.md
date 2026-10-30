@@ -9,7 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander conversation
 
-- **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages; what you type in the terminal still is.
+- **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages. Each is matched on the whole message, so a typed message that pastes such a block after your own words still reaches Commander.
 
 ### Fixed — Forced colors in Commander
 
@@ -27,8 +27,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Slash commands wait for the supervisor's turn to end** — Commander no longer
   types a command into a running turn. Claude's `·` spinner frame counts as busy,
-  and the supervisor's terminal must be quiet for 2 seconds first, so a Codex
-  reply that streams without busy text no longer looks like an idle prompt.
+  and the supervisor's terminal must be quiet for 2 seconds first. A Codex
+  supervisor also counts as busy from its turn start to its turn end in Codex's
+  session file, because Codex can pause for more than 2 seconds mid-reply with
+  no busy text.
 
 ### Fixed — Backquote command inspection
 

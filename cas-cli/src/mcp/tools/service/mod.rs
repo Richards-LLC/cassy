@@ -1262,7 +1262,9 @@ impl CasService {
                 "sync_all_workers" => {
                     Some(&["action", "id", "branch", "worker_names", "force"])
                 }
-                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts", "reclaim_unknown_target"]),
+                // Presentation flags are consumed by the cleanup projector;
+                // they never alter the existing mutation consent gates.
+                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts", "reclaim_unknown_target", "full", "json"]),
                 "server_stop" => Some(&["action", "id"]),
                 "worktree_cleanup" => {
                     Some(&["action", "id", "all", "orphans", "dry_run", "force"])

@@ -2697,6 +2697,14 @@ bytes in `RELEASE_SCRATCH_STATUS_JSON`; `--json` (MCP `json=true`) exposes the
 same records in typed `machine_status`. Scratch `gc_cleanup` requires both
 `force=true` and `dry_run=false`. Reports never create locks or owner records.
 
+`cas factory gc cleanup` also bounds its default inventory, retaining counters
+and up to three largest byte-counted items per category. `--full` (MCP
+`full=true`) preserves complete text and status payloads; `--json` (MCP
+`json=true`) emits one document with `report_text`, `full_report` and
+`machine_status`. Human CLI cleanup emits a periodic stderr heartbeat during
+blocking inventory work; JSON mode suppresses progress. Presentation flags
+never authorize deletion or change the existing force/dry-run gates.
+
 Verified dead owners are swept on the next start, including fresh SIGKILL
 leftovers; age only protects unknown provenance. A surviving descendant's
 inherited flock defers cleanup even after its parent exits. The guardian owns

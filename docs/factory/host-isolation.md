@@ -29,7 +29,10 @@ by this source change.
 
 ## Applying this on a host
 
-The operator applies this, and agents never do. From a checkout at this version:
+The operator applies this, and the script refuses to run under a factory worker or
+other agent role. An operator command in a supervisor pane is allowed. `install`
+needs a checkout at this version, because the drop-ins live there; the copy it leaves
+in `~/.local/libexec/cassy/` runs the other commands.
 
 ```bash
 scripts/hub-pin.sh install --dry-run   # print the plan; change nothing

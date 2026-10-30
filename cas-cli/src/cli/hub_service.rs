@@ -1037,6 +1037,16 @@ pub(crate) fn advance_managed_hub_pin() -> Result<bool> {
 }
 
 fn advance_managed_hub_pin_at(current: &Path, state: &Path, installed: &Path) -> Result<bool> {
+    advance_managed_hub_pin_after_check(current, state, installed, || {})
+}
+
+/// `before_lock` is where another pin operation can finish; tests use it to do so.
+fn advance_managed_hub_pin_after_check(
+    current: &Path,
+    state: &Path,
+    installed: &Path,
+    before_lock: impl FnOnce(),
+) -> Result<bool> {
     let receipt_path = state.join("hub-pin.json");
     let Ok(receipt) = fs::read_to_string(&receipt_path) else {
         return Ok(false);
@@ -1046,6 +1056,7 @@ fn advance_managed_hub_pin_at(current: &Path, state: &Path, installed: &Path) ->
     if fs::read_link(current).ok().as_deref() != Some(receipt.slot.as_path()) {
         return Ok(false);
     }
+    before_lock();
     // The same lock `hub-pin.sh` takes around activate and rollback.
     let lock = OpenOptions::new()
         .create(true)
@@ -3058,6 +3069,32 @@ exit 0
         assert!(!receipt.exists(), "the update clears the hotfix pin");
         require_installed_service_binary(ServicePlatform::Systemd, &unit, &installed).unwrap();
         assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "nothing left to advance");
+    }
+
+    /// cas-889c: a rollback that finishes between the first check and the lock
+    /// has already decided where the hub runs; the update must not overwrite it.
+    #[test]
+    fn update_rechecks_the_hub_pin_under_the_lock_cas_889c() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("versions/abc/cas");
+        let rolled_back = dir.path().join("released/cas");
+        let installed = dir.path().join("bin/cas");
+        let current = dir.path().join("current");
+        let state = dir.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        let receipt = state.join("hub-pin.json");
+        fs::write(&receipt, serde_json::json!({"slot": slot}).to_string()).unwrap();
+        std::os::unix::fs::symlink(&slot, &current).unwrap();
+
+        let advanced = advance_managed_hub_pin_after_check(&current, &state, &installed, || {
+            fs::remove_file(&current).unwrap();
+            std::os::unix::fs::symlink(&rolled_back, &current).unwrap();
+            fs::remove_file(&receipt).unwrap();
+        })
+        .unwrap();
+
+        assert!(!advanced);
+        assert_eq!(fs::read_link(&current).unwrap(), rolled_back);
     }
 
     #[test]

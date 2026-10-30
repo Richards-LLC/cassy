@@ -450,6 +450,8 @@ def native_probe(executable, harness, mode, named, capture_dir, inventory="synth
             if mode in ("local-root", "extra-root", "env-overlay", "trusted-root"):
                 project = repo / {"codex": ".agents/skills", "grok": ".grok/skills"}[harness]
                 shutil.copytree(skills, project)
+                if mode == "trusted-root":
+                    (project / ".gitignore").write_text("*\n")
                 selected = role_skills(audience)
                 for file in project.glob("*/SKILL.md"):
                     file.write_text(file.read_text().replace(f"{BODY}_ORIGINAL", f"{BODY}_PROJECT"))

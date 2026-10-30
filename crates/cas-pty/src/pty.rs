@@ -360,7 +360,6 @@ pub fn claude_worker_contract(worker_name: &str) -> String {
     )
 }
 
-/// The Codex worker contract, delivered as `--config developer_instructions`.
 /// The skills a factory worker's native listing keeps. Every other skill stays
 /// available by name through the `skill` MCP tool, which the contract names.
 /// OpenCode's verbose rows set the budget: six fit under 2,500 characters.
@@ -373,6 +372,7 @@ pub const WORKER_ROLE_SKILLS: &[&str] = &[
     "verify-before-claim",
 ];
 
+/// The Codex worker contract, delivered as `--config developer_instructions`.
 pub fn codex_worker_instructions() -> String {
     worker_contract("mcp__cs__", None, WorkerContractHarness::Codex)
 }

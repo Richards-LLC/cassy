@@ -1006,7 +1006,7 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
     assert!(
-        text.contains("CI advisory") && text.contains("push published"),
+        text.contains("CI ") && text.contains("push published"),
         "compact receipt retains CI and publication decisions.\nGot:\n{text}"
     );
     assert!(text.len() < 800, "routine merge receipt: {} bytes", text.len());

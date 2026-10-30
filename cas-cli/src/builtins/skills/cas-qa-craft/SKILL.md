@@ -110,9 +110,7 @@ report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_
 `<skills-dir>` is the harness skill directory: `.claude/skills`, `.codex/skills` or `.grok/skills`.
 Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line
 above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is
-missing.
-Tiers: Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`.
-Findings stay in your verdict unless they are a reproduced, observable defect affecting someone today.
+missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`. Findings stay in your verdict unless they are a reproduced, observable defect affecting someone today.
 
 ## Boundaries
 

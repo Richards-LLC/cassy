@@ -492,15 +492,15 @@ impl<'w> Formatter<'w> {
     }
 
     /// The mark for a verdict: a coloured glyph on UTF-8 terminals, a bracketed
-    /// word everywhere else. Colour touches the mark only; its meaning is also
-    /// carried by the glyph or word, so a monochrome reader loses nothing.
+    /// word in the terminal foreground everywhere else. The longer ASCII words
+    /// need text contrast rather than the lower contrast floor of a small glyph.
     pub fn mark(&mut self, verdict: Verdict) -> io::Result<()> {
         let label = verdict.label(self.glyphs());
-        if self.mode == OutputMode::Styled {
+        if self.glyphs() {
             let color = self.verdict_color(verdict);
             self.write_bold_colored(label, color)
         } else {
-            write!(self.writer, "{label}")
+            self.write_bold_plain(label)
         }
     }
 

@@ -16,6 +16,11 @@ export function passedCount(runner, report) {
   return count;
 }
 
+function isFactoryTaskBranch(cwd) {
+  const branch = spawnSync('git', ['branch', '--show-current'], { cwd, encoding: 'utf8' });
+  return branch.status === 0 && /^factory\/[^/]+-cas-[a-z0-9]+$/.test(branch.stdout.trim());
+}
+
 export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd(), env = process.env } = {}) {
   if (!['vitest', 'playwright'].includes(runner)) throw new Error('runner must be vitest or playwright');
   const requestedArgs = [...args];
@@ -66,7 +71,8 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     if (env.VERIFIED_TEST_REPORT_FILE) {
       writeFileSync(resolve(env.VERIFIED_TEST_REPORT_FILE), raw);
     }
-    const hasFactoryTaskContext = env.CAS_FACTORY_MODE === '1' || Boolean(env.CAS_WORKER_STABILITY_BASE);
+    const hasFactoryTaskContext = Boolean(env.CAS_WORKER_STABILITY_BASE)
+      || (env.CAS_FACTORY_MODE === '1' && isFactoryTaskBranch(cwd));
     if (runner === 'vitest' && hasFactoryTaskContext && env.CAS_WORKER_STABILITY_TRIAL !== '1') {
       let repo = resolve(cwd);
       while (repo !== resolve('/') && !existsSync(join(repo, 'scripts/worker-test-stability.py'))) {

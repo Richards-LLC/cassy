@@ -18,9 +18,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Playwright journeys retain their native pass status** — Was: Every passing
   Playwright run was rejected by the unsupported stability adapter. → Now: The
-  stability adapters run only with factory context, and Playwright never invokes
-  them. Receipts are scoped to `hub-web` Vitest and node:test files; other paths
-  remain outside the gate.
+  stability adapters run only for active task branches, and Playwright never
+  invokes them. Detached factory checkouts skip receipt generation. Receipts are
+  scoped to `hub-web` Vitest and node:test files; other paths remain outside the
+  gate.
 
 ### Fixed — Stability proof for nested Rust workspaces
 

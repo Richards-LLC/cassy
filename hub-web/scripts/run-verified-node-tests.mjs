@@ -20,6 +20,8 @@ if (countFile) {
 
 const hub = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = resolve(hub, '..');
+const branch = spawnSync('git', ['branch', '--show-current'], { cwd: repo, encoding: 'utf8' });
+const hasFactoryTaskBranch = branch.status === 0 && /^factory\/[^/]+-cas-[a-z0-9]+$/.test(branch.stdout.trim());
 const report = trial ? spawnSync(process.execPath,
   ['--test', '--test-reporter=junit', ...args], { cwd: hub, encoding: 'utf8' }) :
   spawnSync(process.execPath, ['--test', ...args], { cwd: hub, stdio: 'inherit' });
@@ -44,7 +46,8 @@ if (trial) {
   process.exit(0);
 }
 
-const hasFactoryTaskContext = process.env.CAS_FACTORY_MODE === '1' || Boolean(process.env.CAS_WORKER_STABILITY_BASE);
+const hasFactoryTaskContext = Boolean(process.env.CAS_WORKER_STABILITY_BASE)
+  || (process.env.CAS_FACTORY_MODE === '1' && hasFactoryTaskBranch);
 if (hasFactoryTaskContext && process.env.CAS_WORKER_STABILITY_TRIAL !== '1') {
   let scriptRoot = repo;
   while (scriptRoot !== resolve('/') && !existsSync(resolve(scriptRoot, 'scripts/worker-test-stability.py'))) {

@@ -377,15 +377,13 @@ def worker_context(root):
                 'head': os.environ.get('CAS_WORKER_STABILITY_HEAD') or git(root, 'rev-parse', 'HEAD').strip(),
                 'cas_root': Path(os.environ['CAS_ROOT']).resolve() if os.environ.get('CAS_ROOT') else None}
     branch = git(root, 'branch', '--show-current').strip()
-    match = re.search(r'(?:^|-)cas-([a-z0-9]+)$', branch)
+    match = re.fullmatch(r'factory/[^/]+-cas-([a-z0-9]+)', branch)
     if not match:
-        if os.environ.get('CAS_FACTORY_MODE') == '1':
-            raise ValueError('cannot resolve active factory task from branch; no stability receipt')
         return None
     task_id = 'cas-' + match[1]
     cas_root = os.environ.get('CAS_ROOT')
     if not cas_root:
-        raise ValueError('CAS_ROOT missing for active factory task; no stability receipt')
+        return None
     database = Path(cas_root).resolve() / 'cas.db'
     try:
         connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
@@ -393,10 +391,10 @@ def worker_context(root):
             row = connection.execute('SELECT deliverables,status FROM tasks WHERE id=?', (task_id,)).fetchone()
         finally:
             connection.close()
-    except sqlite3.Error as error:
-        raise ValueError(f'cannot resolve target for {task_id}: {error}; no stability receipt') from error
+    except sqlite3.Error:
+        return None
     if row is None or row[1] != 'in_progress':
-        raise ValueError(f'active factory task {task_id} is missing; no stability receipt')
+        return None
     try:
         target = json.loads(row[0])['work_target']['target_branch']
     except (TypeError, KeyError, json.JSONDecodeError) as error:

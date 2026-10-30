@@ -23,6 +23,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   checks allow quoted backtick data while still inspecting executable backtick
   substitutions for filesystem writes and operator-only commands.
 
+### Fixed — Merged delivery recovery guidance
+
+- **Launch and status messages agree on merge completion** — All harness launch
+  contracts, stale merge replies and worker status rows let the merge verdict
+  close or reopen the delivery, without another close command from the worker.
+
+### Added — Supervisor-only restart
+
+- **A supervisor can restart without stopping its workers** — Was: any supervisor
+  exit shut the factory down and stopped every worker, so a new harness version or
+  a fresh context meant checkpointing and respawning the whole fleet. → Now:
+  `factory action=restart_supervisor` ends only the supervisor's session and starts
+  a new one with the factory's boot harness, model and effort. Workers keep their
+  tasks, panes and leases. A plain exit or crash still shuts the factory down.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned
@@ -41,13 +56,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   beyond its parked delivery through unowned work, close reports the kept anchor,
   ignored tip and offending commit instead of returning an ordinary merge request.
 
-### Fixed — Case checks after registry repairs
+### Fixed — Independent case checks after registry failures
 
-- **Registry repairs retain ownership and regression checks** — Fixing a base
-  duplicate evaluates the delivered registry and compares every old case variant.
-  Registry escape notes cannot bypass the case gate; duplicates still present in
-  the delivery refuse with a named error. Unavailable Git inputs retain their
-  existing nonblocking warning.
+- **Registry waivers retain separate regression checks** — Fixing a base duplicate
+  evaluates the delivered registry and compares every old case variant. Unreadable
+  delivered registries and catalog drift still require a separate bug-case decision,
+  including when an earlier registry waiver exists. Duplicates still present in the
+  delivery refuse with a named error; unavailable Git inputs retain their warning.
 
 ### Fixed — Parked delivery attribution
 
@@ -66,6 +81,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Command-line arithmetic refuses unproven operands** — Factory checks
   require numeric source in `$(( ))`, `$[ ]`, `let` and `(( ))`, and refuse
   persistent integer declarations whose later assignments could run arithmetic.
+
+- **Shell syntax cannot hide inside arithmetic** — Arithmetic with comment
+  markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
+  keeps its existing allowance.
+
+- **Arithmetic operands cannot hide commands in array subscripts** — Factory
+  checks accept numeric arithmetic and refuse variable or command-output
+  operands, quoted `let` expressions and persistent integer declarations whose
+  secondary evaluation cannot be proven inert.
 
 - **Ambiguous arithmetic keeps command checks** — Parentheses must match the
   arithmetic boundary. Command substitutions and dynamic arithmetic operands

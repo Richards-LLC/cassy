@@ -55,7 +55,8 @@
 //! unsets or clears `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, so the role gates
 //! that read them see the role the factory gave the agent. That hook refusal
 //! is the control for those role gates, which include `cas update`'s worker
-//! restriction, `restart_spawn_queue` and `supervisor_override`.
+//! restriction, `restart_spawn_queue`, `restart_supervisor` and
+//! `supervisor_override`.
 //!
 //! The gates themselves still read the environment. Overriding it from the
 //! process's cgroup was rejected, because a worker's own test harnesses run

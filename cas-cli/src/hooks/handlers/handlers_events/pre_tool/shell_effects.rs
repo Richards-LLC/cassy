@@ -137,41 +137,55 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
     let mut bodies = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes.get(index..index + 3) == Some(b"$((") {
-            // Bash falls back to command substitution unless the second '('
-            // has a matching ')' immediately before the outer end. Adjacent
-            // final bytes alone also match `(command) && (command)`.
-            if let Some(end) = substitution_end(bytes, index + 2, 0) {
-                let lexed = factory_shell_lex(&word[index + 2..=end], false, 0);
-                let mut parentheses = 0;
-                let mut inner_end = None;
-                for (token, offset) in lexed.tokens.iter().zip(&lexed.ends) {
-                    match token {
-                        ShellToken::Operator('(') => parentheses += 1,
-                        ShellToken::Operator(')') => {
-                            parentheses -= 1;
-                            if parentheses == 0 {
-                                inner_end = Some(index + 2 + offset);
-                                break;
-                            }
-                        }
-                        _ => {}
+        let bracket = bytes.get(index..index + 2) == Some(b"$[");
+        let prefix = if bytes.get(index..index + 3) == Some(b"$((") {
+            Some(3)
+        } else if bracket {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(prefix) = prefix {
+            // Arithmetic has different comment/quote rules across shells.
+            // Recognize only plain balanced spans, without shell lexing.
+            let mut parentheses = 0;
+            let mut brackets = 0;
+            let mut end = None;
+            for (offset, &byte) in bytes.iter().enumerate().skip(index + prefix) {
+                match byte {
+                    b'#' | b'\n' | b'\r' | b'\'' | b'"' | b'`' | b'\\' => {
+                        return Err("an unresolved arithmetic operand");
                     }
-                }
-                if lexed.unresolved_at.is_none() && inner_end == Some(end) {
-                    numeric_arithmetic(&word[index + 3..end - 1])?;
-                    index = end + 1;
-                    continue;
+                    b'(' => parentheses += 1,
+                    b')' if parentheses > 0 => parentheses -= 1,
+                    b')' => {
+                        if !bracket && bytes.get(offset + 1) == Some(&b')') {
+                            end = Some(offset + 1);
+                        }
+                        break;
+                    }
+                    b'[' if bracket => brackets += 1,
+                    b']' if bracket && brackets > 0 => brackets -= 1,
+                    b']' if bracket => {
+                        if parentheses == 0 { end = Some(offset); }
+                        break;
+                    }
+                    _ => {}
                 }
             }
+            if let Some(end) = end {
+                let operand_end = if bracket { end } else { end - 1 };
+                numeric_arithmetic(&word[index + prefix..operand_end])?;
+                index = end + 1;
+                continue;
+            }
+            if bracket {
+                return Err("an unresolved arithmetic operand");
+            }
+            // An unmatched $(( is a command substitution containing a
+            // subshell, so retain the ordinary executable-effects path.
         }
-        if bytes.get(index..index + 2) == Some(b"$[") {
-            let end = word[index + 2..].find(']')
-                .map(|end| index + 2 + end)
-                .ok_or("an unresolved arithmetic operand")?;
-            numeric_arithmetic(&word[index + 2..end])?;
-            index = end + 1;
-        } else if bytes.get(index..index + 2) == Some(b"$(") {
+        if bytes.get(index..index + 2) == Some(b"$(") {
             let literal_heredoc = literal_cat_heredoc_end(&word[index..]);
             let end = match literal_heredoc {
                 Some(end) => index + end,

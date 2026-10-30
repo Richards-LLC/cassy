@@ -6,6 +6,9 @@ Status: draft for supervisor approval, 2026-09-23.
 
 ## Problem
 
+Historical source snapshot below. Current lifecycle: the merge verdict closes
+or reopens a parked task; workers do not close it again after the merge.
+
 Customers receive deliveries with bugs that anyone would spot by opening the
 product, and deliveries that work but look unfinished. Today the implementer
 is the only agent that runs a user-facing change before it merges. The
@@ -39,7 +42,7 @@ merge. The pass has to live there.
 | Trigger | A Cassy **QA dispatch** created when a user-facing task parks for merge. It is not a supervisor habit and not a task-verifier step. |
 | Who runs it | A separate factory worker on the **taste** lane (`claude-opus-5-5`/high). It is never the implementer, and the rule is enforced in the store. |
 | What it produces | A typed QA verdict (`qa_passes` row: passed/failed/waived) bound to the reviewed branch tip, plus a ledger with evidence. |
-| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), a raw GitHub merge by any agent (`gh pr merge`, the merge API; pre-tool guard), a GitHub merge from any client once the `cassy/independent-qa` check is required, and the re-close (backstop). |
+| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), a raw GitHub merge by any agent (`gh pr merge`, the merge API; pre-tool guard), a GitHub merge from any client once the `cassy/independent-qa` check is required, and Cassy's post-merge completion (backstop). |
 | Failure | A rejected QA verdict fires `request_changes` automatically, citing the ledger. The implementer keeps the task. |
 | Cost cap | 45 min per round, 1 active pass per task, 3 rounds before escalation. Journeys are limited to those the diff touches. |
 
@@ -447,7 +450,7 @@ spawn and is retired after its QA task closes.
   with its assignee kept and the ledger cited. An approved verdict writes a
   typed verdict on the pass. Head drift supersedes the pass.
 - **Gates.** `worktree_merge` refuses without a QA pass and accepts with
-  one. The pre-tool guard denies `git merge factory/<w>`. The re-close
+  one. The pre-tool guard denies `git merge factory/<w>`. Cassy's completion
   backstop rejects and then accepts.
 - **Rounds and timeout.** The fourth rejection escalates instead of opening
   a round. An expired deadline times out the pass.

@@ -8753,6 +8753,7 @@ mod workspace_contract_tests {
             "echo \"$((1 + $(cas config gr''ant-write --task cas-1234 --path /x --reason r)))\"",
             "echo \"$[1 + $(cas config gr''ant-write --task cas-1234 --path /x --reason r)]\"",
             "echo ${x:-$(cas config gr''ant-write --task cas-1234 --path /x --reason r)}",
+            "echo \"$((true #)\ncas config gr''ant-write x\n))\"",
         ] {
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
@@ -8766,6 +8767,29 @@ mod workspace_contract_tests {
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
             // Rejected review: a nearby final pair does not prove arithmetic.
+            // Shell comments and quotes cannot certify arithmetic boundaries.
+            "echo $((touch /outside/cas-0c9c-p\\) && (true))",
+            "echo \"$[ $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ]\"",
+            "x=$((true #)\ntouch /outside/cas-0c9c-p\n))",
+            "echo $((true #)\ntouch /outside/cas-0c9c-p\n))",
+            "echo \"$((true #))\nrm -rf /outside/cas-0c9c-dir\n))\"",
+            "echo \"$((true #))\ntouch /outside/cas-0c9c-p\n))\"",
+            "echo \"$((true #)\ntouch /outside/cas-0c9c-p\n))\"",
+            "echo \"$((touch /outside/cas-0c9c-p) #)\n)\"",
+            "echo $((touch /outside/cas-0c9c-p #)\n) )",
+            "echo \"$((touch /outside/cas-0c9c-p #)\n) )\"",
+            "echo \"$((true #)\necho hi > /outside/cas-0c9c-p\n))\"",
+            "echo \"$((true #)\nrm -rf /outside/cas-0c9c-dir\n))\"",
+            "echo \"$(( 1 #)\ntouch /outside/cas-0c9c-p\n))\"",
+            "echo \"$((touch /outside/cas-0c9c-p \") && (\"true))\"",
+            "echo \"$(( \")\" ) && (true))\"",
+            "echo \"$((touch /outside/cas-0c9c-p \")\" ) && (true))\"",
+            "echo $(( ' ) && (touch /outside/cas-0c9c-p) ' ))",
+            "echo \"$(( ' ) && (touch /outside/cas-0c9c-p) ' ))\"",
+            "echo $((touch /outside/cas-0c9c-p ')' ) && (true))",
+            "echo \"$((touch /outside/cas-0c9c-p ') && ('true))\"",
+            "echo $((touch /outside/cas-0c9c-p ') && ('true))",
+            "echo \"$((touch /outside/cas-0c9c-p ')' ) && (true))\"",
             "echo \"$(( $(cat <<'EOF'\n> /outside/cas-0c9c-p\nEOF\n) ))\"",
             "echo \"$((touch /outside/cas-0c9c-p) && (true))\"",
             "echo $((touch /outside/cas-0c9c-p) && (true))",

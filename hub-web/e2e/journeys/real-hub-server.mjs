@@ -15,8 +15,7 @@ import {
 } from "node:fs/promises";
 import { existsSync, createWriteStream } from "node:fs";
 import { createRealHubHome } from "./real-hub-home.mjs";
-import { resolve, join, extname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve, join } from "node:path";
 import { redactQaText, redactQaValue } from "../../../scripts/visual-qa.mjs";
 const run = promisify(execFile);
 if (!process.env.CAS_BIN)
@@ -25,10 +24,8 @@ const cli = resolve(process.env.CAS_BIN);
 const port = Number(process.env.REAL_HUB_CONTROL_PORT ?? 29925);
 const hubPort = Number(process.env.REAL_HUB_PORT ?? 29926);
 const tlsPort = Number(process.env.REAL_HUB_TLS_PORT ?? 29927);
-const dist = resolve(
-  process.env.REAL_HUB_DIST ??
-    fileURLToPath(new URL("../../dist", import.meta.url)),
-);
+if (process.env.REAL_HUB_DIST !== undefined)
+  throw Error("REAL_HUB_DIST is unsupported: real-hub QA serves only candidate-embedded assets; use a different CAS_BIN for a baseline");
 const origin = `http://127.0.0.1:${port}`;
 const hubUrl = `https://journey-hub.ts.net:${tlsPort}`;
 let state;
@@ -334,30 +331,7 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
       key: await readFile(join(home, "tls.key")),
       cert: await readFile(join(home, "tls.crt")),
     },
-    (req, res) => {
-      const upstream = httpRequest(
-        {
-          host: "127.0.0.1",
-          port: hubPort,
-          path: req.url,
-          method: req.method,
-          headers: req.headers,
-        },
-        (r) => {
-          res.writeHead(r.statusCode ?? 502, r.headers);
-          r.pipe(res);
-        },
-      );
-      upstream.on("error", () => {
-        if (res.headersSent) res.destroy();
-        else {
-          res.writeHead(502);
-          res.end();
-        }
-      });
-      res.on("close", () => upstream.destroy());
-      req.pipe(upstream);
-    },
+    proxyToHub,
   );
   // A transparent TLS transport to the actual hub. Application frames are
   // neither fabricated nor decoded; actual upstream shutdown drops sockets.
@@ -509,33 +483,36 @@ async function evidence() {
     daemonPid: state.daemon?.pid,
   };
 }
-const types = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".css": "text/css",
-  ".wasm": "application/wasm",
-  ".svg": "image/svg+xml",
-  ".woff2": "font/woff2",
-};
+function proxyToHub(req, res) {
+  const upstream = httpRequest(
+    {
+      host: "127.0.0.1",
+      port: hubPort,
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    },
+    (r) => {
+      res.writeHead(r.statusCode ?? 502, r.headers);
+      r.pipe(res);
+    },
+  );
+  upstream.on("error", () => {
+    if (res.headersSent) res.destroy();
+    else {
+      res.writeHead(502);
+      res.end();
+    }
+  });
+  res.on("close", () => upstream.destroy());
+  req.pipe(upstream);
+}
 let chain = Promise.resolve();
 const server = createServer(async (req, res) => {
   try {
     const path = new URL(req.url ?? "/", origin).pathname;
-    if (path.startsWith("/commander")) {
-      const inner = path.replace(/^\/commander\/?/, "/");
-      const file = resolve(dist, `.${inner === "/" ? "/index.html" : inner}`);
-      if (!file.startsWith(`${dist}/`)) throw Error("invalid asset");
-      if (!existsSync(file)) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      const bytes = await readFile(file);
-      res.writeHead(200, {
-        "Content-Type": types[extname(file)] ?? "application/octet-stream",
-        "Cache-Control": "no-store",
-      });
-      res.end(bytes);
+    if (path === "/commander" || path.startsWith("/commander/")) {
+      proxyToHub(req, res);
       return;
     }
     if (req.method === "GET" && path === "/health") {
@@ -625,5 +602,5 @@ for (const sig of ["SIGTERM", "SIGINT"])
     cleanup().finally(() => server.close(() => process.exit(0)));
   });
 server.listen(port, "127.0.0.1", () =>
-  console.log(`real-hub fixture control and dist at ${origin}; binary ${cli}`),
+  console.log(`real-hub fixture control and candidate-embedded assets at ${origin}; binary ${cli}`),
 );

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Release report counts
+
+- **Known limitations stay out of shipped totals** — Was: only the exact
+  "Known limits" heading was excluded. Now: the "Known limit…" heading family
+  stays in report prose without adding shipped changes.
+
 ### Fixed — Portable QA guidance
 
 - **QA examples work outside the Cassy repository** — The generic evidence

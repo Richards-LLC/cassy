@@ -1,5 +1,7 @@
 import "./code-frame.css";
 
+let nextFrame = 0;
+
 export interface CodeFrameOptions {
   /** Literal source, independent of any later rich preview. */
   source: string;
@@ -16,6 +18,7 @@ export function createCodeFrame(document: Document, { source, language, filename
   const frame = document.createElement("div");
   frame.className = "code-frame";
   frame.dataset.wrap = "false";
+  frame.dataset.expanded = "false";
   const header = document.createElement("div");
   header.className = "code-frame-header";
   const label = document.createElement("span");
@@ -63,10 +66,25 @@ export function createCodeFrame(document: Document, { source, language, filename
       }
     })();
   });
-  actions.append(wrap, copy);
+  const expand = document.createElement("button");
+  expand.type = "button";
+  expand.dataset.action = "expand";
+  expand.textContent = "Expand";
+  expand.setAttribute("aria-label", `Expand ${label.textContent}`);
+  expand.setAttribute("aria-expanded", "false");
+  expand.addEventListener("click", () => {
+    const expanded = frame.dataset.expanded !== "true";
+    frame.dataset.expanded = String(expanded);
+    expand.setAttribute("aria-expanded", String(expanded));
+    expand.textContent = expanded ? "Collapse" : "Expand";
+    expand.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} ${label.textContent}`);
+  });
+  actions.append(wrap, copy, expand);
   header.append(label, actions);
   const content = document.createElement("div");
   content.className = "code-frame-content";
+  content.id = `code-frame-content-${++nextFrame}`;
+  expand.setAttribute("aria-controls", content.id);
   const pre = document.createElement("pre");
   pre.className = "markdown-code";
   // The nowrap source is keyboard-scrollable even in browsers without automatic
@@ -95,4 +113,30 @@ export function createCodeFrame(document: Document, { source, language, filename
     });
   }
   return { frame, content, pre };
+}
+
+/** Attach an already sanitized preview; literal source and its selection survive. */
+export function setCodeFramePreview(pre: HTMLPreElement, preview: HTMLElement): void {
+  const frame = pre.closest<HTMLElement>(".code-frame");
+  const content = pre.parentElement;
+  const actions = frame?.querySelector(".code-frame-actions");
+  if (!frame || !content || !actions) return;
+  const toggle = pre.ownerDocument.createElement("button");
+  toggle.type = "button";
+  toggle.dataset.action = "source";
+  toggle.textContent = "Source";
+  toggle.setAttribute("aria-label", `Show source from ${frame.querySelector(".code-frame-label")!.textContent}`);
+  toggle.setAttribute("aria-pressed", "false");
+  toggle.setAttribute("aria-controls", content.id);
+  toggle.addEventListener("click", () => {
+    const source = pre.hidden;
+    pre.hidden = !source;
+    preview.hidden = source;
+    toggle.textContent = source ? "Preview" : "Source";
+    toggle.setAttribute("aria-pressed", String(source));
+    toggle.setAttribute("aria-label", `Show ${source ? "preview" : "source"} from ${frame.querySelector(".code-frame-label")!.textContent}`);
+  });
+  actions.insertBefore(toggle, actions.querySelector('[data-action="expand"]'));
+  pre.hidden = true;
+  content.append(preview);
 }

@@ -761,6 +761,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. Read the real PDF first page inline
 7. Play video and audio on demand; unavailable files keep Open
 
+Code, diagram and diff use the same Copy/Wrap/Expand header. Rich previews retain a Source/Preview toggle; the diagram step exercises both views and expansion with the keyboard.
+
 The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named journey against a registered local candidate at `HUB_RICH_HUB_URL` (its `/commander/` URL). It starts no server and keeps the same protocol double; the hub binary supplies the HTML, scripts, styles and lazy assets.
 
 #### Expected experience

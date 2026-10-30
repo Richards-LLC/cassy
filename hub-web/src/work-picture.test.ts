@@ -280,6 +280,13 @@ describe("work events (cas-ff22)", () => {
     renderWork(node, item, context, "cas-src supervisor");
     expect([...node.querySelectorAll(".work-row-text")].map(row => row.textContent)).toEqual(["Read · 3 files", "Search · 7 matches", "Ran command · exit 2", "Edited 2 files", raw, "Turn failed"]);
     expect(node.querySelector("img")).toBeNull();
+    expect(node.querySelectorAll(".work-row-gutter")).toHaveLength(node.querySelectorAll(".work-row").length);
+    const live = { ...item, events: events.map(event => event.id === "command" ? { ...event, error: false, tool: { ...event.tool!, exit_code: undefined }, lifecycle: { id: "cmd", stage: "start" } } : event) };
+    renderWork(node, live, context, "cas-src supervisor");
+    expect(node.querySelectorAll(".work-row.is-live")).toHaveLength(1);
+    expect(node.querySelector(".work-row.is-live")!.getAttribute("data-event-id")).toBe("command");
+    renderWork(node, item, context, "cas-src supervisor");
+    expect(node.querySelector(".work-row.is-live")).toBeNull();
     expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("failed");
     expect(node.textContent).not.toContain("Turn started");
     expect(requested).toEqual([]);

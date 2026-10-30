@@ -170,6 +170,8 @@ export function bindRichInspectionUsage(root: HTMLElement, counter: Pick<UsageCo
   // action, so each opening counts once even if no open toggle is delivered.
   root.addEventListener("click", event => {
     if (event.defaultPrevented) return;
+    const source = event.target instanceof Element ? event.target.closest('[data-action="source"]') : null;
+    if (source?.getAttribute("aria-pressed") === "true") counter.count("rich-content.inspect");
     const summary = event.target instanceof Element ? event.target.closest("summary") : null;
     const detail = summary?.parentElement;
     if (detail instanceof HTMLDetailsElement && !detail.open && detail.closest(".rich-diagram, .rich-diff")) counter.count("rich-content.inspect");

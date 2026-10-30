@@ -154,10 +154,18 @@ for (const [index, variant] of variants.entries()) {
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {
         hub.supervisorSays(PELICAN, "# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```mermaid\ninvalid diagram source\n```");
         await expect(log.getByRole("img", { name: "Mermaid diagram", exact: true })).toBeVisible();
-        const source = log.getByText("Diagram source", { exact: true });
+        const frame = log.locator(".code-frame").filter({ has: page.locator(".rich-diagram") });
+        const source = frame.getByRole("button", { name: "Show source from mermaid" });
         await source.focus(); await page.keyboard.press("Enter");
-        await expect(log.locator(".rich-diagram details")).toHaveAttribute("open", "");
+        await expect(frame.locator("pre.markdown-code")).toBeVisible();
+        await expect(frame.locator(".rich-diagram")).toBeHidden();
         await page.keyboard.press("Enter");
+        await expect(frame.locator(".rich-diagram")).toBeVisible();
+        const expand = frame.getByRole("button", { name: /^(?:Expand|Collapse) mermaid$/ });
+        await expand.focus(); await page.keyboard.press("Enter");
+        await expect(expand).toHaveAttribute("aria-expanded", "true");
+        await page.keyboard.press("Enter");
+        await expect(expand).toHaveAttribute("aria-expanded", "false");
         await expect(log.locator('[data-rich-state="fallback"]')).toHaveText("invalid diagram source");
         expect(richRequests.some((url) => url.includes("chunk-rich-diagram"))).toBe(true);
       });

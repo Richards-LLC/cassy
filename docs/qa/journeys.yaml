@@ -2115,6 +2115,7 @@ journeys:
   - hub-web/src/markdown-renderer.ts
   - hub-web/src/code-frame.ts
   - hub-web/src/code-frame.css
+  - hub-web/src/object-frame.brief.md
   - hub-web/src/rich-code.ts
   - hub-web/src/rich-syntax.ts
   - hub-web/src/code-syntax.brief.md

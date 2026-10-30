@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Commander reading frames
+
+- **Shared source frames and compact work rows** — Diagrams, diffs and code
+  share Copy and inline Expand, with Source/Preview for rich content, including
+  tool-reported file edits. Desktop work rows use a fixed icon gutter and less
+  space; phone targets stay 44px. Only explicitly live tools animate, with motion
+  disabled for reduced motion and forced colors.
+
 ### Fixed — Worker test-shape scope
 
 - **Syncing released trunk preserves the task's test scope** — The test-shape

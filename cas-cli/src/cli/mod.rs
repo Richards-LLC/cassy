@@ -34,6 +34,7 @@ mod project_overview_cmd;
 pub(crate) mod qa;
 pub(crate) mod qa_ledger;
 mod qa_impact;
+mod qa_polish;
 pub(crate) mod qa_post_release;
 pub(crate) mod qa_rapid_response;
 mod provider_default;

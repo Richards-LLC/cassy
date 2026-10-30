@@ -218,7 +218,8 @@ pub(crate) fn ledger_preflight(
         && (!require_missing
             || !config.qa().evidence_gate
             || config.qa().mode == crate::config::QaMode::Batch
-            || task.demo_statement.trim().is_empty())
+            || task.demo_statement.trim().is_empty()
+            || delivery_is_tier_zero(cas_root, task))
     {
         return Ok(());
     }
@@ -255,6 +256,29 @@ pub(crate) fn ledger_preflight(
             task.id
         ))
     }
+}
+
+fn delivery_is_tier_zero(cas_root: &Path, task: &Task) -> bool {
+    crate::qa_batch::task_context(cas_root, task).ok().is_some_and(|(repo, _)| {
+        super::review_tier::tier_for_delivery(task, &repo)
+            .is_some_and(|decision| decision.tier == super::review_tier::VerificationTier::Mechanical)
+    })
+}
+
+/// A delivery that changes enforcement carries an adversarial probe in its task
+/// ledger, in batch mode too: a batch round does not probe one task's guard.
+fn adversarial_probe_refusal(task_id: &str, ledger: &Path, paths: &[String]) -> Option<String> {
+    let (tier, reason) = super::review_tier::tier_for_paths(paths)?;
+    if tier != super::review_tier::VerificationTier::Adversarial
+        || std::fs::read_to_string(ledger)
+            .is_ok_and(|text| super::review_tier::ledger_records_adversarial_probe(&text))
+    {
+        return None;
+    }
+    Some(format!(
+        "QA EVIDENCE REJECTED: Tier 2 delivery has no adversarial probe. {reason} Run `cas qa ledger init --task {task_id}` if {} is missing, add a row whose cell starts `Adversarial probe:` with what you tried to get past and what happened, then retry the close.",
+        ledger.display()
+    ))
 }
 
 /// A missing flat citation can outlive the namespace migration in a running
@@ -572,6 +596,12 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     {
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
     }
+    if let Some(refusal) = changed
+        .as_deref()
+        .and_then(|changed| adversarial_probe_refusal(&task.id, &artifacts_dir.join("LEDGER.md"), changed))
+    {
+        return Err(refusal);
+    }
     let notes = task_qa_notes(&paths, task, &artifacts_dir);
     let ctx = EvidenceContext {
         task_id: &task.id,
@@ -774,6 +804,18 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tier_two_delivery_needs_an_adversarial_probe_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("LEDGER.md");
+        let guard = ["cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs".to_string()];
+        let source = ["cas-cli/src/lib.rs".to_string()];
+        assert!(adversarial_probe_refusal("cas-x", &ledger, &source).is_none());
+        assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_some());
+        std::fs::write(&ledger, "| P1 | Adversarial probe: chained write | refused | refused | PASS | fixture | a.txt | - |\n").unwrap();
+        assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_none());
+    }
 
     #[test]
     fn ledger_preflight_preserves_batch_evidence_ownership() {

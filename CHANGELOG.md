@@ -16,6 +16,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Tab-stripped heredocs pass the workspace guard again** — Was: any `<<-` heredoc, even a quoted literal one, was denied as an unresolved shell payload. → Now: the guard keeps `<<-` together when it compares delimiters, so these heredocs are judged like any other.
 - **`playwright test --help` is allowed for workers and QA** — Was: the browser tier guard denied this read-only command as an unfiltered suite run. → Now: `test --help` and `test -h` pass when help is the only argument. A later `--help` is still denied, because it can be another option's value and the whole suite would run.
 
+### Changed — Verification
+
+- **Review findings stop spawning tasks, and verification follows risk** — Was:
+  every delivery got the same verifier, and its non-blocking improvements became
+  new tasks that each got another verifier. → Now: improvements stay in the
+  verdict unless they show a reproduced defect affecting someone today. Close
+  records a tier: docs and tests have no independent verifier, most changes get
+  one, and guard, CI, release and close-gate changes also get an adversarial
+  probe. QA follows the same tiers, including batch rounds: Tier 0 walks no
+  journeys, and Tier 2 needs an adversarial probe row in the task ledger.
+  `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
+  per release.
+
 ### Fixed — Hub pin safety
 
 - **The hub pin refuses agents, partial installs and a stale update** — Was: only a hook stopped a worker running `scripts/hub-pin.sh`; the installed copy could start `install` and stop partway without its drop-ins; and `cas update` could overwrite a rollback that finished just before it took the pin lock. → Now: the script refuses every factory agent role except an operator command in a supervisor pane, `install` says to run from a checkout before changing anything, and the update checks the pin again under the lock.

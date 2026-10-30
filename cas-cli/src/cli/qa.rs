@@ -163,6 +163,8 @@ pub enum QaCommand {
     Candidate(CandidateArgs),
     /// Map a diff to journeys and unowned CODEMAP areas
     Impact(super::qa_impact::ImpactArgs),
+    /// List an epic's warning findings from approved verdicts, by file
+    Polish(super::qa_polish::PolishArgs),
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
     /// Operator-only, time-boxed rapid-response window for one epic
@@ -243,6 +245,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         QaCommand::Ledger(args) => super::qa_ledger::execute(args, cli, cas_root),
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
+        QaCommand::Polish(args) => super::qa_polish::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
         QaCommand::RapidResponse(args) => super::qa_rapid_response::execute(args, cas_root),
         QaCommand::Journeys {

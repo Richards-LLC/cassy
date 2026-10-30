@@ -49,7 +49,8 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const heading = text("h2", "Your team, at a glance.");
   const notice = text("p", snapshot.stale ?? "Live staffing from this supervisor’s session", "team-freshness");
   notice.setAttribute("role", "status");
-  root.replaceChildren(heading, notice);
+  const head = document.createElement("div"); head.className = "team-head"; head.append(heading, notice);
+  root.replaceChildren(head);
   if (snapshot.unavailable) { root.append(text("p", snapshot.unavailable, "team-empty")); return; }
   root.append(releaseHeader(document, release));
   const strip = document.createElement("section"); strip.className = "team-needs"; strip.setAttribute("aria-label", "Needs you");

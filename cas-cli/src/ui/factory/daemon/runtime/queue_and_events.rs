@@ -13764,6 +13764,7 @@ mod tests {
         spawn_provisioning_timed_out,
         spawn_queue_reset_report,
         stalled_spawn_requests,
+        supervisor_exit_reason,
         take_next_pending_spawn,
         take_spawn_cancellation,
         take_unverified_spawn_on_exit,

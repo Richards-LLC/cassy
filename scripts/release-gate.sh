@@ -1863,6 +1863,11 @@ check_release_notes_draft() {
     fi
     while IFS= read -r path; do
         [[ -f "$path" ]] || continue
+        # Posted bodies are historical records, not drafts for this release.
+        if grep -Eq '^## POSTED[[:space:]]*$' "$path"; then
+            printf 'release-notes-draft: skipping posted draft %s\n' "$path"
+            continue
+        fi
         # Runtime releases and harness diaries both use Slack drafts. Headings
         # or a thread filename distinguish the diary workflow from runtime.
         if [[ "$path" == *harness-diary* || "$path" == *-thread.md ]] \

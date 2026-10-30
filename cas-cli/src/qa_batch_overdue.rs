@@ -279,7 +279,7 @@ mod tests {
             target_branch: "epic/board".into(),
         });
         tasks.add(&delivery).unwrap();
-        let mut round = Task::new("cas-r0und".into(), "Batch QA round 7".into());
+        let mut round = Task::new("cas-r0und".into(), "3.92 batch QA round 7".into());
         round.status = TaskStatus::InProgress;
         tasks.add(&round).unwrap();
         for child in [&delivery.id, &round.id] {

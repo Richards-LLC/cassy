@@ -7,7 +7,7 @@ type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
 interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[] }
-interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
+interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
@@ -183,7 +183,12 @@ export class ProjectNavigation {
         const online = machine?.online ?? row.machine_online;
         return `<button type="button" class="project-machine-chip" data-project-machine="${escapeHtml(row.machineId)}" aria-label="Filter conversations on ${escapeHtml(machineName(row.host))}${online === undefined ? "" : online ? ", online" : ", offline"}"><span class="machine-online-dot${online === true ? " online" : online === false ? " offline" : ""}" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}<span class="sr-only">${online === undefined ? "" : online ? ", online" : ", offline"}</span>${machineVersionMarkup(machine?.runtime, machine?.latestRelease)}</button>`;
       }).join("");
-      if (card.chips.innerHTML !== chipMarkup) card.chips.innerHTML = chipMarkup;
+      // The live DOM also contains aria-description added below. Compare the
+      // generated input so an unchanged catalog tick keeps the focused chip.
+      if (card.chipMarkup !== chipMarkup) {
+        card.chips.innerHTML = chipMarkup;
+        card.chipMarkup = chipMarkup;
+      }
       for (const chip of card.chips.querySelectorAll<HTMLButtonElement>("button")) {
         chip.setAttribute("aria-description", chip.querySelector(".machine-version")!.textContent!);
         chip.onclick = () => this.setFilter(`machine:${chip.dataset.projectMachine!}`);

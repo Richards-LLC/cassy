@@ -290,6 +290,44 @@ pub fn take_reset(cas_dir: &Path, session: &str) -> Option<SpawnQueueResetReques
         }))
 }
 
+/// A supervisor's `factory action=restart_supervisor` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorRestartRequest {
+    pub requested_at: DateTime<Utc>,
+    pub requester: String,
+}
+
+/// A restart request older than this is dropped. The daemon normally reads it
+/// within a second; ending a session long after it asked would surprise it.
+pub const SUPERVISOR_RESTART_REQUEST_TTL_SECS: i64 = 60;
+
+pub fn supervisor_restart_path(cas_dir: &Path, session: &str) -> PathBuf {
+    health_dir(cas_dir).join(format!("{}.supervisor-restart.json", file_stem(session)))
+}
+
+/// Record a restart request for the daemon of `session`. This is a file rather
+/// than a spawn-queue row because an older daemon reads an unknown queue action
+/// as a spawn; it ignores this file.
+pub fn request_supervisor_restart(cas_dir: &Path, session: &str, requester: &str) -> std::io::Result<()> {
+    let request = SupervisorRestartRequest {
+        requested_at: Utc::now(),
+        requester: requester.to_string(),
+    };
+    let bytes = serde_json::to_vec_pretty(&request).map_err(std::io::Error::other)?;
+    write_atomic(&supervisor_restart_path(cas_dir, session), &bytes)
+}
+
+/// Consume the pending restart request. This ends a live supervisor, so unlike
+/// [`take_reset`] an unreadable or expired request is removed without acting.
+pub fn take_supervisor_restart(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<SupervisorRestartRequest> {
+    let path = supervisor_restart_path(cas_dir, session);
+    let bytes = std::fs::read(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_slice::<SupervisorRestartRequest>(&bytes).ok().filter(|request| {
+        now.signed_duration_since(request.requested_at).num_seconds() < SUPERVISOR_RESTART_REQUEST_TTL_SECS
+    })
+}
+
 /// The recovery instruction every warning ends with.
 pub const RESTART_HINT: &str = "Recover without restarting the session: \
      `factory action=restart_spawn_queue`.";
@@ -409,6 +447,24 @@ pub fn worker_status_section(cas_dir: &Path, session: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-b492: only a fresh, readable request may end a live supervisor.
+    #[test]
+    fn supervisor_restart_acts_only_on_a_fresh_readable_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        request_supervisor_restart(dir.path(), "s", "sup").unwrap();
+        assert_eq!(take_supervisor_restart(dir.path(), "s", now).unwrap().requester, "sup");
+        assert!(take_supervisor_restart(dir.path(), "s", now).is_none(), "consumed once");
+
+        request_supervisor_restart(dir.path(), "s", "sup").unwrap();
+        let later = now + chrono::Duration::seconds(SUPERVISOR_RESTART_REQUEST_TTL_SECS + 1);
+        assert!(take_supervisor_restart(dir.path(), "s", later).is_none(), "expired");
+
+        std::fs::write(supervisor_restart_path(dir.path(), "s"), b"not json").unwrap();
+        assert!(take_supervisor_restart(dir.path(), "s", now).is_none(), "unreadable");
+        assert!(!supervisor_restart_path(dir.path(), "s").exists(), "never re-read");
+    }
 
     fn status(now: DateTime<Utc>, pass_age: i64) -> DaemonLoopStatus {
         DaemonLoopStatus {

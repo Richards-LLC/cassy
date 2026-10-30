@@ -1,4 +1,4 @@
-title: Separate family files preserve parallel merges, evaluate repairs without skipping case checks, reject delivered duplicates and detect working-tree drift
-tasks: [cas-c968, cas-d4d7, cas-a207, cas-8d6a]
+title: Separate family files preserve parallel merges, keep case checks independent of registry waivers, reject delivered duplicates detect working-tree drift, bind waivers to current findings and retain G3 for untouched parse debt
+tasks: [cas-c968, cas-d4d7, cas-a207, cas-8d6a, cas-b7e7]
 invariants: []
 journeys: []

@@ -3,6 +3,7 @@ use super::*;
 use crate::config::{QaConfig, RegistryEnforcement};
 use crate::qa_impact::io::git;
 use crate::qa_registry::{BugFamily, DuplicateBugFamily, Problem, Registry};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 
 /// One close-path entry point, sharing the QA gate's delivery head and attribution window.
@@ -47,10 +48,20 @@ pub(super) fn at_park(
         Ok(snapshot) => snapshot,
         Err(message) => return warning(notes, task, message),
     };
+    let Some(delivery_head) =
+        super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+    else {
+        return warning(
+            notes,
+            task,
+            "UPKEEP WARNING: delivery head unavailable (not blocking)".into(),
+        );
+    };
     let target_tip = freshest_target_ref(repo, target);
     // A landed ownership repair can satisfy an older receipt. An unmerged
     // delivery still answers to its own registry, including newly added owners.
-    let ownership_head = if git(repo, &["merge-base", "--is-ancestor", &head, &target_tip]).is_ok() {
+    let ownership_head = if git(repo, &["merge-base", "--is-ancestor", &head, &target_tip]).is_ok()
+    {
         &target_tip
     } else {
         &head
@@ -64,6 +75,7 @@ pub(super) fn at_park(
         &head,
         ownership_head,
         paths.as_deref(),
+        &delivery_head,
         override_reason,
     )
 }
@@ -83,11 +95,13 @@ pub(super) fn delivery_snapshot(
     if task.status == TaskStatus::AwaitingMerge
         && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
         && let Some(published) = task.deliverables.green_merge_commit.as_deref()
-        && let Some(head) = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+        && let Some(head) =
+            super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
         && resolve_branch_sha(repo, anchor).as_deref() == Some(head.as_str())
         && git_commit_is_ancestor(repo, &head, published)
         && git_commit_is_ancestor(repo, published, &freshest_target_ref(repo, target))
-        && let Some((base, integrated)) = crate::qa_evidence::delivery_range(repo, &head, published, None)
+        && let Some((base, integrated)) =
+            crate::qa_evidence::delivery_range(repo, &head, published, None)
         && integrated != head
         && crate::git_evidence::git_commit_parent_count(repo, &integrated) > 1
     {
@@ -193,38 +207,93 @@ impl Finding {
             detail,
         }
     }
+    fn missing_case(detail: String) -> Self {
+        Self {
+            gate: "G3",
+            token: "no case:",
+            title: "BUG FIX WITHOUT A CASE",
+            detail,
+        }
+    }
 }
 
-fn decision_reason<'a>(notes: &'a str, token: &str) -> Option<&'a str> {
+/// A G1 waiver cannot authorize a bug whose case coverage was never evaluated.
+fn retain_case_gate(task: &Task, findings: &mut Vec<Finding>, reason: &str) {
+    if task.task_type == TaskType::Bug && findings.iter().any(|finding| finding.gate == "G1") {
+        findings.push(Finding::missing_case(format!(
+            "Task {} is a bug, but {reason}; regression-case coverage could not be evaluated. Repair the registry and add or extend a case naming {}.",
+            task.id, task.id
+        )));
+    }
+}
+
+impl Finding {
+    fn scoped_token(&self, input_path: &str, head: &str) -> String {
+        let mut digest = Sha256::new();
+        for field in [self.gate, input_path, self.title, &self.detail] {
+            digest.update(field.as_bytes());
+            digest.update([0]);
+        }
+        let id = hex::encode(digest.finalize());
+        format!(
+            "{} delivery={head} finding={}-{}",
+            self.token,
+            self.gate,
+            &id[..16]
+        )
+    }
+}
+
+fn decision_reason<'a>(
+    notes: &'a str,
+    token: &str,
+    delivery_minute: Option<i64>,
+) -> Option<&'a str> {
+    let delivery_minute = delivery_minute?;
     notes.lines().rev().find_map(|line| {
         let (stamp, decision) = line.strip_prefix('[')?.split_once("] ✅ DECISION ")?;
-        chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?;
-        let reason = decision.strip_prefix(token)?.trim();
+        let stamp = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?;
+        if stamp.and_utc().timestamp().div_euclid(60) < delivery_minute {
+            return None;
+        }
+        let reason = decision.strip_prefix(token)?.strip_prefix(' ')?.trim();
         (!reason.is_empty()).then_some(reason)
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finish(
     notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
+    repo: &Path,
+    delivery_head: &str,
     stage: RegistryEnforcement,
     input_path: &str,
     findings: Vec<Finding>,
     warnings: &[String],
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    // Notes have minute precision. Exact delivery/finding identity is primary;
+    // the timestamp also rejects a pre-delivery note carrying copied scope.
+    // The inspected snapshot can be an integration merge; waivers belong to
+    // the parked delivery anchor and still require the identical finding.
+    let delivery_minute = git(repo, &["show", "-s", "--format=%ct", delivery_head])
+        .ok()
+        .and_then(|stamp| stamp.trim().parse::<i64>().ok())
+        .map(|stamp| stamp.div_euclid(60));
     let mut notices = warnings.to_vec();
     for warning in warnings {
         notes.record(task, warning);
     }
     let mut refusals = Vec::new();
     for finding in findings {
+        let token = finding.scoped_token(input_path, delivery_head);
         let text = gate_text::upkeep_message(
             &task.id,
             input_path,
             finding.title,
             &finding.detail,
-            finding.token,
+            &token,
             warnings,
             crate::mcp::tools::core::guidance::caller_prefix(),
         );
@@ -243,15 +312,13 @@ pub(super) fn finish(
                 "UPKEEP OBSERVE {}: {} (see task notes)",
                 finding.gate, finding.title
             ));
-            notes.record(
-                task,
-                &format!("UPKEEP OBSERVE {}: {text}", finding.gate),
-            );
-        } else if let Some(reason) = decision_reason(&task.notes, finding.token).map(str::to_owned)
+            notes.record(task, &format!("UPKEEP OBSERVE {}: {text}", finding.gate));
+        } else if let Some(reason) =
+            decision_reason(&task.notes, &token, delivery_minute).map(str::to_owned)
         {
             notes.record(
                 task,
-                &format!("UPKEEP ESCAPE {}: {} {reason}", finding.gate, finding.token),
+                &format!("UPKEEP ESCAPE {}: {token} {reason}", finding.gate),
             );
         } else {
             refusals.push(text);
@@ -315,39 +382,40 @@ fn read_registry_baseline(
                 baseline.registry = registry;
                 return Ok(baseline);
             }
-            Err(error) if error.is::<DuplicateBugFamily>() => {
-                let duplicate = error.downcast_ref::<DuplicateBugFamily>().unwrap();
-                let (key, file) = (duplicate.key.clone(), duplicate.path.clone());
-                let notice = format!(
-                    "UPKEEP NOTICE: base registry duplicate repaired by this delivery: {error:#}"
-                );
-                let Some(contents) = read(repo, revision, &file, &remaining)? else {
-                    return Err(error.context(format!("BASE JOURNEY REGISTRY INVALID: {path}")));
-                };
-                let family = match serde_yaml::from_str(&contents) {
-                    Ok(family) => family,
-                    Err(cause) => {
-                        return Err(error.context(format!(
-                            "BASE JOURNEY REGISTRY INVALID: cannot compare {file}: {cause}"
-                        )));
-                    }
-                };
-                baseline.alternatives.entry(key).or_default().push(family);
-                baseline.notices.push(notice);
-                remaining.retain(|candidate| candidate != &file);
-                first_duplicate.get_or_insert(error);
+            Err(error) => {
+                if let Some(duplicate) = error.downcast_ref::<DuplicateBugFamily>() {
+                    let (key, file) = (duplicate.key.clone(), duplicate.path.clone());
+                    let notice = format!(
+                        "UPKEEP NOTICE: base registry duplicate repaired by this delivery: {error:#}"
+                    );
+                    let Some(contents) = read(repo, revision, &file, &remaining)? else {
+                        return Err(error.context(format!("BASE JOURNEY REGISTRY INVALID: {path}")));
+                    };
+                    let family = match serde_yaml::from_str(&contents) {
+                        Ok(family) => family,
+                        Err(cause) => {
+                            return Err(error.context(format!(
+                                "BASE JOURNEY REGISTRY INVALID: cannot compare {file}: {cause}"
+                            )));
+                        }
+                    };
+                    baseline.alternatives.entry(key).or_default().push(family);
+                    baseline.notices.push(notice);
+                    remaining.retain(|candidate| candidate != &file);
+                    first_duplicate.get_or_insert(error);
+                    continue;
+                }
+                if error.is::<serde_yaml::Error>() {
+                    // Retain YAML debt, never discard an incomplete duplicate comparison.
+                    return match first_duplicate {
+                        Some(duplicate) => Err(duplicate.context(format!(
+                            "BASE JOURNEY REGISTRY INVALID: cannot compare {path}: {error:#}"
+                        ))),
+                        None => Ok(baseline),
+                    };
+                }
+                return Err(error);
             }
-            Err(error) if error.is::<serde_yaml::Error>() => {
-                // Retain the historical YAML-debt fallback, but never discard
-                // an incomplete duplicate comparison and grant false case credit.
-                return match first_duplicate {
-                    Some(duplicate) => Err(duplicate.context(format!(
-                        "BASE JOURNEY REGISTRY INVALID: cannot compare {path}: {error:#}"
-                    ))),
-                    None => Ok(baseline),
-                };
-            }
-            Err(error) => return Err(error),
         }
     }
 }
@@ -366,9 +434,17 @@ fn changed<T: serde::Serialize>(current: &T, before: Option<&T>) -> bool {
 fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) -> bool {
     registry.bug_families.iter().any(|(key, family)| {
         family.tasks.iter().any(|task| task == id)
-            && changed(family, before.registry.as_ref().and_then(|r| r.bug_families.get(key)))
+            && changed(
+                family,
+                before
+                    .registry
+                    .as_ref()
+                    .and_then(|r| r.bug_families.get(key)),
+            )
             && before.alternatives.get(key).is_none_or(|variants| {
-                variants.iter().all(|variant| changed(family, Some(variant)))
+                variants
+                    .iter()
+                    .all(|variant| changed(family, Some(variant)))
             })
     }) || registry.invariants.iter().any(|(key, invariant)| {
         let names_task = invariant.bug.as_ref().is_some_and(|bug| {
@@ -378,7 +454,11 @@ fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) ->
                     .and_then(serde_yaml::Value::as_sequence)
                     .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some(id)))
         });
-        names_task && changed(invariant, before.registry.as_ref().and_then(|r| r.invariants.get(key)))
+        names_task
+            && changed(
+                invariant,
+                before.registry.as_ref().and_then(|r| r.invariants.get(key)),
+            )
     })
 }
 
@@ -392,6 +472,7 @@ fn check(
     head: &str,
     ownership_head: &str,
     paths: Option<&[String]>,
+    delivery_head: &str,
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let mut qa = qa.clone();
@@ -434,6 +515,8 @@ fn check(
         Ok((findings, warnings)) => finish(
             notes,
             task,
+            repo,
+            delivery_head,
             qa.registry.enforce,
             &qa.registry.path,
             findings,
@@ -485,17 +568,28 @@ fn inspect(
             )));
         }
         Err(error) if registry_touched => {
-            return Ok((
-                vec![Finding::broken(format!(
-                    "{}: cannot read or parse delivered registry: {error:#}",
-                    qa.registry.path
-                ))],
-                vec![],
-            ));
+            let mut findings = vec![Finding::broken(format!(
+                "{}: cannot read or parse delivered registry: {error:#}",
+                qa.registry.path
+            ))];
+            retain_case_gate(
+                task,
+                &mut findings,
+                "the delivered registry cannot be read or parsed",
+            );
+            return Ok((findings, vec![]));
         }
         Err(error) => {
+            let findings = if task.task_type == TaskType::Bug {
+                vec![Finding::missing_case(format!(
+                    "Task {} is a bug, but {} cannot be read or parsed; regression-case coverage cannot be evaluated. Repair the registry and add or extend a case naming {}.",
+                    task.id, qa.registry.path, task.id
+                ))]
+            } else {
+                vec![]
+            };
             return Ok((
-                vec![],
+                findings,
                 vec![format!(
                     "UPKEEP WARNING: {} unreadable or malformed (not blocking; untouched by this delivery): {error:#}",
                     qa.registry.path
@@ -572,6 +666,7 @@ fn inspect(
                 ));
             }
             // An unavailable impact report must not erase proven G1 findings.
+            retain_case_gate(task, &mut findings, "journey impact cannot be evaluated");
             return Ok((findings, warnings));
         }
     };
@@ -644,8 +739,7 @@ fn inspect(
         && !live.is_empty()
         && !(registry_touched && has_changed_case(&registry, &before, &task.id))
     {
-        findings.push(Finding {gate: "G3", token: "no case:", title: "BUG FIX WITHOUT A CASE",
-            detail: format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)});
+        findings.push(Finding::missing_case(format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)));
     }
     Ok((findings, warnings))
 }

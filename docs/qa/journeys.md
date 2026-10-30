@@ -105,7 +105,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
+1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath; a known live MCP version sits beside its supervisor, with an upgrade arrow and reconnect guidance when the installed binary is newer
 2. Each row's time is its own session's activity — lighthouse reads "3h" and its row is named with "3 hours ago"; no time is a catalog check, and across a catalog poll none turns "now" or runs backwards
 3. Notice a new reply while away — before opening it, the row shows an unread count and the reply's first line
 4. Open the conversation, then notice its next reply — opening clears the unread count; a later reply while away brings it back

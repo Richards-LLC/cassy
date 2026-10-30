@@ -375,7 +375,7 @@ impl DeliveryRequest {
             let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
             for event in &self.merge_events {
                 let (ready, wait) = super::merge_alert::read_delivery(
-                    &self.merge_probes, event, fresh, repo, self.probe_now,
+                    &self.merge_probes, event, fresh, repo, self.probe_now, &self.supervisor,
                 );
                 if let Some(ready) = ready { merge_alerts.insert(ready.evidence.task_id.clone(), ready); }
                 if let Some((worker, wait)) = wait { worker_waits.insert(worker, wait); }

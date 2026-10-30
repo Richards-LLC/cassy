@@ -147,6 +147,9 @@ invariants:
   HUB-J3-MACHINE-VERSIONS:
     statement: Each machine names its reported runtime and a newer stable release when known; the Web footer names the client release and build independently.
     check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist. Verify old, current and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
+  HUB-J3-SUPERVISOR-VERSIONS:
+    statement: Each online supervisor shows its observed MCP version; an older version than its machine has installed is marked with an upgrade arrow and reconnect guidance, while unknown versions show nothing.
+    check: 'Run the cas-8125 stage in the existing machine versions HUB-J3 journey for Linux/Claude and macOS/Codex observations, the badge-state conversations unit test and the real-store catalog projection test; capture both real candidate builds and retain platform proof.'
   HUB-J4-GOAL:
     statement: I can read what was said before, back to the start
     check: 'Run the render-before-scroll regression in conversation-view.test.ts with a pending tail pin;
@@ -663,6 +666,7 @@ journeys:
   - hub-web/e2e/journeys/phone-host-line.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
   - hub-web/src/machine-version.ts
+  - hub-web/src/supervisor-version.brief.md
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/attachment-sheet.ts
@@ -699,6 +703,7 @@ journeys:
   - HUB-J3-DELIBERATE-EXIT-QUIET
   - HUB-J3-STABLE-ORDER
   - HUB-J3-MACHINE-VERSIONS
+  - HUB-J3-SUPERVISOR-VERSIONS
   - HUB-J3-MACHINE-CHIP-FOCUS
   traffic:
     share_pct: null

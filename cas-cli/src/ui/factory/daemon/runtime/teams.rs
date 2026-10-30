@@ -1287,6 +1287,20 @@ impl TeamsManager {
         Ok(())
     }
 
+    /// Name the session of a restarted team lead. Claude ignores its inbox
+    /// unless `leadSessionId` matches its `--session-id`.
+    pub fn set_lead_session(&self, lead_session_id: &str) -> anyhow::Result<()> {
+        self.ensure_team_tree()?;
+        let config_path = self.teams_dir.join("config.json");
+        let json = std::fs::read_to_string(&config_path)?;
+        let mut config: TeamConfig = serde_json::from_str(&json)?;
+        config.lead_session_id = lead_session_id.to_string();
+        let json = serde_json::to_string_pretty(&config)?;
+        std::fs::write(&config_path, json)?;
+        *self.config.lock().unwrap() = Some(config);
+        Ok(())
+    }
+
     /// Remove a member from the team (e.g., when a worker is shut down).
     pub fn remove_member(&self, name: &str) -> anyhow::Result<()> {
         self.ensure_team_tree()?;

@@ -35,6 +35,15 @@ impl CasCore {
         }) {
             return Ok(());
         }
+        // cas-5207: a Tier 0 delivery gets no dispatch here either. The close that
+        // follows records the tier.
+        if latest_dispatch.is_none()
+            && super::super::review_tier::tier_for_delivery(task, repo).is_some_and(|decision| {
+                decision.tier == super::super::review_tier::VerificationTier::Mechanical
+            })
+        {
+            return Ok(());
+        }
         // A task with no typed dispatch keeps the close gate's legacy
         // authority: an undispatched approval still authorizes close, so a
         // fresh dispatch here would only void it.

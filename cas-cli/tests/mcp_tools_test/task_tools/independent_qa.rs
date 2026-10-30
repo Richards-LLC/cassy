@@ -704,7 +704,7 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let service = CasService::new(reviewer, None);
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
-    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\n").unwrap();
+    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\nF12 NORMAL: A cosmetic nit nobody acts on.\n").unwrap();
     let record = |issues: serde_json::Value| verification(serde_json::json!({
         "action": "qa_record", "task_id": task_id, "status": "approved",
         "summary": "delivery passes; older defects are tracked separately",
@@ -720,9 +720,12 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert!(!tasks.list(None).unwrap().iter().any(|task| task.labels.iter().any(|label| label == "qa-follow-up")));
 
     let result = extract_text(service.verification(Parameters(record(serde_json::json!([
-        {"id":"F10", "scope":"pre-existing"}, {"id":"F11", "scope":"pre-existing"}
+        {"id":"F10", "scope":"pre-existing"},
+        {"id":"F11", "scope":"pre-existing", "repro":"run the strict capture twice; the contrast differs", "affected":"reviewers reading the capture"},
+        {"id":"F12", "scope":"pre-existing"}
     ])))).await.unwrap());
     assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33"), "{result}");
+    assert!(result.contains("below the spawn threshold (no repro or affected): F12"), "{result}");
     let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
         .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up")).collect();
     assert_eq!(follow_ups.len(), 1, "F10 already has a task; only F11 is filed");
@@ -732,6 +735,43 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert!(tasks.get_dependencies("cas-2a33").unwrap().iter()
         .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related));
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
+}
+
+/// cas-0ad8: through the real task tool. A follow-up naming a verifier finding is
+/// refused until it says how to reproduce it and who it affects.
+#[tokio::test]
+async fn task_create_applies_the_review_spawn_threshold_cas_0ad8() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, _task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let service = CasService::new(core, None);
+    let create = |extra: serde_json::Value| {
+        let mut request = serde_json::json!({
+            "action": "create", "title": "Tighten a check", "risk": "none", "task_type": "task",
+            "description": "Non-blocking verifier findings on the delivery (ver-7e87d441000d).",
+        });
+        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<cas_mcp::types::TaskRequest>(request).unwrap()
+    };
+    let refused = service
+        .task(Parameters(create(serde_json::json!({}))))
+        .await
+        .expect_err("a follow-up from a finding without repro or affected is refused");
+    assert!(refused.message.contains("SPAWN THRESHOLD"), "{}", refused.message);
+
+    let created = extract_text(
+        service
+            .task(Parameters(create(serde_json::json!({
+                "repro": "run cas x; it prints y", "affected": "the supervisor reading it",
+            }))))
+            .await
+            .unwrap(),
+    );
+    let id = extract_task_id(&created).unwrap().to_string();
+    let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
+    assert!(task.labels.iter().any(|label| label == "from-finding"), "{:?}", task.labels);
+    assert!(task.notes.contains("Finding origin: verification:ver-7e87d441000d"), "{}", task.notes);
+    assert!(task.notes.contains("Affected: the supervisor reading it"), "{}", task.notes);
 }
 
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
@@ -782,7 +822,7 @@ async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
         .unwrap();
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
-    let pre_existing = "[{\"severity\":\"normal\",\"scope\":\"pre-existing\",\"problem\":\"Footer links fail contrast at 3.1:1. The base build too.\",\"suggestion\":\"use --ink-mid\",\"file\":\"F01.png\"}]";
+    let pre_existing = "[{\"severity\":\"normal\",\"scope\":\"pre-existing\",\"repro\":\"open the footer; contrast measures 3.1:1\",\"affected\":\"low-vision readers of the footer\",\"problem\":\"Footer links fail contrast at 3.1:1. The base build too.\",\"suggestion\":\"use --ink-mid\",\"file\":\"F01.png\"}]";
 
     // Rejecting for the page's older defect alone is refused, and changes nothing.
     let refused = reviewer_service

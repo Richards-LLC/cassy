@@ -4,6 +4,7 @@ mod claude;
 mod codex;
 mod grok;
 mod opencode;
+mod skill_catalog;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -77,6 +78,9 @@ pub trait Backend: Sync {
     fn prepare_workdir(&self, _cwd: &Path, _config_dir: Option<&str>) -> Result<()> {
         Ok(())
     }
+
+    /// Prepare any on-disk half of a worker's role-scoped skill listing.
+    fn prepare_worker_catalog(&self, _cwd: &Path) {}
 
     /// Inject a factory-session identifier into the CLI and its MCP child.
     fn push_factory_session(&self, config: &mut PtyConfig, session: &str) {

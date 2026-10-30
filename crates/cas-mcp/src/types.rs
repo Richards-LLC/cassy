@@ -248,6 +248,23 @@ pub struct TaskRequest {
     #[serde(default)]
     pub proposal_attempt_id: Option<String>,
 
+    /// Where this follow-up came from, when it came from a review finding.
+    #[schemars(
+        description = "Source finding of a follow-up: verification:<id>, qa:<id> or review:<who>; needs repro and affected. none: not a finding."
+    )]
+    #[serde(default)]
+    pub finding_origin: Option<String>,
+
+    /// Reproduction of a finding-derived follow-up.
+    #[schemars(description = "Finding: steps or command, plus the wrong output")]
+    #[serde(default)]
+    pub repro: Option<String>,
+
+    /// Who a finding-derived follow-up affects.
+    #[schemars(description = "Finding: who acts on it today")]
+    #[serde(default)]
+    pub affected: Option<String>,
+
     /// Description (for create)
     #[schemars(description = "Task description")]
     #[serde(default)]
@@ -359,7 +376,7 @@ pub struct TaskRequest {
     /// provide a non-empty close reason; the accepted decision is logged on
     /// the task.
     #[schemars(
-        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Needs a live registered supervisor and a reason; decision logged. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
+        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Needs a live registered supervisor and a reason. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,
@@ -380,14 +397,14 @@ pub struct TaskRequest {
     /// was inspected before waiving the gate, and it is stored next to the
     /// gate's own measurements. Only honored for a live registered supervisor.
     #[schemars(
-        description = "Epic close stranded-branch override: describe evidence that every lane is stale. Live registered supervisor only; logged with per-branch measurements."
+        description = "Epic close stranded-branch override: describe evidence that every lane is stale. Live registered supervisor only."
     )]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
 
     /// Successful docs/artifact delivery deliberately retained outside integration.
     #[schemars(
-        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a reason. The delivery may hold only regular docs/artifacts files; supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts."
+        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a reason. The delivery may hold only regular docs/artifacts files. Excludes negative_result and completion/external verification receipts."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub evidence_only: Option<bool>,
@@ -410,7 +427,7 @@ pub struct TaskRequest {
     /// below plus a non-empty close `reason`. Ordinary closes that omit this
     /// flag retain the merge-state gate unchanged.
     #[schemars(
-        description = "Supervisor-only close of a measured negative result whose experimental delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a reason; logged. Ordinary closes omit it and need merge evidence."
+        description = "Supervisor-only close of a measured negative result whose delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a reason."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub negative_result: Option<bool>,
@@ -462,7 +479,7 @@ pub struct TaskRequest {
     /// Serialized immutable worker-delivery receipt. This is an additive,
     /// opt-in transactional handoff; omitting it preserves legacy close.
     #[schemars(
-        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, commit/base/target tips, proof reference and optional artifact_path (existing, under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery transaction. Omit for the legacy close."
+        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, tips, proof reference and optional artifact_path (under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery. Omit for the legacy close."
     )]
     #[serde(default)]
     pub completion_receipt: Option<String>,
@@ -475,7 +492,7 @@ pub struct TaskRequest {
     /// supervisor may present this receipt, and close revalidates its exact
     /// task, epic, factory session, gate, terminal verdict, and evidence.
     #[schemars(
-        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a passing receipt for this exact task, epic and factory session as zero-commit delivery evidence; it neither replaces completion_receipt nor bypasses other gates."
+        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a passing receipt for this exact task, epic and factory session as zero-commit delivery evidence; other gates still apply."
     )]
     #[serde(default)]
     pub external_verification_receipt: Option<String>,
@@ -568,14 +585,14 @@ pub struct TaskRequest {
 
     /// Execution note (for create, update, and no-code close) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only edits existing values and refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task needing external_ref proof at close. Close accepts only no-code, when the stored methodology is empty or no-code; its portable external_ref is validated and saved before verification dispatch or with an already-approved close. Empty string clears it on update."
+        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task needing a portable external_ref, saved at close; close accepts it only when the stored methodology is empty or no-code. Empty string clears it on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref, inline or stored). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed). Close proofs still apply."
+        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,
@@ -673,8 +690,7 @@ pub struct TaskRequest {
     /// a peer session of this repository holds on another machine. The start
     /// refusal names that override, so the schema text stays short.
     #[schemars(
-        description = "Force reset even when the task's assignee has a fresh heartbeat (alive worker). \
-                       Omit or false → warn and abort; true → reset immediately and log a forced-reset audit note."
+        description = "Reset even when the assignee has a fresh heartbeat, logging an audit note; otherwise warn and abort."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,

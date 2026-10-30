@@ -12,6 +12,34 @@ import { projectName, projectBadge } from "./cloud-brand";
 
 import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
 
+it("shows the live supervisor's own Cassy version and flags an installed upgrade (cas-8125)", () => {
+  const base: ConversationRow = { key: "atlas:lead", machineId: "atlas", session: "lead", supervisor: "lead", projectDir: "/projects/cas-src", host: "Atlas", freshness: "now", connection: "Live", attention: 0, selected: false, machine_online: true };
+  const view = document.createElement("div");
+  for (const state of [
+    { mcp_version: "3.90.0", installed_version: "3.91.1", shown: "3.90.0", update: true },
+    { mcp_version: "3.91.1", installed_version: "3.91.1", shown: "3.91.1", update: false },
+    { mcp_version: "3.92.0", installed_version: "3.91.1", shown: "3.92.0", update: false },
+    { mcp_version: "3.91.1", installed_version: undefined, shown: "3.91.1", update: false },
+    { mcp_version: undefined, installed_version: "3.91.1", shown: undefined, update: false },
+    { mcp_version: "unknown", installed_version: "3.91.1", shown: undefined, update: false },
+    { mcp_version: "3.90.0", installed_version: "3.91.1", machine_online: false, shown: undefined, update: false },
+  ]) {
+    const row = { ...base, ...state };
+    view.innerHTML = conversationRowMarkup(row);
+    const badge = view.querySelector<HTMLElement>(".supervisor-version");
+    if (!state.shown) { expect(badge).toBeNull(); continue; }
+    expect(badge?.textContent).toContain(state.shown);
+    expect(badge?.classList.contains("update-available")).toBe(state.update);
+    expect(conversationRowSpokenName(row)).toContain(`Cassy ${state.shown}`);
+    if (state.update) {
+      expect(badge?.title).toContain("3.91.1");
+      expect(badge?.title).toContain("Reconnect MCP");
+      expect(badge?.textContent).toContain("↑");
+      expect(conversationRowSpokenName(row)).toContain("Update available");
+    }
+  }
+});
+
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
 it('another tab settles adjacent held sends without manufacturing unsent chips', () => {
   const history = new ConversationHistory();

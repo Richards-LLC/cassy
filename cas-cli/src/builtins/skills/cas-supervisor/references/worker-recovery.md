@@ -23,16 +23,25 @@ destructive whole-queue clear and should not be used for targeted recovery.
 
 ## Supervisor restart
 
-When your pane exits, the factory shuts down and every worker pane stops with
-it. No action restarts a supervisor alone. Tell the operator this plainly
-before recommending a restart.
+When your pane exits on its own (`/exit`, a crash, a kill), the factory shuts down
+and every worker pane stops with it. Only a requested restart spares them. Tell
+the operator this plainly before recommending a restart.
 
 - **New `cas serve` binary:** ask the operator to use the harness's MCP
   reconnect control (Claude Code: `/mcp`). It replaces only your MCP server;
   your pane and the workers keep running. Use `recycle_worker` for stale
   workers.
-- **Anything else** (a new harness version, a fresh context, a crash): treat it
-  as a factory restart.
+- **A new harness version or a fresh context:**
+  1. Record your handoff with `memory action=remember entry_type=handoff`.
+  2. Run `factory action=restart_supervisor`. Within about a second the daemon
+     ends your session and starts a new one with the factory's boot harness,
+     model and effort. Workers keep their tasks, panes and leases. A `/model`
+     change does not carry over.
+  3. If your session is still running after 10 seconds, the restart did not
+     happen: a refusal arrives as a message, and silence means the running
+     daemon predates this action. Use the factory restart below.
+- **A crash, or a daemon that predates `restart_supervisor`:** treat it as a
+  factory restart.
   1. Have each worker commit and push or park, and write `HANDOFF.md`.
   2. Record your handoff with `memory action=remember entry_type=handoff`.
   3. After the restart and preflight, respawn the workers by name on their

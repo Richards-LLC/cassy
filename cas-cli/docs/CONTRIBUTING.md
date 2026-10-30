@@ -1014,6 +1014,22 @@ or bearer is included in the note, output or saved record. Fetch requires the
 synced task and Cloud credentials; proof interpretation remains the verifier's
 responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
 
+### Verification tiers and the spawn threshold
+
+Close measures the delivered diff from the task's recorded start to its anchor and records the tier as a task note. `lifecycle/review_tier.rs` owns the path rules for verification and QA, and the highest tier any path reaches applies.
+
+| Tier | Paths | Verification | QA |
+| --- | --- | --- | --- |
+| 0 | `docs/**` except `docs/design`, `docs/review` and the QA catalog, Markdown outside `src/` that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
+| 1 | Everything else, including skills, agents and an unmeasurable diff | One verifier | The impacted journeys |
+| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | One verifier plus an adversarial probe | An `Adversarial probe:` row in the task ledger, in batch mode too |
+
+An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
+
+Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none.
+
+`task action=create` enforces the threshold. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, needs `repro` and `affected`, or it is refused. It carries the `from-finding` label and a note recording all three. A P0/P1 bug that an operator or supervisor observed directly is exempt, and `finding_origin=none` declares that finding-like text is not a finding; reviewers cannot use it. `qa_record` applies the same threshold to its automatic pre-existing follow-ups: an issue without `repro` and `affected` stays in the verdict. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside
@@ -1288,6 +1304,13 @@ close shells that export the account's selector before renaming or removing it.
 A later launch from a stale shell can recreate the old profile folder. Readable
 Claude/Codex descendants of these shells and registered agents remain checked;
 an unrelated opaque shell does not block every account mutation.
+
+The session catalog also reports optional `mcp_version` (the live supervisor's
+fingerprinted MCP daemon epoch) and `installed_version` (that machine's
+installed CLI). Both reuse the Factory MCP versions source; MCP observations
+match supervisor role, name and session. Conflicting live MCP versions remain
+unknown. A ten-second per-project cache bounds epoch/process probes. Neither
+field borrows the hub's own binary version; absent versions are omitted.
 
 The hub session catalog reports the supervisor's optional `harness`, `model`
 and `effort`. Model version is part of the reported model ID or display name
@@ -1932,6 +1955,14 @@ attempt does not remove unmanaged scratch directories or run full factory GC.
 Worker shutdown and replacement also retire safe terminal or parked-and-pushed
 targets, copying proof logs to durable artifacts before removal. In-progress,
 unpushed or unverifiable work keeps its target and checkout.
+QA candidate builds first install locked web dependencies and invoke the same
+source-bound production snapshot builder as journeys, in the isolated checkout.
+Only that disposable checkout receives the generated dist before Cargo embeds
+it. A private loopback hub then serves every expected asset under a disposable
+HOME and CAS_ROOT: publication refuses a source/served digest mismatch and
+preserves the previous candidate. RECEIPT.json records `web.source_sha`,
+`web.dist_sha256` and `web.served_dist_sha256`.
+
 QA candidate builds use a private bounded target inside their owned release
 scratch directory. Candidate artifacts are copied out before that directory is
 removed; existing shared supervisor targets remain review-only. Interrupted
@@ -2892,8 +2923,42 @@ builds reuse their private Cargo target without a compiler-cache daemon.
 Standing operator policy: factory/* pushes and epic-targeted PRs run
 import/dependency-selected tests in Scoped Validation. Protected-default PRs run
 only the required Fast Validation and macOS Check admission lanes. The release
-merge queue runs the complete workspace suite on its synthetic tree once; when its
-successful tree is pushed unchanged to main, the main-push Fast Validation lane
+merge queue runs the complete workspace suite on its synthetic tree once. Only
+at this queue stage, `scripts/ci-queue-flakes.py run` reruns the exact failed Rust
+tests or failed journey specs once in the same job on the same tracked tree.
+The Rust recovery attempt has a 29-second execution deadline and bounded child
+cleanup, keeping its added time below 30 seconds; passing suites add no rerun.
+A second failure still ejects the queue entry. Fail-then-pass is **FLAKY**, and
+both attempts' reports, output and journey traces remain in the queue artifacts.
+The required Fast Validation fan-in refuses green until `reconcile` has durably
+filed or updated a `priority:p1`, `flaky` issue in the configured Cassy issue
+route (`Richards-LLC/cassy` here), with its test identity, run link and original
+failure. Impact recall still records the original failing status and log.
+
+Open issues labeled `flaky-quarantine` are the quarantine source of truth. Each
+has one `<!-- cas-queue-flake: JSON -->` test identity/observation line. Shards
+read them with an issues-read `GITHUB_TOKEN`, exclude only those identities and
+print the issue links in the job summary. State/label-filtered GitHub lists can
+lag acknowledged updates, so discovery enumerates unfiltered issue history and
+reads each flake candidate directly before deciding its open state and labels.
+Reconciliation adds that label after
+two distinct GitHub run IDs; duplicate shards and run attempts count once.
+The fix PR uses `Fixes #N`: closing the issue removes the exclusion from the next
+queue run. No bot PR, new credential or evaluated-tree edit is needed.
+
+The hosted publication fan-in alone has issues-write and contents-write. An
+atomic `heads/cas-queue-flake-publication-lock` ref serializes issue creation
+and updates across runs without changing the evaluated tree. Concurrent writers
+fail closed and retain their receipts. If a cancelled publisher leaves this ref,
+confirm the owning run (named in its commit) has finished before deleting the
+ref and reconciling the retained receipts. Transport, malformed quarantine and
+missing-shard evidence failures also refuse green. Workers, lane CI, schedules,
+main/tag pushes and ordinary manual checks keep zero retries and ignore queue
+quarantine. The explicit `test-ci-queue-flakes.py --live-acceptance <dir>` mode is
+only a throwaway-branch workflow proof using synthetic native runner fixtures;
+normal script tests use local HTTP fixtures and never create live issues.
+
+When the queue's successful tree is pushed unchanged to main, the main-push Fast Validation lane
 reuses that receipt and names the validating run. The main-push macOS Check
 still runs, after the merge, because only main's Darwin cargo and sccache entries
 are readable by later queue entries. Without them every queue entry compiled

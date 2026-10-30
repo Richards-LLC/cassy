@@ -5650,9 +5650,14 @@ impl FactoryDaemon {
                 exit_code,
                 exit_signal,
             } => {
+                let is_supervisor = pane_id == self.app.supervisor_name();
+                // cas-b492: a requested restart is no exit to report or shut
+                // down for; the next pass starts its replacement.
+                if is_supervisor && self.absorb_supervisor_restart_exit() {
+                    return;
+                }
                 // Notify GUI and WS clients
                 self.gui_notify_pane_exited(&pane_id, exit_code);
-                let is_supervisor = pane_id == self.app.supervisor_name();
                 let is_worker = self.app.worker_names().contains(&pane_id);
 
                 if is_supervisor {
@@ -6965,7 +6970,7 @@ impl FactoryDaemon {
         }
     }
 
-    fn forget_probe_pane(&mut self, pane: &str) {
+    pub(super) fn forget_probe_pane(&mut self, pane: &str) {
         self.queue_jobs.prompt_preparation.forget_pane(pane);
         self.normal_delivery_probes
             .retain(|_, probe| probe.pane != pane && probe.target != pane);
@@ -9116,7 +9121,7 @@ impl FactoryDaemon {
                                 &envelope.target_branch,
                                 &target_tip,
                             )),
-                            "merge already landed — re-close task",
+                            "merge already landed — awaiting verdict",
                         ),
                         MergeRequestDelivery::SuppressResolved { status } => (
                             Some(format!(

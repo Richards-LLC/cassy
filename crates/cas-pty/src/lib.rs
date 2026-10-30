@@ -84,7 +84,10 @@ pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
     missing_contract_elements, rendered_contract_surface,
 };
-pub use pty::{Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV};
+pub use pty::{
+    Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV,
+    WORKER_ROLE_SKILLS,
+};
 
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]

@@ -34,6 +34,8 @@ export type Session = {
   /** The project's human name (cas-6f79); older hubs omit it. */
   project_name?: string;
   machine_online?: boolean;
+  mcp_version?: string;
+  installed_version?: string;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };

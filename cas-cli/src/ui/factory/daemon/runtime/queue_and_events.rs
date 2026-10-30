@@ -1661,6 +1661,44 @@ pub(super) fn report_provision_failure(
     });
 }
 
+/// cas-1b4d: turn each closed rapid-response window's ledger into one
+/// back-fill task under its epic and tell the supervisor.
+pub(super) fn backfill_closed_rapid_response_windows(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+) {
+    let Ok(store) = crate::store::open_task_store(cas_dir) else {
+        return;
+    };
+    let done = match crate::rapid_response::backfill_due(cas_dir, store.as_ref(), chrono::Utc::now()) {
+        Ok(done) => done,
+        Err(error) => {
+            tracing::warn!(%error, "rapid-response back-fill failed; retried next refresh");
+            return;
+        }
+    };
+    for item in done {
+        let (summary, message) = match &item.task {
+            Some(task) => (
+                format!("Rapid-response back-fill: {} skipped check(s) for {}", item.skipped, item.epic),
+                format!(
+                    "The rapid-response window for {} has closed; normal gates apply again. Back-fill task {task} lists the {} check(s) the window skipped. Dispatch it; its close reports each result.",
+                    item.epic, item.skipped
+                ),
+            ),
+            None => (
+                format!("Rapid-response window closed: {}", item.epic),
+                format!(
+                    "The rapid-response window for {} has closed with no skipped checks; normal gates apply again.",
+                    item.epic
+                ),
+            ),
+        };
+        notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, message);
+    }
+}
+
 /// Queue a director notice to the supervisor that must not be lost to a spent
 /// store budget: tried now, deferred to the store worker otherwise
 /// (cas-00d5, cas-981e). A failed enqueue inserts nothing, so a retry cannot
@@ -4191,6 +4229,11 @@ impl FactoryDaemon {
                             );
                         }
                     }
+                    RelayOutput::WorkerTaskQueuesReconciled(result) => {
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "worker queue reconciliation failed; retrying next pass");
+                        }
+                    }
                     RelayOutput::ExternalWorkReconciled(Ok(count)) if count > 0 => {
                         tracing::debug!(count, "reconciled due external-work journal operation(s)");
                     }
@@ -6484,8 +6527,33 @@ impl FactoryDaemon {
         task_id: &str,
         request_id: Option<i64>,
     ) {
+        // Ordered spawn queues use the same selector/start/brief transaction
+        // as successors. Do not independently preassign a stale spawn head.
+        if let Some(request_id) = request_id {
+            match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                .and_then(|queues| {
+                    queues.bind_spawn(request_id, &self.session_name, worker)?;
+                    queues.get(&self.session_name, worker)
+                }) {
+                Ok(queue) if queue.revision > 0 => return, // daemon repair is durable and off-loop
+                Ok(_) => {},
+                Err(error) => {
+                    tracing::error!(%worker, %error, "spawn queue repair deferred");
+                    return;
+                }
+            }
+        }
         match ensure_worker_preassignment(self.app.cas_dir(), task_id, worker) {
             Ok(title) => {
+                if let Some(request_id) = request_id {
+                    let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                        .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, worker));
+                    if let Err(error) = bound {
+                        tracing::error!(%worker, %error, "spawn task queue binding failed; retry registration repair");
+                        return;
+                    }
+                }
+
                 tracing::info!(
                     worker = %worker,
                     task_id = %task_id,
@@ -11286,7 +11354,10 @@ impl FactoryDaemon {
                             std::slice::from_ref(warning),
                         );
                     }
-                    let task_id_for_finish = pending_task_id.clone();
+                    let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                        .and_then(|queues| queues.get(&self.session_name, &pending_name))
+                        .map(|queue| queue.revision > 0).unwrap_or(true);
+                    let task_id_for_finish = if queued_spawn { None } else { pending_task_id.clone() };
                     // cas-2a49: `finish_worker_spawn` starts the PTY and then
                     // does store and git bookkeeping, so the canary floor is
                     // taken before the call, not after it returns.
@@ -11549,12 +11620,24 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
+                        if let Some(request_id) = request_id {
+                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            if let Err(error) = bound {
+                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
+                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                return;
+                            }
+                        }
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
                         // codex+isolate async gaps cannot skip pre-assign.
                         // finish_worker_spawn confirms; failure/cancel paths
                         // release via release_preassign_if_bound.
-                        if let Some(ref tid) = task_id {
+                        let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                            .and_then(|queues| queues.get(&self.session_name, &worker_name))
+                            .map(|queue| queue.revision > 0).unwrap_or(true);
+                        if !queued_spawn && let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
                                 self.app.cas_dir(),
                                 tid,
@@ -11632,8 +11715,20 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
+                        if let Some(request_id) = request_id {
+                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            if let Err(error) = bound {
+                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
+                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                return;
+                            }
+                        }
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
-                        if let Some(ref tid) = task_id {
+                        let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                            .and_then(|queues| queues.get(&self.session_name, &worker_name))
+                            .map(|queue| queue.revision > 0).unwrap_or(true);
+                        if !queued_spawn && let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
                                 self.app.cas_dir(),
                                 tid,

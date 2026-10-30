@@ -179,6 +179,14 @@ pub struct TaskRequest {
     #[serde(default)]
     pub id: Option<String>,
 
+    /// Update: replace the assignee's pending task queue in this order.
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
+
+    /// Worker queue revision precondition for update with task_ids.
+    #[serde(default, deserialize_with = "deser::option_u64")]
+    pub expected_generation: Option<u64>,
+
     /// Brief start is the default; false explicitly includes sibling/epic context.
     #[schemars(
         description = "For start: bounded own-task response by default; false includes sibling/epic context"

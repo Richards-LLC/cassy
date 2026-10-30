@@ -196,9 +196,10 @@ factory action=worktree_merge id=<worker> task_id=<task-id>
 
 `worktree_merge` admits a lane on its CI state and the merge preflight's
 conflict and dirt checks. It runs no local release rows and needs no compile
-receipt. The worker's pre-push hook runs the fast rows; park has already read
-their receipt and a test receipt in each changed crate, and `CAS_LANE_SLIM=true`
-drops the lane copies. The merge queue
+receipt. CI runs the fast rows once per lane; the worker's pre-push hook gives
+early feedback. Park reads a test receipt in each changed crate, without
+trusting local fast-row receipts or exceptions. `CAS_LANE_SLIM=true` omits broad
+Rust tests from lanes. The merge queue
 is the Rust compile and suite proof. Rust merges still use the detached venue's
 clean-target-checkout rule; commit or stash target-checkout dirt first.
 

@@ -1854,6 +1854,36 @@ draft_failure_scope() {
     fi
 }
 
+draft_has_posted_receipt() {
+    python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+fence = None
+posted = False
+receipt = re.compile(
+    r"\bmessage_id=[0-9]+(?:\.[0-9]+)?\b"
+    r"|https://(?:[A-Za-z0-9-]+\.)?slack\.com/archives/[A-Za-z0-9]+/p[0-9]+\b"
+    r"|\b[0-9]{10}\.[0-9]{6}\b"
+)
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if fence:
+        if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line):
+            fence = None
+    else:
+        opening = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+        elif re.match(r" {0,3}##(?:[ \t]|$)", line):
+            posted = re.fullmatch(r" {0,3}##[ \t]+POSTED[ \t]*", line) is not None
+            continue
+    if posted and receipt.search(line):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 check_release_notes_draft() {
     local -a diary_drafts=() runtime_drafts=()
     local path
@@ -1863,8 +1893,9 @@ check_release_notes_draft() {
     fi
     while IFS= read -r path; do
         [[ -f "$path" ]] || continue
-        # Posted bodies are historical records, not drafts for this release.
-        if grep -Eq '^## POSTED[[:space:]]*$' "$path"; then
+        # Only a real posting receipt makes this a historical record. Fenced
+        # examples and empty/template POSTED sections remain lintable drafts.
+        if draft_has_posted_receipt "$path"; then
             printf 'release-notes-draft: skipping posted draft %s\n' "$path"
             continue
         fi
@@ -1882,35 +1913,26 @@ check_release_notes_draft() {
         printf 'release-notes-draft: no release-notes draft change\n'
         return 0
     fi
-    local output code failed=0 scope_count=0
-    for path in "${diary_drafts[@]}"; do
-        if output="$(python3 scripts/release-diary-thread.py --lint "$path" 2>&1)"; then
+    local output failed=0
+    if [[ "${#diary_drafts[@]}" -gt 0 ]]; then
+        if output="$(python3 scripts/release-diary-thread.py --lint "${diary_drafts[@]}" 2>&1)"; then
             printf '%s\n' "$output"
         else
-            code=$?
             printf '%s\n' "$output"
             printf 'FIX: harness-diary drafts need one parent and exactly three replies ordered Grok, Claude, Codex, with no ticket IDs\n'
-            draft_failure_scope "$path" "$code" "$output"
-            scope_count=$((scope_count + 1))
             failed=1
         fi
-    done
-    for path in "${runtime_drafts[@]}"; do
-        if output="$(python3 scripts/release-train-announce.py --lint "$path" 2>&1)"; then
+    fi
+    if [[ "${#runtime_drafts[@]}" -gt 0 ]]; then
+        if output="$(python3 scripts/release-train-announce.py --lint "${runtime_drafts[@]}" 2>&1)"; then
             printf '%s\n' "$output"
         else
-            code=$?
             printf '%s\n' "$output"
             printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
                 "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
-            draft_failure_scope "$path" "$code" "$output"
-            scope_count=$((scope_count + 1))
             failed=1
         fi
-    done
-    # Written only after every draft has been checked. A killed row cannot
-    # authorize an exception for the partial scope it happened to emit.
-    printf 'scope complete count=%s\n' "$scope_count"
+    fi
     return "$failed"
 }
 
@@ -2442,11 +2464,6 @@ record_fast_rows_receipt() {
             printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$head" "$(IFS=,; printf '%s' "${failures[*]}")" \
                 "${fast_base:-HEAD^}" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             fast_row_fixes
-            # Complete file scope, independent of the bounded human FIX list.
-            # Only the draft row supports a file-scoped exception.
-            if [[ "$(IFS=,; printf '%s' "${failures[*]}")" == release-notes-draft ]]; then
-                grep -E '^((SCOPE|UNSCOPED) release-notes-draft |scope complete count=)' "$row_log_dir/release-notes-draft.log" || true
-            fi
         } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
     fi
     printf 'fast rows: receipt %s\n' "$dir/$head.pass"

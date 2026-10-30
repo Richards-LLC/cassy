@@ -55,10 +55,10 @@ export default defineConfig({
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";
           if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash:8].js";
-          if (name === "rich-content.css") return "chunk-rich-content-[hash:8].css";
-          if (name === "accounts-panel.css") return "chunk-accounts-panel-[hash:8].css";
-          if (name === "composer-uploads.css") return "chunk-composer-uploads-[hash:8].css";
-          if (name.endsWith(".css")) return "app.css";
+          // Vite names the HTML entry's stylesheet index.css. Only that
+          // entry owns app.css; every lazy stylesheet uses the hub chunk route.
+          if (name === "index.css") return "app.css";
+          if (name.endsWith(".css")) return `chunk-${name.slice(0, -4).replace(/[^A-Za-z0-9_-]/g, "-")}-[hash:8].css`;
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).
           if (name.endsWith("Inter-latin-wght.woff2")) return "inter.woff2";
           if (name.endsWith("JetBrainsMono-latin-wght.woff2")) return "jetbrains-mono.woff2";

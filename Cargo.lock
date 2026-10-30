@@ -748,6 +748,7 @@ dependencies = [
  "rustls 0.23.36",
  "schemars",
  "self_update",
+ "semver",
  "sentry",
  "serde",
  "serde_json",

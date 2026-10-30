@@ -11,9 +11,91 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.
 
+### Fixed — Extracted handler journey coverage
+
+- **Rich inspection stays in source-impact selection** — Literal DOM lookups
+  retain the journeys that own their UI when a handler moves into an existing
+  shared module. Existing import ownership and conservative fallbacks remain.
+
+### Fixed — Changelog category validation
+
+- **Documentation and test entries pass release validation** — Titled non-shipped
+  changelog categories follow the release report rules; unknown categories and
+  malformed entries remain refused.
+
+### Fixed — Commander stylesheet loading
+
+- **Commander keeps its page styles when opening images** — The global
+  stylesheet retains its served name, while every lazy stylesheet receives a
+  hashed chunk name that the hub can serve.
+
+### Added — Commander reading frames
+
+- **Shared source frames and compact work rows** — Diagrams, diffs and code
+  share Copy and inline Expand, with Source/Preview for rich content, including
+  tool-reported file edits. Desktop work rows use a fixed icon gutter and less
+  space; phone targets stay 44px. Only explicitly live tools animate, with motion
+  disabled for reduced motion and forced colors.
+
+### Fixed — Worker test-shape scope
+
+- **Syncing released trunk preserves the task's test scope** — The test-shape
+  guard excludes files imported only by a trunk sync merge, while checking the
+  task's committed and working edits on either side of the sync.
+
+### Added — Readable published reasoning
+
+- **Published reasoning stays easy to skim** — Commander shows a folded summary preview with formatted detail and an exact raw-text fallback. Opening or updating it preserves focus and reading position; Thinking and Thought labels require reported lifecycle events.
+
+### Fixed — Parameter expansion boundaries
+
+- **Parameter data cannot hide policy commands** — Shell checks keep parameter
+  and arithmetic expansions together, inspect nested executable substitutions,
+  and refuse unfinished expansions before accepting their command boundaries.
+
+### Fixed — Merge completion guidance
+
+- **Parked workers wait for the merge verdict** — Recycle briefs, merge alerts
+  and supervisor references consistently let verification close a merged task or
+  return findings, without requesting another close from a worker or supervisor.
+
+### Added — Work-event edit line counts
+
+- **Edit facts can carry per-file additions and removals** — Successful explicit
+  patch records expose optional line counts through the Commander v2 contract
+  and parser. Counts describe each file's latest edit event; missing counts stay
+  unknown. The changed-files card can consume these facts in a follow-up.
+
+### Fixed — Complete command substitution boundaries
+
+- **Case patterns and comments cannot hide policy commands** — Substitution
+  boundaries use the shell tokenizer across heredoc, quoted-word and file-effect
+  checks. Parentheses in comments or case patterns no longer truncate a check;
+  single-quoted text and quoted heredoc bodies remain data.
+
+### Added — Conversation image inspection
+
+- **Inspect screenshots without leaving the conversation** — Image cards open a
+  viewer with zoom, pan and a gallery limited to that turn. Touch, mouse and
+  keyboard controls keep filenames and load failures visible; closing restores
+  keyboard focus and the reading position.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.
+
+### Fixed — Project account recommendations
+
+- **New session follows the selected project's account policy** — Commander
+  applies that project's account selection and usage threshold when recommending
+  an account, and refreshes the recommendation whenever the project changes.
+
+### Added — Turn edit summaries
+
+- **Inspect tool-reported edits per turn** — Commander groups the recorded file
+  paths beneath Show work. Open a file for its recorded unified diff or source
+  edit detail; disclosures stay expanded on this device. The summary reports
+  successful tool calls without inventing Git state or line counts.
 
 ### Fixed — Merge-readiness guidance
 
@@ -27,6 +109,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Double-quoted substitutions enforce operator-only commands** — The shell
   guard inspects executable substitution bodies with the full command tokenizer,
   including quote-split command names. Single-quoted command text stays data.
+
+### Fixed — Composer file uploads
+
+- **Slow photo uploads show progress and have more time** — File transfers reserve
+  25% margin on a 512 kbit/s link, show their byte progress and storage step, and
+  keep a refusal in one place. Generic HEIF photos retain their image type.
 
 ### Fixed — Release draft linting
 
@@ -185,6 +273,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Changed — Journey source snapshots
 
 - **Lanes test their committed source without generated dist commits** — Journey runs build a scratch production snapshot, verify its source revision and content hash when serving and recording evidence, and preserve that provenance in reused receipts. Source-only changes invalidate background evaluations even when committed dist stays unchanged.
+
+### Fixed — Exit confirmation
+
+- **Old Exit requests stay unconfirmed** — A later session end confirms Exit
+  only within its 95-second outcome window, so an unrelated shutdown cannot
+  relabel an old timed-out request as executed.
+
+### Fixed — Capped test package selection
+
+- **Duplicate crate names can select an exact version** — Capped worker and
+  verifier tests accept selectors such as `crossterm@0.25.0`, retain the version
+  in test receipts, and keep the existing named-test and resource guards.
 
 ### Fixed — Codex profile listing width
 

@@ -179,12 +179,14 @@ interface SessionOptions {
   send(message: unknown): boolean;
   changed(): void;
 }
+const COMMAND_OUTCOME_WINDOW_MS = 95_000;
 /** One conversation owns its mutations and polls only for their outcomes. */
 export class SupervisorCommandSession {
   readonly receipts = new Map<string, CommandReceipt>();
   supported = false;
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly endedCommands = new Map<string, string>();
+  private readonly exitSentAt = new Map<string, number>();
   constructor(private readonly options: SessionOptions) {}
   async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
@@ -196,6 +198,7 @@ export class SupervisorCommandSession {
     if (!this.options.send({ SupervisorCommand: { client_ref: ref, command, confirmed } })) {
       this.receipts.delete(ref); throw new Error("The command was not sent. Try again once connected.");
     }
+    if (command === "exit") this.exitSentAt.set(ref, Date.now());
     this.options.changed(); this.poll(ref);
   }
   receive(receipt: CommandReceipt): void {
@@ -212,6 +215,11 @@ export class SupervisorCommandSession {
   ended(reason: string): void {
     for (const receipt of this.receipts.values()) {
       if (!this.canSettleEnded(receipt)) continue;
+      // A later, unrelated end is not evidence that an old Exit executed.
+      if (receipt.command === "exit") {
+        const sentAt = this.exitSentAt.get(receipt.client_ref);
+        if (sentAt === undefined || Date.now() - sentAt > COMMAND_OUTCOME_WINDOW_MS) continue;
+      }
       this.endedCommands.set(receipt.client_ref, reason);
       this.settleEnded(receipt, reason);
     }
@@ -253,7 +261,7 @@ export class SupervisorCommandSession {
     const read = () => {
       const receipt = this.receipts.get(ref);
       if (!receipt || receipt.phase !== "submitted") { this.stopPoll(ref); return; }
-      if (Date.now() - started > 95_000) {
+      if (Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
         this.reject(ref, "Harness execution was not observed. Check Raw output before running another command."); return;
       }
       this.options.send({ SupervisorCommandStatus: { client_ref: ref } });

@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkEventStream, workEventSupport, workEventsPage } from "./work-events";
 import { WorkPicture, type WorkEventTransport } from "./work-picture";
 import { renderWork, workSignature } from "./work-rows-view";
+import { ConversationHistory } from "./conversation-history";
+import { threadModel } from "./thread-model";
 
 const wire = (id: string, second: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", session: "s", at: `2026-10-27T12:00:${String(second).padStart(2, "0")}Z`, label: id, has_detail: true, ...extra });
 
@@ -16,6 +18,60 @@ function livePicture(agent?: string) {
 }
 
 describe("work events (cas-ff22)", () => {
+  it("shows each turn's newest tool-reported edits once and persists lazy file evidence", () => {
+    const storage = new Map<string, string>([["commander.showWork", "1"]]);
+    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => "detail") };
+    const makePicture = () => new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => void storage.set(key, value) } });
+    const files = [
+      { path: "src/a.ts", operation: "edit", source_event_id: "edit" },
+      { path: "src/<b>.ts", operation: "edit", source_event_id: "other" },
+    ];
+    const events = [
+      wire("edit", 1, { turn: "one", changed_files: { files: files.slice(0, 1), provenance: "successful_tool_calls", complete: false } }),
+      wire("other", 3, { turn: "one", changed_files: { files, provenance: "successful_tool_calls", complete: false } }),
+      wire("next", 4, { turn: "two", changed_files: { files: [files[0]], provenance: "successful_tool_calls", complete: false } }),
+    ];
+    const history = new ConversationHistory();
+    for (const [id, second] of [[1, 0], [2, 2], [3, 5]]) history.reply({ notification_id: id!, reply_to: null, message: "Updated", summary: "", device_id: "d", kind: "answer" }, Date.parse(wire("", second!).at));
+    let picture = makePicture();
+    const load = () => { picture.watchThread("m", "s"); picture.page("m", "s", workEventsPage({ request_id: "page", events, has_earlier: false })!); };
+    load();
+    const node = document.createElement("div"); document.body.append(node);
+    const items = threadModel(history.events, { work: picture.threadWork("m", "s"), historyEnd: true }).filter(item => item.type === "work");
+    const paint = () => renderWork(node, items[1]!, picture.rows("m", "s"), "Supervisor");
+    renderWork(node, items[0]!, picture.rows("m", "s"), "Supervisor");
+    expect(node.querySelector(".changed-files")).toBeNull();
+    paint();
+    expect(node.querySelectorAll(".changed-files")).toHaveLength(2);
+    expect(node.textContent).toContain("Tool-reported edits · 2 files");
+    expect(node.textContent).not.toMatch(/\+\d|−\d/);
+    expect(transport.requestWorkEventDetail).not.toHaveBeenCalled();
+    const card = () => node.querySelector<HTMLElement>(".changed-files")!;
+    card().querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
+    const file = () => card().querySelector<HTMLButtonElement>(".changed-file-toggle")!;
+    file().focus(); file().click();
+    expect(document.activeElement).toBe(file());
+    expect(card().textContent).toContain("Loading");
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledWith("s", "edit");
+    const signature = workSignature(items[1]!, picture.rows("m", "s"));
+    const patch = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+<script>new</script>\n--- a/unrelated.ts\n+++ b/unrelated.ts\n@@ -1 +1 @@\n-no\n+unrelated";
+    picture.detail("m", "s", { request_id: "detail", event_id: "edit", detail: patch, truncated: false });
+    expect(workSignature(items[1]!, picture.rows("m", "s"))).not.toBe(signature);
+    paint();
+    expect(card().querySelector('.diff-line[data-change="add"]')?.textContent).toContain("<script>new</script>");
+    expect(card().textContent).not.toContain("unrelated");
+    expect(node.querySelectorAll("b, script")).toHaveLength(0);
+    card().querySelectorAll<HTMLButtonElement>(".changed-file-toggle")[1]!.click();
+    picture.detail("m", "s", { request_id: "detail", event_id: "other", detail: "Exact edit input and output", truncated: true });
+    paint();
+    expect(card().textContent).toContain("Exact edit input and output");
+    expect(card().textContent).toContain("cut");
+    picture = makePicture(); load(); paint();
+    expect(card().querySelector(".changed-files-toggle")?.getAttribute("aria-expanded")).toBe("true");
+    expect(file().getAttribute("aria-expanded")).toBe("true");
+    expect(card().textContent).toContain("Loading");
+    node.remove();
+  });
   it("merges pages by id and reads back from a newest page that missed the loaded events", () => {
     const stream = new WorkEventStream();
     stream.requested("first", "newest");
@@ -38,7 +94,7 @@ describe("work events (cas-ff22)", () => {
       tool: { name: "Read", operation: "read", targets: ["a.ts"], counts: { files: 1 } },
       lifecycle: { id: "call-1", stage: "end", outcome: "success" },
       reasoning: { summary: "Published", source: "codex_summary" },
-      changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "a" }], provenance: "successful_tool_calls", complete: false },
+      changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "a", line_counts: { added: 3, removed: 0 } }], provenance: "successful_tool_calls", complete: false },
     };
     const page = workEventsPage({ request_id: "v2", schema_version: 2, events: [
       wire("a", 1, extensions), wire("legacy", 2),
@@ -49,6 +105,14 @@ describe("work events (cas-ff22)", () => {
     expect(page.events.map((event) => event.label)).toEqual(["a", "legacy", "bad", "future"]);
     expect(page.events[2]).not.toHaveProperty("tool");
     expect(page.events[3]).toMatchObject({ tool: { operation: "teleport" }, lifecycle: { stage: "future" } });
+    // A bad optional extension cannot discard the file's existing provenance.
+    for (const line_counts of [undefined, null, {}, { added: 1 }, { added: -1, removed: 0 }, { added: 0.5, removed: 0 }, { added: 0, removed: "1" }, { added: Number.MAX_SAFE_INTEGER + 1, removed: 0 }]) {
+      const file = { path: "a.ts", operation: "edit", source_event_id: "a" };
+      const decoded = workEventsPage({ request_id: "counts", events: [wire("a", 1, {
+        changed_files: { files: [{ ...file, line_counts }], provenance: "successful_tool_calls", complete: false },
+      })] })!.events[0]!.changed_files!.files[0];
+      expect(decoded).toEqual(file);
+    }
   });
 
   it("reads nothing while Show work is off, polls only a daemon without change notices, and re-reads on a notice", () => {
@@ -146,6 +210,55 @@ describe("work events (cas-ff22)", () => {
     }
   });
 
+  it("folds only published reasoning into readable detail and retains the reader's state", () => {
+    const open = new Set(["work:published"]);
+    const requested = vi.fn();
+    const detail = { state: "ready" as const, text: "## Published detail\n\nKeep **the reader** here.\n\n- Check `src/a.ts`.\n\n<img src=x onerror=alert(1)> [unsafe](javascript:alert)", truncated: true };
+    let loaded = false;
+    const context = { detail: () => loaded ? detail : undefined, requestDetail: requested, isOpen: (key: string) => open.has(key), setOpen: (key: string, on: boolean) => void (on ? open.add(key) : open.delete(key)) };
+    const events = workEventsPage({ request_id: "x", events: [
+      wire("published", 1, { kind: "thinking", label: "Legacy label", reasoning: { summary: "Check **the lane**", source: "codex_summary" } }),
+      wire("summary-only", 2, { kind: "thinking", has_detail: false, lifecycle: { id: "active", stage: "start" }, reasoning: { summary: "Only **published text**", source: "claude_thinking" } }),
+      wire("legacy", 3, { kind: "thinking", label: "Legacy **literal**", reasoning: { summary: "Unknown source", source: "future_source" } }),
+    ] })!.events;
+    const item = { type: "work" as const, key: "work:published", events };
+    const node = document.createElement("div"); document.body.append(node);
+    renderWork(node, item, context, "supervisor");
+    const row = () => node.querySelector<HTMLElement>('[data-event-id="published"]')!;
+    const toggle = () => row().querySelector<HTMLButtonElement>(".work-row-toggle")!;
+    expect(row().textContent).toContain("Reasoning summaryCheck the lane");
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(requested).not.toHaveBeenCalled();
+    toggle().focus(); toggle().click();
+    expect(requested).toHaveBeenCalledExactlyOnceWith("published");
+    loaded = true;
+    renderWork(node, item, context, "supervisor");
+    expect(row().querySelector(".work-reasoning-content p strong")!.textContent).toBe("the reader");
+    expect(row().querySelectorAll("img, a[href^=javascript]")).toHaveLength(0);
+    expect(row().querySelector(".work-detail-limit")!.textContent).toContain("16 KB");
+    const raw = row().querySelector<HTMLDetailsElement>(".work-reasoning-raw")!;
+    raw.open = true; raw.dispatchEvent(new Event("toggle"));
+    expect(raw.querySelector("pre")!.textContent).toBe(detail.text);
+    row().querySelector<HTMLElement>(".work-detail")!.scrollTop = 42;
+    const revised = { ...item, events: events.map(event => event.id === "published" ? { ...event, reasoning: { ...event.reasoning!, summary: "Updated **summary**" } } : event) };
+    expect(workSignature(revised, context)).not.toBe(workSignature(item, context));
+    const updated = { ...revised, events: revised.events.map(event => event.id === "published" ? { ...event, lifecycle: { id: "turn", stage: "end" } } : event) };
+    expect(workSignature(updated, context)).not.toBe(workSignature(item, context));
+    renderWork(node, updated, context, "supervisor");
+    expect(row().querySelector(".work-reasoning-label")!.textContent).toBe("Thought");
+    expect(row().querySelector<HTMLDetailsElement>(".work-reasoning-raw")!.open).toBe(true);
+    expect(row().querySelector<HTMLElement>(".work-detail")!.scrollTop).toBe(42);
+    expect(document.activeElement?.getAttribute("data-focus-key")).toBe("row:published");
+    expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-label')!.textContent).toBe("Thinking");
+    node.querySelector<HTMLButtonElement>('[data-event-id="summary-only"] button')!.click();
+    expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-content p strong')!.textContent).toBe("published text");
+    expect(requested).toHaveBeenCalledTimes(1);
+    node.querySelector<HTMLButtonElement>('[data-event-id="legacy"] button')!.click();
+    expect(node.querySelector('[data-event-id="legacy"] .work-record')!.textContent).toBe(detail.text);
+    expect(node.querySelector('[data-event-id="legacy"] strong')).toBeNull();
+    node.remove();
+  });
+
   it("renders typed work evidence safely, lazily and without losing disclosure or focus", () => {
     const open = new Set<string>(["work:read"]);
     const requested: string[] = [];
@@ -167,6 +280,13 @@ describe("work events (cas-ff22)", () => {
     renderWork(node, item, context, "cas-src supervisor");
     expect([...node.querySelectorAll(".work-row-text")].map(row => row.textContent)).toEqual(["Read · 3 files", "Search · 7 matches", "Ran command · exit 2", "Edited 2 files", raw, "Turn failed"]);
     expect(node.querySelector("img")).toBeNull();
+    expect(node.querySelectorAll(".work-row-gutter")).toHaveLength(node.querySelectorAll(".work-row").length);
+    const live = { ...item, events: events.map(event => event.id === "command" ? { ...event, error: false, tool: { ...event.tool!, exit_code: undefined }, lifecycle: { id: "cmd", stage: "start" } } : event) };
+    renderWork(node, live, context, "cas-src supervisor");
+    expect(node.querySelectorAll(".work-row.is-live")).toHaveLength(1);
+    expect(node.querySelector(".work-row.is-live")!.getAttribute("data-event-id")).toBe("command");
+    renderWork(node, item, context, "cas-src supervisor");
+    expect(node.querySelector(".work-row.is-live")).toBeNull();
     expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("failed");
     expect(node.textContent).not.toContain("Turn started");
     expect(requested).toEqual([]);

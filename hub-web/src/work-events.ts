@@ -3,7 +3,8 @@
  * stream (`docs/guides/commander-work-events.md`). Pages are read by cursor,
  * details on demand, and a daemon that pushes `WorkEventsAppended` says when
  * to read the newest page again. Everything here is data: labels and details
- * are agent-supplied text, and the views set them only as `textContent`.
+ * are agent-supplied text. Only explicitly published reasoning is rendered
+ * through the safe Markdown dialect; tool records and legacy rows stay literal.
  */
 
 export type WorkEventKind = "thinking" | "tool" | "todo" | "task" | "worker" | "notice";
@@ -27,7 +28,13 @@ export interface WorkLifecycle {
   readonly ended_at?: string;
 }
 export interface WorkReasoning { readonly summary: string; readonly source: string }
-export interface WorkChangedFile { readonly path: string; readonly operation: string; readonly source_event_id: string }
+export interface WorkChangedFile {
+  readonly path: string;
+  readonly operation: string;
+  readonly source_event_id: string;
+  /** Counts from this source event's edit, never cumulative or a net Git diff. */
+  readonly line_counts?: { readonly added: number; readonly removed: number };
+}
 export interface WorkChangedFiles {
   readonly files: readonly WorkChangedFile[];
   readonly provenance: string;
@@ -117,7 +124,12 @@ function workChangedFiles(value: unknown): WorkChangedFiles | undefined {
   for (const file of row.files) {
     const item = record(file);
     if (!item || typeof item.path !== "string" || typeof item.operation !== "string" || typeof item.source_event_id !== "string") return undefined;
-    files.push({ path: item.path, operation: item.operation, source_event_id: item.source_event_id });
+    const counts = record(item.line_counts);
+    files.push({
+      path: item.path, operation: item.operation, source_event_id: item.source_event_id,
+      ...(counts && integer(counts.added) && counts.added >= 0 && integer(counts.removed) && counts.removed >= 0
+        ? { line_counts: { added: counts.added, removed: counts.removed } } : {}),
+    });
   }
   return { files, provenance: row.provenance, complete: row.complete };
 }
@@ -350,7 +362,7 @@ export function workSummary(events: readonly WorkEvent[]): string {
   const failed = events.filter((event) => event.kind === "tool" && workFailed(event)).length;
   const others = events.filter((event) => !["tool", "thinking", "todo"].includes(event.kind) && !taskChip(event) && !turnNotice(event)).length;
   const parts: string[] = [];
-  if (thinking > 0) parts.push("Thought");
+  if (thinking > 0) parts.push(events.filter(event => event.kind === "thinking").every(event => event.lifecycle?.stage === "end") ? "Thought" : "Reasoning");
   if (tools > 0) parts.push(`ran ${tools} tool${tools === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}`);
   if (todos > 0) parts.push(`updated todos`);
   if (others > 0) parts.push(`${others} event${others === 1 ? "" : "s"}`);
@@ -359,9 +371,15 @@ export function workSummary(events: readonly WorkEvent[]): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-/** The words a row shows: thinking reads as "Thinking", the rest as labelled. */
+/** A lifecycle label needs a reported boundary; summaries alone imply no state. */
+export function reasoningLabel(event: WorkEvent): string {
+  const stage = event.lifecycle?.stage;
+  return stage === "end" ? "Thought" : stage === "start" || stage === "phase" ? "Thinking" : "Reasoning summary";
+}
+
+/** The words a row shows, with no lifecycle inferred from its presence. */
 export function rowText(event: WorkEvent): string {
-  if (event.kind === "thinking") return event.label ? `Thinking: ${event.label}` : "Thinking…";
+  if (event.kind === "thinking") return event.label ? `${reasoningLabel(event)}: ${event.label}` : reasoningLabel(event);
   const tool = event.kind === "tool" ? event.tool : undefined;
   if (tool) {
     const files = tool.counts?.files;

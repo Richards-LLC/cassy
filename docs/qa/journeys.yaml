@@ -154,6 +154,9 @@ invariants:
   HUB-J4-VISUAL-SANDBOX:
     statement: A supervisor's HTML page shows inline and in its own tab, and a hostile page can't run script, reach Commander's storage, leave its frame or call out to another host
     check: 'Run the cas-3aff parts of hub-web/e2e/journeys/read-history.journey.ts at desktop and phone, whose double serves the policy file the hub embeds, and the hub route test visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets. Threat model: docs/design/hub-web/visual-replies-threat-model.md.'
+  HUB-J4-IMAGE-INSPECTION:
+    statement: Image cards open a named gallery limited to the turn; touch, mouse and keyboard zoom and pan; load failures name the file; closing restores focus and reading position.
+    check: 'Run the inspect images in a turn part of read-history.journey.ts at 390 and 1440 in light and dark, with focus boundaries, gallery edges, failed decode, wheel/drag, synthetic touch pinch and accessibility media captures. The attachment-sheet unit regression covers the same entry path and preserved scroll offset.'
   HUB-J4-READABLE-PROSE-TABLES:
     statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, and wide tables scroll inside the message without widening the page.
     check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
@@ -264,6 +267,10 @@ invariants:
     statement: Claude account choices consume profile-local native statusline observations, including factory sessions; an older percentage stays visible with its Eastern observation time and, for an earlier day, its date until its known reset, while expired windows and changed identities cannot retain that percentage.
     check: Run generated_statusline_records_usage_even_for_a_factory_supervisor, configure_migrates_bare_statuslines_in_every_profile_once (including malformed-profile warnings and continued project hook setup), configured_profile_beats_ambient_and_main, weekly_observation_date_follows_the_eastern_day and native_claude_snapshot_reaches_limits_and_picker_without_authentication; then use the batch candidate for real sessions on two profiles and read back both cas claude percentages and their profile snapshots without a usage endpoint request or credential-content reads.
     bug: {task: cas-7045}
+  HUB-J13-PROJECT-ACCOUNT-POLICY:
+    statement: New session recommends an account using the selected project's selection and threshold settings; changing the project refreshes the recommendation, stale responses cannot replace it, and the operator can still choose another logged-in account.
+    check: Run launch_profiles_follow_the_resolved_projects_account_policy, launch-session and connection Vitest tests, and the HUB-J13 start-session journey; inspect project and browse targets, global fallback, project switching and the explicit account in the launch request, with 390/1440 captures.
+    bug: {task: cas-774a}
   HUB-J13-ACCOUNT-MANAGEMENT:
     statement: The shell Accounts panel lists each machine independently and scrolls through every account on a phone; only factory-manage pairings mutate named Claude/Codex accounts, destructive operations confirm and audit, Grok is read-only, and New session refreshes choices without reload with local 12-hour capacity times. The confirmation editor is not rendered for read-only pairings or after Cancel/completion, and dismissal clears its text and typed value.
     check: Run accounts_route_tests, accounts-panel and launch-session UI tests and the HUB-J13 shell Accounts journey; assert rendered editor visibility after Cancel/remove and for read-only pairings, and prove CLI parity and each audited mutation on disposable profiles against the exact-tip real hub candidate, with 1280/390 light/dark captures.
@@ -427,8 +434,9 @@ invariants:
     check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history. The sender's own notes.txt opens as sandboxed UTF-8 plain text, never HTML, and Edit on a refused send restores its file cards with no host path in the composer (composer-uploads.test.ts); hub::server::composer_upload::tests::open_preview_hashes_each_upload_once_per_change proves one hash per upload change.
     bug: {task: cas-195a}
   HUB-J24-PHONE-UPLOAD:
-    statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
-    check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
+    statement: A supported phone attachment up to 10 MiB has at least 25% transfer deadline margin at 512 kbit/s, shows byte progress then Saving before Delivered, retains its sniffed media type, and shows a refused file and hub reason once.
+    check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 throttled loopback upload and single-refusal stages at 1440/390px in light/dark, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
+    bug: {task: cas-03d2}
   HUB-J3-LIST-SCROLL-BOUNDS:
     statement: Project-list accessibility labels remain inside the scrolling navigation and never extend the viewport-sized conversation shell.
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
@@ -702,6 +710,7 @@ journeys:
     trigger: a conversation with earlier turns from past days
   steps:
   - Open the conversation and see the recent turns — the latest exchange is on screen at once
+  - Inspect an image card — zoom and pan, compare only that turn's images, read named load failures, and close back to the same reading position
   - Load earlier turns — "Load earlier" fetches the previous page
   - Reach the start of the conversation — "No earlier history" appears, with day separators
   - Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived
@@ -736,6 +745,9 @@ journeys:
   - hub-web/src/time.ts
   - hub-web/src/attachment-sheet.ts
   - hub-web/src/artifact-open.ts
+  - hub-web/src/image-viewer.ts
+  - hub-web/src/image-viewer.css
+  - hub-web/src/image-viewer.brief.md
   - hub-web/e2e/journeys/read-history.journey.ts
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
@@ -765,6 +777,7 @@ journeys:
   invariants:
   - HUB-J4-GOAL
   - HUB-J4-VISUAL-SANDBOX
+  - HUB-J4-IMAGE-INSPECTION
   - HUB-J4-READABLE-PROSE-TABLES
   - HUB-J4-TABLE-COPY
   - HUB-J4-SAFE-CSV-COPY
@@ -1402,7 +1415,7 @@ journeys:
   - Open New session and find the project — the most recently used project leads, a running project offers Attach,
     Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as
     the machine's default
-  - Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out
+  - Choose the account — every Claude account on the machine is listed with the selected project's recommendation preselected (falling back to the default); changing projects refreshes the recommendation; a logged-out
     one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has
     no account step; the summary names the chosen account
   - Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>)
@@ -1478,6 +1491,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-PROJECT-ACCOUNT-POLICY
   - HUB-J13-ACCOUNT-MANAGEMENT
   - HUB-J13-ACCOUNTS-ENTRY
   - HUB-J13-NATIVE-CLAUDE-CAPACITY
@@ -2105,6 +2119,7 @@ journeys:
   - hub-web/src/markdown-renderer.ts
   - hub-web/src/code-frame.ts
   - hub-web/src/code-frame.css
+  - hub-web/src/object-frame.brief.md
   - hub-web/src/rich-code.ts
   - hub-web/src/rich-syntax.ts
   - hub-web/src/code-syntax.brief.md
@@ -2141,6 +2156,7 @@ journeys:
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/composer-uploads.ts
+  - hub-web/src/upload-transport.ts
   - hub-web/src/sent-attachments.ts
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
@@ -2153,7 +2169,7 @@ journeys:
   - A 4 or 10 MiB phone file reaches the hub over 512 kbit/s transport without the ordinary 10 second request timeout.
   - A refused file is named among multiple attachments; unsupported types do not prescribe reconnecting.
   - A missing session shows the hub refusal text and keeps the files for recovery.
-  - HEIC, AVIF and MOV bytes retain their media types in host artifact storage.
+  - HEIC, generic HEIF, AVIF and MOV bytes retain their media types in host artifact storage.
   invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD, HUB-J24-SENT-ATTACHMENT]
   traffic:
     share_pct: null
@@ -2177,7 +2193,9 @@ journeys:
     and markup in it reads as text
   - New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the
     earlier reply keeps its node
+  - Read the published reasoning summary in place — a neutral folded preview opens safe Markdown and raw published text without moving focus or fetching detail twice
   - Read typed work scope — read, search, command and edit rows name their v2 scope; failures remain explicit, exact output stays readable, and live metadata updates preserve focus and expansion
+  - Inspect tool-reported edits — one newest cumulative file list per turn; a file opens its recorded unified diff or exact source event on demand, with card and file expansion restored after reload, and no invented line counts or Git claim
   - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
     only
   - Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the
@@ -2193,6 +2211,8 @@ journeys:
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
   - hub-web/src/work-rows.brief.md
+  - hub-web/readable-thinking.brief.md
+  - hub-web/src/changed-files.brief.md
   - hub-web/src/worker-timeline.ts
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-view.ts

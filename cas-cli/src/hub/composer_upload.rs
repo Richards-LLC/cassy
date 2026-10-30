@@ -188,6 +188,8 @@ fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
             Some("image/avif")
         } else if [b"heic", b"heix", b"hevc", b"hevx"].iter().any(|b| has(*b)) {
             Some("image/heic")
+        } else if [b"mif1", b"heim", b"heis", b"msf1"].iter().any(|b| has(*b)) {
+            Some("image/heif")
         } else if has(b"qt  ") {
             Some("video/quicktime")
         } else {

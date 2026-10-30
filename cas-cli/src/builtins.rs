@@ -7661,6 +7661,21 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/workflow.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor workflow.md");
 
+        // pin: shipped guidance must not order another close after merge.
+        assert!(
+            !workflow.content.contains("re-close"),
+            "merge verdict owns parked completion"
+        );
+        let close_gate = BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-worker/references/close-gate.md")
+            .unwrap();
+        // pin: merged deliveries await the verification verdict.
+        assert!(
+            !close_gate.content.contains("re-close or stop"),
+            "merged workers wait for the verdict"
+        );
+
         let phase3 = workflow
             .content
             .split("## Phase 4: Complete")

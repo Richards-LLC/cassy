@@ -3242,11 +3242,20 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
    --ink-mid, task chips that carry their tone in text and dot only (D8), and
    rows a tap deeper. No new colour, no blur, no motion. */
 .thread .work-turn { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); margin: var(--space-1) 0; max-width: 100%; }
+.changed-files { width: 100%; min-width: 0; border: 1px solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-raised); color: var(--ink); }
+.changed-files .work-row-toggle { width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-card); color: var(--ink); }
+.changed-files-note { margin: 0; padding: 0 var(--space-3) var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
+.changed-files-list { list-style: none; padding: 0; margin: 0; }
+.changed-file { min-width: 0; border-top: 1px solid var(--line-subtle); }
+.changed-file-path { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-xs); }
+.changed-file-operation { flex: none; color: var(--ink-mid); font-size: var(--fs-xs); }
+.changed-file-detail.work-detail { margin: 0 var(--space-2) var(--space-2); max-width: 100%; }
+.changed-file-detail .rich-diff { margin: 0; }
 .work-summary, .work-row-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; max-width: 100%; padding: 0 var(--space-2); border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink-mid); font: var(--weight-regular) var(--fs-meta)/1.3 var(--font-ui); text-align: left; cursor: pointer; }
 .work-summary:hover, .work-row-toggle:hover { background: var(--bg-hover); }
 .work-summary:focus-visible, .work-row-toggle:focus-visible, .work-detail:focus-visible, .status-timeline:focus-visible, .worker-timeline-older:focus-visible, .worker-timeline-raw:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
 .work-chevron { width: 14px; height: 14px; flex: none; }
-[aria-expanded="true"] > .work-chevron { transform: rotate(90deg); }
+[aria-expanded="true"] > .work-chevron, [aria-expanded="true"] > .work-row-gutter > .work-chevron { transform: rotate(90deg); }
 .work-time, .work-row-time { color: var(--ink-mid); font: var(--fs-xs)/1 var(--font-mono); }
 .work-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0; padding: 0 var(--space-2); list-style: none; }
 .work-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink-mid); font-size: var(--fs-xs); }
@@ -3255,13 +3264,40 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-chip--ok { color: var(--state-ok); }
 .work-chip--warn { color: var(--warn-text); }
 .work-chip--crit { color: var(--state-crit); }
-.work-rows { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0 0 0 var(--space-4); list-style: none; max-width: 100%; }
+.work-rows { display: flex; flex-direction: column; gap: 0; margin: 0; padding: 0 0 0 var(--space-4); list-style: none; max-width: 100%; }
 .work-row { display: flex; flex-direction: column; min-width: 0; }
 .work-row-line { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
-.work-row-text { overflow-wrap: anywhere; }
-.work-row--tool .work-row-text { font-weight: var(--weight-medium); }
+.work-row > .work-row-toggle, .work-row > .work-row-line { min-height: var(--space-6); gap: var(--space-2); border-radius: var(--radius-card); }
+.work-row-gutter { display: grid; place-items: center; width: var(--space-4); height: var(--space-4); flex: none; color: var(--ink-mid); }
+.work-row.is-failed .work-row-gutter { color: var(--state-crit); }
+.work-row.is-failed .work-row-line > .work-row-gutter::before { content: "!"; font-weight: var(--weight-semibold); }
+.work-row-text { min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+.work-row-time { flex: none; }
+.work-row.is-live .work-row-gutter:empty::before { content: "•"; }
+@keyframes work-live-shine { 50% { opacity: 0.45; } }
+@media (forced-colors: none) and (prefers-reduced-motion: no-preference) {
+  .work-row.is-live .work-row-gutter { animation: work-live-shine 1.8s ease-in-out infinite; }
+}
+.work-row--tool .work-row-text { font-weight: var(--weight-regular); }
+.work-reasoning-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-block: var(--space-1); }
+.work-reasoning-label { font-size: var(--fs-xs); }
+.work-reasoning-preview { font-weight: var(--weight-medium); }
+.work-row--thinking .work-row-toggle { border-radius: var(--radius-pane); }
+.work-reasoning-content > :first-child { margin-top: 0; }
+.work-reasoning-content > :last-child { margin-bottom: 0; }
+.work-reasoning-content p { margin-block: 0 var(--space-2); white-space: pre-wrap; }
+.work-reasoning-content .markdown-heading { margin-block: var(--space-3) var(--space-2); font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.work-reasoning-content .markdown-list { margin-block: var(--space-2); padding-inline-start: var(--space-4); }
+.work-reasoning-content .markdown-inline-code { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.work-reasoning-content .markdown-link { color: inherit; text-decoration: underline; }
+.work-reasoning-raw { margin-top: var(--space-3); }
+.work-reasoning-raw > summary { padding-block: var(--space-1); color: var(--ink-mid); cursor: pointer; }
+.work-reasoning-raw > summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.work-reasoning-raw .work-record { margin-top: var(--space-2); }
+@media print {
+  .work-row--thinking .work-detail { max-height: none; overflow: visible; }
+}
 .work-row-failed { color: var(--state-crit); font-weight: var(--weight-medium); }
-.work-row.is-failed .work-row-toggle::before, .work-row.is-failed .work-row-line::before { content: ""; width: 6px; height: 6px; border-radius: var(--radius-pill); background: var(--state-crit); flex: none; }
 .work-detail { margin: var(--space-1) 0 var(--space-2) var(--space-6); max-height: 18rem; overflow: auto; max-width: 100%; box-sizing: border-box; padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); font: var(--fs-meta)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
 .work-detail-label { margin: 0 0 var(--space-1); color: var(--ink-mid); font-weight: var(--weight-medium); font-size: var(--fs-xs); }
 .work-detail-label:not(:first-child) { margin-top: var(--space-3); }
@@ -3277,14 +3313,14 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .worker-timeline-note { margin: var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .worker-timeline-older, .worker-timeline-raw { align-self: flex-start; min-height: 40px; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); cursor: pointer; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  .work-summary, .work-row-toggle, .work-row-line { min-height: 44px; }
+  .work-summary, .work-row-toggle, .work-row-line, .work-row > .work-row-toggle, .work-row > .work-row-line { min-height: var(--rail-item-min); }
   .status-timeline { min-height: 44px; min-width: 44px; }
   #conversation-show-work { padding: 0 var(--space-2); }
   #conversation-show-work .action-label { display: none; }
 }
 @media (forced-colors: active) {
   .work-chip, .work-detail, .status-timeline, .worker-timeline-older, .worker-timeline-raw { border-color: ButtonText; }
-  .work-chip-dot, .work-row.is-failed .work-row-toggle::before, .work-row.is-failed .work-row-line::before { background: CanvasText; }
+  .work-chip-dot { background: CanvasText; }
 }
 .worker-timeline-rows .work-row-toggle, .worker-timeline-rows .work-row-line { width: 100%; }
 .worker-timeline-rows .work-row-time { margin-left: auto; padding-left: var(--space-2); }

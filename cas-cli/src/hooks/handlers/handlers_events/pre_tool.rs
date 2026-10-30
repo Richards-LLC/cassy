@@ -1716,7 +1716,7 @@ fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> 
     // Single quotes make the mandatory filter a literal shell argument. Match
     // the suffix after the filter so '&' within a filter is not backgrounding.
     if command.starts_with("cargo nextest ") {
-        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
+        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_@.+-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
         let matched = pattern.captures(command)?;
         let mut args = vec![
             "nextest".into(),
@@ -3309,32 +3309,63 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
 
 // Argument-only consumers omit attached IO numbers. Security/effect consumers
 // retain the original tokens, including every redirect target.
+struct ShellLexed {
+    tokens: Vec<ShellToken>,
+    literals: Vec<bool>,
+    /// Byte after each token in the original source, including removed quotes.
+    ends: Vec<usize>,
+    unresolved_at: Option<usize>,
+}
+
 fn factory_shell_tokens_for_projection(
     command: &str,
     arguments_only: bool,
 ) -> (Vec<ShellToken>, Vec<bool>) {
+    let lexed = factory_shell_lex(command, arguments_only, 0);
+    (lexed.tokens, lexed.literals)
+}
+
+/// The same lexer backs ordinary commands and substitution boundaries. Source
+/// positions avoid recovering syntax from cooked words or quoted/comment text.
+fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> ShellLexed {
     let mut tokens = Vec::new();
     let mut literals = Vec::new();
+    let mut ends = Vec::new();
+    let mut unresolved_at = None;
     let mut word = String::new();
     let mut literal = true;
     let mut word_quoted = false;
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
+    // Parameter and arithmetic expansions are word parts, not shell scopes.
+    // Keep their source intact so the effect/substitution collectors can still
+    // inspect executable substitutions nested inside them.
+    struct Expansion {
+        start: usize,
+        opening: char,
+        closing: char,
+        balance: usize,
+        quote: Option<char>,
+        escaped: bool,
+    }
+    let mut expansions: Vec<Expansion> = Vec::new();
     let push_word = |tokens: &mut Vec<ShellToken>,
                      literals: &mut Vec<bool>,
                      word: &mut String,
                      literal: &mut bool,
-                     word_quoted: &mut bool| {
+                     word_quoted: &mut bool,
+                     ends: &mut Vec<usize>, end: usize| {
         if !word.is_empty() {
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(*literal);
+            ends.push(end);
             *literal = true;
         }
         *word_quoted = false;
     };
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
+    let mut chars = command.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
         if comment {
             if matches!(ch, '\n' | '\r') {
                 comment = false;
@@ -3344,9 +3375,11 @@ fn factory_shell_tokens_for_projection(
                     &mut word,
                     &mut literal,
                     &mut word_quoted,
+                    &mut ends, index,
                 );
                 tokens.push(ShellToken::Operator(';'));
                 literals.push(true);
+                ends.push(index + ch.len_utf8());
             }
             continue;
         }
@@ -3355,14 +3388,53 @@ fn factory_shell_tokens_for_projection(
             escaped = false;
             continue;
         }
+        if let Some(expansion) = expansions.last_mut() && expansion.escaped {
+            word.push(ch);
+            expansion.escaped = false;
+            continue;
+        }
+        let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        if active_quote != Some('\'') && ch == '$' {
+            let expansion = match command.as_bytes().get(index + 1..) {
+                Some([b'{', ..]) => Some(('{', '}', 1, 1)),
+                Some([b'[', ..]) => Some(('[', ']', 1, 1)),
+                Some([b'(', b'(', ..]) => Some(('(', ')', 2, 2)),
+                _ => None,
+            };
+            if let Some((opening, closing, balance, consumed)) = expansion {
+                word.push_str(&command[index..index + consumed + 1]);
+                for _ in 0..consumed { chars.next(); }
+                expansions.push(Expansion {
+                    start: index, opening, closing, balance, quote: None, escaped: false,
+                });
+                literal = false;
+                continue;
+            }
+        }
+        if active_quote != Some('\'') && ch == '`' {
+            let bytes = command.as_bytes();
+            let mut end = index + 1;
+            while end < bytes.len() && bytes[end] != b'`' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            if end < bytes.len() {
+                let substitution = &command[index..=end];
+                word.push_str(substitution);
+                for _ in 1..substitution.chars().count() { chars.next(); }
+                literal = false;
+                continue;
+            }
+            unresolved_at.get_or_insert(index);
+        }
         // A substitution has its own quoting context: its double quotes must
         // not close the outer word or turn quoted parentheses into scopes.
         // Preserve its source for the recursive effect collector, which still
         // judges both the commands it runs and how its output is used.
-        if quote == Some('"') && ch == '$' && chars.peek() == Some(&'(') {
-            let tail = format!("${}", chars.clone().collect::<String>());
+        if active_quote != Some('\'') && (quote == Some('"') || !expansions.is_empty())
+            && ch == '$' && chars.peek().is_some_and(|(_, ch)| *ch == '(') {
+            let tail = &command[index..];
             if let Some(end) = shell_effects::literal_cat_heredoc_end(&tail)
-                .or_else(|| shell_effects::substitution_end(tail.as_bytes(), 2, 0))
+                .or_else(|| shell_effects::substitution_end(tail.as_bytes(), 2, depth + 1))
             {
                 let substitution = &tail[..=end];
                 word.push_str(substitution);
@@ -3371,16 +3443,35 @@ fn factory_shell_tokens_for_projection(
                 }
                 literal = false;
                 continue;
+            } else {
+                unresolved_at.get_or_insert(index);
             }
+        }
+        if let Some(expansion) = expansions.last_mut() {
+            word.push(ch);
+            match expansion.quote {
+                Some(active) if active == ch => expansion.quote = None,
+                Some('\'') => {},
+                _ if ch == '\\' => expansion.escaped = true,
+                Some(_) => {},
+                None if matches!(ch, '\'' | '"') => expansion.quote = Some(ch),
+                None if ch == expansion.opening => expansion.balance += 1,
+                None if ch == expansion.closing => {
+                    expansion.balance -= 1;
+                    if expansion.balance == 0 { expansions.pop(); }
+                }
+                _ => {},
+            }
+            continue;
         }
         if quote != Some('\'') {
             if ch == '$'
                 && chars
                     .peek()
-                    .is_some_and(|next| matches!(next, '?' | '$' | '!'))
+                    .is_some_and(|(_, next)| matches!(next, '?' | '$' | '!'))
             {
                 word.push(ch);
-                word.push(chars.next().unwrap());
+                word.push(chars.next().unwrap().1);
                 continue;
             }
             if matches!(ch, '$' | '`') || (quote.is_none() && matches!(ch, '*' | '?' | '[')) {
@@ -3417,9 +3508,11 @@ fn factory_shell_tokens_for_projection(
                         &mut word,
                         &mut literal,
                         &mut word_quoted,
+                        &mut ends, index,
                     );
                     tokens.push(ShellToken::Operator(ch));
                     literals.push(true);
+                    ends.push(index + ch.len_utf8());
                 }
                 '\n' | '\r' => {
                     push_word(
@@ -3428,9 +3521,11 @@ fn factory_shell_tokens_for_projection(
                         &mut word,
                         &mut literal,
                         &mut word_quoted,
+                        &mut ends, index,
                     );
                     tokens.push(ShellToken::Operator(';'));
                     literals.push(true);
+                    ends.push(index + ch.len_utf8());
                 }
                 ch if ch.is_whitespace() => push_word(
                     &mut tokens,
@@ -3438,6 +3533,7 @@ fn factory_shell_tokens_for_projection(
                     &mut word,
                     &mut literal,
                     &mut word_quoted,
+                    &mut ends, index,
                 ),
                 _ => word.push(ch),
             },
@@ -3446,14 +3542,18 @@ fn factory_shell_tokens_for_projection(
     if escaped {
         word.push('\\');
     }
+    if let Some(expansion) = expansions.first() {
+        unresolved_at = Some(unresolved_at.map_or(expansion.start, |at: usize| at.min(expansion.start)));
+    }
     push_word(
         &mut tokens,
         &mut literals,
         &mut word,
         &mut literal,
         &mut word_quoted,
+        &mut ends, command.len(),
     );
-    (tokens, literals)
+    ShellLexed { tokens, literals, ends, unresolved_at }
 }
 
 /// Return shell statements with heredoc bodies and comments removed. Quoted
@@ -4213,6 +4313,12 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
 /// operands. The declaration line and any shell commands after the delimiter
 /// remain available to the workspace guard.
 fn shell_command_without_heredoc_bodies(command: &str) -> String {
+    shell_command_projection(command, false)
+}
+
+/// Offset-aware consumers mask body bytes instead of deleting them. Delimiter
+/// recognition is identical, including quoted bodies and tab-stripping.
+fn shell_command_projection(command: &str, preserve_offsets: bool) -> String {
     let mut pending: std::collections::VecDeque<HeredocDelimiter> =
         std::collections::VecDeque::new();
     let mut shell_command = String::new();
@@ -4227,6 +4333,11 @@ fn shell_command_without_heredoc_bodies(command: &str) -> String {
             };
             if candidate == delimiter.value {
                 pending.pop_front();
+            }
+            if preserve_offsets {
+                for byte in line.bytes() {
+                    shell_command.push(if matches!(byte, b'\n' | b'\r') { byte as char } else { ' ' });
+                }
             }
             continue;
         }
@@ -5566,7 +5677,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
             collect_heredoc_substitutions(&body, depth, found);
         }
     }
-    collect_quoted_shell_substitutions(&shell_command_without_heredoc_bodies(command), depth, found);
+    collect_shell_substitutions(&shell_command_without_heredoc_bodies(command), depth, found);
     for words in shell_statement_words(command) {
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
@@ -5596,10 +5707,10 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
     }
 }
 
-/// Unquoted `$(...)` scopes already reach the statement tokenizer. Quoted
-/// substitutions and backticks keep their own shell syntax, so inspect their
-/// original source before the outer tokenizer removes quote provenance.
-fn collect_quoted_shell_substitutions(
+/// Inspect substitutions before word projection removes quote provenance.
+/// Parameter/arithmetic word parts can contain executable substitutions even
+/// when the outer word is unquoted; their source must remain inspectable.
+fn collect_shell_substitutions(
     command: &str,
     depth: usize,
     found: &mut Vec<(String, Vec<String>)>,
@@ -5637,7 +5748,7 @@ fn collect_quoted_shell_substitutions(
             }
             continue;
         }
-        let (start, end) = if quote == Some(b'"') && bytes.get(index..index + 2) == Some(b"$(") {
+        let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
             let end = shell_effects::literal_cat_heredoc_end(&command[index..])
                 .map(|end| index + end)
                 .or_else(|| shell_effects::substitution_end(bytes, index + 2, 0));
@@ -8507,6 +8618,20 @@ mod workspace_contract_tests {
             "cat <<EOF\n`cas config gr''ant-write --task cas-1234 --path /x --reason r`\nEOF",
             "cat <<EOF\n'$(cas config gr''ant-write --task cas-1234 --path /x --reason r)'\nEOF",
             "cat <<EOF\n$\\\n(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            // Fix-forward: pattern/comment ')' tokens do not close $().
+            "cat <<EOF\n$(case x in x) cas config gr''ant-write --task cas-1234 --path /x --reason r;; esac)\nEOF",
+            "cat <<EOF\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "echo \"$(case x in x) cas config gr''ant-write --task cas-1234 --path /x --reason r;; esac)\"",
+            "echo \"$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\"",
+            // Parameter expansion delimiters do not end a command substitution.
+            "cat <<EOF\n$(echo ${x:-)}; cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "cat <<EOF | pbcopy\n$(echo ${x:-)}; cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "echo \"$(echo ${x:-)}; cas config gr''ant-write --task cas-1234 --path /x --reason r)\"",
+            "cat <<EOF\n$(echo ${x/)/}; cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "echo \"$(echo ${x/)/}; cas config gr''ant-write --task cas-1234 --path /x --reason r)\"",
+            "echo \"$((1 + $(cas config gr''ant-write --task cas-1234 --path /x --reason r)))\"",
+            "echo \"$[1 + $(cas config gr''ant-write --task cas-1234 --path /x --reason r)]\"",
+            "echo ${x:-$(cas config gr''ant-write --task cas-1234 --path /x --reason r)}",
         ] {
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
@@ -8526,10 +8651,19 @@ mod workspace_contract_tests {
             "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",
             "cat <<EOF\ncas config gr''ant-write --task cas-1234 --path /x --reason r\nEOF",
+            "cat <<'EOF'\n$(case x in x) cas config gr''ant-write --task cas-1234 --path /x --reason r;; esac)\nEOF",
+            "cat <<'EOF'\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "echo \"$(echo ${x:-\"a)b\"})\"",
+            "echo \"$(echo ${x:-${y:-)}})\"",
+            "echo \"$((1 + (2)))\"",
+            "echo \"$[1 + (2)]\"",
         ] {
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");
         }
+        // An unfinished word expansion cannot provide a trustworthy boundary.
+        assert_eq!(decision("echo ${x:-unfinished").0, "deny");
+        assert_eq!(decision("echo $[1 + (2)").0, "deny");
         for operation in [
             r#"set factory.write_roots "~/x""#,
             "grant-write --task cas-1234 --path /x --reason example",

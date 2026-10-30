@@ -1413,8 +1413,10 @@ export class ConversationView {
     if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
     this.scrolledTo = this.element.scrollTop;
     this.lastContentHeight = this.element.scrollHeight;
-    this.following = shouldFollowTail(this.element);
-    this.jump.hidden = this.following;
+    // Loading may still fit in the viewport. Opening work is reading intent:
+    // its later detail must not resume tail-following when it grows.
+    this.following = false;
+    this.jump.hidden = shouldFollowTail(this.element);
     this.notePlace();
   }
 

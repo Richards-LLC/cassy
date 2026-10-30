@@ -273,6 +273,22 @@ class FastRows(unittest.TestCase):
         self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
         self.assertIn("PASS changelog-and-versions", restored.stdout)
 
+        for category, accepted in (("Documentation", True), ("Tests", True), ("Bogus", False)):
+            with self.subTest(category=category):
+                self.write("CHANGELOG.md", (
+                    f"## [Unreleased]\n\n### {category} — Fixture\n\n"
+                    "- **Fixture entry** — Describe the fixture change.\n\n"
+                    "## [9.99.7] - 2026-09-30\n\n- Fixture.\n"
+                ))
+                self.commit()
+                result = self.fast()
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("PASS changelog-and-versions", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("FAIL changelog-and-versions", result.stdout)
+
     def receipt(self):
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         return head, self.repo / ".git" / "cas" / "fast-rows" / f"{head}.pass"

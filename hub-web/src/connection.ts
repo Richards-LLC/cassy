@@ -10,10 +10,11 @@ import { ConnectionDiagnostics, httpRefusalCause, type CauseEvidence } from "./c
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { CoalescedRefresh } from "./catalog-refresh";
 import { dpopHeaders } from "./dpop";
+import { uploadRequest } from "./upload-transport";
 import { localNetworkAccessHelp } from "./local-network-access";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
 import { SessionLaunchGrantError } from "./launch-session";
-import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
+import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, LaunchTarget, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
   connectingAnchor,
@@ -631,7 +632,7 @@ export class HubConnectionSupervisor {
     return true;
   }
 
-  private async authorizedFetch(method: string, path: string, init: RequestInit = {}): Promise<{ response: Response; refusal: AuthRefusal }> {
+  private async authorizedFetch(method: string, path: string, init: RequestInit = {}, onProgress?: (fraction: number) => void): Promise<{ response: Response; refusal: AuthRefusal }> {
     // The proof binds the bare path; the hub rejects an htu with a query.
     const htu = path.split("?")[0] ?? path;
     let signedWith = this.machine.credentialId;
@@ -642,13 +643,15 @@ export class HubConnectionSupervisor {
       if (path === "/v1/auth/websocket-ticket" && !await this.waitForAttachSlot(init.signal)) {
         throw new DOMException("Attachment cancelled", "AbortError");
       }
-      return fetch(new URL(path, this.machine.baseUrl), {
+      const requestInit: RequestInit = {
       ...init,
       method,
       headers: { ...(init.headers as Record<string, string> | undefined), ...proof },
       cache: "no-store",
       credentials: "omit",
-    });
+    };
+      const url = new URL(path, this.machine.baseUrl);
+      return onProgress ? uploadRequest(url, requestInit, onProgress) : fetch(url, requestInit);
     };
     let response = await send();
     if ((response.status === 401 || response.status === 403) && (this.machine.credentialGeneration !== undefined || typeof indexedDB !== "undefined") && !this.installationMutation) {
@@ -678,21 +681,21 @@ export class HubConnectionSupervisor {
     this.clockOffsetMs = serverTime * 1000 - Date.now();
   }
 
-  uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string; mime: string }> {
-    // Budget the base64 wire payload at 64 KiB/s (512 kbit/s), plus signing,
+  uploadFile(session: string, id: string, name: string, data: string, onProgress?: (fraction: number) => void): Promise<{ path: string; artifact_id: string; mime: string }> {
+    // Budget the base64 wire payload at 512 kbit/s with 25% transfer margin, plus signing,
     // JSON overhead and hub storage time. Ordinary reads keep their short deadline.
-    const timeoutMs = 10_000 + Math.ceil(data.length / 65_536) * 1000;
-    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data }, undefined, timeoutMs);
+    const timeoutMs = 10_000 + Math.ceil(data.length / 64_000 * 1.25) * 1000;
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data }, undefined, timeoutMs, onProgress);
   }
 
-  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, timeoutMs?: number, onProgress?: (fraction: number) => void): Promise<T> {
     return withRequestDeadline(async boundedSignal => {
     const startedAt = performance.now();
     const { response, refusal } = await this.authorizedFetch(method, path, {
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: boundedSignal,
-    });
+    }, onProgress);
     if (response.status === 403) {
       const error = await hubRequestError(method, path, response.clone());
       if (error.code === "session_denied") throw error;
@@ -823,9 +826,10 @@ export class HubConnectionSupervisor {
     await this.request("POST", "/v1/accounts/operations", change);
   }
 
-  /** Each launch CLI's account profiles on the machine (cas-7b52). */
-  async launchProfiles(signal?: AbortSignal): Promise<LaunchProfiles> {
-    return this.request("GET", "/v1/launch/profiles", undefined, signal);
+  /** Each launch CLI's account profiles under the selected project's policy. */
+  async launchProfiles(signal?: AbortSignal, target?: LaunchTarget): Promise<LaunchProfiles> {
+    const query = target ? `?${new URLSearchParams({ target: JSON.stringify(target) })}` : "";
+    return this.request("GET", `/v1/launch/profiles${query}`, undefined, signal);
   }
 
   /** One folder under a configured launch root. */

@@ -98,7 +98,7 @@ import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, typ
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
-import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ArtifactRef, AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
 
@@ -245,7 +245,8 @@ installAttachmentSheet((sheet, file, context) => {
   const thread = threadOf(context);
   if (!thread) return sheet;
   const available = () => connectionStates.get(thread.machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
+  const fetchImage = async (image: ArtifactRef) => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, image.artifact_id) : undefined;
+  return inlineAttachment(sheet, file, () => fetchImage(file), { machineId: thread.machineId, available, gallery: context.reply.attachments, fetchImage });
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
@@ -1289,7 +1290,7 @@ const launchSheet = new LaunchSheet({
   currentMachineId: () => selectedMachineId,
   origin: location.origin,
   projects: (machineId, signal) => launchConnection(machineId).projects(signal),
-  profiles: (machineId, signal) => launchConnection(machineId).launchProfiles(signal),
+  profiles: (machineId, signal, target) => launchConnection(machineId).launchProfiles(signal, target),
   browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
   launch: (machineId, request) => launchConnection(machineId).launchSession(request),
   grant: async (machineId) => {
@@ -4115,11 +4116,12 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
   if (uploads && hasAttachments) {
-    text = await uploads.prepare(text, async (id, name, data) => {
+    clearComposerStatus();
+    text = await uploads.prepare(text, async (id, name, data, onProgress) => {
       const connection = connections.get(machine.id);
       if (!connection) throw new Error("The machine is disconnected.");
       try {
-        return await connection.uploadFile(session, id, name, data);
+        return await connection.uploadFile(session, id, name, data, onProgress);
       } catch (error) {
         const detail = (error as { detail?: string })?.detail;
         if (detail) throw new Error(detail);
@@ -4140,7 +4142,9 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (sent && hasAttachments) countUsage("reply.attachment");
   if (sent && !quick) draftDictated = false;
   } catch (error) {
-    showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
+    if (!composerUploads || !(error instanceof composerUploads.UploadPreparationError)) {
+      showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
+    }
   } finally {
     pendingSubmissions.delete(submissionKey);
   }

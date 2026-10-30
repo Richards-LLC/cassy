@@ -87,3 +87,32 @@ it("restores a refused send's files as cards for Edit, without the host path in 
   expect(await draft.prepare("Edited", upload)).toBe(sent.replace("See this", "Edited"));
   expect(upload).not.toHaveBeenCalled();
 });
+
+it("shows byte progress through saving, survives rebinding, and clears progress on refusal", async () => {
+  const draft = new ComposerUploads();
+  document.body.innerHTML = composerMarkup("supervisor");
+  draft.bind(document.body);
+  draft.add([new File(["photo"], "photo.jpg")]);
+  let progress!: (fraction: number) => void;
+  let refuse!: (error: Error) => void;
+  let start!: () => void;
+  const started = new Promise<void>(resolve => { start = resolve; });
+  const result = draft.prepare("", async (_id, _name, _data, report) => {
+    progress = report!; start();
+    return new Promise((_resolve, reject) => { refuse = reject; });
+  });
+  const rejected = expect(result).rejects.toThrow("offline");
+  await started;
+  progress(0.42);
+  expect(document.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
+  expect(document.querySelector(".composer-uploads")?.textContent).toContain("Uploading photo.jpg · 42%");
+  document.body.innerHTML = composerMarkup("supervisor"); draft.bind(document.body);
+  expect(document.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
+  progress(1);
+  expect(document.querySelector(".composer-uploads")?.textContent).toContain("Saving photo.jpg");
+  refuse(new Error("offline"));
+  await rejected;
+  expect(document.querySelector(".upload-error")).not.toBeNull();
+  expect(document.querySelector('[role="progressbar"]')).toBeNull();
+  expect(draft.hasFiles()).toBe(true);
+});

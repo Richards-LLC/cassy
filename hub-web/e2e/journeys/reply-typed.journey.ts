@@ -639,7 +639,7 @@ test("HUB-J5 a revoked send keeps its text and draft and points to re-pairing (c
     await expect(composer).toHaveValue("Keep my newer draft too.");
     await bubble.getByRole("button", { name: "Edit message", exact: true }).click();
     await expect(composer).toHaveValue("Keep my newer draft too.");
-    await expect(page.locator("#message-status")).toContainText("Your draft already has text.");
+    await expect(page.locator("#message-status")).toContainText("Your draft already has text or files.");
   });
   await journey.stage("The header offers usable Re-pair while Edit still recovers the refused text", async () => {
     hub.refuseProofs("atlas", 1_000, "revoked", false);

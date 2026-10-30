@@ -117,32 +117,34 @@ def plan(root, base, head):
     changed = git(root, 'diff', '--name-only', '--no-renames', '--diff-filter=AM', '-z', base, head, '--').split('\0')
     tests = []
     for path in sorted(p for p in changed if p):
-        runner = ecosystem(path)
-        if runner is None:
-            continue
         old = git(root, 'show', f'{base}:{path}', missing=True)
         new = git(root, 'show', f'{head}:{path}')
-        before = {test['function']: test['fingerprint'] for test in source_tests(path, old, runner)}
-        for test in source_tests(path, new, runner):
+        runner = ecosystem(path, new)
+        if runner is None:
+            continue
+        before = {test['function']: test['fingerprint'] for test in source_tests(path, old, runner, root)}
+        for test in source_tests(path, new, runner, root):
             if before.get(test['function']) != test['fingerprint']:
                 tests.append({**test, 'runner': runner, 'file': path,
                               'id': path+'::'+test['function']})
     return {'version': 1, 'base': base, 'head': head, 'tests': tests}
 
 
-def ecosystem(path):
+def ecosystem(path, source=''):
     suffix = Path(path).suffix.lower()
     name = Path(path).name.lower()
     if suffix == '.rs':
         return 'rust'
     if suffix in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx') and re.search(r'(?:\.test|\.spec|\.journey)\.', name):
+        if re.search(r"(?:from\s*|import\s*\(|require\s*\()(['\"])node:test\1", source):
+            return 'node-test'
         return 'vitest' if '.test.' in name else 'playwright'
     if suffix == '.py' and (name.startswith('test_') or name.endswith('_test.py')):
         return 'pytest'
     return None
 
 
-def source_tests(path, source, runner):
+def source_tests(path, source, runner, root=None):
     if not source:
         return []
     if runner == 'rust':
@@ -169,6 +171,21 @@ def source_tests(path, source, runner):
         if len({test['function'] for test in found}) != len(found):
             raise ValueError(f'ambiguous pytest test identity in {path}')
         return found
+    if root is not None and (root / 'hub-web/node_modules/typescript/lib/typescript.js').is_file():
+        parser = root / 'scripts/worker-js-test-source.mjs'
+        result = subprocess.run(['node', str(parser), path], cwd=root, input=source,
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            message = next((line.strip()[7:] for line in result.stderr.splitlines() if line.strip().startswith('Error: ')),
+                           result.stderr.splitlines()[0] if result.stderr else f'cannot resolve touched tests in {path}')
+            raise ValueError(message)
+        try:
+            tests = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise ValueError(f'invalid JavaScript test plan for {path}') from error
+        for test in tests:
+            test['fingerprint'] = hashlib.sha256(test['fingerprint'].encode()).hexdigest()
+        return tests
     return javascript_tests(path, source)
 
 
@@ -192,7 +209,7 @@ def javascript_tests(path, source):
             start, quote = i, char
             i += 1
             while i < len(source):
-                if source[i] == '\\\\':
+                if source[i] == '\\':
                     i += 2
                 elif source[i] == quote:
                     i += 1
@@ -209,21 +226,63 @@ def javascript_tests(path, source):
             tokens.append(('string', str(value), start, i))
         elif char == '`':
             start = i
-            end = source.find('`', i + 1)
-            if end < 0:
+            i += 1
+            value = []
+            while i < len(source):
+                if source[i] == '\\':
+                    if i + 1 < len(source):
+                        value.extend((source[i], source[i + 1]))
+                    i += 2
+                elif source[i] == '`':
+                    break
+                else:
+                    value.append(source[i])
+                    i += 1
+            if i >= len(source):
                 raise ValueError(f'unclosed template string in {path}')
-            raw = source[i + 1:end]
+            raw = ''.join(value)
             if '${' in raw:
-                tokens.append(('dynamic-string', raw, start, end + 1))
+                tokens.append(('dynamic-string', raw, start, i + 1))
             else:
-                tokens.append(('string', raw, start, end + 1))
-            i = end + 1
+                tokens.append(('string', raw, start, i + 1))
+            i += 1
+        elif char == '/' and regex_can_start(tokens):
+            start = i
+            i += 1
+            in_class = False
+            while i < len(source):
+                if source[i] == '\\':
+                    i += 2
+                elif source[i] == '[':
+                    in_class = True
+                    i += 1
+                elif source[i] == ']':
+                    in_class = False
+                    i += 1
+                elif source[i] == '/' and not in_class:
+                    i += 1
+                    while i < len(source) and source[i].isalpha():
+                        i += 1
+                    break
+                elif source[i] in '\r\n':
+                    raise ValueError(f'unclosed regular expression in {path}')
+                else:
+                    i += 1
+            else:
+                raise ValueError(f'unclosed regular expression in {path}')
+            tokens.append(('regex', source[start:i], start, i))
         elif char.isalpha() or char in '_$':
             start = i
             i += 1
             while i < len(source) and (source[i].isalnum() or source[i] in '_$'):
                 i += 1
             tokens.append(('id', source[start:i], start, i))
+        elif char.isdigit():
+            start = i
+            i += 1
+            while i < len(source) and (source[i].isalnum() or source[i] in '._'):
+                i += 1
+            tokens.append(('number', source[start:i], start, i))
         else:
             tokens.append(('punct', char, i, i + 1))
             i += 1
@@ -275,22 +334,41 @@ def javascript_tests(path, source):
     return tests
 
 
+def regex_can_start(tokens):
+    """A slash begins a regex where JavaScript permits a new expression."""
+    if not tokens:
+        return True
+    kind, value, *_ = tokens[-1]
+    if kind == 'id' and value not in {
+        'return', 'throw', 'case', 'delete', 'void', 'typeof', 'new', 'in',
+        'of', 'yield', 'await', 'else', 'do', 'instanceof',
+    }:
+        return False
+    if kind in ('string', 'regex', 'number'):
+        return False
+    if kind == 'punct' and value in (')', ']', '}', '.', '++', '--'):
+        return False
+    return True
+
+
 def adapter_args(runner, tests):
     """Produce the narrow native selector for the touched cases in one ecosystem."""
     if not tests or any(test['runner'] != runner for test in tests):
         raise ValueError(f'no resolvable touched {runner} tests')
     if runner == 'pytest':
-        return [test['file'] + '::' + test['function'] for test in tests]
+        raise ValueError('pytest touched-test stability receipts are not supported yet')
     if runner == 'playwright':
-        locations = [f"{test['file']}:{test['line']}" for test in tests]
-        if len(set(locations)) != len(locations):
-            raise ValueError('ambiguous Playwright test location')
-        return locations
+        raise ValueError('Playwright touched-test stability receipts are not supported yet')
     if runner == 'vitest':
         files = sorted({test['file'] for test in tests})
         names = [' '.join(test['function'].split('::')) for test in tests]
         pattern = '^(?:' + '|'.join(re.escape(name) for name in names) + ')$'
         return ['--testNamePattern', pattern, *files]
+    if runner == 'node-test':
+        files = sorted({test['file'] for test in tests})
+        names = [test['function'].replace('::', ' ') for test in tests]
+        pattern = '^(?:' + '|'.join(re.escape(name) for name in names) + ')$'
+        return ['--test-name-pattern', pattern, *files]
     raise ValueError('unsupported stability ecosystem: '+runner)
 
 
@@ -332,7 +410,7 @@ def worker_context(root):
 
 
 def rust_test_receipt_path(cas_root, root, head, runner):
-    package = 'web-tests' if runner != 'pytest' else 'python-tests'
+    package = 'web-tests'
     harness = runner
     filter_name = 'test(worker-stability)'
     repo_key = hashlib.sha256(os.fsencode(str(root.resolve()))).hexdigest()
@@ -342,18 +420,9 @@ def rust_test_receipt_path(cas_root, root, head, runner):
 
 
 def report_durations(runner, report, tests):
-    data = json.loads(Path(report).read_text())
     durations = {test['id']: [] for test in tests}
-    if runner == 'pytest':
-        import xml.etree.ElementTree as ET
-        for case in ET.parse(report).iter('testcase'):
-            name = case.attrib.get('name', '')
-            path = case.attrib.get('file', '')
-            matched = next((test for test in tests if Path(test['file']).name == Path(path).name
-                            and test['function'].endswith(name)), None)
-            if matched and 'time' in case.attrib:
-                durations[matched['id']].append(float(case.attrib['time']))
-    elif runner == 'vitest':
+    if runner == 'vitest':
+        data = json.loads(Path(report).read_text())
         for result in data.get('testResults', []):
             file = Path(result.get('name', '')).as_posix()
             for case in result.get('assertionResults', []):
@@ -362,27 +431,17 @@ def report_durations(runner, report, tests):
                                 and ' '.join(test['function'].split('::')) == full_name), None)
                 if matched and isinstance(case.get('duration'), (int, float)):
                     durations[matched['id']].append(float(case['duration']) / 1000)
+    elif runner == 'node-test':
+        import xml.etree.ElementTree as ET
+        for case in ET.parse(report).iter('testcase'):
+            name = case.attrib.get('name', '')
+            matched = next((test for test in tests if test['function'] == name
+                            or ' '.join(test['function'].split('::')) == name
+                            or name.endswith(' ' + ' '.join(test['function'].split('::')))), None)
+            if matched and 'time' in case.attrib:
+                durations[matched['id']].append(float(case.attrib['time']))
     else:
-        def walk(suite, parents=(), suite_file=''):
-            title = suite.get('title', '')
-            suite_file = suite.get('file') or suite_file
-            # Playwright emits a file suite whose title is the filename. Keep
-            # only describe scopes so the name matches the selected test title.
-            scope = parents + ((title,) if title and not suite.get('file') else ())
-            for spec in suite.get('specs', []):
-                name = ' '.join((*scope, spec.get('title', '')))
-                file = Path(spec.get('file') or suite_file).as_posix()
-                matched = next((test for test in tests if file.endswith(Path(test['file']).as_posix())
-                                and ' '.join(test['function'].split('::')) == name), None)
-                if matched:
-                    seconds = [float(result.get('duration', 0)) / 1000
-                               for item in spec.get('tests', []) for result in item.get('results', [])
-                               if result.get('status') == 'expected']
-                    durations[matched['id']].extend(seconds)
-            for child in suite.get('suites', []):
-                walk(child, scope, suite_file)
-        for suite in data.get('suites', []):
-            walk(suite)
+        raise ValueError(f'{runner} report parsing is not supported yet')
     if any(not values for values in durations.values()):
         raise ValueError(f'{runner} report does not resolve every touched test')
     return durations
@@ -391,6 +450,8 @@ def report_durations(runner, report, tests):
 def run_adapter_stability(root, runner, report, initial_args=(), invoke=subprocess.run):
     if os.environ.get('CAS_WORKER_STABILITY_TRIAL') == '1':
         return
+    if runner not in ('vitest', 'node-test'):
+        raise ValueError(f'{runner} touched-test stability receipts are not supported yet')
     context = worker_context(root)
     if context is None:
         return
@@ -406,19 +467,11 @@ def run_adapter_stability(root, runner, report, initial_args=(), invoke=subproce
     path.unlink(missing_ok=True)
     (root / 'target').mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix='stability-', dir=root / 'target'))
-    if runner in ('vitest', 'playwright'):
+    if runner == 'vitest':
         executable = [sys.executable, str(Path(__file__).resolve()), '--adapter-trial', runner]
-        command = [*executable, *selectors]
-        if runner == 'playwright':
-            command.extend(['--workers=1'])
-            command.extend(option_args(initial_args, ('--config', '--project')))
-        else:
-            command.extend(['--retry=0'])
-            command.extend(option_args(initial_args, ('--config', '--project')))
+        command = [*executable, '--', *selectors, '--retry=0']
     else:
-        command = [sys.executable, str(Path(__file__).with_name('run-verified-pytest.py')),
-                   *selectors, '--override-ini=addopts=']
-        command.extend(option_args(initial_args, ('-c', '--confcutdir')))
+        command = [sys.executable, str(Path(__file__).resolve()), '--adapter-trial', runner, '--', *selectors]
     ready = __import__('threading').Barrier(5)
     def trial(number):
         log = directory / f'run-{number}.log'
@@ -476,15 +529,17 @@ def run_adapter_stability(root, runner, report, initial_args=(), invoke=subproce
 
 def adapter_trial(runner, args):
     root = Path.cwd().resolve()
-    if runner in ('vitest', 'playwright'):
+    if runner == 'vitest':
         hub = root / 'hub-web'
         script = hub / 'scripts/run-verified-tests.mjs'
         selectors = [arg.removeprefix('hub-web/') if arg.startswith('hub-web/') else arg for arg in args]
         command = [shutil.which('node') or 'node', str(script), runner, *selectors]
+    elif runner == 'node-test':
+        selectors = [arg.removeprefix('hub-web/') if arg.startswith('hub-web/') else arg for arg in args]
+        command = [shutil.which('node') or 'node', str(root / 'hub-web/scripts/run-verified-node-tests.mjs'), *selectors]
     else:
-        command = [sys.executable, str(root / 'scripts/run-verified-pytest.py'), *args]
-    result = subprocess.run(command, cwd=(root / 'hub-web' if runner in ('vitest', 'playwright') else root),
-                            close_fds=False)
+        raise ValueError(f'{runner} touched-test stability receipts are not supported yet')
+    result = subprocess.run(command, cwd=(root / 'hub-web' if runner == 'vitest' else root), close_fds=False)
     return result.returncode
 
 
@@ -780,8 +835,8 @@ def main():
     parser.add_argument('--plan', action='store_true')
     parser.add_argument('--base')
     parser.add_argument('--head')
-    parser.add_argument('--run-adapter', choices=('vitest', 'playwright', 'pytest'))
-    parser.add_argument('--adapter-trial', choices=('vitest', 'playwright', 'pytest'))
+    parser.add_argument('--run-adapter', choices=('vitest', 'node-test', 'playwright', 'pytest'))
+    parser.add_argument('--adapter-trial', choices=('vitest', 'node-test', 'playwright', 'pytest'))
     parser.add_argument('--report')
     parser.add_argument('--cargo')
     parser.add_argument('--verified-script')

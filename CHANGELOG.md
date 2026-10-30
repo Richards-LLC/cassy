@@ -7,12 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Added — Touched-test stability receipts for web and Python
+### Added — Touched-test stability receipts for web tests
 
-- **Vitest, Playwright and pytest record stable touched-test evidence** — Was:
-  Their worker runs had no park-readable stability proof. → Now: Runners select
-  changed tests and record five concurrent, zero-retry passes in the existing
-  worker evidence store; unresolved selection and failed copies leave no receipt.
+- **Vitest and node:test record stable touched-test evidence** — Was: Their
+  worker runs had no park-readable stability proof. → Now: The supported runners
+  select changed tests and record five concurrent, zero-retry passes in the
+  existing worker evidence store. Playwright and pytest fail closed as unsupported.
 
 ### Fixed — Stability proof for nested Rust workspaces
 

@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn extract_skill_id_stops_before_degraded_validation_warning() {
-        let response = "Created skill: cas-skf7\nWARNING: network isolation is unavailable; bubblewrap was not found, so validation ran in degraded plain-shell mode";
+        let response = "Created skill: cas-skf7\nWARNING: network isolation is unavailable; bubblewrap is missing or could not create a network namespace, so validation ran in degraded plain-shell mode";
 
         assert_eq!(extract_skill_id(response).as_deref(), Some("cas-skf7"));
     }

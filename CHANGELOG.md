@@ -23,6 +23,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   scoped to `hub-web` Vitest and node:test files; other paths remain outside the
   gate.
 
+### Fixed — Skill validation sandbox detection
+
+- **Validation handles unusable Bubblewrap installations** — Was: Finding
+  `bwrap` on `PATH` selected network isolation even when the host could not
+  create a namespace, rejecting otherwise valid skill probes. → Now: Validation
+  checks the host capability first, falls back with a warning when policy allows,
+  and still fails closed when `require_sandbox` is enabled.
+
 ### Fixed — Stability proof for nested Rust workspaces
 
 - **Subdirectory Rust workspaces can produce park evidence** — Capped checks

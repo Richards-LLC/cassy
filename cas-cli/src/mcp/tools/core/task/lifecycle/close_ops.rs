@@ -9160,6 +9160,29 @@ impl CasCore {
                             }
                         }
                     }
+                    // cas-a58cc: a rejected continuation must not look like
+                    // a successful re-park of the pushed tip. Shared advance
+                    // callers still retain their silent attribution fence.
+                    if task.status == TaskStatus::AwaitingMerge
+                        && let (Some(recorded), Some(tip)) = (
+                            task.deliverables.factory_branch_anchor.as_deref(), anchor.as_deref(),
+                        )
+                        && tip != recorded
+                        && park_anchor.as_deref() == Some(recorded)
+                    {
+                        let offending = git_stdout_lines(
+                            &close_project_root,
+                            &["rev-list", "--first-parent", "--reverse", &format!("{recorded}..{tip}")],
+                        ).unwrap_or_default().into_iter().find(|commit| {
+                            self.eligible_awaiting_merge_advance(
+                                task_store.as_ref(), &task, &close_project_root,
+                                &resolved_parent_branch, Some(commit),
+                            ).is_none()
+                        }).unwrap_or_else(|| tip.to_string());
+                        return Ok(Self::tool_error(format!(
+                            "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored pushed tip {tip}. No anchor or QA round changed. Ask the supervisor to request changes and review the replacement delivery.",
+                        )));
+                    }
                     // Focused-test receipts at this
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before

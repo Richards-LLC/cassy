@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Refused delivery advances
+
+- **Re-parking names work it cannot attribute** — When a pushed branch advances
+  beyond its parked delivery through unowned work, close reports the kept anchor,
+  ignored tip and offending commit instead of returning an ordinary merge request.
+
 ### Added — Emoji in Commander conversations
 
 - **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.

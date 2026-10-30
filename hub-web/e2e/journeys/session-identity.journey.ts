@@ -61,22 +61,23 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 conversations on Atlas");
     await expect(list.getByRole("group", { name: "gabber-studio · 3 conversations on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(3);
     const rows = list.locator(".conversation-row");
-    await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "wild-shark-68", "noble-cheetah-84"]);
+    // cas-ade2: rows sort by supervisor name; Most recent marks the newest where it stands.
+    await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "noble-cheetah-84", "wild-shark-68"]);
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
-    await expect(rows.locator(".conversation-when")).toHaveText(["2m", "40m", /^\d+h$/]);
+    await expect(rows.locator(".conversation-when")).toHaveText(["2m", /^\d+h$/, "40m"]);
     await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · Messaged bright-robin-85");
     // cas-5d2c: under a heading that names the project and machine once, each
     // row leads with its codename and says what its session last did, before
     // any of them is opened; the heading and footer count the same noun.
     await expect(rows.locator(".conversation-title")).toHaveCount(3);
     for (const title of await rows.locator(".conversation-title").all()) await expect(title).toBeHidden();
-    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Mixdown preview rendered: 3 stems."]);
+    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "Mixdown preview rendered: 3 stems.", "You wrote to it"]);
     await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
     await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
     // A useful incoming preview can grow the last row beyond the list's
     // available height. Keep it reachable in the list's own scroll region.
-    const incoming = row("noble-cheetah-84");
+    const incoming = rows.last();
     await incoming.scrollIntoViewIfNeeded();
     await expect(incoming).toBeInViewport({ ratio: 1 });
   });
@@ -205,7 +206,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(log).not.toContainText("Mixdown preview rendered");
     await expect(earlier).toBeHidden();
     await backToList();
-    // cas-5d2c: the lowest row keeps its place when it opens; the list does
+    // cas-5d2c: a lower row keeps its place when it opens; the list does
     // not jump back to its top and leave it below the fold.
     await row("noble-cheetah-84").scrollIntoViewIfNeeded();
     await row("noble-cheetah-84").click();
@@ -219,7 +220,8 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
 
   await journey.stage("End a stale session", async () => {
     await backToList();
-    const end = list.locator(".conversation-end").nth(2);
+    // cas-ade2: noble-cheetah-84 is the second row by supervisor name.
+    const end = list.locator(".conversation-end").nth(1);
     // cas-f60a: a double-click on End session opens the confirmation and
     // nothing more. Its destructive button is never where the pointer was.
     const ask = end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" });
@@ -236,7 +238,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     }, point);
     expect(underPointer.confirm, `the confirm is not under the pointer (hit: ${underPointer.hit})`).toBe(false);
     expect(await end.locator("button").allTextContents()).toEqual(["Cancel", "End session"]);
-    // cas-d6bf: the last row's confirmation is in view and focused, and the list stays whole.
+    // cas-d6bf: a lower row's confirmation is in view and focused, and the list stays whole.
     await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();
     await expect(end.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });
     await expect(list.locator(".conversation-row")).toHaveCount(3);

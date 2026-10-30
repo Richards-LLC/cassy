@@ -248,7 +248,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
 
 // cas-4646: the operator's fleet on the day of the report. One machine runs
 // two projects; the other runs two sessions of one project, which the list
-// groups ("gabber-studio · 2 conversations on prowl") with the most recent first.
+// groups ("gabber-studio · 2 conversations on prowl"), by supervisor name (cas-ade2).
 const SOUNDWAVE: Machine = {
   id: "soundwave",
   label: "soundwave · Linux",
@@ -265,12 +265,16 @@ const PROWL: Machine = {
     { name: "calm-raven-72", supervisor: "calm-raven-72", project_dir: "/projects/gabber-studio", workers: ["deft-owl-4"], liveness: "live", last_activity_at: journeyStamp(-3_700_000) },
   ],
 };
-// A session that starts and ends on soundwave while the operator taps.
-const PASSING = { name: "brisk-elk-6", supervisor: "brisk-elk-6", project_dir: "/projects/scratch", workers: ["tame-gnu-7"], liveness: "live" as const };
+// A session that starts and ends on soundwave while the operator taps. Its
+// project sorts first, so its card moves every other row (cas-ade2).
+const PASSING = { name: "brisk-elk-6", supervisor: "brisk-elk-6", project_dir: "/projects/aardvark", workers: ["tame-gnu-7"], liveness: "live" as const };
 
 for (const width of [1280, 390]) {
   test.describe(`HUB-J8 at ${width}`, () => {
-    test.use(width === 390 ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 800 } });
+    // cas-ade2: activity no longer reorders rows, so the card that starts and
+    // ends above them is what moves a row under the finger. The whole list
+    // fits, so a scrolled list cannot clamp or anchor that movement away.
+    test.use(width === 390 ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 1200 } });
     test(`HUB-J8 every tap opens its conversation while the list re-renders under the finger at ${width} (cas-4646)`, journeyPart, async ({ page, journey }) => {
       test.setTimeout(240_000);
       // Each part streams into its own copy of the fleet.
@@ -332,14 +336,15 @@ for (const width of [1280, 390]) {
           await press(point.x, point.y);
           try {
             // While the finger is down, both kinds of live update land: the
-            // prowl pair trades places (the other one just did something), and
-            // a session starts or ends on soundwave, which rebuilds the list.
+            // other prowl session just did something, which leaves its
+            // alphabetical place alone (cas-ade2), and a session starts or ends
+            // on soundwave in the first card, which moves every row below it.
             const [, other] = [...prowl.sessions].sort((a, b) => Date.parse(b.last_activity_at!) - Date.parse(a.last_activity_at!));
             stamp += 61_000;
             other!.last_activity_at = journeyStamp(stamp);
             await hub.announceCatalog(prowl.id);
             await expect(list.locator('.conversation-row[data-machine-id="prowl"]').first(),
-              `tap ${tap}: the catalog re-sorted the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:${other!.name}`);
+              `tap ${tap}: activity never re-sorts the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:calm-raven-72`);
             if (soundwave.sessions.some((session) => session.name === PASSING.name)) {
               soundwave.sessions = soundwave.sessions.filter((session) => session.name !== PASSING.name);
               await hub.announceCatalog(soundwave.id, { removed: [PASSING.name] });

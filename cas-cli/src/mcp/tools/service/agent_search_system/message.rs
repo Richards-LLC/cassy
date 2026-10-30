@@ -1823,6 +1823,20 @@ impl CasService {
                 })?;
             let reply_id = reply.id();
             crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
+            // cas-2f55: replying to the hub's "saved" message confirms use of
+            // a secret the operator chose to delete after use.
+            let used = match req.in_reply_to.map(|answered| {
+                crate::hub::secret_auto_delete::confirm_use(&self.inner.cas_root, factory_session, answered)
+            }) {
+                Some(Ok(removed)) if !removed.is_empty() => {
+                    format!("\nSecret deleted after use: {}", removed.join(", "))
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "cas-2f55: after-use secret deletion failed");
+                    "\nSecret deletion after use failed; tell the operator to delete the file".to_string()
+                }
+                _ => String::new(),
+            };
             let deadline = match ask_deadline {
                 Some((secs, default)) => {
                     let id =
@@ -1839,7 +1853,7 @@ impl CasService {
                 ("queued", "", "queued for")
             };
             return Ok(Self::success(format!(
-                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}",
+                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}{used}",
                 kind.as_str(),
                 req.in_reply_to
                     .map_or_else(|| "none".to_string(), |id| id.to_string())
@@ -7629,6 +7643,13 @@ mod cas_89e1_post_merge_message_type_tests {
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
+        // cas-2f55: a secret saved to delete after use, bound to this
+        // Commander message, is removed by the supervisor's reply to it.
+        let secret = temp.path().join("DEPLOY_KEY");
+        std::fs::write(&secret, "dk-value").unwrap();
+        let after_use = crate::hub::secret_auto_delete::AutoDelete::AfterUse;
+        crate::hub::secret_auto_delete::schedule(&cas_root, "DEPLOY_KEY", &secret, "factory-operator", commander - 1, after_use).unwrap();
+        crate::hub::secret_auto_delete::bind_reply(&cas_root, commander - 1, commander).unwrap();
         let request: AgentRequest = serde_json::from_value(serde_json::json!({
             "action": "message",
             "target": "operator",
@@ -7645,6 +7666,10 @@ mod cas_89e1_post_merge_message_type_tests {
                 .expect("supervisor reply queues successfully"),
         );
         assert!(response.contains("held for delivery to phone-7"), "{response}");
+        assert!(response.contains("Secret deleted after use: DEPLOY_KEY"), "{response}");
+        assert!(!secret.exists(), "the reply confirmed use");
+        let receipts = std::fs::read_to_string(cas_root.join("secret-receipts.jsonl")).unwrap();
+        assert!(receipts.contains("\"trigger\":\"after_use\"") && !receipts.contains("dk-value"), "{receipts}");
 
         let rows = queue
             .peek_operator_replies("factory-operator", 10)

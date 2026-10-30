@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Commander secret auto-delete
+
+- **A saved secret can delete itself** — Was: a secret saved from Commander's secret card stayed on the machine until someone deleted it. Now: the card offers to keep the file, delete it once the agent has used it, or delete it after 1 or 24 hours. The project setting `secrets.auto_delete` (default `off`) sets the default. Each deletion leaves a receipt in `.cas/secret-receipts.jsonl` that never contains the value.
+
 ### Fixed — Posted release notes
 
 - **Posted drafts keep their historical wording** — Was: later pushes could

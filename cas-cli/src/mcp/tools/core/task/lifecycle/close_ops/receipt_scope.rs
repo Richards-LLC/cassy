@@ -1026,7 +1026,11 @@ sys.exit(100 if failed else 0)
         // runtime target metadata; it must discover the same nearest manifest.
         std::fs::remove_file(repo.join("target/rendezvous")).unwrap();
         let output = std::process::Command::new("python3")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/worker-test-stability.py"))
+            .args(["-I", "-B", "-c"])
+            .arg(concat!(
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/rust_test_source.py")), "\n",
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/worker-test-stability.py")),
+            ))
             .args(["--base", &base, "--cargo"]).arg(&cargo)
             .arg("--verified-script").arg(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/run-verified-tests.sh")))
             .arg("--count-file").arg(repo.join("target/python-count"))

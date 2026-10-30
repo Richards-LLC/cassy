@@ -316,19 +316,30 @@ fn manifest_roots(repo: &Path) -> Vec<PathBuf> {
 }
 
 fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
-    let mut manifests = std::collections::VecDeque::from(manifest_roots(repo));
-    let mut visited = BTreeSet::new();
-    while let Some(path) = manifests.pop_front() {
-        if !visited.insert(path.clone()) { continue; }
-        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-        if value.get("package").and_then(|p| p.get("name")).and_then(toml::Value::as_str) == Some(package) {
-            return Ok((path, value));
+    let root = repo.join("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
+    let mut manifests = vec![root];
+    if let Some(members) = manifest
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(toml::Value::as_array)
+    {
+        for member in members.iter().filter_map(toml::Value::as_str) {
+            manifests.extend(
+                glob::glob(&repo.join(member).join("Cargo.toml").to_string_lossy())?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
         }
-        if let Some(members) = value.get("workspace").and_then(|w| w.get("members")).and_then(toml::Value::as_array) {
-            for member in members.iter().filter_map(toml::Value::as_str) {
-                manifests.extend(glob::glob(&path.parent().context("manifest directory")?.join(member).join("Cargo.toml").to_string_lossy())?
-                    .collect::<std::result::Result<Vec<_>, _>>()?);
-            }
+    }
+    for path in manifests {
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
+        if value
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(toml::Value::as_str)
+            == Some(package)
+        {
+            return Ok((path, value));
         }
     }
     bail!("Worker test refused: package {package} not found in workspace")

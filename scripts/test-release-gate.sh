@@ -39,6 +39,13 @@ chmod +x "$tmp/linux-cc"
 export CC="$tmp/linux-cc"
 }
 
+# Source-only sections need no ELF compiler. Resolve compiling sections now,
+# before the fixture environment hides the operator's release profile.
+case "${1:-}" in
+    --changelog-only|--test-child-env-only) ;;
+    *) pin_fixture_compiler ;;
+esac
+
 # The gate refuses any scratch base with a .cas ancestor. Its default used to be
 # $HOME/.cache/cas-release-gate — which on a developer machine sits under the
 # user-level ~/.cas — so unset, this self-test died mid-run on the two rows that
@@ -841,7 +848,6 @@ print(f"replay 1/{sys.argv[3]}: gate wall {wall:.1f}s; sequential sum {serial:.1
 PY_REPLAY_REPORT
 }
 if [[ "${1:-}" == --replay-timing ]]; then
-    pin_fixture_compiler
     replay_timing "${2:?timing.tsv}" "${3:-10}"
     exit
 fi
@@ -2670,26 +2676,23 @@ run_sections() {
 }
 if [[ "${1:-}" == --changelog-only ]]; then
     run_sections section_web_and_source_rows
+elif [[ "${1:-}" == --release-binary-isa-only ]]; then
+    run_sections section_release_binary_isa
+elif [[ "${1:-}" == --concurrency-only ]]; then
+    run_sections section_concurrency
+elif [[ "${1:-}" == --failure-scenarios-only ]]; then
+    run_sections section_failure_scenarios
 else
-    pin_fixture_compiler
-    if [[ "${1:-}" == --release-binary-isa-only ]]; then
-        run_sections section_release_binary_isa
-    elif [[ "${1:-}" == --concurrency-only ]]; then
-        run_sections section_concurrency
-    elif [[ "${1:-}" == --failure-scenarios-only ]]; then
-        run_sections section_failure_scenarios
-    else
-        run_sections section_release_binary_isa \
-            section_admission_and_script_tier \
-            section_failure_scenarios \
-            section_web_and_source_rows \
-            section_scratch_and_selection \
-            section_environment_and_receipts \
-            section_row_cache \
-            section_train_proof \
-            section_admission_barriers \
-            section_concurrency
-    fi
+    run_sections section_release_binary_isa \
+        section_admission_and_script_tier \
+        section_failure_scenarios \
+        section_web_and_source_rows \
+        section_scratch_and_selection \
+        section_environment_and_receipts \
+        section_row_cache \
+        section_train_proof \
+        section_admission_barriers \
+        section_concurrency
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

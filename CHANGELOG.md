@@ -39,6 +39,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Arithmetic workspace checks
 
+- **Shell syntax cannot hide inside arithmetic** — Arithmetic with comment
+  markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
+  keeps its existing allowance.
+
 - **Ambiguous arithmetic keeps command checks** — Parentheses must match the
   arithmetic boundary. Command substitutions and dynamic arithmetic operands
   retain workspace checks and unresolved effects are refused.

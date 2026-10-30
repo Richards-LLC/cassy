@@ -31284,6 +31284,56 @@ esac
         assert_eq!(rev_parse_local(p, "factory/worker"), parked);
     }
 
+    /// cas-985f: merging the released trunk into an epic-bound lane, as
+    /// instructed and without a rebase, brings other tasks' released commits.
+    /// They are upstream, so the lane still resolves to its own commit; an
+    /// unreleased branch carrying another task's work is still refused.
+    #[test]
+    fn merging_released_main_into_an_epic_lane_is_upstream_but_unreleased_work_is_foreign_cas_985f() {
+        for (merged, foreign) in [("main", false), ("factory/other-cas-0e2b", true)] {
+            let dir = init_factory_repo_with_parent("worker", "main");
+            let p = dir.path();
+            std::fs::create_dir_all(p.join(".cas")).unwrap();
+            std::fs::write(p.join(".cas/config.toml"), "[project]\ncanonical_id = \"cas985f\"\n").unwrap();
+            git(p, &["branch", "epic/next", "main"]);
+            git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1", "epic/next"]);
+            let base = head_sha(p);
+            std::fs::write(p.join("own.rs"), "// own\n").unwrap();
+            git(p, &["add", "own.rs"]);
+            git(p, &["commit", "-q", "-m", "fix(cas-test1): own work"]);
+            let own = head_sha(p);
+            // Released on main by another task, after this lane started.
+            git(p, &["checkout", "-q", "main"]);
+            std::fs::write(p.join("released.rs"), "// released\n").unwrap();
+            git(p, &["add", "released.rs"]);
+            git(p, &["commit", "-q", "-m", "fix(cas-0e1a): released work"]);
+            git(p, &["checkout", "-q", "-b", "factory/other-cas-0e2b", "main"]);
+            std::fs::write(p.join("unreleased.rs"), "// unreleased\n").unwrap();
+            git(p, &["add", "unreleased.rs"]);
+            git(p, &["commit", "-q", "-m", "fix(cas-0e2b): unreleased work"]);
+            git(p, &["checkout", "-q", "factory/worker-cas-test1"]);
+            git(p, &["merge", "-q", "--no-ff", "--no-edit", merged]);
+            let target = cas_types::WorkTarget {
+                repo_selector: "project:cas985f".into(), target_branch: "epic/next".into(),
+            };
+            let mut task = worker_task("worker");
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target, assignee: "worker".into(),
+                branch: "factory/worker-cas-test1".into(), base_sha: base,
+            });
+            match task_attribution::started_delivery(p, &task) {
+                Ok(delivery) if !foreign => {
+                    assert_eq!(delivery.map(|d| d.commits), Some(vec![own.clone()]), "merging {merged}");
+                }
+                Err(error) if foreign => {
+                    assert!(error.contains("foreign commit") && error.contains("cas-0e2b"), "{error}");
+                }
+                other => panic!("merging {merged}: unexpected {:?}", other.map(|d| d.map(|d| d.commits))),
+            }
+        }
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]

@@ -19,6 +19,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   changelog categories follow the release report rules; unknown categories and
   malformed entries remain refused.
 
+### Fixed — Commander stylesheet loading
+
+- **Commander keeps its page styles when opening images** — The global
+  stylesheet retains its served name, while every lazy stylesheet receives a
+  hashed chunk name that the hub can serve.
+
 ### Added — Commander reading frames
 
 - **Shared source frames and compact work rows** — Diagrams, diffs and code

@@ -34,6 +34,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
   await journey.stage("Expand an image and keep keyboard focus inside", async () => {
     await first.focus(); await first.press("Enter");
     await expect(dialog).toBeVisible();
+    await expect(page.locator("body")).toHaveCSS("margin", "0px");
+    await expect(dialog.locator(".image-viewer-canvas")).toHaveCSS("display", "grid");
     await expect(dialog.getByRole("button", { name: "Close image viewer" })).toBeFocused();
     await expect(dialog).toContainText("1 of 3");
     await expect(dialog.locator("img")).toHaveAttribute("alt", "First screenshot.png");

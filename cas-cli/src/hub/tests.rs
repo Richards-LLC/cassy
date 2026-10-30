@@ -6179,7 +6179,7 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     use crate::ui::factory::create_metadata;
     use cas_types::{Agent, AgentRole};
     let mut env = crate::test_support::TestEnvGuard::temp_home();
-    env.set("CLAUDE_EFFORT", "high");
+    env.remove("CLAUDE_EFFORT");
     let project = env.home().join("model-project");
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);

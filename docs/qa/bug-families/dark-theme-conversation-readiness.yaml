@@ -1,4 +1,4 @@
-title: Dark-theme journey stages await the conversation socket before publishing seeded supervisor messages; composer visibility alone is not transport readiness
-tasks: [cas-f811]
+title: Desktop and phone dark-theme journey stages await the conversation socket before publishing seeded supervisor messages; composer visibility alone is not transport readiness
+tasks: [cas-f811, cas-9f5a]
 invariants: [HUB-J10-GOAL]
 journeys: [HUB-J10]

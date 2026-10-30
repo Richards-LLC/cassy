@@ -179,6 +179,7 @@ export async function phoneDark(page: Page, journey: Journey): Promise<void> {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.stage("Read a supervisor message, then use Back to reach Appearance on the phone", async () => {
     await journey.open(); await openConversation(page, "cas-src");
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
     hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
     await expect(page.getByRole("log")).toContainText("Linux lane is green");
     await showConversationList(page);

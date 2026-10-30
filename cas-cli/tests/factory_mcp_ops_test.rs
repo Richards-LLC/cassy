@@ -5517,6 +5517,28 @@ fn clear_context_fixture(
     )
 }
 
+/// A completed turn can leave the current registration Idle while an older
+/// same-name registration still says Active. Harness comes from the current
+/// row's metadata, not the UUID or the stale row's provider.
+fn register_idle_reset_worker(
+    env: &FactoryTestEnv,
+    fixture: &ClearContextFixture,
+    stale_cli: &str,
+) -> Agent {
+    let store = env.agent_store();
+    let mut stale = fixture.worker.clone();
+    stale.id = format!("old-{}", stale.name);
+    stale.registered_at -= chrono::Duration::seconds(1);
+    stale.last_heartbeat -= chrono::Duration::seconds(1);
+    stale.metadata.insert("worker_cli".into(), stale_cli.into());
+    store.register(&stale).expect("register stale active row");
+    let mut current = fixture.worker.clone();
+    current.id = "00000000-0000-4000-8000-000000001114".into();
+    current.status = AgentStatus::Idle;
+    store.register(&current).expect("register current idle row");
+    current
+}
+
 /// cas-dffe (GH #145), the regression this task exists for, pinned dead: the
 /// queued row must be a CONTROL command, never the literal text `/clear`.
 ///
@@ -5536,7 +5558,7 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
             "supervisor".to_string(),
         ))
         .expect("register supervisor");
-    store.register(&fixture.worker).expect("register worker");
+    register_idle_reset_worker(&env, &fixture, "codex");
 
     let mut req = factory_req("clear_context");
     req.target = Some("wolf".to_string());
@@ -5711,43 +5733,55 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
     assert!(briefs[0].prompt.contains(&format!("#{answer_id}")));
 }
 
-/// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls
-/// through to the durable recycle path rather than queueing a fake reset.
+/// Current recorded harness wins over a same-name Active ghost: Codex
+/// recycles, while Grok/OpenCode retain their unsupported-reset refusal.
 #[tokio::test]
-async fn test_clear_context_recycles_harness_without_verified_reset() {
-    let (guard, fixture) = clear_context_fixture("badger", "codex", "0");
-    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+async fn test_clear_context_uses_current_idle_harness_cas_1114() {
+    for cli in ["codex", "grok", "opencode"] {
+        let (guard, fixture) = clear_context_fixture("badger", cli, "0");
+        let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
-    let store = env.agent_store();
-    store
-        .register(&Agent::new(
-            "test-sup".to_string(),
-            "supervisor".to_string(),
-        ))
-        .expect("register supervisor");
-    let mut worker = fixture.worker.clone();
-    // The recycle fallback only needs the durable worker identity and recipe;
-    // this fixture's temp directory is intentionally not a Git checkout.
-    worker.metadata.remove("clone_path");
-    store.register(&worker).expect("register worker");
+        let store = env.agent_store();
+        store
+            .register(&Agent::new(
+                "test-sup".to_string(),
+                "supervisor".to_string(),
+            ))
+            .expect("register supervisor");
+        let mut worker = register_idle_reset_worker(&env, &fixture, "claude");
+        // The recycle fallback only needs the durable worker identity and recipe;
+        // this fixture's temp directory is intentionally not a Git checkout.
+        worker.metadata.remove("clone_path");
+        store.update(&worker).expect("update current worker");
+        std::fs::remove_dir_all(&fixture.projects).expect("no Claude transcripts for this harness");
 
-    let mut req = factory_req("clear_context");
-    req.target = Some("badger".to_string());
-    let result = env
-        .service
-        .factory_request(Parameters(req))
-        .await
-        .expect("Codex clear_context should recycle the worker");
-    let message = get_text(&result);
-    assert!(message.contains("recycle"), "{message}");
+        let mut req = factory_req("clear_context");
+        req.target = Some("badger".to_string());
+        let result = env
+            .service
+            .factory_request(Parameters(req))
+            .await;
+        if cli != "codex" {
+            let error = result.expect_err("an unverified reset must remain unsupported");
+            assert!(error.message.contains(&format!("harness '{cli}'")), "{error}");
+            assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+            assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
+            continue;
+        }
+        let result = result.expect("Idle Codex clear_context should recycle the current worker");
+        let message = get_text(&result);
+        assert!(message.contains("recycle"), "{message}");
 
-    let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
-    assert!(
-        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
-        "Codex recycle must not queue readable prompt text"
-    );
+        let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
+        let spec: cas_mux::WorkerSpec = serde_json::from_str(requests[0].worker_spec.as_deref().unwrap()).unwrap();
+        assert_eq!(spec.cli, SupervisorCli::Codex, "reset must preserve the current Codex recipe");
+        assert!(
+            env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+            "Codex recycle must not queue readable prompt text"
+        );
+    }
 }
 
 /// GH #751: clear_context is not a recovery action once Claude is repeatedly

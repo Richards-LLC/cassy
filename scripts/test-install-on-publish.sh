@@ -146,8 +146,8 @@ plist="$mac_home/Library/LaunchAgents/dev.cassy.install-on-publish.plist"
 : >"$FAKE_LOG"
 if HOME="$mac_home" FAKE_OS=Darwin "$installer" --install >"$tmp/install-out" 2>&1 &&
    HOME="$mac_home" FAKE_OS=Darwin FAKE_BOOTSTRAP_FAILS=once "$installer" --install >>"$tmp/install-out" 2>&1; then
-    check '[[ "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 3 ]] && grep -q "^sleep 1$" "$FAKE_LOG"' 'macOS reinstall recovers after the old job finishes shutting down'
-    if ! command -v python3 >/dev/null 2>&1; then
+    check '[[ "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 3 ]] && grep -q "^sleep 1$" "$FAKE_LOG" && grep -q "retrying once" "$tmp/install-out"' 'macOS reinstall logs its retry and recovers after the old job finishes shutting down'
+    if ! python3 -c 'import plistlib' >/dev/null 2>&1; then
         printf 'skip macOS LaunchAgent plist validation: python3 is unavailable\n'
     elif ! python3 - "$plist" "$mac_home" "$CAS_BIN" "$GH_BIN" "$XDG_STATE_HOME/cassy/install-on-publish.log" <<'PY_PLIST'
 import plistlib

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA overdue notice
+
+- **A running "3.92 batch QA round N" holds back the overdue notice** — Was: the hourly notice that merged tasks are waiting for QA only recognized a running round whose title started with "Batch QA round", so a round titled "3.92 batch QA round 8" was ignored and the notice fired anyway. → Now: "batch QA round" anywhere in the title, in any case, counts as a running round.
+
 ### Fixed — Task close
 
 - **A changelog entry received by merging a predecessor's branch counts** — Was: a worker who merged an earlier worker's branch into its lane was refused with "CHANGELOG [Unreleased] REQUIRED", because the check skipped merge commits. → Now: close counts a titled Unreleased entry introduced by the commits it attributes to the task, including a merged branch of the same task. Entries brought in by a target refresh or another task's merged branch still do not count.

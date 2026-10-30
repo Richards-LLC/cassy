@@ -20,8 +20,9 @@ use cas_types::{AgentRole, Task, TaskStatus};
 const CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const OVERDUE_MINUTES: i64 = 60;
 /// A running round suppresses the notice, so it must be recognizable. A round is
-/// a task with this title prefix, as the cas-supervisor Batch QA reference says.
-const ROUND_TITLE_PREFIX: &str = "batch qa round";
+/// a task whose title contains this phrase in any case, such as the reference's
+/// "Batch QA round 7" or a release's "3.92 batch QA round 8" (cas-895d8).
+const ROUND_TITLE: &str = "batch qa round";
 const NOTICE_KIND: &str = "qa_batch_overdue";
 
 struct Overdue {
@@ -68,7 +69,7 @@ fn merged_at(repo: &Path, anchor: &str, target: &str) -> Option<DateTime<Utc>> {
 fn round_running(children: &[Task], now: DateTime<Utc>) -> bool {
     children.iter().any(|task| {
         task.status == TaskStatus::InProgress
-            && task.title.to_ascii_lowercase().starts_with(ROUND_TITLE_PREFIX)
+            && task.title.to_ascii_lowercase().contains(ROUND_TITLE)
             && (now - task.created_at).num_minutes() < OVERDUE_MINUTES
     })
 }

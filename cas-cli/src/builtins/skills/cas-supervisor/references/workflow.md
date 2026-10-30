@@ -426,6 +426,13 @@ delivery anchor must be contained in that reviewed target commit. Then close tho
 deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
 remain available.
 
+A round covers whatever is merged at the tip when it starts. Never hold a round for
+lanes still in review; they join the next round. Title its task `Batch QA round ...`,
+because that in-progress task is how Cassy knows a round is running. If a merged
+delivery has no receipt after 60 minutes and no round started in that time, every
+supervisor on the epic gets a `QA batch overdue` notice each hour. Start a round
+when it arrives.
+
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).

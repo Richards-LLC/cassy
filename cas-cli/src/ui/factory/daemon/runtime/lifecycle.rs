@@ -3643,6 +3643,7 @@ impl FactoryDaemon {
                     loop_progress.record_reset(outcome);
                 }
                 self.take_supervisor_restart_request();
+                crate::qa_batch_overdue::tick(self.app.cas_dir());
             }
             self.advance_supervisor_restart().await;
 

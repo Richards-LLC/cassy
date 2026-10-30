@@ -111,6 +111,27 @@ pub fn has_qa_batch_deferral(root: &Path, task: &str) -> Result<bool> {
     )?)
 }
 
+/// Deferred deliveries whose task is still open. Reads only, and has no debt on a
+/// database that predates the batch tables.
+pub fn pending_qa_batch_deferrals(root: &Path) -> Result<Vec<String>> {
+    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let exists: bool = guard.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_batch_deferrals')",
+        [], |row| row.get(0))?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut statement = guard.prepare(
+        "SELECT d.task_id FROM qa_batch_deferrals d JOIN tasks t ON t.id=d.task_id
+         WHERE t.status NOT IN ('closed', 'cancelled')",
+    )?;
+    let rows = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
 pub fn qa_batch_receipts_for_task(
     root: &Path,
     project: &str,

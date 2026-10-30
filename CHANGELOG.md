@@ -22,6 +22,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   gate replies now keep the task, delivery, CI and next-action facts in a short
   response, with the full immutable receipt available at its content-hashed path.
 
+### Fixed — Policy substitutions in heredocs
+
+- **Expanding heredocs keep operator-only commands protected** — The shell
+  guard inspects commands inside heredoc substitutions even when quote splitting
+  hides their spelling. Quoted bodies and escaped substitution text remain data.
+
 ### Fixed — Shared-file warnings
 
 - **Workers can add their own changelog entries without coordination** — Was:

@@ -62,6 +62,9 @@ name one exact absolute inventory path with
 Supported unknown caches are a missing-gitdir checkout's `target/` and the exact
 retired `.cas/merge-sweeps/assembly-target`; a parent or pattern never authorizes
 reclaim. Omitting either destructive flag previews and prints the refusal reason.
+Pass `full=true` for complete refusal reasons and machine-status lines; the
+default response bounds its inventory samples. `json=true` returns the same
+complete data in `machine_status` and `full_report`.
 
 The same exact-path option also accepts a known retired worker target, including
 its configured scratch target. Its historical `reclaim_unknown_target` name is

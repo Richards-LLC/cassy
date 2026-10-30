@@ -8670,6 +8670,18 @@ mod workspace_contract_tests {
             r#"echo "\\`touch /outside/cas-6e99-must-not-execute`""#,
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
+            // Rejected review: a nearby final pair does not prove arithmetic.
+            "echo \"$(( $(cat <<'EOF'\n> /outside/cas-0c9c-p\nEOF\n) ))\"",
+            "echo \"$((touch /outside/cas-0c9c-p) && (true))\"",
+            "echo $((touch /outside/cas-0c9c-p) && (true))",
+            "echo \"$((touch /outside/cas-0c9c-p)|(true))\"",
+            "echo \"$((touch /outside/cas-0c9c-p);(true))\"",
+            "echo $((touch /outside/cas-0c9c-p);(true))",
+            "echo \"$((touch /outside/cas-0c9c-p)$(true))\"",
+            "echo \"$((rm -rf /outside/cas-0c9c-dir) && (true))\"",
+            "echo \"$((echo hi > /outside/cas-0c9c-p) && (true))\"",
+            "echo \"$(( $(cat <<'EOF'\n1\nEOF\n) ))\"",
+            "echo \"$(( $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ))\"",
         ] {
             let (status, reason) = decision(command);
             assert_eq!(status, "deny", "{command}: {reason}");
@@ -8695,6 +8707,10 @@ mod workspace_contract_tests {
             "cat <<'EOF'\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "echo \"$(echo ${x:-\"a)b\"})\"",
             "echo \"$(echo ${x:-${y:-)}})\"",
+            // Keep the release-pinned balanced-parentheses controls beside
+            // the arithmetic multiplication and command-substitution cases.
+            "echo \"$((1 + (2)))\"",
+            "echo \"$[1 + (2)]\"",
             // cas-0c9c: multiplication is arithmetic, never a glob executable.
             "echo $(( (1+2)*3 ))",
             "echo \"$(( (1+2)*3 ))\"",

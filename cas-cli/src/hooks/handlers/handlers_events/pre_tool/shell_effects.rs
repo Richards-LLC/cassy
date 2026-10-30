@@ -79,22 +79,47 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
+    let mut arithmetic_end = None;
     while index < bytes.len() {
+        if arithmetic_end.is_some_and(|end| index > end) {
+            arithmetic_end = None;
+        }
         if bytes.get(index..index + 3) == Some(b"$((") {
-            // The lexer validates word boundaries, but `$((command) )` can
-            // still be a command substitution with a subshell. Only `))`
-            // closes arithmetic; ambiguous forms must remain unresolved.
-            let end = substitution_end(bytes, index + 2, 0)
-                .ok_or("an unresolved shell payload")?;
-            if bytes.get(end - 1) != Some(&b')') {
-                return Err("an unresolved shell payload");
+            // Bash falls back to command substitution unless the second '('
+            // has a matching ')' immediately before the outer end. Adjacent
+            // final bytes alone also match `(command) && (command)`.
+            if let Some(end) = substitution_end(bytes, index + 2, 0) {
+                let lexed = factory_shell_lex(&word[index + 2..=end], false, 0);
+                let mut parentheses = 0;
+                let mut inner_end = None;
+                for (token, offset) in lexed.tokens.iter().zip(&lexed.ends) {
+                    match token {
+                        ShellToken::Operator('(') => parentheses += 1,
+                        ShellToken::Operator(')') => {
+                            parentheses -= 1;
+                            if parentheses == 0 {
+                                inner_end = Some(index + 2 + offset);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if lexed.unresolved_at.is_none() && inner_end == Some(end) {
+                    arithmetic_end = Some(arithmetic_end.map_or(end, |outer| outer.max(end)));
+                    index += 3;
+                    continue;
+                }
             }
-            // Continue inside arithmetic to find executable substitutions,
-            // without interpreting its operators as shell commands.
-            index += 3;
-        } else if bytes.get(index..index + 2) == Some(b"$[") {
+        }
+        if bytes.get(index..index + 2) == Some(b"$[") {
             index += 2;
         } else if bytes.get(index..index + 2) == Some(b"$(") {
+            // Arithmetic can reinterpret command output as another expression
+            // (including executable array subscripts), even from literal cat.
+            if arithmetic_end.is_some() {
+                return Err("an unresolved arithmetic operand");
+            }
             let literal_heredoc = literal_cat_heredoc_end(&word[index..]);
             let end = match literal_heredoc {
                 Some(end) => index + end,
@@ -111,6 +136,9 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             bodies.push(&word[index + 2..end]);
             index = end + 1;
         } else if bytes[index] == b'`' {
+            if arithmetic_end.is_some() {
+                return Err("an unresolved arithmetic operand");
+            }
             let start = index + 1;
             index = start;
             while index < bytes.len() && bytes[index] != b'`' {

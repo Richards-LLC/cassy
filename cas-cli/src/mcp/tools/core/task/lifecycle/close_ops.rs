@@ -12106,6 +12106,35 @@ impl CasCore {
             receipt.push_str("\n\n");
             receipt.push_str(DEPRECATED_BYPASS_WARNING);
         }
+        let routine_close = task.task_type != TaskType::Epic
+            && auto_unblocked_tasks.is_empty()
+            && held_blocked_tasks.is_empty()
+            && registry_upkeep_notices.is_empty()
+            && epic_close_msg.is_empty()
+            && epic_issue_warning.is_empty()
+            && !used_deprecated_override_alias;
+        if routine_close {
+            let delivery = task
+                .deliverables
+                .merge_commit
+                .as_deref()
+                .or(delivery_receipt)
+                .unwrap_or("none");
+            let summary = format!(
+                "Closed task: {}; delivery {delivery}; target {resolved_parent_branch}; next: none.",
+                task.id,
+            );
+            if let Ok(compact) = gate_text::compact_receipt(
+                &self.cas_root,
+                configured_artifacts_root.as_deref(),
+                &task.id,
+                "close",
+                &summary,
+                &receipt,
+            ) {
+                receipt = compact;
+            }
+        }
         Ok(Self::success(receipt))
     }
 

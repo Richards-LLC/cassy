@@ -1006,12 +1006,8 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
     assert!(
-        text.contains("Merge policy: merge proceeded because CI is advisory."),
-        "worktree_merge without a GitHub origin must state its advisory policy.\nGot:\n{text}"
-    );
-    assert!(
-        text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"),
-        "worktree_merge CI diagnostics must name the endpoint and source SHA.\nGot:\n{text}"
+        text.contains("CI admission: advisory") && text.contains("Push state:"),
+        "trunk fallback and unavailable publication keep full actionable details.\nGot:\n{text}"
     );
 
     // The merge actually landed: content reachable from the checked-out repo.

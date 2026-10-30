@@ -534,7 +534,7 @@ context_window = 200000
                 argv += ["-p", prompt, "--output-format", "json", "--no-session-persistence", "--strict-mcp-config"]
                 if mode == "settings":
                     selected = role_skills(audience)
-                    overrides = {file.parent.name: "user-invocable-only" for file in skills.glob("*/SKILL.md") if file.parent.name != selected}
+                    overrides = {file.parent.name: "user-invocable-only" for file in skills.glob("*/SKILL.md") if file.parent.name not in selected}
                     overrides.update({name: "user-invocable-only" for name in CLAUDE_BUNDLED})
                     argv += ["--settings", json.dumps({"skillOverrides": overrides})]
             else:

@@ -44,14 +44,14 @@ The delivery trail uses semantic ordered lists, labeled receipt marks and text; 
 
 ## Critique
 
-Scored on 2026-10-30 from real captures with four live workers. The worker's scores were recorded before the independent reader's, and that reader saw neither them nor the earlier round. The worker wrote the fixes it scored.
+Scored on 2026-10-30 from real captures with four live workers. The worker's scores were recorded before each independent read. Each round had a new independent reader, who saw no scores. The worker wrote the fixes it scored.
 
-| Dimension | Round 1, f2162488a: worker / independent | Round 2, d91ccbe13: worker / independent | Round 2 evidence |
-| --- | --- | --- | --- |
-| Distinctiveness | 4 / 3 | 4 / 3 | The receipt trail is the distinctive move but stays small, so the serif slogan is what a reader recalls. |
-| Fit to argument | 3 / 2 | 4 / 4 | All four lanes fit above the fold at 1280x800 and 390x844, including with an ask open. |
-| Hierarchy | 3 / 2 | 4 / 3 | The largest type states no finding, and at 1280 the rail's worker cards out-weigh the lanes beside them. |
-| Craft | 4 / 3 | 4 / 3 | Strict visual QA passes on 8 of 8 renders, with seams: a square panel and uneven Waiting pill padding. |
-| Accessibility | 4 / 2 | 3 / 3 | Text passes and forced colors read correctly, but the release track outline is 2.27:1 light and 2.69:1 dark. |
+| Dimension | Round 1, f2162488a: worker / independent | Round 2, d91ccbe13: worker / independent | Round 3, c3adc949: worker / independent | Round 3 evidence |
+| --- | --- | --- | --- | --- |
+| Distinctiveness | 4 / 3 | 4 / 3 | 4 / 4 | The computed serif sentence and five-receipt track lead and repeat, though no filled segment has been seen on a real lane. |
+| Fit to argument | 3 / 2 | 4 / 4 | 4 / 3 | Each lane joins who, what and stage, but state is only a word and the tracks look alike, so you read to find the odd worker out. |
+| Hierarchy | 3 / 2 | 4 / 3 | 4 / 3 | The finding leads with little more ink than nearby titles, and the rail's In progress cards share the lanes' style at 1280. |
+| Craft | 4 / 3 | 4 / 3 | 4 / 3 | Strict visual QA passes on 8 of 8 with no page overflow, with seams: rail controls stagger. |
+| Accessibility | 4 / 2 | 3 / 3 | 3 / 4 | Text and the release track pass, but the lane connector is 2.24:1 light and 2.64:1 dark. |
 
-Floor not met: distinctiveness and hierarchy are 3 from the independent reader. Two failed rounds mean this idea needs revising, not more polish: lead with a computed finding instead of the slogan, settle what the rail shows beside the lanes, and make the trail the figure.
+Floor not met after three rounds: fit and hierarchy are 3 from the independent reader. No further pass without an operator decision. The open question is how a worker that needs attention stands out without reading every lane.

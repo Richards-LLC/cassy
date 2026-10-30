@@ -392,6 +392,9 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
     tls.listen(tlsPort, "127.0.0.1", ok);
   });
   await startHub();
+  // Native cells load the hub's embedded document and its headers directly.
+  const commanderOrigin = nativeCommander ? `http://127.0.0.1:${hubPort}` : origin;
+  const pairingHubUrl = nativeCommander ? commanderOrigin : hubUrl;
   const pair = JSON.parse(
     (
       await cas([
@@ -400,9 +403,9 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
         "pair",
         ...(newSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,session-launch"] : messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
         "--origin",
-        nativeCommander ? hubUrl : origin,
+        commanderOrigin,
         "--hub-url",
-        hubUrl,
+        pairingHubUrl,
       ])
     ).stdout,
   );

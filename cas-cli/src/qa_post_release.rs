@@ -568,7 +568,8 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
     if verdict == Verdict::Clean {
         return None;
     }
-    if waiting.is_none()
+    if verdict == Verdict::Pending
+        && waiting.is_none()
         && let Ok(Some(receipt)) = load(cas_root, &epic.id)
         && let Some(window) = crate::rapid_response::active_for_release(cas_root, epic, &receipt.sha)
         && crate::rapid_response::record_skip(cas_root, &window, &epic.id, "post-release", &receipt.sha)

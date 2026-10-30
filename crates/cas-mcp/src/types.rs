@@ -250,18 +250,18 @@ pub struct TaskRequest {
 
     /// Where this follow-up came from, when it came from a review finding.
     #[schemars(
-        description = "For create: the review finding this follow-up originates from (e.g. verification:ver-1a2b, qa:cas-1234, review:<reviewer>). Requires repro and affected. Use none when text that looks like a finding is not one."
+        description = "Source finding of a follow-up: verification:<id>, qa:<id> or review:<who>; needs repro and affected. none: not a finding."
     )]
     #[serde(default)]
     pub finding_origin: Option<String>,
 
     /// Reproduction of a finding-derived follow-up.
-    #[schemars(description = "For a follow-up from a finding: the steps or command, plus the wrong output observed")]
+    #[schemars(description = "Finding: steps or command, plus the wrong output")]
     #[serde(default)]
     pub repro: Option<String>,
 
     /// Who a finding-derived follow-up affects.
-    #[schemars(description = "For a follow-up from a finding: who acts on the wrong output today")]
+    #[schemars(description = "Finding: who acts on it today")]
     #[serde(default)]
     pub affected: Option<String>,
 
@@ -585,14 +585,14 @@ pub struct TaskRequest {
 
     /// Execution note (for create, update, and no-code close) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only edits existing values and refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task needing external_ref proof at close. Close accepts only no-code, when the stored methodology is empty or no-code; its portable external_ref is validated and saved before verification dispatch or with an already-approved close. Empty string clears it on update."
+        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task needing a portable external_ref, saved at close; close accepts it only when the stored methodology is empty or no-code. Empty string clears it on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref, inline or stored). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed). Close proofs still apply."
+        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref, inline or stored). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,
@@ -690,8 +690,7 @@ pub struct TaskRequest {
     /// a peer session of this repository holds on another machine. The start
     /// refusal names that override, so the schema text stays short.
     #[schemars(
-        description = "Force reset even when the task's assignee has a fresh heartbeat (alive worker). \
-                       Omit or false → warn and abort; true → reset immediately and log a forced-reset audit note."
+        description = "Reset even when the assignee has a fresh heartbeat, logging an audit note; otherwise warn and abort."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,

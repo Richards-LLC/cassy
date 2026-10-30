@@ -3480,6 +3480,15 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         }
         match quote {
             Some(active) if ch == active => quote = None,
+            Some('"') if ch == '\\'
+                && chars.peek().is_some_and(|(_, next)| matches!(next, '`' | '\\')) =>
+            {
+                // Escaped backticks are data; a doubled backslash leaves the
+                // next backtick executable. Retain the source escape spelling
+                // for consumers that inspect substitutions in dynamic words.
+                word.push(ch);
+                word.push(chars.next().unwrap().1);
+            }
             Some(_) => word.push(ch),
             None => match ch {
                 '\\' => {
@@ -8658,6 +8667,7 @@ mod workspace_contract_tests {
         // checks. A separated closing pair can denote a subshell substitution.
         for command in [
             r#"echo "`touch /outside/cas-6e99-must-not-execute`""#,
+            r#"echo "\\`touch /outside/cas-6e99-must-not-execute`""#,
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
         ] {

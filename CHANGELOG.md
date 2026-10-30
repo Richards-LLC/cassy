@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Quoted shell data
+
+- **Escaped backticks stay literal inside double quotes** — Factory workspace
+  checks allow quoted backtick data while still inspecting executable backtick
+  substitutions for filesystem writes and operator-only commands.
+
 ### Fixed — Parked delivery attribution
 
 - **Upkeep excludes later work on a reused lane** — When an integration merge

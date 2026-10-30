@@ -3,11 +3,12 @@
  * thread, and how a worker's timeline lists its rows. Brief:
  * `hub-web/whole-picture.brief.md`.
  *
- * Every string here that came from an agent (labels, thinking, tool input
- * and output) is set as `textContent`. Nothing is parsed as markup.
+ * Explicitly published v2 reasoning uses the safe Markdown dialect. Legacy
+ * thinking, labels and tool records remain literal text.
  */
 import { clockLabel, type ThreadWork } from "./thread-model";
-import { rowText, taskChip, turnNotice, workFailed, workSummary, type DetailState, type WorkEvent } from "./work-events";
+import { reasoningLabel, rowText, taskChip, turnNotice, workFailed, workSummary, type DetailState, type WorkEvent } from "./work-events";
+import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 
 export interface WorkRowsContext {
   /** The loaded detail of one event, if it was asked for. */
@@ -32,14 +33,35 @@ export function workSignature(item: ThreadWork, context: WorkRowsContext): strin
     open,
     context.isOpen(`turns:${item.key}`),
     item.events.map((event) => [
-      event.id, event.label, event.error, event.hasDetail, event.tool, event.lifecycle,
+      event.id, event.kind, event.label, event.error, event.hasDetail, event.tool, event.lifecycle, event.reasoning,
+      context.isOpen(`row:${event.id}`),
       open && context.isOpen(`row:${event.id}`) ? context.detail(event.id) ?? null : null,
     ]),
   ]);
 }
 
+/** Only the contract's published sources opt into formatted reasoning. */
+function publishedReasoning(event: WorkEvent): string | undefined {
+  return event.kind === "thinking" && event.reasoning
+    && ["codex_summary", "claude_thinking"].includes(event.reasoning.source)
+    && event.reasoning.summary.trim() ? event.reasoning.summary : undefined;
+}
+
+function reasoningDetail(document: Document, detail: HTMLElement, event: WorkEvent, text: string, context: WorkRowsContext): void {
+  const content = document.createElement("div"); content.className = "work-reasoning-content";
+  content.append(...renderMarkdown(document, text));
+  const raw = document.createElement("details"); raw.className = "work-reasoning-raw";
+  const key = `raw:${event.id}`;
+  raw.open = context.isOpen(key);
+  raw.ontoggle = () => { if (raw.isConnected) context.setOpen(key, raw.open); };
+  const toggle = document.createElement("summary"); toggle.textContent = "Raw summary"; toggle.dataset.focusKey = key;
+  const record = document.createElement("pre"); record.className = "work-record"; record.textContent = text;
+  raw.append(toggle, record);
+  detail.append(content, raw);
+}
+
 /** Typed scope comes from protocol facts; the original detail is never reparsed. */
-function readyDetail(document: Document, detail: HTMLElement, event: WorkEvent, state: Extract<DetailState, { state: "ready" }>): void {
+function readyDetail(document: Document, detail: HTMLElement, event: WorkEvent, state: Extract<DetailState, { state: "ready" }>, context: WorkRowsContext): void {
   const tool = event.kind === "tool" ? event.tool : undefined;
   const operation = tool && ["read", "search", "command", "edit"].includes(tool.operation) ? tool.operation : undefined;
   const label = (text: string): void => {
@@ -73,8 +95,11 @@ function readyDetail(document: Document, detail: HTMLElement, event: WorkEvent, 
     }
     label("Tool input and output");
   }
-  const record = document.createElement("pre"); record.className = "work-record"; record.textContent = state.text;
-  detail.append(record);
+  if (publishedReasoning(event) !== undefined) reasoningDetail(document, detail, event, state.text, context);
+  else {
+    const record = document.createElement("pre"); record.className = "work-record"; record.textContent = state.text;
+    detail.append(record);
+  }
   if (state.truncated) { const cut = document.createElement("p"); cut.className = "work-detail-limit"; cut.textContent = "…cut at 16 KB"; detail.append(cut); }
 }
 
@@ -104,8 +129,18 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   row.classList.toggle("is-failed", workFailed(event));
   row.dataset.eventId = event.id;
   const key = `row:${event.id}`;
-  const open = event.hasDetail && context.isOpen(key);
+  const published = publishedReasoning(event);
+  const expandable = event.hasDetail || published !== undefined;
+  const open = expandable && context.isOpen(key);
   const text = document.createElement("span"); text.className = "work-row-text"; text.textContent = rowText(event);
+  if (published !== undefined) {
+    text.classList.add("work-reasoning-heading");
+    const label = document.createElement("span"); label.className = "work-reasoning-label";
+    label.textContent = reasoningLabel(event);
+    const preview = document.createElement("span"); preview.className = "work-reasoning-preview";
+    preview.textContent = plainTextMarkdown(published);
+    text.replaceChildren(label, preview);
+  }
   const parts: HTMLElement[] = [text];
   if (workFailed(event)) {
     const failed = document.createElement("span"); failed.className = "work-row-failed"; failed.textContent = "failed";
@@ -116,7 +151,7 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
     time.textContent = clockLabel(event.at) ?? "";
     parts.push(time);
   }
-  if (!event.hasDetail) {
+  if (!expandable) {
     const line = document.createElement("span"); line.className = "work-row-line"; line.append(...parts);
     row.append(line);
     return row;
@@ -129,7 +164,7 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   toggle.onclick = () => {
     const opening = !context.isOpen(key);
     context.setOpen(key, opening);
-    if (opening && context.detail(event.id) === undefined) context.requestDetail(event.id);
+    if (opening && event.hasDetail && context.detail(event.id) === undefined) context.requestDetail(event.id);
     repaint(key);
   };
   row.append(toggle);
@@ -140,9 +175,9 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
     toggle.setAttribute("aria-controls", detail.id);
     detail.tabIndex = 0;
     detail.dataset.focusKey = `detail:${event.id}`;
-    const state = context.detail(event.id);
+    const state = event.hasDetail ? context.detail(event.id) : { state: "ready" as const, text: published!, truncated: false };
     if (!state || state.state === "loading") { detail.textContent = "Loading…"; detail.setAttribute("aria-busy", "true"); }
-    else if (state.state === "ready") readyDetail(document, detail, event, state);
+    else if (state.state === "ready") readyDetail(document, detail, event, state, context);
     else if (state.state === "gone") detail.textContent = "This detail is no longer on the machine.";
     else detail.textContent = `Could not load: ${state.reason}`;
     row.append(detail);
@@ -190,6 +225,7 @@ export function refocus(container: HTMLElement, focusKey: string): void {
  */
 export function renderWork(node: HTMLElement, item: ThreadWork, context: WorkRowsContext, speaker: string, onRepaint?: (topBefore: number) => void): void {
   const document = node.ownerDocument;
+  const scroll = new Map([...node.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")].map(detail => [detail.dataset.focusKey, detail.scrollTop]));
   // A repaint (a detail landing, an event appended) keeps the reader's focus.
   const focused = document.activeElement instanceof HTMLElement && node.contains(document.activeElement) ? document.activeElement.dataset.focusKey : undefined;
   const open = context.isOpen(item.key);
@@ -224,5 +260,6 @@ export function renderWork(node: HTMLElement, item: ThreadWork, context: WorkRow
     children.push(rows);
   }
   node.replaceChildren(...children);
+  for (const detail of node.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")) detail.scrollTop = scroll.get(detail.dataset.focusKey) ?? 0;
   if (focused) refocus(node, focused);
 }

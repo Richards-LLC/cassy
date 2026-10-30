@@ -3,7 +3,8 @@
  * stream (`docs/guides/commander-work-events.md`). Pages are read by cursor,
  * details on demand, and a daemon that pushes `WorkEventsAppended` says when
  * to read the newest page again. Everything here is data: labels and details
- * are agent-supplied text, and the views set them only as `textContent`.
+ * are agent-supplied text. Only explicitly published reasoning is rendered
+ * through the safe Markdown dialect; tool records and legacy rows stay literal.
  */
 
 export type WorkEventKind = "thinking" | "tool" | "todo" | "task" | "worker" | "notice";
@@ -350,7 +351,7 @@ export function workSummary(events: readonly WorkEvent[]): string {
   const failed = events.filter((event) => event.kind === "tool" && workFailed(event)).length;
   const others = events.filter((event) => !["tool", "thinking", "todo"].includes(event.kind) && !taskChip(event) && !turnNotice(event)).length;
   const parts: string[] = [];
-  if (thinking > 0) parts.push("Thought");
+  if (thinking > 0) parts.push(events.filter(event => event.kind === "thinking").every(event => event.lifecycle?.stage === "end") ? "Thought" : "Reasoning");
   if (tools > 0) parts.push(`ran ${tools} tool${tools === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}`);
   if (todos > 0) parts.push(`updated todos`);
   if (others > 0) parts.push(`${others} event${others === 1 ? "" : "s"}`);
@@ -359,9 +360,15 @@ export function workSummary(events: readonly WorkEvent[]): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-/** The words a row shows: thinking reads as "Thinking", the rest as labelled. */
+/** A lifecycle label needs a reported boundary; summaries alone imply no state. */
+export function reasoningLabel(event: WorkEvent): string {
+  const stage = event.lifecycle?.stage;
+  return stage === "end" ? "Thought" : stage === "start" || stage === "phase" ? "Thinking" : "Reasoning summary";
+}
+
+/** The words a row shows, with no lifecycle inferred from its presence. */
 export function rowText(event: WorkEvent): string {
-  if (event.kind === "thinking") return event.label ? `Thinking: ${event.label}` : "Thinking…";
+  if (event.kind === "thinking") return event.label ? `${reasoningLabel(event)}: ${event.label}` : reasoningLabel(event);
   const tool = event.kind === "tool" ? event.tool : undefined;
   if (tool) {
     const files = tool.counts?.files;

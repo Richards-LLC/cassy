@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Readable published reasoning
+
+- **Published reasoning stays easy to skim** — Commander shows a folded summary preview with formatted detail and an exact raw-text fallback. Opening or updating it preserves focus and reading position; Thinking and Thought labels require reported lifecycle events.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.

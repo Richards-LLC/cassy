@@ -3260,6 +3260,24 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-row-line { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .work-row-text { overflow-wrap: anywhere; }
 .work-row--tool .work-row-text { font-weight: var(--weight-medium); }
+.work-reasoning-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-block: var(--space-1); }
+.work-reasoning-label { font-size: var(--fs-xs); }
+.work-reasoning-preview { font-weight: var(--weight-medium); }
+.work-row--thinking .work-row-toggle { border-radius: var(--radius-pane); }
+.work-reasoning-content > :first-child { margin-top: 0; }
+.work-reasoning-content > :last-child { margin-bottom: 0; }
+.work-reasoning-content p { margin-block: 0 var(--space-2); white-space: pre-wrap; }
+.work-reasoning-content .markdown-heading { margin-block: var(--space-3) var(--space-2); font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.work-reasoning-content .markdown-list { margin-block: var(--space-2); padding-inline-start: var(--space-4); }
+.work-reasoning-content .markdown-inline-code { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.work-reasoning-content .markdown-link { color: inherit; text-decoration: underline; }
+.work-reasoning-raw { margin-top: var(--space-3); }
+.work-reasoning-raw > summary { padding-block: var(--space-1); color: var(--ink-mid); cursor: pointer; }
+.work-reasoning-raw > summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.work-reasoning-raw .work-record { margin-top: var(--space-2); }
+@media print {
+  .work-row--thinking .work-detail { max-height: none; overflow: visible; }
+}
 .work-row-failed { color: var(--state-crit); font-weight: var(--weight-medium); }
 .work-row.is-failed .work-row-toggle::before, .work-row.is-failed .work-row-line::before { content: ""; width: 6px; height: 6px; border-radius: var(--radius-pill); background: var(--state-crit); flex: none; }
 .work-detail { margin: var(--space-1) 0 var(--space-2) var(--space-6); max-height: 18rem; overflow: auto; max-width: 100%; box-sizing: border-box; padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); font: var(--fs-meta)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }

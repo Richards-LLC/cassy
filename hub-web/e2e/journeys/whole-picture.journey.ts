@@ -3,26 +3,26 @@ import { test, expect, journeyPart, type Journey } from "./journey";
 import { journeyStamp } from "./clock";
 import type { FleetWorld, Machine, WorkEventWire, WorkWorld } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
-import type { WorkTool, WorkLifecycle } from "../../src/work-events";
+import type { WorkTool, WorkLifecycle, WorkReasoning } from "../../src/work-events";
 
 // cas-ff22 (hub-web/whole-picture.brief.md): Show work puts the supervisor's
 // thinking, tool calls and task events between its replies, collapsed by
 // default, and each worker's timeline is a tap away in Tasks & progress.
 
 const WORKER = "swift-lark-3";
-const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> & { tool?: WorkTool; lifecycle?: WorkLifecycle } = {}): WorkEventWire =>
+const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> & { tool?: WorkTool; lifecycle?: WorkLifecycle; reasoning?: WorkReasoning } = {}): WorkEventWire =>
   ({ id, kind, session: PELICAN, agent: PELICAN, at: journeyStamp(offsetMs), label, has_detail: kind !== "task", ...extra });
 
 const work = (): WorkWorld => ({
   supervisor: PELICAN,
   events: [
-    event("t:sup:1:0", "thinking", "Checking the lane", -170_000),
+    event("t:sup:1:0", "thinking", "Checking the lane", -170_000, { reasoning: { summary: "Checking **the lane**", source: "codex_summary" } }),
     event("t:sup:2:0", "tool", "Bash: Run the tests", -160_000, { error: true }),
     event("q:7", "task", "cas-42 parked for merge: Ship the stream", -150_000, { agent: WORKER }),
     event("t:w:1:0", "tool", "Read: src/limits.rs", -400, { agent: WORKER }),
   ],
   // Agent text is data: the markup in this detail must read as text.
-  details: { "t:sup:2:0": "Bash\n\nInput:\ncargo test <b>-p cas</b>\n\nResult (error):\n1 failed" },
+  details: { "t:sup:1:0": "## Published summary\n\nCheck **the lane** before shipping.\n\n- Keep `src/limits.rs` readable.\n\n<img src=x onerror=alert(1)>", "t:sup:2:0": "Bash\n\nInput:\ncargo test <b>-p cas</b>\n\nResult (error):\n1 failed" },
 });
 
 const fleet = (): FleetWorld => ({
@@ -75,7 +75,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(blocks).toHaveCount(1);
         const order = await thread.locator(":scope > *").evaluateAll((nodes) => nodes.map((node) => node.classList.contains("work-turn") ? "work" : node.textContent?.includes("parked for merge.") ? "after" : node.textContent?.includes("Starting") ? "before" : "other").filter((kind) => kind !== "other"));
         expect(order).toEqual(["before", "work", "after"]);
-        const summary = blocks.getByRole("button", { name: /Thought, ran 1 tool \(1 failed\)/ });
+        const summary = blocks.getByRole("button", { name: /Reasoning, ran 1 tool \(1 failed\)/ });
         await expect(summary).toHaveAttribute("aria-expanded", "false");
         await expect(blocks.locator(".work-chip")).toHaveText("cas-42 parked");
         await expect(blocks.locator(".work-row")).toHaveCount(0);
@@ -98,6 +98,25 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(detail).toContainText("cargo test <b>-p cas</b>");
         await expect(detail.locator("b"), "agent text is never parsed as markup").toHaveCount(0);
         expect(hub.frames.filter((frame) => frame.kind === "WorkEventDetailRequest").map((frame) => (frame.body as { event_id: string }).event_id)).toEqual(["t:sup:2:0"]);
+      });
+
+      await journey.stage("Read the published reasoning summary in place", async () => {
+        const row = blocks.locator('[data-event-id="t:sup:1:0"]');
+        const toggle = row.getByRole("button", { name: /Reasoning summary/ });
+        await expect(toggle).toHaveAttribute("aria-expanded", "false");
+        await expect(toggle).toContainText("Checking the lane");
+        await toggle.focus();
+        const before = (await toggle.boundingBox())!.y;
+        await page.keyboard.press("Enter");
+        await expect(row.locator(".work-reasoning-content p strong")).toHaveText("the lane");
+        await expect(row.locator("img")).toHaveCount(0);
+        await expect(toggle).toBeFocused();
+        expect(Math.abs((await toggle.boundingBox())!.y - before)).toBeLessThanOrEqual(1);
+        await row.getByText("Raw summary", { exact: true }).click();
+        await expect(row.locator(".work-reasoning-raw pre")).toContainText("**the lane**");
+        await toggle.click(); await toggle.click();
+        await expect(row.locator(".work-reasoning-raw")).toHaveAttribute("open", "");
+        expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest" && (frame.body as { event_id: string }).event_id === "t:sup:1:0")).toHaveLength(1);
       });
 
       await journey.stage("New work arrives live without redrawing the thread", async () => {

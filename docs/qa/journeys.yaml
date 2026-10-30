@@ -2173,6 +2173,7 @@ journeys:
     and markup in it reads as text
   - New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the
     earlier reply keeps its node
+  - Read the published reasoning summary in place — a neutral folded preview opens safe Markdown and raw published text without moving focus or fetching detail twice
   - Read typed work scope — read, search, command and edit rows name their v2 scope; failures remain explicit, exact output stays readable, and live metadata updates preserve focus and expansion
   - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
     only
@@ -2189,6 +2190,7 @@ journeys:
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
   - hub-web/src/work-rows.brief.md
+  - hub-web/readable-thinking.brief.md
   - hub-web/src/worker-timeline.ts
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-view.ts

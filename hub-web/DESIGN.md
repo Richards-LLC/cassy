@@ -331,6 +331,10 @@ The heading answers, in this order of weight: which project, which model, where,
 - An action cluster is one flex row with an `--space-2` gap; the primary action is last. A sheet's sticky action bar keeps its 12px gap and hairline.
 - Section labels inside a sheet are eyebrows (`typography.eyebrow`, `--ink-mid`) followed by their count in the same style ("WORKERS · 5"); they are not cards.
 
+### Published reasoning
+
+Show work and worker timelines keep published reasoning subordinate to replies: a quiet label over a plain-text preview, with safe Markdown detail opened in place. Only `codex_summary` and `claude_thinking` v2 sources opt into formatting. Legacy and unknown sources remain literal. Raw summary exposes the exact published text; opening it survives repaints. Without a lifecycle boundary, use Reasoning summary (Reasoning for a work block); use Thinking for a reported start/phase and Thought for a reported end. Detail scroll and keyboard focus stay put across updates.
+
 ### Unknown and empty states
 
 - Say what is missing in plain words, at the weight of evidence, not of a verdict: `--ink-mid`, regular weight, `--fs-meta`. "Merge progress not reported", "Usage unknown", "Version unknown" are evidence lines; they are never bold, never headings and never status pills.

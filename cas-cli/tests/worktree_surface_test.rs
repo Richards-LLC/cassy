@@ -7764,6 +7764,7 @@ async fn validated_epic_merge_returns_compact_receipt() {
         .split_once(" (SHA-256 ").unwrap().0;
     let detail = std::fs::read_to_string(path).unwrap();
     assert!(detail.contains("Merged worktree") && detail.contains(&source_sha), "{detail}");
+    // pin: the public receipt must state why CI admitted this merge.
     assert!(text.contains("Merge policy: merge proceeded on successful validation."), "{text}");
     assert!(text.contains(&format!("CI SHA: {source_sha}")), "{text}");
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),

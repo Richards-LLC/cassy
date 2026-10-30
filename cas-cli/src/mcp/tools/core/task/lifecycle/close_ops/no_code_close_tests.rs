@@ -1835,10 +1835,15 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
     git(&worker_path, &["commit", "-qm", "fix(cas-3d57): final correction"]);
     git(&worker_path, &["push", "-q", "origin", &lane]);
     let ignored_tip = git(&worker_path, &["rev-parse", "HEAD"]);
+    let mut unrelated = assigned("cas-dec0", TaskType::Bug, "epic/next");
+    unrelated.status = TaskStatus::Open;
+    f.put(&unrelated);
     let refused = call(&f.worker, close.clone()).await;
     assert_eq!(f.task(id).deliverables.factory_branch_anchor, parked_anchor,
         "a local main ahead of origin is not released, so the anchor must not advance: {refused}");
     assert!(refused.contains("PARK REFUSED"), "{refused}");
+    assert!(refused.contains("request changes") && !refused.contains(&unrelated.id),
+        "an unrelated same-worker task must not acquire the foreign advance: {refused}");
     for boundary in [parked_anchor.as_ref().unwrap(), &ignored_tip, &offending] {
         assert!(refused.contains(boundary), "missing {boundary}: {refused}");
     }

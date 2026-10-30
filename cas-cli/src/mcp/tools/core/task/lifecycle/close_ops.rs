@@ -6815,6 +6815,53 @@ impl CasCore {
             .map(|claimed| claimed.timestamp())
     }
 
+    /// Identify next-task work from the rejected boundary's introduced commits
+    /// or the same lease cutoff used by attribution, never from status alone.
+    fn refused_advance_sibling(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        offending: &str,
+        foreign_since: Option<i64>,
+    ) -> Option<String> {
+        let assignee = task.assignee.as_deref()?;
+        let siblings: Vec<_> = task_store.list(None).ok()?.into_iter().filter(|other| {
+            other.id != task.id && other.status != TaskStatus::Closed
+                && other.assignee.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+        }).collect();
+        // Include side-parent work introduced by a foreign merge whose own
+        // subject may contain no task id. Earlier upstream imports are excluded.
+        let messages = git_stdout_lines(repo_path, &[
+            "log", "--format=%B%x1e", &format!("{offending}^1..{offending}"), "--",
+        ]).unwrap_or_default().join("\n");
+        let owners: Vec<_> = siblings.iter().filter(|other| {
+            messages.split('\u{1e}').any(|message| {
+                message_claims_other_task(message, Some(&task.id))
+                    && message_references_task(message, &other.id)
+            }) || other.deliverables.factory_branch_anchor.as_deref() == Some(offending)
+        }).collect();
+        if owners.len() == 1 {
+            return Some(owners[0].id.clone());
+        }
+        if !owners.is_empty() {
+            return None;
+        }
+        let since = foreign_since?;
+        let epoch = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", offending])?
+            .first()?.parse::<i64>().ok()?;
+        if epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS) {
+            return None;
+        }
+        let agents = self.open_agent_store().ok()?;
+        let owners: Vec<_> = siblings.iter().filter(|other| {
+            agents.get_lease_history(&other.id, None).unwrap_or_default().iter().any(|entry| {
+                entry.event_type == "claimed" && entry.timestamp.timestamp() == since
+            })
+        }).collect();
+        (owners.len() == 1).then(|| owners[0].id.clone())
+    }
+
     /// cas-00eb (cas-f1f4 regression): a recorded anchor may only move along
     /// this task's own lineage. Commit messages alone cannot tell (cas-ba4a
     /// catches only messages that name another task), so two structural
@@ -9170,17 +9217,32 @@ impl CasCore {
                         && tip != recorded
                         && park_anchor.as_deref() == Some(recorded)
                     {
+                        let foreign_since = self.sibling_lease_boundary(task_store.as_ref(), &task);
+                        let (target, _) = preferred_live_target_ref_for_delivery(
+                            &close_project_root, &resolved_parent_branch, task.delivery_mode,
+                        );
                         let offending = git_stdout_lines(
                             &close_project_root,
                             &["rev-list", "--first-parent", "--reverse", &format!("{recorded}..{tip}")],
                         ).unwrap_or_default().into_iter().find(|commit| {
-                            self.eligible_awaiting_merge_advance(
-                                task_store.as_ref(), &task, &close_project_root,
-                                &resolved_parent_branch, Some(commit),
-                            ).is_none()
+                            // Diagnose history independently of the global
+                            // active-sibling fence on actual anchor advances.
+                            !parked_anchor_advance_with_target_is_attributable(
+                                &close_project_root, recorded, commit, &task.id, foreign_since, &target,
+                            )
                         }).unwrap_or_else(|| tip.to_string());
+                        let remedy = self.refused_advance_sibling(
+                            task_store.as_ref(), &task, &close_project_root, &offending, foreign_since,
+                        ).map(|sibling| format!(
+                            "The advance belongs to task {sibling}. Deliver that task on its own branch; the parked delivery remains valid."
+                        )).unwrap_or_else(||
+                            "Ask the supervisor to request changes and review the replacement delivery.".to_string()
+                        );
+                        if merge_conflicted && !task.deliverables.merge_conflicted {
+                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                        }
                         return Ok(Self::tool_error(format!(
-                            "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored pushed tip {tip}. No anchor or QA round changed. Ask the supervisor to request changes and review the replacement delivery.",
+                            "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored pushed tip {tip}. No anchor or QA round changed. {remedy}",
                         )));
                     }
                     // Focused-test receipts at this

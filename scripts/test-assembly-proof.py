@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,44 @@ spec.loader.exec_module(proof)
 
 
 class ReceiptTests(unittest.TestCase):
+    def test_row_toolchain_uses_the_isa_audits_selected_objdump(self):
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copy(Path(__file__).with_name("release-portable.sh"), scripts)
+        tools = self.root / "bin"
+        tools.mkdir()
+        for name in ("cargo", "rustc", "cargo-zigbuild", "gobjdump"):
+            tool = tools / name
+            tool.write_text("#!/bin/sh\n" + ("exit 1\n" if name == "gobjdump" else "echo fixture-version\n"))
+            tool.chmod(0o755)
+        objdump = self.root / "keg-only objdump"
+        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.defpath,
+                   CARGO=str(tools / "cargo"), OBJDUMP=str(objdump))
+        fingerprints = []
+        for version in ("first", "second"):
+            objdump.write_text(f"#!/bin/sh\necho 'GNU objdump {version}'\n")
+            objdump.chmod(0o755)
+            with mock.patch.object(proof.platform, "system", return_value="Darwin"):
+                fingerprints.append(proof.row_toolchain(self.root, "release-binary-isa", env))
+        self.assertNotEqual(*fingerprints, "the ISA audit's selected objdump version must bind the row proof")
+
+    def test_changelog_section_does_not_require_a_fixture_compiler(self):
+        # Model a host without an ELF compiler at the portable tool boundary;
+        # leave the real section dispatcher and all changelog cases running.
+        startup = self.root / "no-compiler.sh"
+        startup.write_text('''source() {
+    builtin source "$@"
+    if [[ "$1" == */release-portable.sh ]]; then
+        release_portable_x86_64_linux_cc() { return 1; }
+    fi
+}
+''')
+        result = subprocess.run(["bash", str(Path(__file__).with_name("test-release-gate.sh")),
+                                 "--changelog-only"], env=dict(os.environ, BASH_ENV=str(startup)),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"[1-9]\d* passed, 0 failed")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

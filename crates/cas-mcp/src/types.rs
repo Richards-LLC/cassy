@@ -404,7 +404,7 @@ pub struct TaskRequest {
 
     /// Successful docs/artifact delivery deliberately retained outside integration.
     #[schemars(
-        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a reason. The delivery may hold only regular docs/artifacts files; supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts."
+        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a reason. The delivery may hold only regular docs/artifacts files. Excludes negative_result and completion/external verification receipts."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub evidence_only: Option<bool>,
@@ -427,7 +427,7 @@ pub struct TaskRequest {
     /// below plus a non-empty close `reason`. Ordinary closes that omit this
     /// flag retain the merge-state gate unchanged.
     #[schemars(
-        description = "Supervisor-only close of a measured negative result whose experimental delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a reason; logged. Ordinary closes omit it and need merge evidence."
+        description = "Supervisor-only close of a measured negative result whose delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a reason."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub negative_result: Option<bool>,
@@ -479,7 +479,7 @@ pub struct TaskRequest {
     /// Serialized immutable worker-delivery receipt. This is an additive,
     /// opt-in transactional handoff; omitting it preserves legacy close.
     #[schemars(
-        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, commit/base/target tips, proof reference and optional artifact_path (existing, under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery transaction. Omit for the legacy close."
+        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, tips, proof reference and optional artifact_path (under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery. Omit for the legacy close."
     )]
     #[serde(default)]
     pub completion_receipt: Option<String>,
@@ -492,7 +492,7 @@ pub struct TaskRequest {
     /// supervisor may present this receipt, and close revalidates its exact
     /// task, epic, factory session, gate, terminal verdict, and evidence.
     #[schemars(
-        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a passing receipt for this exact task, epic and factory session as zero-commit delivery evidence; it neither replaces completion_receipt nor bypasses other gates."
+        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a passing receipt for this exact task, epic and factory session as zero-commit delivery evidence; other gates still apply."
     )]
     #[serde(default)]
     pub external_verification_receipt: Option<String>,

@@ -151,42 +151,115 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
     None
 }
 
-pub(super) fn substitution_end(bytes: &[u8], mut index: usize, depth: usize) -> Option<usize> {
-    if depth > 8 {
-        return None;
+/// Resolve a substitution with the ordinary shell lexer. Only real operator
+/// tokens can close it: quoted/comment text and case-pattern ')' are data.
+pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Option<usize> {
+    if depth > 8 { return None; }
+    let source = std::str::from_utf8(bytes.get(index..)?).ok()?;
+    let projected = shell_command_projection(source, true);
+    let lexed = factory_shell_lex(&projected, false, depth);
+    enum Phase {
+        Word,
+        In,
+        Pattern { started: bool, parentheses: usize },
+        Body,
     }
-    let mut parentheses = 1;
-    let mut quote = None;
-    while index < bytes.len() {
-        let ch = bytes[index];
-        if ch == b'\\' && quote != Some(b'\'') {
-            index += 2;
-            continue;
-        }
-        if quote == Some(b'\'') {
-            if ch == b'\'' {
-                quote = None;
-            }
-        } else if bytes.get(index..index + 2) == Some(b"$(") {
-            index = substitution_end(bytes, index + 2, depth + 1)?;
-        } else if quote == Some(b'"') {
-            if ch == b'"' {
-                quote = None;
-            }
-        } else {
-            match ch {
-                b'\'' | b'"' => quote = Some(ch),
-                b'(' => parentheses += 1,
-                b')' => {
-                    parentheses -= 1;
-                    if parentheses == 0 {
-                        return Some(index);
+    struct Case { level: usize, phase: Phase }
+    let mut cases: Vec<Case> = Vec::new();
+    let mut level = 0;
+    let mut arithmetic = vec![false];
+    let mut command_start = true;
+    let mut previous_operator = None;
+    let mut start = 0;
+    for (token, &end) in lexed.tokens.iter().zip(&lexed.ends) {
+        let raw = source.get(start..end)?.trim();
+        start = end;
+        let keyword = |word: &str| raw == word;
+        let previous = previous_operator;
+        previous_operator = match token {
+            ShellToken::Operator(ch) => Some((*ch, end)),
+            _ => None,
+        };
+        let mut handled = false;
+        let mut close_case = false;
+        if let Some(case) = cases.last_mut().filter(|case| case.level == level && !arithmetic[level]) {
+            match (&mut case.phase, token) {
+                (Phase::Word, ShellToken::Word(_)) => {
+                    case.phase = Phase::In;
+                    handled = true;
+                }
+                (Phase::In, ShellToken::Word(word)) => {
+                    if word == "in" && keyword(word) {
+                        case.phase = Phase::Pattern { started: false, parentheses: 0 };
                     }
+                    handled = true;
+                }
+                (Phase::Pattern { started, .. }, ShellToken::Word(word)) => {
+                    close_case = !*started && word == "esac" && keyword(word);
+                    *started = true;
+                    handled = true;
+                }
+                (Phase::Pattern { started, parentheses }, ShellToken::Operator('(')) => {
+                    if *started { *parentheses += 1; }
+                    *started = true;
+                    handled = true;
+                }
+                (Phase::Pattern { parentheses, .. }, ShellToken::Operator(')')) => {
+                    if *parentheses > 0 {
+                        *parentheses -= 1;
+                    } else {
+                        case.phase = Phase::Body;
+                        command_start = true;
+                    }
+                    handled = true;
+                }
+                (Phase::Body, ShellToken::Word(word))
+                    if command_start && word == "esac" && keyword(word) => close_case = true,
+                (Phase::Body, ShellToken::Operator(';' | '&'))
+                    if previous == Some((';', end - 1))
+                        && matches!(source.as_bytes().get(end.saturating_sub(2)..end), Some(b";;" | b";&")) =>
+                {
+                    case.phase = Phase::Pattern { started: false, parentheses: 0 };
+                    handled = true;
                 }
                 _ => {}
             }
         }
-        index += 1;
+        if close_case {
+            cases.pop();
+            command_start = false;
+            continue;
+        }
+        if handled { continue; }
+        match token {
+            ShellToken::Word(word) => {
+                if command_start && !arithmetic[level] && word == "case" && keyword(word) {
+                    cases.push(Case { level, phase: Phase::Word });
+                }
+                command_start = command_start && keyword(word)
+                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
+            }
+            ShellToken::Operator('(') => {
+                let at = end - 1;
+                let dollar = at > 0 && source.as_bytes().get(at - 1) == Some(&b'$');
+                arithmetic.push(if at == 0 { true } else if dollar {
+                    source.as_bytes().get(at + 1) == Some(&b'(')
+                } else { arithmetic[level] });
+                level += 1;
+                command_start = true;
+            }
+            ShellToken::Operator(')') if level > 0 => {
+                arithmetic.pop();
+                level -= 1;
+                command_start = false;
+            }
+            ShellToken::Operator(')') => {
+                return (cases.is_empty() && lexed.unresolved_at.is_none_or(|at| at >= end))
+                    .then_some(index + end - 1);
+            }
+            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            _ => {}
+        }
     }
     None
 }
@@ -257,8 +330,12 @@ fn collect_script(
     if depth > 8 {
         return Err("a shell payload beyond the resolution limit");
     }
-    let (tokens, literal_words) =
-        factory_shell_tokens_with_literals(&shell_command_without_heredoc_bodies(script));
+    let projected = shell_command_without_heredoc_bodies(script);
+    let lexed = factory_shell_lex(&projected, false, 0);
+    if lexed.unresolved_at.is_some() {
+        return Err("an unresolved shell payload");
+    }
+    let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
     // Directory operands use only bindings visible before that cd. The

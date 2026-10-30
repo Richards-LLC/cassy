@@ -98,7 +98,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
       const evidence = worker.agent?.recent_trail?.find(item => item.step === step && item.reference);
       const item = text("li", label); item.dataset.reported = String(Boolean(evidence));
       const time = evidence?.at ? new Date(evidence.at) : undefined;
-      const detail = evidence ? `Reported${time && Number.isFinite(time.getTime()) ? ` at ${time.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : ""}: ${evidence.reference}` : "Not reported";
+      const detail = evidence ? `Reported${time && Number.isFinite(time.getTime()) ? ` at ${time.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : ""}${evidence.reference.startsWith("event:") ? "" : `: ${evidence.reference}`}` : "Not reported";
       item.title = detail; item.setAttribute("aria-label", `${label}: ${detail}`); trail.append(item);
     }
     const avatar = document.createElement("template");

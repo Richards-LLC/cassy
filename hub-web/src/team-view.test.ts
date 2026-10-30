@@ -19,6 +19,10 @@ it("joins the selected session to real receipts, keeps focus on live updates and
   expect(root.textContent).not.toMatch(/SECRET RAW|outsider/);
   expect(root.querySelectorAll('[data-reported="true"]')).toHaveLength(1);
   expect(root.querySelector('.team-lane[data-worker="lark"] .supervisor-state')?.classList.contains("working")).toBe(true);
+  // Receipt names say when it was reported; an internal event id means nothing to a reader.
+  const started = root.querySelector('.team-lane[data-worker="lark"] .team-trail li');
+  expect(started?.getAttribute("aria-label")).toMatch(/^Started: Reported/);
+  expect(started?.getAttribute("aria-label")).not.toContain("event:");
   updateTeamElapsed(root, Date.parse("2026-10-28T12:42:00Z"));
   expect(root.querySelector(".team-elapsed")?.textContent).toBe("42m on task");
   const initialLane = root.querySelector(".team-lane");

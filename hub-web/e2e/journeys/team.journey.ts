@@ -40,6 +40,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
           await expect(card.getByText("swift-lark-3", { exact: true })).toBeVisible();
           await expect(card.getByRole("button", { name: /timeline/ })).toBeVisible();
           expect((await card.boundingBox())!.height).toBeLessThan(lastLane!.height);
+          // Name and both controls share one line.
+          const centers = await card.evaluate(row => [row.querySelector(".status-identifier")!, row.querySelector(".status-timeline")!, row.querySelector(".fleet-ops-trigger")!].map(node => { const box = node.getBoundingClientRect(); return box.top + box.height / 2; }));
+          expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(2);
         }
         await expect(panel).toContainText("3 of 8 merged");
         await expect(panel).toContainText("Build the Team view");
@@ -85,6 +88,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(forced.unselected).toBe(forced.page);
         expect(forced.selected).not.toBe(forced.unselected);
         expect(forced.name).toBe(forced.row);
+        if (width === 1280) expect(await page.locator(".conversation-context .status-agent").first().evaluate(row => getComputedStyle(row).borderTopWidth)).toBe("0px");
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await page.getByRole("tab", { name: "Conversation", exact: true }).click();
         await expect(page.locator("#team-panel")).toBeHidden();

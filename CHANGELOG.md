@@ -16,6 +16,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Team tab finish
 
 - **Delivery track contrast** — The line between receipts on each Team lane now holds at least 3:1 against its lane in both schemes.
+- **Rail rows beside Team** — Each worker's name and controls share one line, the worker menu has a visible edge at rest, and forced colors no longer paint a border against the name.
+- **Receipt names for screen readers** — Delivery receipts no longer read out internal event ids.
 - **Release track contrast and shapes** — The release progress track has a stronger outline in both schemes, the Team panel and tabs have rounded corners, and state pills sit evenly in their lanes.
 
 ### Fixed — Commander conversation

@@ -53,6 +53,14 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(working[1]).not.toBe(waiting[1]);
         // The track is an outline, so a release at zero cannot read as a full bar.
         expect(await panel.locator(".release-progress progress").evaluate(bar => { const style = getComputedStyle(bar); return [style.borderTopStyle, style.backgroundColor]; })).toEqual(["solid", "rgba(0, 0, 0, 0)"]);
+        // The track's connector is a graphic that carries meaning, so it holds 3:1 against its lane.
+        const connector = await panel.locator(".team-lane").first().evaluate(lane => {
+          const channels = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+          const luminance = (value: string) => { const [r, g, b] = channels(value).map(part => { const unit = part / 255; return unit <= 0.03928 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+          const [line, card] = [luminance(getComputedStyle(lane.querySelectorAll(".team-trail li")[1], "::after").backgroundColor), luminance(getComputedStyle(lane).backgroundColor)];
+          return (Math.max(line, card) + 0.05) / (Math.min(line, card) + 0.05);
+        });
+        expect(connector).toBeGreaterThanOrEqual(3);
         const merges = panel.locator('[data-team-action="merges"]');
         expect(await merges.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();

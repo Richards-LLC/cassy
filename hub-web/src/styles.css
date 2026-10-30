@@ -1914,7 +1914,7 @@ dialog form > *,
 .team-trail { grid-column: 1 / -1; list-style: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 0; margin: 2px 0 0; color: var(--ink-mid); font-size: 12px; }
 .team-trail li { position: relative; display: grid; justify-items: start; gap: 2px; line-height: 1.2; }
 .team-trail li::before { content: ""; position: relative; z-index: 1; box-sizing: border-box; width: 11px; height: 11px; border: 2px solid currentColor; border-radius: var(--radius-pill); background: var(--bg-raised); }
-.team-trail li:not(:last-child)::after { content: ""; position: absolute; top: 4.5px; left: 11px; right: 0; height: 2px; background: var(--line-strong); }
+.team-trail li:not(:last-child)::after { content: ""; position: absolute; top: 4.5px; left: 11px; right: 0; height: 2px; background: var(--state-idle); }
 .team-trail [data-reported="true"] { color: var(--state-ok); font-weight: var(--weight-semibold); }
 .team-trail [data-reported="true"]::before { background: currentColor; }
 .team-trail [data-reported="true"]:has(+ [data-reported="true"])::after { background: var(--state-ok); }

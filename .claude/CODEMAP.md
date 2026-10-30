@@ -96,7 +96,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry/sidecar validation and diff-scoped journey selection.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
-- `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs` - independent reviews, cross-host sync and batch receipts.
+- `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs` - independent reviews, cross-host sync, batch receipts and the operator-only QA author override.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
 - `cas-cli/src/rapid_response.rs`, `cas-cli/src/cli/qa_rapid_response.rs` - operator-only, time-boxed per-epic rapid-response windows, scaled-down gates and the back-fill ledger.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - local action counts and per-journey traffic shares.

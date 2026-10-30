@@ -45,9 +45,13 @@ rechecks them, so an author who later joins the lineage no longer satisfies
 it. A worker's own tests and captures remain its proof but never count as
 independent QA; a passed QA round whose reviewer joins the lineage is refused
 the same way. Tier 0 deliveries (docs and tests only) are not gated. Only the
-operator overrides, by recording their words on the task as a note containing
-`QA AUTHOR OVERRIDE: <operator's words>`; the receipt keeps those words and
-its audit note on the task records them.
+operator overrides, from their own terminal, with
+`cas qa author-override <task> --note "<why>"`. The command refuses agent
+sessions, the PreToolUse hook refuses agent shells that run it, and the record
+lives in `.cas/operator/qa-author-overrides.toml`, which agents may not write.
+A task note never overrides, because the delivering worker can write notes on
+its own task. The receipt keeps the operator's words and the task gets an audit
+note.
 
 Use the verification MCP tool:
 

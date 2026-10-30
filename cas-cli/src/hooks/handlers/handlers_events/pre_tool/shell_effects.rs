@@ -443,7 +443,7 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
 }
 
 /// Marks each token that belongs to a redirect rather than the command: its
-/// filename, and a descriptor number in front of it. Bash runs `>out touch /x` as
+/// filename, and a numbered or named descriptor in front of it. Bash runs `>out touch /x` as
 /// `touch /x`, so neither may be mistaken for the executable or an operand.
 fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
     let redirect = |token: Option<&ShellToken>| matches!(token, Some(ShellToken::Operator('<' | '>')));
@@ -452,9 +452,7 @@ fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
     while index < tokens.len() {
         if !redirect(tokens.get(index)) {
             if let ShellToken::Word(word) = &tokens[index]
-                && redirect(tokens.get(index + 1))
-                && !word.is_empty()
-                && word.bytes().all(|byte| byte.is_ascii_digit())
+                && is_redirect_descriptor(word, tokens.get(index + 1))
             {
                 marked[index] = true;
             }
@@ -793,8 +791,8 @@ fn check_heredoc_boundaries(script: &str) -> Result<(), &'static str> {
     let joined = script.replace("\\\n", "");
     let projected = shell_command_without_heredoc_bodies(&joined);
     let delimiters: Vec<_> = projected.split('\n').flat_map(heredoc_delimiters).collect();
-    if delimiters.iter().any(|delimiter| !delimiter.literal_body)
-        && script.chars().any(|ch| ch == '\r' || (!ch.is_ascii() && ch.is_whitespace()))
+    if !delimiters.is_empty()
+        && script.chars().any(|ch| ch.is_whitespace() && !matches!(ch, ' ' | '\t' | '\n'))
     {
         return Err("an unresolved shell payload");
     }
@@ -802,7 +800,27 @@ fn check_heredoc_boundaries(script: &str) -> Result<(), &'static str> {
     // the delimiter. Removing a leading dollar alone cannot prove either.
     if !delimiters.is_empty() && projected.split("<<").skip(1).any(|tail| {
         let tail = tail.strip_prefix('-').unwrap_or(tail).trim_start_matches([' ', '\t']);
-        tail.starts_with("$'") || tail.starts_with("$\"")
+        // Stop at an unquoted word boundary, preserving quoted blanks and
+        // fragments such as E$"O"F in the same raw delimiter word.
+        let mut quote = None;
+        let mut escaped = false;
+        let end = tail.char_indices().find_map(|(index, ch)| {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' && quote != Some('\'') {
+                escaped = true;
+            } else if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                if matches!(ch, '\'' | '"') {
+                    quote = Some(ch);
+                } else if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                    return Some(index);
+                }
+            }
+            None
+        }).unwrap_or(tail.len());
+        tail[..end].contains("$'") || tail[..end].contains("$\"")
     }) {
         return Err("an unresolved shell payload");
     }

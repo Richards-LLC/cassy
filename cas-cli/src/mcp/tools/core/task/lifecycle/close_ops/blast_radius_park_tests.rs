@@ -857,6 +857,29 @@ async fn exact_receipt_parks_after_a_helper_branch_anchor_cas_3d70() {
     let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(refused.contains(&format!("delivery anchor {helper} is absent")), "{refused}");
     assert!(refused.contains(&format!("commit_receipt={tip}")), "{refused}");
+
+    // Safety half: a lane carrying another task's commit cannot be adopted by
+    // the exact receipt, and the refusal stops suggesting that receipt.
+    std::fs::write(f.worker_path.join("README.md"), "someone else\n").unwrap();
+    git(&f.worker_path, &["commit", "-q", "-am", "fix(cas-f0a6): someone else's change"]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let foreign = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &foreign, "widget", "test(gear)",
+    );
+    let guarded = call(
+        &f.worker,
+        serde_json::json!({"action": "close", "id": ID, "reason": "gear turns", "commit_receipt": foreign}),
+    )
+    .await;
+    assert!(guarded.contains("PARK REFUSED"), "{guarded}");
+    assert!(guarded.contains("Do not retry the same receipt"), "{guarded}");
+    assert!(!guarded.contains("Re-run"), "the refusal must not loop: {guarded}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+    assert_eq!(f.task().deliverables.factory_branch_anchor.as_deref(), Some(helper.as_str()));
+    git(&f.worker_path, &["reset", "-q", "--hard", &tip]);
+    git(&f.worker_path, &["push", "-q", "-f", "origin", LANE]);
+
     let parked = call(
         &f.worker,
         serde_json::json!({"action": "close", "id": ID, "reason": "gear turns", "commit_receipt": tip}),

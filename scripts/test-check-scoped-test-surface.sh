@@ -318,4 +318,66 @@ assert searches <= 2, f'expected one search per kind, found {searches}'
 assert elapsed < 30, f'60-path discovery took {elapsed:.3f}s (30s shared-host allowance)'
 PY_BATCH
 printf 'ok   60-path delivery batches searches within the close budget\n'
+
+# The same discovery must survive deliveries larger than Git's regex compiler
+# limit. Keep consumers across the path list, a duplicate consumer, and a final
+# partial batch; comments and untracked files still cannot create targets.
+python3 - "$batch_repo" <<'PY_LARGE_SETUP'
+from pathlib import Path
+import subprocess
+import sys
+
+repo = Path(sys.argv[1])
+for index in range(58, 1313):
+    path = repo / f'cas-cli/src/large_delivery/proof_surface_module_{index:04}.rs'
+    path.parent.mkdir(exist_ok=True)
+    path.write_text('pub fn operation() {}\n')
+(repo / 'cas-cli/tests/source_consumers.rs').open('a').write(
+    'use large_delivery::proof_surface_module_1312::operation;\n'
+)
+(repo / 'cas-cli/tests/chunk_use.rs').write_text(
+    'use large_delivery::proof_surface_module_0058::operation;\n'
+)
+(repo / 'cas-cli/tests/chunk_symbol.rs').write_text(
+    'fn test() { large_delivery::proof_surface_module_0700::operation(); }\n'
+)
+(repo / 'cas-cli/tests/chunk_path.rs').write_text(
+    'const SOURCE: &str = include_str!("cas-cli/src/large_delivery/proof_surface_module_1312.rs");\n'
+)
+(repo / 'cas-cli/tests/comment_only.rs').write_text(
+    '// large_delivery::proof_surface_module_1312::operation();\n'
+)
+subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
+(repo / 'cas-cli/tests/untracked.rs').write_text(
+    'use large_delivery::proof_surface_module_1312::operation;\n'
+)
+subprocess.run(['git', 'config', 'color.grep', 'always'], cwd=repo, check=True)
+PY_LARGE_SETUP
+python3 - "$batch_repo" "$no_rg_bin" "$tmpdir/large-git.trace" <<'PY_LARGE'
+from pathlib import Path
+import os
+import shlex
+import subprocess
+import sys
+
+repo, search_path, trace = map(Path, sys.argv[1:])
+paths = sorted(str(path.relative_to(repo)) for path in (repo / 'cas-cli/src').rglob('*') if path.is_file())
+assert len(paths) == 1315, len(paths)
+result = subprocess.run(
+    ['bash', './scripts/check-scoped-test-surface.sh', '--resolve-targets', '--base', 'HEAD', '--paths-from-stdin', '--'],
+    cwd=repo, env=dict(os.environ, PATH=str(search_path), GIT_TRACE=str(trace)),
+    input='\n'.join(paths) + '\n', capture_output=True, text=True, timeout=60,
+)
+assert result.returncode == 0, result.stdout + result.stderr
+args = shlex.split(result.stdout)
+targets = [args[index + 1] for index, value in enumerate(args) if value == '--test']
+assert len(targets) == len(set(targets)), targets
+assert set(targets) == {
+    'source_consumers', 'source_builtin', 'catalog_builtin',
+    'chunk_use', 'chunk_symbol', 'chunk_path',
+}, targets
+searches = sum('built-in: git grep ' in line for line in trace.read_text().splitlines())
+assert searches <= 8, f'1315-path discovery used {searches} searches'
+print(f'ok   1315-path delivery preserves consumer union in {searches} searches')
+PY_LARGE
 printf 'PASS: scoped test surface backend and nested-module mapping verified.\n'

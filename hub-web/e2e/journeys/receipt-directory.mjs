@@ -2,6 +2,11 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
+/** Chapter annotation for native pages with a restrictive style-src policy. */
+export async function showRecordingChapter(page, title, { duration = 1000 } = {}) {
+  await page.screencast.showChapter(title, { duration });
+}
+
 // Describe blocks and projects may share a leaf title. Keep a readable prefix,
 // but key the directory by the complete test identity, including long titles.
 export function receiptPartName(title, identity) {

@@ -1,7 +1,7 @@
 import { test, expect, type Request } from "@playwright/test";
 import { access, chmod, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { claimReceiptDirectory } from "./receipt-directory.mjs";
+import { claimReceiptDirectory, showRecordingChapter } from "./receipt-directory.mjs";
 import {
   saveQaTrace,
   redactQaText,
@@ -622,6 +622,16 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     await page.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(page.locator("#pair-dialog")).toBeHidden();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await page.evaluate(() => {
+      const violations: string[] = [];
+      (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations = violations;
+      document.addEventListener("securitypolicyviolation", event => {
+        if (event.effectiveDirective.startsWith("style-src")) violations.push(event.effectiveDirective);
+      });
+    });
+    await page.screencast.start({ path: info.outputPath("native-chapter.webm"), size: { width: 390, height: 844 } });
+    await showRecordingChapter(page, "M01 Choose a local image", { duration: 1000 });
+    expect(await page.evaluate(() => (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations)).toEqual([]);
     const imageViolations: string[] = [];
     await page.exposeFunction("recordImageViolation", (blocked: string) => imageViolations.push(blocked));
     await page.evaluate(() => document.addEventListener("securitypolicyviolation", event => {
@@ -653,6 +663,7 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     expect(await readFile(stored.path)).toEqual(bytes);
     await expect(page.locator(".composer-uploads")).toBeHidden();
   } finally {
+    await page.screencast.stop().catch(() => undefined);
     await command("cleanup");
   }
 });

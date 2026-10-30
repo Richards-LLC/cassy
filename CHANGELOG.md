@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   if the candidate serves different bytes. The previous candidate stays intact
   when verification fails.
 
+### Fixed — Independent batch QA
+
+- **A worker's own QA walk no longer counts as independent QA** — Was: a batch QA receipt and a QA-backed close accepted a ledger walked by the worker that delivered the task, as long as a different supervisor recorded it. → Now: `batch_receipt` requires `ledger_author` and records its id and role. It refuses an author in any listed tier 1 or 2 task's implementation lineage, and close rechecks receipts and passed QA rounds the same way. QA reviewers, verifiers and non-delivering workers, including on another machine, are accepted. Only an operator's `QA AUTHOR OVERRIDE:` task note lets a lineage author through. Receipts recorded before authors were tracked still count.
+
 ### Added — Supervisor Cassy versions in Commander
 
 - **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.

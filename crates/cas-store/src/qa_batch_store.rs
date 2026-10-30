@@ -30,6 +30,16 @@ pub struct QaBatchReceipt {
     pub task_heads: BTreeMap<String, String>,
     pub recorder_agent_id: String,
     pub recorded_at: String,
+    /// Who walked the ledger (cas-26ac). Absent on receipts recorded before
+    /// authors were tracked; present ones must stay outside each task's
+    /// implementation lineage unless the operator overrode it for that task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_author_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_author_role: Option<String>,
+    /// Task ID to the operator's recorded words for an author-lineage override.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub author_overrides: BTreeMap<String, String>,
 }
 
 fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
@@ -253,6 +263,9 @@ mod tests {
             staging_sha: "b".repeat(40),
             recorder_agent_id: "supervisor".into(),
             recorded_at: Utc::now().to_rfc3339(),
+            ledger_author_id: None,
+            ledger_author_role: None,
+            author_overrides: BTreeMap::new(),
             task_heads: tasks
                 .iter()
                 .map(|id| ((*id).into(), "c".repeat(40)))

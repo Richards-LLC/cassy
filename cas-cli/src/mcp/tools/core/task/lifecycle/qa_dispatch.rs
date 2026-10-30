@@ -323,11 +323,15 @@ impl CasCore {
 
     /// cas-619f: starting a QA work item claims its round for the caller,
     /// and refuses the delivery's implementer (under either identity).
-    pub(crate) fn claim_qa_round_on_start(&self, qa_task: &Task) -> Result<Option<String>, McpError> {
+    pub(crate) fn claim_qa_round_on_start(&self, qa_task: &Task, principal: Option<&str>) -> Result<Option<String>, McpError> {
         if !qa_task.labels.iter().any(|label| label == QA_PASS_LABEL) {
             return Ok(None);
         }
-        let (name, id) = self.qa_caller_identity()?;
+        let (name, id) = match principal {
+            Some(id) => (self.open_agent_store()?.get(id)
+                .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?.name, id.to_string()),
+            None => self.qa_caller_identity()?,
+        };
         let reject = |error: cas_store::StoreError| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Cannot start QA task {}: {error}", qa_task.id)),

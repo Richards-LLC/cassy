@@ -19,6 +19,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 ## Core Concepts
 
 - **Provider account** - a Claude or Codex subscription identified by provider account and organization/workspace IDs, displayed by login email; `cas accounts list` shows usage, absolute resets and duplicate or login findings while legacy folder names remain launch aliases.
+- **Worker task queue** - an ordered backlog for one worker. Closing or parking starts the next eligible task on its own target branch; supervisors inspect, reorder or clear pending work, and stale entries carry skip notes.
 - **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI.
 - **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
 - **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.

@@ -234,6 +234,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
+        task_ids: None,
         delivery_mode: None,
         merge_request: None,
         blocker: None,

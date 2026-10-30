@@ -10168,6 +10168,64 @@ mod worker_commit_guard_tests {
         tmp
     }
 
+    #[cfg(unix)]
+    fn attach_failing_pre_push_probe(repo: &std::path::Path) -> tempfile::TempDir {
+        let remote = tempfile::tempdir().expect("probe remote");
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(remote.path())
+            .output()
+            .expect("initialize probe remote");
+        assert!(initialized.status.success());
+
+        let configured = std::process::Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(remote.path())
+            .current_dir(repo)
+            .output()
+            .expect("configure probe remote");
+        assert!(configured.status.success());
+
+        let hook = repo.join(".git/hooks/pre-push");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf 'probe pre-push hook rejected push\\n' >&2\nexit 1\n",
+        )
+        .expect("write failing probe hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&hook)
+                .expect("hook metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&hook, permissions).expect("make probe hook executable");
+        }
+
+        let hooks_path = repo.join(".git/hooks");
+        let configured_hooks = std::process::Command::new("git")
+            .args(["config", "core.hooksPath"])
+            .arg(&hooks_path)
+            .current_dir(repo)
+            .output()
+            .expect("configure probe hook path");
+        assert!(configured_hooks.status.success());
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/guard-test"])
+            .current_dir(repo)
+            .output()
+            .expect("probe plain push");
+        assert!(
+            !push.status.success()
+                && String::from_utf8_lossy(&push.stderr)
+                    .contains("probe pre-push hook rejected push"),
+            "probe must reject a plain push via pre-push: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+        remote
+    }
+
     // ── looks_like_git_write_op tests ─────────────────────────────────────
 
     #[test]
@@ -11018,6 +11076,8 @@ mod worker_commit_guard_tests {
             .output()
             .expect("create a worker branch");
         assert!(switched.status.success());
+        #[cfg(unix)]
+        let _probe_remote = attach_failing_pre_push_probe(repo.path());
 
         let variants = [
             "git push --no-verify origin factory/guard-test".to_string(),
@@ -11035,6 +11095,11 @@ mod worker_commit_guard_tests {
             "bash -c 'git push --no-verify origin factory/guard-test'".to_string(),
             "eval 'git push --no-verify origin factory/guard-test'".to_string(),
             "env -S 'git push --no-verify origin factory/guard-test'".to_string(),
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks; git push origin factory/guard-test".to_string(),
+            "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" && git push origin factory/guard-test".to_string(),
+            "git config core.hooksPath /tmp/empty-hooks && git push origin factory/guard-test".to_string(),
+            "git config --worktree core.hooksPath /tmp/empty-hooks".to_string(),
+            "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" bash -c 'git push origin factory/guard-test'".to_string(),
         ];
 
         let mut mismatches = Vec::new();
@@ -11106,6 +11171,8 @@ mod worker_commit_guard_tests {
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(repo_path.as_str())),
             ("CAS_AGENT_NAME", Some("guard-test")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("GIT_CONFIG_GLOBAL", Some("/tmp/worker-global-config")),
         ]);
         let mut input = hook_git_write_input(&repo_path, "git push origin factory/guard-test");
         input.agent_role = Some("worker".to_string());

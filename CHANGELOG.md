@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Task start branch ownership
+
+- **Misbound factory branches fail before work starts** — Was: task start
+  could accept another worker's factory branch or a task suffix missing `cas-`,
+  leaving the commit guard to refuse the first commit. Now: start uses the
+  same ownership check and names the worker's canonical per-task branch before
+  claiming a lease or changing the checkout.
+
 ### Fixed — Hub authentication clock correction
 
 - **Fast device clocks recover automatically** — The hub refuses future-dated

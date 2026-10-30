@@ -4,7 +4,10 @@ import { sentAttachmentFiles, sentAttachmentReference } from "./sent-attachments
 const MAX_BYTES = 10 * 1024 * 1024;
 /** A sent file restored by Edit has no bytes here: it is already on the machine. */
 interface PendingFile { id: string; name: string; size: number; file?: File; preview?: string; thumbnail?: string; path?: string; mime?: string }
-type Upload = (id: string, name: string, data: string) => Promise<{ path: string; artifact_id: string; mime: string }>;
+type Upload = (id: string, name: string, data: string, onProgress?: (fraction: number) => void) => Promise<{ path: string; artifact_id: string; mime: string }>;
+
+/** Already rendered beside the retained files; the outer submit must not repeat it. */
+export class UploadPreparationError extends Error {}
 
 /** Bytes remain in this page through socket reconnects and shell replacements. */
 export class ComposerUploads {
@@ -12,6 +15,7 @@ export class ComposerUploads {
   private root?: ParentNode;
   private error = "";
   private sending = false;
+  private progress?: { name: string; fraction: number; index: number; total: number };
 
   bind(root: ParentNode): void { this.root = root; this.paint(); }
   hasFiles(): boolean { return this.files.length > 0; }
@@ -63,6 +67,8 @@ export class ComposerUploads {
       for (const entry of this.files) {
         if (!entry.path && entry.file) {
           const file = entry.file;
+          this.progress = { name: file.name, fraction: 0, index: this.files.indexOf(entry) + 1, total: this.files.length };
+          this.paint();
           const data = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result).split(",")[1]!);
@@ -70,7 +76,9 @@ export class ComposerUploads {
             reader.readAsDataURL(file);
           });
           try {
-            const uploaded = await upload(entry.id, file.name, data);
+            const uploaded = await upload(entry.id, file.name, data, fraction => {
+              this.progress!.fraction = Math.max(0, Math.min(1, fraction)); this.paint();
+            });
             entry.path = uploaded.path; entry.mime = uploaded.mime;
           } catch (error) {
             throw new Error(`${file.name}: ${error instanceof Error ? error.message : "The upload failed."}`);
@@ -80,8 +88,14 @@ export class ComposerUploads {
       return [text, ...this.files.map(entry => sentAttachmentReference({ path: entry.path!, mime: entry.mime!, size: entry.size }))].filter(Boolean).join("\n\n");
     } catch (error) {
       this.error = `Files were not sent. ${error instanceof Error ? error.message : "The upload failed."} Your files are kept here.`;
-      throw new Error(this.error);
-    } finally { this.sending = false; this.paint(); }
+      throw new UploadPreparationError(this.error);
+    } finally { this.progress = undefined; this.sending = false; this.paint(); }
+  }
+  private progressText(): string {
+    if (!this.progress) return "Preparing files…";
+    const { name, fraction, index, total } = this.progress;
+    const position = total > 1 ? ` (${index} of ${total})` : "";
+    return fraction >= 1 ? `Saving ${name}${position}…` : `Uploading ${name}${position} · ${Math.floor(fraction * 100)}%`;
   }
   private paint(): void {
     const field = this.root?.querySelector<HTMLTextAreaElement>("#message-text");
@@ -109,9 +123,17 @@ export class ComposerUploads {
       list.append(chip);
     }
     const status = document.createElement("p"); status.setAttribute("role", "status");
-    status.textContent = this.error || (this.sending ? "Uploading files…" : this.files.length ? "Files stay here through reconnects. Send before closing this page." : "");
+    status.textContent = this.error || (this.sending ? this.progressText() : this.files.length ? "Files stay here through reconnects. Send before closing this page." : "");
     if (this.error) status.className = "upload-error";
     strip.append(status);
+    if (this.sending && this.progress) {
+      const progress = document.createElement("progress");
+      progress.max = 100; progress.value = Math.floor(this.progress.fraction * 100);
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", `Upload ${this.progress.name}`);
+      progress.setAttribute("aria-valuenow", String(progress.value));
+      strip.append(progress);
+    }
   }
 }
 const drafts = new Map<string, ComposerUploads>();

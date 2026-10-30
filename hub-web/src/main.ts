@@ -4112,11 +4112,12 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
   if (uploads && hasAttachments) {
-    text = await uploads.prepare(text, async (id, name, data) => {
+    clearComposerStatus();
+    text = await uploads.prepare(text, async (id, name, data, onProgress) => {
       const connection = connections.get(machine.id);
       if (!connection) throw new Error("The machine is disconnected.");
       try {
-        return await connection.uploadFile(session, id, name, data);
+        return await connection.uploadFile(session, id, name, data, onProgress);
       } catch (error) {
         const detail = (error as { detail?: string })?.detail;
         if (detail) throw new Error(detail);
@@ -4137,7 +4138,9 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (sent && hasAttachments) countUsage("reply.attachment");
   if (sent && !quick) draftDictated = false;
   } catch (error) {
-    showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
+    if (!composerUploads || !(error instanceof composerUploads.UploadPreparationError)) {
+      showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
+    }
   } finally {
     pendingSubmissions.delete(submissionKey);
   }

@@ -783,9 +783,9 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 ### HUB-J24 · Paste text, screenshots and files into a supervisor message
 
-- **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
+- **Entry:** A paired conversation at 1440×800 or 390×844, in light or dark.
 - **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with resolvable local paths; sent bubbles show image previews or named file sheets, including after reload and on another paired phone.
-- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-content.css`
+- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/upload-transport.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-content.css`
 - **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
 - **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.
 
@@ -796,6 +796,8 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 3. A connection loss keeps the files visibly, then reuses the upload identity
 4. Sent files show their names and an image preview after reload and on another phone
 5. A missing preview stays on its own file card
+6. A 10 MiB photo shows byte progress, then Saving, before its message is Delivered
+7. A refused file shows its reason once and remains removable
 
 #### Expected experience
 
@@ -807,7 +809,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 #### Edge paths
 
 - The hub refuses oversized or unsupported bytes, traversal names stay within host storage, and unsigned or unknown-session requests write nothing.
-- A slow 512 kbit/s phone upload budgets the base64 payload size (4 and 10 MiB regression rows); ordinary requests still time out promptly.
+- A slow 512 kbit/s phone upload budgets the base64 payload size with at least 25% margin (4 and 10 MiB regression rows); ordinary requests still time out promptly.
 - A refusal names the failed attachment, keeps all pending files, and gives no reconnect advice for an unsupported type. A missing session shows the hub's own explanation.
 - Phone HEIC, AVIF and MOV containers are identified from their brands and stored with their correct media types, regardless of filename.
 - Reusing an upload identity with different bytes is a conflict; replaying the same bytes returns the same artifact.

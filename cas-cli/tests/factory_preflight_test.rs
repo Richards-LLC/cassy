@@ -127,9 +127,10 @@ fn gc_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
     command
         .current_dir(cwd)
         .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
         .env("GROK_HOME", cwd.join(".test-grok-home"))
-        .env_remove("CAS_ROOT")
+        .env("CAS_ROOT", cwd.join(".cas"))
         .env_remove("CAS_SOURCE_DIR")
         .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA");
     command
@@ -140,6 +141,11 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
     let project = project(false);
     cas::store::init_cas_dir(project.path()).expect("initialize fake store");
     let home = TempDir::new().unwrap();
+    let artifacts = cas::config::project_factory_artifacts_root(
+        &project.path().join(".cas"), &home.path().join(".cas/artifacts"));
+    for index in 0..128 {
+        std::fs::create_dir_all(artifacts.join(format!("review-only-{index}"))).unwrap();
+    }
 
     let help = gc_command_at(project.path(), &home)
         .args(["factory", "gc", "cleanup", "--help"])
@@ -210,7 +216,7 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
     assert!(full.starts_with("Factory GC Report\n") && full.contains("TARGET_CACHE_STATUS_JSON="), "{full}");
 
     let cleanup = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "cleanup", "--force", "--no-dry-run"])
+        .args(["factory", "gc", "cleanup", "--force", "--no-dry-run", "--full"])
         .assert()
         .success()
         .get_output()
@@ -219,6 +225,27 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
     let cleanup = String::from_utf8(cleanup).unwrap();
     assert!(cleanup.starts_with("Factory GC cleanup complete."), "{cleanup}");
     assert!(cleanup.contains("Cargo target caches: mode=cleanup"), "{cleanup}");
+
+    let preview = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "cleanup"])
+        .assert().success().get_output().clone();
+    let text = String::from_utf8(preview.stdout).unwrap();
+    assert!(text.starts_with("[INFO] GC cleanup complete:"), "{text}");
+    assert!(text.lines().all(|line| line.len() <= 79), "{text}");
+    assert!(text.lines().count() < 100, "inventory must not grow with every path");
+    assert!(text.contains("stray inventory=128"), "{text}");
+    assert!(!text.contains("_STATUS_JSON="), "{text}");
+    assert!(text.contains("cleanup --full") && text.contains("cleanup --json"));
+    assert!(String::from_utf8(preview.stderr).unwrap().contains("GC cleanup running:"));
+    let machine = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "cleanup", "--json"])
+        .assert().success().get_output().clone();
+    let document: Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert!(document["report_text"].as_str().unwrap().starts_with("[INFO] GC cleanup complete:"));
+    assert!(document["full_report"].as_str().unwrap().contains("mode=dry-run"));
+    assert!(document["machine_status"]["TARGET_CACHE_STATUS_JSON"].is_object());
+    assert!(machine.stderr.is_empty(), "JSON mode must suppress progress");
+    assert_eq!(std::fs::read_dir(artifacts).unwrap().count(), 128);
 }
 
 #[test]

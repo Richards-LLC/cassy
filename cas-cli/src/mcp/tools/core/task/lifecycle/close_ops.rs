@@ -9237,6 +9237,18 @@ impl CasCore {
                                     &close_project_root, tip, boundary, &resolved_parent_branch,
                                 )
                             {
+                                // cas-3d70: once the exact tip receipt was tried and the
+                                // recorded anchor still stands, repeating that instruction
+                                // would loop; only the supervisor can resolve it.
+                                let receipt_was_tip = req.commit_receipt.as_deref()
+                                    .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
+                                    .is_some_and(|receipt| commit_ids_match(&receipt, tip));
+                                if receipt_was_tip {
+                                    return Ok(Self::tool_error(format!(
+                                        "PARK REFUSED: recorded delivery anchor {boundary} is absent from {branch}, and commit_receipt={tip} cannot replace it: the commits since {branch} left the target are not all attributable to {id} (another task's commit, or work after a sibling's lease). No park or anchor change was recorded. Do not retry the same receipt. Ask the supervisor to review the delivery and use `task action=request_changes id={id}` or rebind the branch.",
+                                        id = task.id,
+                                    )));
+                                }
                                 return Ok(Self::tool_error(format!(
                                     "PARK REFUSED: delivery anchor {boundary} is absent from {branch} at pushed tip {tip}. No park or anchor change was recorded. Re-run `{}task action=close id={} commit_receipt={tip}` at that tip. If the rewritten delivery cannot be attributed, ask the supervisor to request changes and review the replacement delivery.",
                                     crate::mcp::tools::core::guidance::caller_prefix(), task.id,
@@ -24754,11 +24766,6 @@ pub(crate) fn parked_anchor_advance_is_attributable(
         })
 }
 
-/// cas-9668: an epic sync imports sibling commits without transferring the
-/// task's delivery identity. Each side parent must belong to the declared
-/// target or released trunk to bypass the foreign-task check; direct commits
-/// and lease cutoffs still apply. The recorded anchor must lie on the first-parent chain, so a
-/// supervisor's integration merge cannot become a worker continuation.
 /// No other open task's delivery anchor lies in `base..tip`.
 fn no_other_open_anchor_between(
     task_store: &dyn cas_store::TaskStore,
@@ -24783,6 +24790,11 @@ fn no_other_open_anchor_between(
     })
 }
 
+/// cas-9668: an epic sync imports sibling commits without transferring the
+/// task's delivery identity. Each side parent must belong to the declared
+/// target or released trunk to bypass the foreign-task check; direct commits
+/// and lease cutoffs still apply. The recorded anchor must lie on the first-parent chain, so a
+/// supervisor's integration merge cannot become a worker continuation.
 fn parked_anchor_advance_with_target_is_attributable(
     repo_path: &std::path::Path,
     recorded: &str,

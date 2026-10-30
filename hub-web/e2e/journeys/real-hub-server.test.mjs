@@ -62,6 +62,7 @@ if '--message' in sys.argv:
   child.stdin.end(frame("Startup instructions\nThe /exit command ends a session.") +
     frame("ping launch supervisor") + frame("/exit"));
   assert.deepEqual(await ended, [0, null], stderr);
+  // pin: These two inert-provider replies are the native journey's startup and ping protocol.
   assert.equal(await readFile(join(home, "replies.jsonl"), "utf8"), "Supervisor ready\nLaunch supervisor answered\n");
 });
 

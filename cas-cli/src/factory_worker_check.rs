@@ -2322,14 +2322,15 @@ child.wait()
     #[cfg(unix)]
     #[test]
     fn detached_runner_leads_its_own_session_outside_the_callers_group() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 5"]);
+        // Own the process holding the capture pipe, with no shell descendant.
+        let mut command = Command::new("sleep");
+        command.arg("5");
         let mut child = spawn_detached(command).unwrap();
         let pid = child.id() as libc::pid_t;
         // SAFETY: plain process-id queries on our own live child.
         let (sid, pgid, caller_pgid) = unsafe { (libc::getsid(pid), libc::getpgid(pid), libc::getpgrp()) };
-        let _ = child.kill();
-        let _ = child.wait();
+        child.kill().expect("kill the owned detached fixture");
+        child.wait().expect("reap the fixture and close its output descriptors");
         assert_eq!(sid, pid, "detached runner must be a session leader");
         assert_eq!(pgid, pid, "detached runner must lead its own process group");
         assert_ne!(pgid, caller_pgid, "a kill of the caller's group must not reach it");

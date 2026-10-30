@@ -2,8 +2,8 @@
 use super::*;
 use crate::config::{QaConfig, RegistryEnforcement};
 use crate::qa_impact::io::git;
-use crate::qa_registry::{Problem, Registry};
-use std::path::Path;
+use crate::qa_registry::{BugFamily, DuplicateBugFamily, Problem, Registry};
+use std::{collections::BTreeMap, path::Path};
 
 /// One close-path entry point, sharing the QA gate's delivery head and attribution window.
 #[allow(clippy::too_many_arguments)]
@@ -290,6 +290,67 @@ pub(super) fn read_registry(
 ) -> anyhow::Result<Option<Registry>> {
     crate::qa_registry::load_with(path, paths, |path| read(repo, revision, path, paths))
 }
+
+#[derive(Default)]
+struct RegistryBaseline {
+    registry: Option<Registry>,
+    alternatives: BTreeMap<String, Vec<BugFamily>>,
+    notices: Vec<String>,
+}
+
+/// Recover comparison data only; the delivered registry still uses the strict loader.
+/// Keep every duplicate variant so removing one cannot turn an old case into a new one.
+fn read_registry_baseline(
+    repo: &Path,
+    revision: &str,
+    path: &str,
+    paths: &[String],
+) -> anyhow::Result<RegistryBaseline> {
+    let mut baseline = RegistryBaseline::default();
+    let mut remaining = paths.to_vec();
+    let mut first_duplicate: Option<anyhow::Error> = None;
+    loop {
+        match read_registry(repo, revision, path, &remaining) {
+            Ok(registry) => {
+                baseline.registry = registry;
+                return Ok(baseline);
+            }
+            Err(error) if error.is::<DuplicateBugFamily>() => {
+                let duplicate = error.downcast_ref::<DuplicateBugFamily>().unwrap();
+                let (key, file) = (duplicate.key.clone(), duplicate.path.clone());
+                let notice = format!(
+                    "UPKEEP NOTICE: base registry duplicate repaired by this delivery: {error:#}"
+                );
+                let Some(contents) = read(repo, revision, &file, &remaining)? else {
+                    return Err(error.context(format!("BASE JOURNEY REGISTRY INVALID: {path}")));
+                };
+                let family = match serde_yaml::from_str(&contents) {
+                    Ok(family) => family,
+                    Err(cause) => {
+                        return Err(error.context(format!(
+                            "BASE JOURNEY REGISTRY INVALID: cannot compare {file}: {cause}"
+                        )));
+                    }
+                };
+                baseline.alternatives.entry(key).or_default().push(family);
+                baseline.notices.push(notice);
+                remaining.retain(|candidate| candidate != &file);
+                first_duplicate.get_or_insert(error);
+            }
+            Err(error) if error.is::<serde_yaml::Error>() => {
+                // Retain the historical YAML-debt fallback, but never discard
+                // an incomplete duplicate comparison and grant false case credit.
+                return match first_duplicate {
+                    Some(duplicate) => Err(duplicate.context(format!(
+                        "BASE JOURNEY REGISTRY INVALID: cannot compare {path}: {error:#}"
+                    ))),
+                    None => Ok(baseline),
+                };
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 fn problem_lines(problems: &[Problem]) -> String {
     problems
         .iter()
@@ -302,10 +363,13 @@ fn changed<T: serde::Serialize>(current: &T, before: Option<&T>) -> bool {
         serde_yaml::to_value(current).ok() != serde_yaml::to_value(before).ok()
     })
 }
-fn has_changed_case(registry: &Registry, before: Option<&Registry>, id: &str) -> bool {
+fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) -> bool {
     registry.bug_families.iter().any(|(key, family)| {
         family.tasks.iter().any(|task| task == id)
-            && changed(family, before.and_then(|r| r.bug_families.get(key)))
+            && changed(family, before.registry.as_ref().and_then(|r| r.bug_families.get(key)))
+            && before.alternatives.get(key).is_none_or(|variants| {
+                variants.iter().all(|variant| changed(family, Some(variant)))
+            })
     }) || registry.invariants.iter().any(|(key, invariant)| {
         let names_task = invariant.bug.as_ref().is_some_and(|bug| {
             bug.get("task").and_then(serde_yaml::Value::as_str) == Some(id)
@@ -314,7 +378,7 @@ fn has_changed_case(registry: &Registry, before: Option<&Registry>, id: &str) ->
                     .and_then(serde_yaml::Value::as_sequence)
                     .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some(id)))
         });
-        names_task && changed(invariant, before.and_then(|r| r.invariants.get(key)))
+        names_task && changed(invariant, before.registry.as_ref().and_then(|r| r.invariants.get(key)))
     })
 }
 
@@ -376,6 +440,9 @@ fn check(
             &warnings,
             override_reason,
         ),
+        // Semantic duplicates must not become unavailable-Git warnings or
+        // escapable G1 findings that authorize an unexamined delivered registry.
+        Err(error) if error.is::<DuplicateBugFamily>() => Err(format!("{error:#}")),
         // Git failures cannot establish causality. Never brick unrelated deliveries.
         Err(error) => warning(
             notes,
@@ -411,6 +478,12 @@ fn inspect(
     let registry = match after {
         Ok(None) => return Ok((vec![], vec![])), // no input file: gate off
         Ok(Some(registry)) => registry,
+        Err(error) if error.is::<DuplicateBugFamily>() => {
+            return Err(error.context(format!(
+                "DELIVERED JOURNEY REGISTRY INVALID: {}; remove the duplicate key before retrying",
+                qa.registry.path
+            )));
+        }
         Err(error) if registry_touched => {
             return Ok((
                 vec![Finding::broken(format!(
@@ -431,24 +504,9 @@ fn inspect(
         }
     };
     let before_paths = tracked(repo, base)?;
-    let before = match read_registry(repo, base, &qa.registry.path, &before_paths) {
-        Ok(registry) => registry,
-        // Malformed YAML is existing debt; unavailable Git data cannot establish causality.
-        Err(error) if error.is::<serde_yaml::Error>() => None,
-        Err(error) if error.is::<crate::qa_registry::DuplicateBugFamily>() => {
-            return Ok((
-                vec![Finding {
-                    gate: "G1",
-                    token: "registry unchanged:",
-                    title: "BASE JOURNEY REGISTRY INVALID",
-                    detail: format!("{} at delivery base {base}: {error:#}", qa.registry.path),
-                }],
-                vec![],
-            ));
-        }
-        Err(error) => return Err(error),
-    };
+    let before = read_registry_baseline(repo, base, &qa.registry.path, &before_paths)?;
     let old_problems = before
+        .registry
         .as_ref()
         .map(|r| r.validate(&before_paths).problems)
         .unwrap_or_default();
@@ -487,14 +545,13 @@ fn inspect(
         .filter(|p| !caused.contains(p))
         .cloned()
         .collect();
-    let mut warnings = if debt.is_empty() {
-        vec![]
-    } else {
-        vec![format!(
+    let mut warnings = before.notices.clone();
+    if !debt.is_empty() {
+        warnings.push(format!(
             "UPKEEP WARNING: pre-existing or unrelated registry problems (not blocking):\n{}",
             problem_lines(&debt)
-        )]
-    };
+        ));
+    }
     let mut findings = Vec::new();
     if !caused.is_empty() {
         findings.push(Finding::broken(format!(
@@ -585,7 +642,7 @@ fn inspect(
         .collect();
     if task.task_type == TaskType::Bug
         && !live.is_empty()
-        && !(registry_touched && has_changed_case(&registry, before.as_ref(), &task.id))
+        && !(registry_touched && has_changed_case(&registry, &before, &task.id))
     {
         findings.push(Finding {gate: "G3", token: "no case:", title: "BUG FIX WITHOUT A CASE",
             detail: format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)});

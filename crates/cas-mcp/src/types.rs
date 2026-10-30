@@ -376,7 +376,7 @@ pub struct TaskRequest {
     /// provide a non-empty close reason; the accepted decision is logged on
     /// the task.
     #[schemars(
-        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Needs a live registered supervisor and a reason; decision logged. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
+        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Needs a live registered supervisor and a reason. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,
@@ -397,7 +397,7 @@ pub struct TaskRequest {
     /// was inspected before waiving the gate, and it is stored next to the
     /// gate's own measurements. Only honored for a live registered supervisor.
     #[schemars(
-        description = "Epic close stranded-branch override: describe evidence that every lane is stale. Live registered supervisor only; logged with per-branch measurements."
+        description = "Epic close stranded-branch override: describe evidence that every lane is stale. Live registered supervisor only."
     )]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
@@ -592,7 +592,7 @@ pub struct TaskRequest {
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref, inline or stored). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed)."
+        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,

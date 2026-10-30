@@ -25,7 +25,7 @@ import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
-import { HeldSendFlushes } from "./held-send-flush";
+import { drainHeld, HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText, type TurnRenderContext } from "./conversation-view";
@@ -3917,25 +3917,25 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     try {
       const history = conversationHistory(key);
       const queue = heldSends.get(key) ?? [];
-      while (queue.length) {
-        const held = queue[0]!;
+      await drainHeld(queue, async (held) => {
         const accepted = machines.get(machine.id);
-        if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
+        if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) return false;
         const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
           () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
-        if (result === "waiting") { waiting = true; break; }
-        if (result === "not-saved") break;
-        queue.shift();
-        clearTimeout(held.expiry);
-        history.release(held.clientRef);
-        if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
-        else if (result !== "written") {
-          // Another tab may own this send. A lost claim is not a failed wire
-          // write: project its durable state and original receipt deadline.
-          const snapshot = await sendJournal.read(deliveryScope(machine, session));
-          history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
-        }
-      }
+        if (result === "waiting") { waiting = true; return false; }
+        if (result === "not-saved") return false;
+        return async () => {
+          clearTimeout(held.expiry);
+          history.release(held.clientRef);
+          if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
+          else if (result !== "written") {
+            // Another tab may own this send. A lost claim is not a failed wire
+            // write: project its durable state and original receipt deadline.
+            const snapshot = await sendJournal.read(deliveryScope(machine, session));
+            history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
+          }
+        };
+      });
       if (queue.length === 0) heldSends.delete(key);
       scheduleReceiptCheck(key);
     } finally {

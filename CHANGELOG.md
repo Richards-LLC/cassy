@@ -14,6 +14,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Git root and direct Cargo to that workspace, while retaining repository-bound
   selection and receipts. Root workspace behavior and user command limits stay intact.
 
+### Fixed — Factory workflow
+
+- **Late pane-exit events preserve retired workers** — Was: A delayed stale
+  event could change a recycled worker registration from Shutdown to Stale. →
+  Now: Stale updates leave shutdown registrations terminal.
+
 ## [3.91.0] - 2026-10-30
 
 ### Fixed — Factory workflow

@@ -812,6 +812,21 @@ fn test_mark_stale_releases_leases() {
 }
 
 #[test]
+fn mark_stale_after_shutdown_preserves_terminal_status() {
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
+    let agent = Agent::new("agent-retired".to_string(), "Retired Agent".to_string());
+    store.register(&agent).unwrap();
+
+    // A late pane-exit observation can arrive after recycle has retired this
+    // registration. It must not move the terminal row back to Stale.
+    store.graceful_shutdown("agent-retired").unwrap();
+    store.mark_stale("agent-retired").unwrap();
+
+    assert_eq!(store.get("agent-retired").unwrap().status, AgentStatus::Shutdown);
+}
+
+#[test]
 fn release_lease_if_owner_epoch_never_releases_replacement_generation() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_temp, store) = create_test_store(&mut env);

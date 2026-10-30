@@ -401,14 +401,18 @@ for (const [runner, args, context] of [
         self.assertEqual((data['head'], data['test']['harness'], data['test']['stability']['runs']),
                          (head, 'node-test', 5))
 
-    def test_node_test_runner_skips_adapter_without_factory_task_context(self):
+    def test_factory_mode_detached_head_skips_stability_adapters(self):
         hub = self.repo / 'hub-web'
         (hub / 'scripts').mkdir(parents=True, exist_ok=True)
         (hub / 'e2e').mkdir(parents=True, exist_ok=True)
-        wrapper = Path(__file__).parents[1] / 'hub-web/scripts/run-verified-node-tests.mjs'
-        shutil.copy(wrapper, hub / 'scripts/run-verified-node-tests.mjs')
+        for name in ['run-verified-node-tests.mjs', 'run-verified-tests.mjs']:
+            shutil.copy(Path(__file__).parents[1] / 'hub-web/scripts' / name, hub / 'scripts' / name)
         test_file = hub / 'e2e/no-context.test.mjs'
         test_file.write_text("import test from 'node:test';\ntest('native runner passes', () => {});\n")
+        (hub / 'src').mkdir()
+        (hub / 'src/detached.test.ts').write_text("test('native runner passes', () => expect(1).toBe(1));\n")
+        head = self.commit()
+        self.git('checkout', '--detach', head)
         with tempfile.TemporaryDirectory() as scratch:
             scratch = Path(scratch)
             marker = scratch / 'adapter-called'
@@ -418,12 +422,35 @@ for (const [runner, args, context] of [
             env = {key: value for key, value in os.environ.items()
                    if key not in ('CAS_FACTORY_MODE', 'CAS_WORKER_STABILITY_BASE', 'CAS_WORKER_STABILITY_HEAD')}
             env['PATH'] = f'{scratch}:{env["PATH"]}'
+            env['CAS_FACTORY_MODE'] = '1'
+            self.assertIsNone(STABILITY.worker_context(self.repo))
             result = subprocess.run(
-                ['node', str(hub / 'scripts/run-verified-node-tests.mjs',), str(test_file)],
+                ['node', str(hub / 'scripts/run-verified-node-tests.mjs'), str(test_file)],
                 cwd=hub, env=env, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertFalse(marker.exists(), 'non-factory Node test run invoked the stability adapter')
+            script = r'''import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { runVerified } from './scripts/run-verified-tests.mjs';
+let calls = 0;
+const status = runVerified('vitest', ['src/detached.test.ts'], {
+  cwd: process.cwd(),
+  env: process.env,
+  spawn(_command, args) {
+    calls += 1;
+    assert.equal(calls, 1, 'detached factory checkout must not invoke the adapter');
+    const report = args.find(arg => arg.startsWith('--outputFile=')).slice('--outputFile='.length);
+    writeFileSync(report, JSON.stringify({ numPassedTests: 1 }));
+    return { status: 0 };
+  },
+});
+assert.equal(status, 0);
+assert.equal(calls, 1);
+'''
+            result = subprocess.run(['node', '--input-type=module', '-e', script],
+                                     cwd=hub, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(marker.exists(), 'detached factory Node test run invoked the stability adapter')
 
     def test_native_reports_resolve_exact_touched_case_durations(self):
         with tempfile.TemporaryDirectory() as scratch:

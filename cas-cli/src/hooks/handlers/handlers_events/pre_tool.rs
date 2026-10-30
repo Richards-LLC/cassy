@@ -549,6 +549,9 @@ fn handle_pre_tool_use_inner(
                         "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor.",
                     ));
                 }
+                if let Some(denial) = worker_pre_push_guard_tampering(cmd) {
+                    return Ok(HookOutput::with_pre_tool_permission("deny", denial));
+                }
                 if looks_like_git_write_op(cmd) {
                     // `CAS_CLONE_PATH` is the bootstrap value, but SessionStart
                     // persists the authoritative checkout binding in the agent
@@ -1980,6 +1983,111 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
 /// because LAYER 2 (pre-commit hook) is the hard floor.
 pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
     !git_write_targets(".", cmd).is_empty()
+}
+
+/// Refuse worker commands that can disable the private pre-push guard. Git's
+/// `GIT_CONFIG_*` variables are scoped to one prefixed command unless the
+/// shell explicitly exports them (or `set -a` makes later assignments
+/// exported), so a harmless `GIT_CONFIG_KEY_0=... git status` must not taint
+/// subsequent statements.
+fn worker_pre_push_guard_tampering(command: &str) -> Option<&'static str> {
+    let mut allexport = false;
+    let mut exported_git_config = false;
+    for words in shell_statement_words(command) {
+        let Some(index) = unwrapped_command_index(&words) else {
+            if allexport
+                && words.iter().any(|word| {
+                    word.split_once('=')
+                        .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
+                })
+            {
+                exported_git_config = true;
+            }
+            continue;
+        };
+        let name = shell_word_basename(&words[index]);
+        if name == "set" && index == 0 {
+            for arg in &words[1..] {
+                if let Some(flags) = arg.strip_prefix('-').filter(|flags| !flags.starts_with('-')) {
+                    if flags.contains('a') {
+                        allexport = true;
+                    }
+                } else if let Some(flags) = arg.strip_prefix('+').filter(|flags| !flags.starts_with('+'))
+                    && flags.contains('a')
+                {
+                    allexport = false;
+                } else if (arg == "-o" || arg == "+o")
+                    && words.get(2).is_some_and(|option| option == "allexport")
+                {
+                    allexport = arg == "-o";
+                }
+            }
+        }
+
+        let is_export = matches!(name, "export" | "declare" | "typeset");
+        if is_export {
+            let options = words.get(index + 1).map(String::as_str).unwrap_or("");
+            let exports = name == "export" || options.starts_with('-') && options.contains('x');
+            if exports
+                && words[index + 1..].iter().any(|word| {
+                    word.split_once('=')
+                        .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
+                })
+            {
+                exported_git_config = true;
+            }
+        }
+
+        let prefixed_git_config = words[..index].iter().any(|word| {
+            word.split_once('=')
+                .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
+        });
+        let assigned_git_config = words[..index]
+            .iter()
+            .chain(words.get(index + 1..).unwrap_or_default().iter())
+            .any(|word| {
+                word.split_once('=')
+                    .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
+            });
+        if allexport && assigned_git_config {
+            exported_git_config = true;
+        }
+
+        if name != "git" {
+            continue;
+        }
+        let git_words = &words[index + 1..];
+        let mut operation_index = 0;
+        while let Some(word) = git_words.get(operation_index) {
+            match word.as_str() {
+                "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                    operation_index += 2;
+                }
+                "--" => {
+                    operation_index += 1;
+                    break;
+                }
+                _ if word.starts_with('-') => operation_index += 1,
+                _ => break,
+            }
+        }
+        let Some(operation) = git_words.get(operation_index).map(String::as_str) else {
+            continue;
+        };
+        let args = &git_words[operation_index + 1..];
+        if operation == "config" {
+            let removes_core = args.windows(2).any(|pair| {
+                pair[0] == "--remove-section" && pair[1].eq_ignore_ascii_case("core")
+            });
+            if removes_core {
+                return Some("🚫 WORKER PUSH GUARD: removing the Git core section can disable the private pre-push guard. Ask the supervisor to restore the worker hooks configuration.");
+            }
+        }
+        if operation == "push" && (prefixed_git_config || exported_git_config) {
+            return Some("🚫 WORKER PUSH GUARD: GIT_CONFIG_* overrides can disable the private pre-push guard. Push with the worker hooks configuration intact.");
+        }
+    }
+    None
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -10812,6 +10920,44 @@ mod worker_commit_guard_tests {
         add_linked_worktree(repo.path(), linked.path(), "factory/linked-worker");
         let repo_path = repo.path().to_string_lossy().to_string();
         let linked_path = linked.path().to_string_lossy().to_string();
+        let remote = tempfile::tempdir().expect("bare remote path");
+        let remote_init = std::process::Command::new("git")
+            .args(["init", "--bare", &remote.path().to_string_lossy()])
+            .output()
+            .expect("initialize probe remote");
+        assert!(remote_init.status.success());
+        let remote_add = std::process::Command::new("git")
+            .args(["remote", "add", "origin", &remote.path().to_string_lossy()])
+            .current_dir(linked.path())
+            .output()
+            .expect("add probe remote");
+        assert!(remote_add.status.success());
+        let failing_hooks = tempfile::tempdir().expect("failing hooks path");
+        let pre_push = failing_hooks.path().join("pre-push");
+        std::fs::write(
+            &pre_push,
+            "#!/bin/sh\necho 'probe pre-push hook refused' >&2\nexit 1\n",
+        )
+        .expect("write failing probe hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &pre_push,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("make probe hook executable");
+        }
+        let hook_config = std::process::Command::new("git")
+            .args([
+                "config",
+                "core.hooksPath",
+                &failing_hooks.path().to_string_lossy(),
+            ])
+            .current_dir(linked.path())
+            .output()
+            .expect("configure failing probe hook");
+        assert!(hook_config.status.success());
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
@@ -10827,6 +10973,13 @@ mod worker_commit_guard_tests {
             (ledger.to_string(), false),
             ("printf '%s' git commit".to_string(), false),
             (format!("git -C '{repo_path}' log --grep commit"), false),
+            ("GIT_CONFIG_KEY_0=core.hooksPath git status".to_string(), false),
+            (format!("git -C '{linked_path}' push origin factory/linked-worker"), false),
+            (format!("git -C '{linked_path}' config --remove-section core"), true),
+            (format!("git -C '{linked_path}' config --worktree --remove-section core"), true),
+            (format!("set -ae; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
+            (format!("set -euax; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
+            (format!("declare -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
             (format!("git -C '{linked_path}' commit -m work"), false),
             (format!("{ledger}\ngit -C '{repo_path}' commit -m work"), true),
             (format!("cat > LEDGER.md <<EOF\n$(git -C '{repo_path}' commit -m work)\nEOF"), true),
@@ -10839,6 +10992,18 @@ mod worker_commit_guard_tests {
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/linked-worker"])
+            .current_dir(linked.path())
+            .output()
+            .expect("run baseline push against failing probe hook");
+        assert!(!push.status.success(), "the probe pre-push hook must fail");
+        assert!(
+            String::from_utf8_lossy(&push.stderr).contains("probe pre-push hook refused"),
+            "push must reach the configured failing probe hook: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
     }
 
     #[test]

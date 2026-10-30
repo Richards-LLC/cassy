@@ -14,6 +14,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   drafts carrying a `## POSTED` block and names each skipped file; unposted
   release and diary drafts still pass through their usual lint.
 
+### Fixed — Worker pre-push guard
+
+- **Worker Git configuration cannot disable the private push guard** — Combined
+  shell export flags, exported `GIT_CONFIG_*` overrides and removal of the Git
+  `core` section are refused. A one-command configuration prefix on a read
+  command remains scoped to that command and is not treated as persistent.
+
 ### Fixed — Generated artifact regeneration
 
 - **Current dependencies survive regeneration** — Was: every changed hub-web

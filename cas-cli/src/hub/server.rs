@@ -480,10 +480,12 @@ async fn security_headers(
     // are the embedded page's only external origins (`h4_csp_03`).
     // frame-src: Commander frames visual reply pages from the same paired
     // machines (cas-3aff); each page carries its own sandbox policy.
+    // img-src: pending raster attachments use local object URLs. Keep blob:
+    // scoped to images; the composer never previews active SVG/HTML formats.
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
             "; frame-src 'self' https: http://127.0.0.1:*",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"

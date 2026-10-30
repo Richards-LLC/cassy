@@ -796,6 +796,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 #### Expected experience
 
 - Every attachment is named and removable before sending; long text has a bounded preview and screenshots have thumbnails.
+- Native Commander's real image policy permits pending raster object-URL thumbnails to decode; SVG and HTML remain named files without previews. The real-hub HUB-J24 part loads the embedded document directly on loopback and checks image-policy events before upload.
 - Sent and received images use a reserved thumbnail inside their own named file card; the card opens the existing full preview. A real failing content fetch collapses the preview to an inline note without an empty panel.
 - Files remain through reconnect and shell replacement, with a visible reminder to send before closing the page.
 

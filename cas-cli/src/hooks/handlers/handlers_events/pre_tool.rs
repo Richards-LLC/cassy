@@ -8393,7 +8393,6 @@ mod workspace_contract_tests {
     #[test]
     fn cas_3147_agent_shell_cannot_run_operator_policy_commands() {
         let mut env = TestEnvGuard::temp_home();
-        env.set("PATH", "/usr/bin:/bin");
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_FACTORY_MODE", "1");
         let project = tempfile::tempdir().unwrap();

@@ -2992,13 +2992,12 @@ fn only_notes_changed(before: &Task, after: &Task) -> bool {
     before == after
 }
 
-/// cas-c202: a test-only point just before the terminal Closed write, so a
-/// regression can land a concurrent supervisor correction mid-close.
+/// Test-only lifecycle boundaries for concurrent corrections and handoffs.
 #[cfg(test)]
-pub(crate) mod close_race_hook {
+pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3011,6 +3010,14 @@ pub(crate) mod close_race_hook {
 
     pub(crate) fn before_queue_handoff(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeHandoff, Box::new(hook)));
+    }
+
+    pub(crate) fn before_start_lease(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeLease, Box::new(hook)));
+    }
+
+    pub(crate) fn fire_before_start_lease(task_id: &str) {
+        fire_at(task_id, Phase::BeforeLease);
     }
 
     pub(super) fn fire(task_id: &str) {
@@ -7554,7 +7561,7 @@ impl CasCore {
             external_verification_receipt, negative_result, evidence_only,
             inline_external_ref, inline_execution_note).await;
         #[cfg(test)]
-        close_race_hook::fire_before_handoff(&id);
+        lifecycle_race_hook::fire_before_handoff(&id);
         let note = self.advance_queue_after_delivery(&id).await;
         match note {
             Ok(Some(note)) => if let Ok(result) = result.as_mut() {
@@ -11528,7 +11535,7 @@ impl CasCore {
         // re-read under the lock: the loser reports the existing close and
         // writes, relays and notifies nothing.
         #[cfg(test)]
-        close_race_hook::fire(&req.id);
+        lifecycle_race_hook::fire(&req.id);
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
         let close_refused = |change: &str| {
             let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -11562,7 +11569,7 @@ impl CasCore {
             // cas-ec74: adopt the store-owned stamp for the Closed occurrence.
             // cas-c202: guard against corrections after the final re-read.
             #[cfg(test)]
-            close_race_hook::fire_before_cas(&req.id);
+            lifecycle_race_hook::fire_before_cas(&req.id);
             let written = match current.as_ref() {
                 Some(current) => task_store.update_if_current(&task, current),
                 None => task_store.update(&task),

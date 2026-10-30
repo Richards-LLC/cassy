@@ -3009,6 +3009,8 @@ impl CasCore {
             }
         }
 
+        #[cfg(test)]
+        close_ops::lifecycle_race_hook::fire_before_start_lease(&req.id);
         let local_claim =
             agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started"));
         let won = match &local_claim {

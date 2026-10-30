@@ -1118,6 +1118,21 @@ export class ConversationView {
     if (this.following) this.pin();
   }
 
+  /**
+   * cas-1996: once the hub saved or declined a secret, it stops waiting here
+   * at once, before the hub's reply reaches the history. The repaint waits a
+   * task so the card first records its outcome.
+   */
+  private async answerSecret(request: OperatorReply, answer: Parameters<SecretAnswerer>[1]): Promise<{ path?: string }> {
+    const outcome = await this.options.answerSecret!(request, answer);
+    setTimeout(() => {
+      if (this.disposed || !this.history.dismissAsk(request.notification_id)) return;
+      this.update();
+      this.options.dismissalsChanged?.();
+    }, 0);
+    return outcome;
+  }
+
   /** Dismiss a waiting ask: it unpins, stops waiting, and its copy in the thread keeps its choices. */
   private dismissAsk(id: number, byKeyboard: boolean): void {
     if (!this.history.dismissAsk(id)) return;
@@ -1202,7 +1217,7 @@ export class ConversationView {
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
-      ...(this.options.answerSecret ? { answerSecret: this.options.answerSecret } : {}),
+      ...(this.options.answerSecret ? { answerSecret: (request: OperatorReply, answer: Parameters<SecretAnswerer>[1]) => this.answerSecret(request, answer) } : {}),
       ...(this.options.machine ? { machine: this.options.machine } : {}),
       pinned,
     };

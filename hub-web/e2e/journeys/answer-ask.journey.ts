@@ -381,5 +381,7 @@ test("HUB-J7 save a secret an agent asked for (cas-1996)", journeyPart, async ({
     expect(JSON.stringify(hub.sends)).not.toContain(VALUE);
     expect(await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }))).not.toContain(VALUE);
     await expect(page.getByRole("log")).not.toContainText(VALUE);
+    // Saved, it no longer waits on the operator.
+    await expect(page.locator('[aria-label="Conversation context"] [data-section="waiting"] .context-jump[data-kind="secret"]')).toHaveCount(0);
   });
 });

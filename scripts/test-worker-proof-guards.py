@@ -10,6 +10,8 @@ import sys
 import threading
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -23,6 +25,32 @@ SPEC.loader.exec_module(STABILITY)
 
 
 class ChangedStrings(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dependencies = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.dependencies.cleanup)
+        shared = Path(__file__).parents[1] / 'hub-web/node_modules'
+        use_shared = (
+            os.environ.get('CAS_TEST_WORKER_PROOF_NO_SHARED_DEPS') != '1'
+            and (shared / 'vitest/vitest.mjs').is_file()
+            and (shared / 'typescript/lib/typescript.js').is_file()
+        )
+        if use_shared:
+            cls.node_modules = shared
+            return
+
+        fixture = Path(__file__).parent / 'fixtures/vitest-stability'
+        install_root = Path(cls.dependencies.name)
+        shutil.copy(fixture / 'package.json', install_root / 'package.json')
+        shutil.copy(fixture / 'package-lock.json', install_root / 'package-lock.json')
+        install = subprocess.run(
+            ['npm', 'ci', '--prefix', str(install_root), '--ignore-scripts', '--no-audit', '--no-fund'],
+            capture_output=True, text=True,
+        )
+        if install.returncode:
+            raise RuntimeError(f'could not install pinned Vitest fixture dependencies:\n{install.stdout}\n{install.stderr}')
+        cls.node_modules = install_root / 'node_modules'
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -34,7 +62,7 @@ class ChangedStrings(unittest.TestCase):
         hub = self.repo / 'hub-web'
         hub.mkdir()
         (hub / 'package.json').write_text('{}')
-        (hub / 'node_modules').symlink_to(Path(__file__).parents[1] / 'hub-web/node_modules')
+        (hub / 'node_modules').symlink_to(self.node_modules)
         self.git('init', '-q')
 
     def git(self, *args):
@@ -309,7 +337,12 @@ test.each(['first', 'second'])('%s case', () => {});
             'CAS_WORKER_STABILITY_HEAD': head,
             'CAS_ROOT': str(cas_root),
         }, clear=False):
-            STABILITY.run_adapter_stability(self.repo, 'vitest', None)
+            output = StringIO()
+            try:
+                with redirect_stdout(output):
+                    STABILITY.run_adapter_stability(self.repo, 'vitest', None)
+            except ValueError as error:
+                raise ValueError(f'{error}\nVitest copy output:\n{output.getvalue()}') from error
         receipts = list((cas_root / 'worker-checks').rglob(f'{head}-test-*.json'))
         receipt, = receipts
         data = json.loads(receipt.read_text())

@@ -22,6 +22,21 @@ in a new profile, because Cassy never reads or rewrites the Keychain secret.
 A duplicate subscription offers to reuse the existing folder; cancellation drops staging.
 Distinct provider identities sharing one email receive `email-2`, `email-3`, and so on.
 
+## Duplicate-account EOF (cas-4d78)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | The existing default-no question keeps its prompt line; EOF ends that line before the login-cancelled notice. |
+| Scannable | Cancellation and the statement that the existing account was kept appear together on their own line. |
+| Readable | Ctrl-D with or without unfinished input cancels cleanly; normal entered and queued answers retain their existing spacing. |
+| Machine output | The prompt and cancellation remain on stderr; piped EOF also ends the prompt line, with unchanged exit status and stdout. |
+| Omitted | EOF does not echo a made-up answer, expose credentials, or add a second newline to an already-echoed queued answer. |
+
+The shared answer reader supplies the missing line break when stdin reaches
+EOF. The current duplicate-subscription path is reachable for Claude's
+non-secret account metadata; Codex identity remains unknown without reading
+its credential file. Exact-build terminal evidence follows in the task ledger.
+
 
 ## Critique
 

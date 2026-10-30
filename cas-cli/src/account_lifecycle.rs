@@ -617,7 +617,13 @@ impl LoginSignals {
             match receive.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(answer) => {
                     self.check()?;
-                    return Ok(answer?);
+                    let answer = answer?;
+                    if answer.is_empty() {
+                        // EOF does not echo Enter, so end the question before
+                        // the caller prints its cancellation notice.
+                        eprintln!();
+                    }
+                    return Ok(answer);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(error) => return Err(error.into()),

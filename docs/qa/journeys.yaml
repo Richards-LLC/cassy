@@ -2096,8 +2096,8 @@ journeys:
   steps:
   - Open plain text without loading rich renderers
   - Copy exact source and wrap a code frame with the keyboard
-  - Read a diagram and inspect its source; bad input stays readable
-  - Expand a unified diff
+  - Read a diagram and toggle Source/Preview and inline Expand by keyboard; bad input stays readable
+  - Expand a unified diff and retain Copy and Source/Preview in its shared frame
   - Decode an inline image without moving its file caption
   - Read the real PDF first page inline
   - Play video and audio on demand; unavailable files keep Open
@@ -2107,6 +2107,7 @@ journeys:
   - hub-web/src/markdown-renderer.ts
   - hub-web/src/code-frame.ts
   - hub-web/src/code-frame.css
+  - hub-web/src/object-frame.brief.md
   - hub-web/src/rich-code.ts
   - hub-web/src/rich-syntax.ts
   - hub-web/src/code-syntax.brief.md

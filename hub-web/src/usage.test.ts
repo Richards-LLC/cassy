@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, onTestFinished } from "vitest";
+import { createCodeFrame, setCodeFramePreview } from "./code-frame";
 import { USAGE_ACTIONS, UsageCounter, bindRichInspectionUsage, countAttentionDelivery, type UsageEntry } from "./usage";
 
 function memoryStore() {
@@ -14,7 +15,10 @@ describe("usage counter (cas-0b3d)", () => {
   it("counts opening diagram and diff inspections even when their toggle events coalesce", async () => {
     const counter = new UsageCounter(memoryStore(), () => new Date("2026-10-26T12:00:00Z"));
     const root = document.createElement("div");
-    root.innerHTML = '<figure class="rich-diagram"><details><summary>Diagram source</summary>source</details></figure><div class="rich-diff"><details><summary>Show diff</summary>diff</details></div>';
+    root.innerHTML = '<div class="rich-diff"><details><summary>Show diff</summary>diff</details></div>';
+    const { frame, pre } = createCodeFrame(document, { source: "flowchart LR\nA --> B", language: "mermaid" });
+    setCodeFramePreview(pre, document.createElement("figure"));
+    root.append(frame);
     document.body.append(root); onTestFinished(() => root.remove());
     bindRichInspectionUsage(root, counter);
     const details = [...root.querySelectorAll("details")];
@@ -24,6 +28,9 @@ describe("usage counter (cas-0b3d)", () => {
       summary.click(); expect(detail.open).toBe(true);
       summary.click(); expect(detail.open).toBe(false);
     }
+    const source = frame.querySelector<HTMLButtonElement>('[data-action="source"]')!;
+    source.click();
+    source.click();
     await delivered;
     expect(counter.pending("m")).toEqual([{ day: "2026-10-26", action: "rich-content.inspect", journey: "HUB-J22", count: 2 }]);
   });

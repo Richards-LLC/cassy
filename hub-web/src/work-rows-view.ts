@@ -9,6 +9,7 @@
 import { clockLabel, workTurnKey, type ThreadWork } from "./thread-model";
 import { rowText, taskChip, turnNotice, workFailed, workSummary, type DetailState, type WorkEvent } from "./work-events";
 import { unifiedDiff } from "./rich-diff";
+import { createCodeFrame, setCodeFramePreview } from "./code-frame";
 import "./rich-content.css";
 
 export interface WorkRowsContext {
@@ -106,7 +107,9 @@ function changedFiles(document: Document, event: WorkEvent, context: WorkRowsCon
         if (diff) {
           const disclosure = diff.querySelector("details");
           if (disclosure) disclosure.open = true;
-          detail.append(diff);
+          const { frame, pre } = createCodeFrame(document, { source: patch!, language: "diff", filename: file.path });
+          setCodeFramePreview(pre, diff);
+          detail.append(frame);
         }
         else {
           const label = document.createElement("p"); label.className = "work-detail-label"; label.textContent = "Source edit · no recorded unified diff";
@@ -188,10 +191,14 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   row.className = `work-row work-row--${event.kind}`;
   row.classList.toggle("is-failed", workFailed(event));
   row.dataset.eventId = event.id;
+  row.classList.toggle("is-live", event.kind === "tool" && !workFailed(event) && event.tool?.exit_code === undefined && !event.lifecycle?.outcome && !event.lifecycle?.ended_at
+    && (event.lifecycle?.stage === "start" || event.lifecycle?.stage === "phase"));
   const key = `row:${event.id}`;
   const open = event.hasDetail && context.isOpen(key);
   const text = document.createElement("span"); text.className = "work-row-text"; text.textContent = rowText(event);
-  const parts: HTMLElement[] = [text];
+  const gutter = document.createElement("span"); gutter.className = "work-row-gutter"; gutter.setAttribute("aria-hidden", "true");
+  if (event.hasDetail) gutter.insertAdjacentHTML("afterbegin", CHEVRON);
+  const parts: HTMLElement[] = [gutter, text];
   if (workFailed(event)) {
     const failed = document.createElement("span"); failed.className = "work-row-failed"; failed.textContent = "failed";
     parts.push(failed);
@@ -209,7 +216,6 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   const toggle = document.createElement("button");
   toggle.type = "button"; toggle.className = "work-row-toggle"; toggle.dataset.focusKey = key;
   toggle.setAttribute("aria-expanded", String(open));
-  toggle.insertAdjacentHTML("afterbegin", CHEVRON);
   toggle.append(...parts);
   toggle.onclick = () => {
     const opening = !context.isOpen(key);

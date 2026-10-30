@@ -162,7 +162,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       await journey.stage("Read typed work scope", async () => {
         const typed = [
           event("typed-start", "notice", "Turn started", -900, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
-          event("typed-read", "tool", "Read files", -800, { tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
+          event("typed-read", "tool", "Read files", -800, { lifecycle: { id: "read", stage: "start" }, tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
           event("typed-search", "tool", "Find the renderer", -700, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
           event("typed-command", "tool", "Check the build", -600, { tool: { name: "Bash", operation: "command", targets: [], command: "npm run check", cwd: "/project", exit_code: 2 }, lifecycle: { id: "check", stage: "end", outcome: "error" } }),
           event("typed-edit", "tool", "Update the renderer", -500, { tool: { name: "Edit", operation: "edit", targets: ["src/a.ts", "src/b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
@@ -181,6 +181,15 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(block).not.toContainText("Turn started");
         await expect(block).not.toContainText("Turn completed");
         const read = block.getByRole("button", { name: "Read · 3 files", exact: true });
+        const liveGutter = block.locator('[data-event-id="typed-read"] .work-row-gutter');
+        await expect(block.locator(".work-row.is-live")).toHaveCount(1);
+        expect(await read.evaluate(node => node.getBoundingClientRect().height)).toBe(width === 390 ? 44 : 24);
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "active" });
+        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await page.emulateMedia({ forcedColors: "none" });
+        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("work-live-shine");
         await read.focus(); await page.keyboard.press("Enter");
         await expect(read).toBeFocused();
         const detail = block.locator('[data-event-id="typed-read"] .work-detail');
@@ -189,9 +198,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(detail.locator("script")).toHaveCount(0);
         // The same event ID receives new metadata while its detail is open.
         await detail.focus();
-        hub.appendWork(PELICAN, { ...typed[1]!, tool: { name: "Read", operation: "read", targets: ["src/a.ts"], counts: { files: 1 } } } as WorkEventWire, exact);
+        hub.appendWork(PELICAN, { ...typed[1]!, lifecycle: { id: "read", stage: "end", outcome: "success" }, tool: { name: "Read", operation: "read", targets: ["src/a.ts"], counts: { files: 1 } } } as WorkEventWire, exact);
         await expect(block.getByRole("button", { name: "Read · 1 file", exact: true })).toHaveAttribute("aria-expanded", "true");
         await expect(detail).toBeFocused();
+        await expect(block.locator(".work-row.is-live")).toHaveCount(0);
         await expect(detail.locator(".work-record")).toHaveText(exact);
       });
 

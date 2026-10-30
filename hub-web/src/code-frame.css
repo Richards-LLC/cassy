@@ -31,7 +31,11 @@
   font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui);
 }
 .code-frame-actions button[aria-pressed="true"] { background: var(--bg-active); color: var(--color-action); }
-.code-frame-content { min-width: 0; max-width: 100%; }
+.code-frame-content { min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; }
+.code-frame[data-expanded="true"] > .code-frame-content { max-height: none; }
+.code-frame-content > [hidden] { display: none; }
+.code-frame .rich-diagram { margin: 0; }
+.code-frame-actions button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
 /* Scoped specificity overrides the legacy thread, pinned ask and inbox pre. */
 .code-frame .code-frame-content pre.markdown-code {
   max-width: 100%;
@@ -68,6 +72,7 @@
 }
 @media print {
   .code-frame-actions, .code-frame-status { display: none; }
+  .code-frame-content { max-height: none; overflow: visible; }
   .code-frame .code-frame-content pre.markdown-code { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
 }
 

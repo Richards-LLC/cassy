@@ -21,7 +21,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   candidate checkout now builds production web assets before compiling Cassy.
   Its receipt records the source and served web digests, and publication fails
   if the candidate serves different bytes. The previous candidate stays intact
-  when verification fails.
+  when verification fails. Homepage verification uses the hub's canonical
+  Commander route, so a valid candidate no longer fails with an HTML 404.
 
 ### Fixed — Independent batch QA
 

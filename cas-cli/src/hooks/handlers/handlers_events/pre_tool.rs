@@ -8617,6 +8617,52 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn cas_3147_heredoc_expansions_obey_workspace_contract() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let operand = "a[$(touch /outside/cas-b8ae-must-not-execute)]";
+        let prefix = format!("x='{operand}'; ");
+        let mut failures = Vec::new();
+        for (case, command, denied) in [
+            ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), true),
+            ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), true),
+            ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), true),
+            ("literal subscript", format!("cat <<EOF\n$(( {operand} ))\nEOF\n"), true),
+            ("command substitution", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("tab stripping", format!("{prefix}cat <<-EOF\n\t$(( x ))\n\tEOF\n"), true),
+            ("redirected receiver", format!("{prefix}cat > /dev/null <<EOF\n$(( x ))\nEOF\n"), true),
+            ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
+            ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
+            ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("unterminated body", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\n".into(), true),
+            ("single quoted delimiter", format!("{prefix}cat <<'EOF'\n$(( x )) $(touch /outside/p)\nEOF\n"), false),
+            ("double quoted delimiter", "cat <<\"EOF\"\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("numeric arithmetic", "cat <<EOF\n$(( (1+2)*3 )) $[ (1+2)*3 ]\nEOF\n".into(), false),
+            ("literal text", "cat <<EOF\ntouch /outside/p; 'unbalanced quote\nEOF\n".into(), false),
+            ("escaped markers", r"cat <<EOF
+\$(touch /outside/p) \`touch /outside/p\` \$(( x ))
+EOF
+".into(), false),
+            ("mixed delimiters", "cat <<'DATA' <<RUN\n$(touch /outside/ignored)\nDATA\n$(touch /outside/cas-b8ae-must-not-execute)\nRUN\n".into(), true),
+            ("effective directory", "cd /outside && cat <<EOF\n$(touch cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+        ] {
+            // These are JSON request strings only. Never execute their payloads.
+            let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            let decision = &response["hookSpecificOutput"]["permissionDecision"];
+            let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
+            if (decision == "deny") != denied || (denied && !reason.contains("FACTORY WORKSPACE CONTRACT")) {
+                failures.push(format!("{case}: {decision}: {reason}"));
+            }
+        }
+        assert!(failures.is_empty(), "heredoc expansion decisions: {failures:#?}");
+    }
+
+    #[test]
     fn cas_3147_arithmetic_subscript_sources_are_denied() {
         let mut env = TestEnvGuard::temp_home();
         env.set("CAS_AGENT_ROLE", "supervisor");

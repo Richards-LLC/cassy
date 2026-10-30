@@ -221,8 +221,11 @@ Write `<ledger-dir>/LEDGER.md` beside `bundle.json`. It has these sections:
   `| # | Path | Viewport · scheme | Expected | Actual | Severity | Evidence |`
 - **Polish:** the rubric table, the checklist, and the
   `visual-qa.mjs --strict` verdict line (plus the base run's, when scoped).
-- **Pre-existing:** every defect the base build shares, with its evidence and
-  the follow-up task Cassy filed for it. Say "none" when there are none.
+- **Pre-existing:** every defect the base build shares, with its evidence.
+  File a follow-up only for a reproduced, observable defect affecting someone
+  today: `task action=create` refuses a follow-up from a finding without `repro`
+  (steps or command, plus the wrong output) and `affected` (who acts on it
+  today). Leave the rest in the verdict. Say "none" when there are none.
 
 Every finding cites a `trace action N` **and** its `F0N.png`. A finding
 without both is not a finding. Recording the verdict cites the bundle on the

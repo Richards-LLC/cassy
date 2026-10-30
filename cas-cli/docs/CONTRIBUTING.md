@@ -1028,6 +1028,8 @@ An existing dispatch or verdict keeps its authority, and the `force-verifier` la
 
 Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none.
 
+`task action=create` enforces the threshold. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, needs `repro` and `affected`, or it is refused. It carries the `from-finding` label and a note recording all three. A P0/P1 bug that an operator or supervisor observed directly is exempt, and `finding_origin=none` declares that finding-like text is not a finding; reviewers cannot use it. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. At 0.5 or more the supervisor gets one notice per crossing, and `epic_status` shows the ratio whenever the epic has a completed review.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside

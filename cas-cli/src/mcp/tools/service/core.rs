@@ -264,6 +264,36 @@ impl CasService {
             &self.inner.load_config().qa().user_facing_labels,
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        // cas-0ad8: the review spawn threshold, for every project and role.
+        let reviewer_origin = self.caller_review_origin();
+        let finding_origin = crate::mcp::tools::core::task::lifecycle::review_loop::spawn_gate(
+            &crate::mcp::tools::core::task::lifecycle::review_loop::SpawnRequest {
+                origin: req.finding_origin.as_deref(),
+                repro: req.repro.as_deref(),
+                affected: req.affected.as_deref(),
+                title: req.title.as_deref().unwrap_or_default(),
+                description: req.description.as_deref().unwrap_or_default(),
+                priority: req.priority.unwrap_or(2),
+                task_type,
+                reviewer_origin: reviewer_origin.as_deref(),
+                is_worker: std::env::var("CAS_AGENT_ROLE").is_ok_and(|role| role == "worker"),
+            },
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        let mut req = req;
+        if let Some(origin) = finding_origin.as_deref() {
+            use crate::mcp::tools::core::task::lifecycle::review_loop::{FINDING_LABEL, origin_note};
+            req.labels = Some(match req.labels.take().filter(|labels| !labels.trim().is_empty()) {
+                Some(labels) => format!("{labels},{FINDING_LABEL}"),
+                None => FINDING_LABEL.to_string(),
+            });
+            let note = origin_note(origin, req.repro.as_deref().unwrap_or_default(), req.affected.as_deref().unwrap_or_default());
+            req.notes = Some(match req.notes.take().filter(|notes| !notes.trim().is_empty()) {
+                Some(notes) => format!("{notes}\n{note}"),
+                None => note,
+            });
+        }
+        let finding_epic = finding_origin.as_ref().and(req.epic.clone());
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -307,7 +337,8 @@ impl CasService {
                 )
                 .await;
         }
-        self.inner
+        let created = self
+            .inner
             .cas_task_create_with_delivery_mode(
                 inner_req,
                 target_repo.as_deref(),
@@ -315,7 +346,33 @@ impl CasService {
                 req.confirm_warning.unwrap_or(false),
                 req.delivery_mode.as_deref(),
             )
-            .await
+            .await;
+        if created.as_ref().is_ok_and(|result| result.is_error != Some(true))
+            && let Some(epic) = finding_epic.as_deref()
+        {
+            crate::mcp::tools::core::task::lifecycle::review_loop::notify_on_crossing(&self.inner.cas_root, epic);
+        }
+        created
+    }
+
+    /// The review this caller is performing, which makes anything it files a
+    /// follow-up from a finding: a verifier, or a worker holding a QA task.
+    fn caller_review_origin(&self) -> Option<String> {
+        let agent_id = self.inner.get_agent_id().ok()?;
+        let agent = crate::store::open_agent_store(&self.inner.cas_root).ok()?.get(&agent_id).ok()?;
+        if agent.name == "task-verifier" {
+            return Some("verifier".to_string());
+        }
+        crate::store::open_task_store(&self.inner.cas_root)
+            .ok()?
+            .list(Some(crate::types::TaskStatus::InProgress))
+            .ok()?
+            .into_iter()
+            .find(|task| {
+                task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL)
+                    && task.assignee.as_deref().is_some_and(|assignee| assignee == agent.id || assignee == agent.name)
+            })
+            .map(|task| format!("qa:{}", task.id))
     }
 
     pub(super) async fn task_proposal_inbox(

@@ -3315,6 +3315,8 @@ struct ShellLexed {
     /// Byte after each token in the original source, including removed quotes.
     ends: Vec<usize>,
     unresolved_at: Option<usize>,
+    /// Raw parameter bodies: numeric operand checks must retain source quoting.
+    parameters: Vec<(usize, usize)>,
 }
 
 fn factory_shell_tokens_for_projection(
@@ -3380,6 +3382,7 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
     let mut literals = Vec::new();
     let mut ends = Vec::new();
     let mut unresolved_at = None;
+    let mut parameters = Vec::new();
     let mut word = String::new();
     let mut literal = true;
     let mut word_quoted = false;
@@ -3436,12 +3439,30 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
             escaped = false;
             continue;
         }
+        // Escaped ${ is literal data inside a double-quoted word. Its braces
+        // must not manufacture a parameter quoting context for later text.
+        if quote == Some('"') && expansions.is_empty() && ch == '\\'
+            && command.as_bytes().get(index + 1..index + 3) == Some(b"${")
+        {
+            word.push_str("\\$");
+            chars.next();
+            continue;
+        }
         if let Some(expansion) = expansions.last_mut() && expansion.escaped {
             word.push(ch);
             expansion.escaped = false;
             continue;
         }
         let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        // Single quotes inside a double-quoted parameter default differ
+        // across Bash modes. Retain potentially active nested operands too.
+        if quote == Some('"') && active_quote == Some('\'') && !expansions.is_empty()
+            && ch == '$' && command.as_bytes().get(index + 1) == Some(&b'{')
+            && command.as_bytes()[..index].iter().rev().take_while(|&&ch| ch == b'\\').count() % 2 == 0
+        {
+            let end = command[index + 2..].find('}').map_or(command.len(), |end| index + 2 + end);
+            parameters.push((index + 2, end));
+        }
         // Shell line continuations disappear before word matching, including
         // inside double quotes; single-quoted backslash/newline stays data.
         if active_quote != Some('\'') && ch == '\\'
@@ -3525,7 +3546,12 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
                 None if ch == expansion.opening => expansion.balance += 1,
                 None if ch == expansion.closing => {
                     expansion.balance -= 1;
-                    if expansion.balance == 0 { expansions.pop(); }
+                    if expansion.balance == 0 {
+                        if expansion.opening == '{' {
+                            parameters.push((expansion.start + 2, index));
+                        }
+                        expansions.pop();
+                    }
                 }
                 _ => {},
             }
@@ -3629,7 +3655,7 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         &mut word_quoted,
         &mut ends, command.len(),
     );
-    ShellLexed { tokens, literals, ends, unresolved_at }
+    ShellLexed { tokens, literals, ends, unresolved_at, parameters }
 }
 
 /// Return shell statements with heredoc bodies and comments removed. Quoted
@@ -4570,6 +4596,26 @@ impl ParenPositions {
     }
 }
 
+/// A redirect's filename is not the command: `>out touch /x` runs touch. Leaves
+/// command position as it was.
+fn skip_redirect(tokens: &[ShellToken], index: &mut usize, parens: &mut ParenPositions) {
+    while let Some(ShellToken::Operator('<' | '>' | '&' | '|')) = tokens.get(*index) {
+        parens.operator();
+        *index += 1;
+    }
+    if matches!(tokens.get(*index), Some(ShellToken::Word(_))) {
+        parens.word(false);
+        *index += 1;
+    }
+}
+
+/// The descriptor number in `2>out touch /x`, which is not the command either.
+fn is_redirect_descriptor(word: &str, next: Option<&ShellToken>) -> bool {
+    !word.is_empty()
+        && word.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(next, Some(ShellToken::Operator('<' | '>')))
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
@@ -4590,6 +4636,14 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     for (index, token) in tokens.iter().enumerate() {
         if token == &ShellToken::Operator('>') {
             if let Some(ShellToken::Word(target)) = tokens.get(index + 1) {
+                add_target(target);
+            }
+            // `>|file` and `>&file` write too; `>&2` and `>&-` name a descriptor.
+            if let (Some(ShellToken::Operator('|' | '&')), Some(ShellToken::Word(target))) =
+                (tokens.get(index + 1), tokens.get(index + 2))
+                && target != "-"
+                && !target.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 add_target(target);
             }
         }
@@ -4621,8 +4675,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                 command_position = true;
                 index += 1;
             }
+            ShellToken::Operator('<' | '>') => skip_redirect(&tokens, &mut index, &mut parens),
             ShellToken::Operator(_) => {
                 parens.operator();
+                index += 1;
+            }
+            ShellToken::Word(word) if command_position && is_redirect_descriptor(word, tokens.get(index + 1)) => {
+                parens.word(false);
                 index += 1;
             }
             ShellToken::Word(command) if command_position => {
@@ -4793,8 +4852,13 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
                 command_position = true;
                 index += 1;
             }
+            ShellToken::Operator('<' | '>') => skip_redirect(&tokens, &mut index, &mut parens),
             ShellToken::Operator(_) => {
                 parens.operator();
+                index += 1;
+            }
+            ShellToken::Word(word) if command_position && is_redirect_descriptor(word, tokens.get(index + 1)) => {
+                parens.word(false);
                 index += 1;
             }
             ShellToken::Word(word) if command_position => {
@@ -8751,6 +8815,26 @@ mod workspace_contract_tests {
             ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), true),
             ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), true),
             ("earlier arm directory", format!("cd /outside; case x in a) cd {} ;; b) touch p ;; esac\n", project.path().display()), true),
+            // ver-e69b5575c18c: a redirect's filename is no keyword, so bash runs
+            // `touch in /outside/p` here; it must not be read as a case statement.
+            ("redirect target named case", "(>case touch in /outside/p) >esac\n".into(), true),
+            ("substituted redirect target named case", "echo \"$(>case touch in /outside/p) >esac)\"\n".into(), true),
+            ("append target named case", "(>>case touch in /outside/p) >esac\n".into(), true),
+            ("fd redirect target named case", "(>&case touch in /outside/p) >&esac\n".into(), true),
+            ("clobber target named case", "(>|case touch in /outside/p) >|esac\n".into(), true),
+            ("input target named case", "(<case touch in /outside/p) <esac\n".into(), true),
+            ("subshell after a redirect target named case", ">case x in\n(touch /outside/p)\nesac\n".into(), true),
+            ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
+            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
+            ("redirect before a write", ">out touch /outside/p\n".into(), true),
+            ("clobber redirect", "echo hi >|/outside/p\n".into(), true),
+            ("combined redirect", "echo hi >&/outside/p\n".into(), true),
+            ("redirect before a delete", ">out rm -rf /outside/p\n".into(), true),
+            ("descriptor redirect before a write", "2>out touch /outside/p\n".into(), true),
+            ("redirect before a directory change", ">out cd /outside; touch p\n".into(), true),
+            ("redirect target substitution", "echo hi > \"$(touch /outside/p)\"\n".into(), true),
+            ("redirect before a harmless command", ">out.txt echo hi\n".into(), false),
+            ("descriptor duplication", ">&2 echo hi\n".into(), false),
             ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
             ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
             ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
@@ -8775,6 +8859,16 @@ EOF
             ("escaped delimiter", "cat <<\\EOF\n$(touch /outside/p)\nEOF\n".into(), false),
             ("partially single quoted delimiter", "cat <<E'O'F\n$(touch /outside/p)\nEOF\n".into(), false),
             ("partially double quoted delimiter", "cat <<\"E\"OF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("CR terminator", "cat <<EOF\nok\nEOF\r\necho '$(touch /outside/p)'\nEOF\n".into(), true),
+            ("CR delimiter suffix", "cat <<EOF\r\nok\nEOF\necho '$(touch /outside/p)'\nEOF\r\n".into(), true),
+            ("CR delimiter interior", "cat <<EOF\rX\nok\nEOF\necho '$(touch /outside/p)'\nEOF\rX\n".into(), true),
+            ("non-ASCII delimiter space", "cat <<EOF\u{a0}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{a0}\n".into(), true),
+            ("ANSI-C delimiter desync", "cat <<$'EOF'\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
+            ("locale delimiter desync", "cat <<$\"EOF\"\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
+            ("split heredoc operator", "cat <\\\n<EOF\necho '$(touch /outside/p)'\nEOF\n".into(), true),
+            ("quoted CR body", "cat <<'EOF'\r\n$(touch /outside/p)\r\nEOF\r\n".into(), false),
+            ("tab stripped literal", "cat <<-'EOF'\n\t$(touch /outside/p)\n\tEOF\n".into(), false),
+            ("tab stripped numeric", "cat <<-EOF\n\t$(( 1+2 ))\n\tEOF\n".into(), false),
         ] {
             // These are JSON request strings only. Never execute their payloads.
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
@@ -8994,7 +9088,36 @@ EOF
             assert_eq!(status, "deny", "{command}: {reason}");
             assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
         }
+        // cas-d6f2: these operands recursively evaluate subscript text.
+        let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
+        for expression in [
+            "[[ x -eq 0 ]]",
+            "[[ 0 -ge x ]]",
+            "[[ 1 -eq 1 && x -ne 0 ]]",
+            "test x -eq 0",
+            "echo \"${b[x]}\"",
+            "echo \"${s:x}\"",
+            "echo \"${s:0:x}\"",
+            "echo \"${!x}\"",
+            "cat <<EOF\n${b[x]}\nEOF",
+            r#"echo "\${default:-'${b[x]}'}""#,
+            r#"echo "${default:-'${b[x]}'}""#,
+        ] {
+            let command = format!("{indirect}{expression}");
+            let (status, reason) = decision(&command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
         for allowed in [
+            "[[ 1 -eq 1 ]]",
+            "test 1 -eq 1",
+            "test -n -eq",
+            "echo \"${b[0]}\"",
+            "echo \"${s:0:2}\"",
+            "cat <<EOF\n${s:0:2}\nEOF",
+            "[[ \"literal\" == \"-eq\" ]]",
+            r#"echo "\${b[x]}""#,
+            r#"echo '${b[x]}'"#,
             "cas config get factory.write_roots",
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",

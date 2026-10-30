@@ -592,7 +592,7 @@ impl Fx {
         serde_json::from_value(serde_json::json!({
             "action":"batch_receipt", "task_ids":["cas-bq01","cas-bq02","cas-bq01"],
             "staging_sha":self.staging, "ledger_artifact_id":self.artifact,
-            "ledger_path":self.ledger,
+            "ledger_path":self.ledger, "ledger_author":"qa-reviewer",
         }))
         .unwrap()
     }
@@ -671,6 +671,12 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
         .await
         .expect("one supervisor receipt must cover the staging walk");
     assert!(extract_text(recorded).contains("Batch QA receipt"));
+    let receipt = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
+    assert_eq!(
+        (receipt[0].ledger_author_id.as_deref(), receipt[0].ledger_author_role.as_deref()),
+        (Some("qa-reviewer"), Some("external")),
+        "an unregistered reviewer on another machine is an accepted independent author"
+    );
     let status: VerificationRequest = serde_json::from_value(serde_json::json!({
         "action":"qa_status", "task_id":"cas-bq01"
     }))
@@ -1235,4 +1241,44 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         TaskStatus::Closed,
         "{refused}"
     );
+}
+
+#[tokio::test]
+async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let status = |id: &str| tasks.get(id).unwrap().status;
+    // The delivering worker walked its own ledger: never independent QA.
+    fx.reject(
+        serde_json::json!({"ledger_author":"test-agent"}),
+        "is in cas-bq01's implementation lineage",
+    )
+    .await;
+
+    // An independent receipt stops counting once its author joins the lineage.
+    fx.record().await;
+    let mut task = tasks.get("cas-bq01").unwrap();
+    task.deliverables.handoff_branches.push("factory/qa-reviewer-cas-bq01".into());
+    tasks.update(&task).unwrap();
+    let refused = fx.close("cas-bq01").await;
+    assert_ne!(status("cas-bq01"), TaskStatus::Closed, "{refused}");
+
+    // Only the operator's recorded words override, at record time and at close.
+    tasks
+        .append_note("cas-bq01", "[2026-10-30 13:00] DECISION: QA AUTHOR OVERRIDE: operator accepts this walk")
+        .unwrap();
+    let mut request = serde_json::to_value(fx.request()).unwrap();
+    request["task_ids"] = serde_json::json!(["cas-bq01"]);
+    request["ledger_author"] = serde_json::json!("test-agent");
+    fx.supervisor
+        .verification(Parameters(serde_json::from_value(request).unwrap()))
+        .await
+        .expect("operator override admits a lineage author");
+    let receipts = cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap();
+    assert!(receipts.iter().any(|receipt| receipt.author_overrides.get("cas-bq01").map(String::as_str)
+        == Some("operator accepts this walk")));
+    let closed = fx.close("cas-bq01").await;
+    assert_eq!(status("cas-bq01"), TaskStatus::Closed, "{closed}");
 }

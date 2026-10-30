@@ -43,7 +43,7 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 3. Gather the EPIC specification and task breakdown through the supervisor's task/spec workflow.
 4. Review task scope and dependencies
 
-**Spawn threshold for review findings.** Read a verifier's `Improvements (non-blocking)` and warning issues, and leave them in the verdict. File a follow-up only when a finding shows reproduced, observable wrong behaviour that affects someone today. With three or more findings under that bar, note them together on the task and file nothing. A worker may fix a nit in its own lane before merge; a nit never reopens or extends a merged task. At release prep, run `cas qa polish --epic <id>` to list warnings by file, then batch them into one polish task for that release or drop them.
+**Spawn threshold for review findings.** Read a verifier's `Improvements (non-blocking)` and warning issues, and leave them in the verdict. File a follow-up only when a finding shows reproduced, observable wrong behaviour that affects someone today. With three or more findings under that bar, note them together on the task and file nothing. A worker may fix a nit in its own lane before merge; a nit never reopens or extends a merged task. `task action=create` enforces this: a follow-up from a finding (`finding_origin`, a QA or verifier caller, or text naming one) needs `repro` and `affected`. A P0/P1 bug you or the operator observed directly is exempt. An epic with at least 5 completed reviews whose follow-ups from findings reach 0.5 per review over its last 10 sends you one notice and shows the ratio in `epic_status`. At release prep, run `cas qa polish --epic <id>` to list warnings by file, then batch them into one polish task for that release or drop them.
 
 **Verification tiers.** Close records the tier on the task. Tier 0 (only docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys) has no independent verifier; CI and the mechanical gates still apply. Tier 1 is one verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, merge-queue and close-gate code) adds an adversarial probe. QA follows the same tiers, including batch rounds: Tier 0 walks no journeys and needs no ledger row, Tier 1 walks the impacted journeys, and Tier 2 needs an `Adversarial probe:` row in the task ledger. To force a verifier on a Tier 0 task, add the `force-verifier` label before close.
 
@@ -421,10 +421,18 @@ Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-deli
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 Every hour with new deliveries, build a candidate at the exact epic tip, walk the
 combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
-with `task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`; every listed
+with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and
+`ledger_author`, who walked it and did not implement a listed task; every listed
 delivery anchor must be contained in that reviewed target commit. Then close those
 deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
 remain available.
+
+A round covers whatever is merged at the tip when it starts. Never hold a round for
+lanes still in review; they join the next round. Title its task `Batch QA round ...`,
+because that in-progress task is how Cassy knows a round is running. If a merged
+delivery has no receipt after 60 minutes and no round started in that time, every
+supervisor on the epic gets a `QA batch overdue` notice each hour. Start a round
+when it arrives.
 
 ## Phase 4: Complete
 

@@ -9256,9 +9256,9 @@ impl CasCore {
                     if (task.status != TaskStatus::AwaitingMerge
                         || park_anchor != task.deliverables.factory_branch_anchor)
                         && let Some(tip) = park_anchor.as_deref()
-                        && let Some(paths) = commit_receipt_window.as_ref().and_then(|window| {
+                        && let Some(window) = commit_receipt_window.as_ref()
+                        && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
-                        })
                         && let Some(refusal) = receipt_scope::park_refusal(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
@@ -9266,6 +9266,9 @@ impl CasCore {
                             &paths,
                             tip,
                             &resolved_parent_branch,
+                            task_attribution::range_bounds(
+                                &close_project_root, &resolved_parent_branch, window, Some(tip),
+                            ).as_deref(),
                         )
                     {
                         return Ok(Self::tool_error(refusal));

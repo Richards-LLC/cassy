@@ -1676,10 +1676,14 @@ async fn cas_81937_qa_waiver_binds_to_current_repark_after_handoff() {
 
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 2);
-    assert_eq!(passes[0], old_pass, "the passed historical review is immutable");
-    assert_eq!(passes[1].branch, current_branch);
-    assert_eq!(passes[1].bound_head, current_head);
-    assert_eq!(passes[1].state, cas::types::QaPassState::Waived);
+    let historical = passes.iter().find(|pass| pass.id == old_pass.id).unwrap();
+    assert_eq!(historical, &old_pass, "the passed historical review is immutable");
+    let waiver = passes
+        .iter()
+        .find(|pass| pass.state == cas::types::QaPassState::Waived)
+        .unwrap();
+    assert_eq!(waiver.branch, current_branch);
+    assert_eq!(waiver.bound_head, current_head);
     let after = tasks.get(&task_id).unwrap();
     assert_eq!(after.deliverables.parked_branch.as_deref(), Some(current_branch));
     assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(current_head.as_str()));

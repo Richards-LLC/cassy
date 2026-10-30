@@ -59,6 +59,14 @@ pub(crate) fn park(
     if expected_head.is_some_and(|head| head != current.head) {
         return Ok(()); // A delayed retirement job must not mark a newer delivery parked.
     }
+    // The cache can disappear after retirement was scheduled. There is no
+    // inventory entry to create when only proof logs (or no target) remain.
+    if !crate::factory_scratch::worker_target_dir(&current.worktree)
+        .join("debug")
+        .is_dir()
+    {
+        return Ok(());
+    }
     let directory = cas_root.join("worker-target-parks");
     fs::create_dir_all(&directory)?;
     // The runner removes its parked marker under this same lane lock before

@@ -48,6 +48,15 @@ pub(super) fn at_park(
         Ok(snapshot) => snapshot,
         Err(message) => return warning(notes, task, message),
     };
+    let Some(delivery_head) =
+        super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+    else {
+        return warning(
+            notes,
+            task,
+            "UPKEEP WARNING: delivery head unavailable (not blocking)".into(),
+        );
+    };
     let target_tip = freshest_target_ref(repo, target);
     // A landed ownership repair can satisfy an older receipt. An unmerged
     // delivery still answers to its own registry, including newly added owners.
@@ -66,6 +75,7 @@ pub(super) fn at_park(
         &head,
         ownership_head,
         paths.as_deref(),
+        &delivery_head,
         override_reason,
     )
 }
@@ -256,7 +266,7 @@ pub(super) fn finish(
     notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
     repo: &Path,
-    head: &str,
+    delivery_head: &str,
     stage: RegistryEnforcement,
     input_path: &str,
     findings: Vec<Finding>,
@@ -265,7 +275,9 @@ pub(super) fn finish(
 ) -> Result<Vec<String>, String> {
     // Notes have minute precision. Exact delivery/finding identity is primary;
     // the timestamp also rejects a pre-delivery note carrying copied scope.
-    let delivery_minute = git(repo, &["show", "-s", "--format=%ct", head])
+    // The inspected snapshot can be an integration merge; waivers belong to
+    // the parked delivery anchor and still require the identical finding.
+    let delivery_minute = git(repo, &["show", "-s", "--format=%ct", delivery_head])
         .ok()
         .and_then(|stamp| stamp.trim().parse::<i64>().ok())
         .map(|stamp| stamp.div_euclid(60));
@@ -275,7 +287,7 @@ pub(super) fn finish(
     }
     let mut refusals = Vec::new();
     for finding in findings {
-        let token = finding.scoped_token(input_path, head);
+        let token = finding.scoped_token(input_path, delivery_head);
         let text = gate_text::upkeep_message(
             &task.id,
             input_path,
@@ -460,6 +472,7 @@ fn check(
     head: &str,
     ownership_head: &str,
     paths: Option<&[String]>,
+    delivery_head: &str,
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let mut qa = qa.clone();
@@ -503,7 +516,7 @@ fn check(
             notes,
             task,
             repo,
-            head,
+            delivery_head,
             qa.registry.enforce,
             &qa.registry.path,
             findings,

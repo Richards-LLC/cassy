@@ -1508,6 +1508,41 @@ assignment or lease changes. The original branch is preserved as handoff
 history. Omitting `adopt_branch` keeps the existing assignment-only transfer
 behavior.
 
+### Ordered worker task queues
+
+Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
+Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
+Ordered spawns default to `isolate=true`; explicit `isolate=false` is refused.
+An existing worker also needs its own registered factory checkout for queue assignment.
+The first task controls the spawn base. Provisioning durably binds the queue
+by factory session and worker name. Registration selects its first eligible task;
+a head blocked, closed or assigned elsewhere during boot cannot strand the tail.
+
+For an existing worker, `task action=update assignee=<worker> task_ids=["cas-b","cas-c"]`
+replaces pending work. If `id` is supplied, it must name the first entry. This
+form accepts queue fields only; apply title/status/other task edits separately.
+An idle worker starts the first eligible entry immediately. Future entries
+stay unassigned until selected.
+
+Inspect with `factory action=worker_queue id=<worker>`; `worker_status` also
+shows the current task, ordered pending tasks and last queue decision. Replace
+or reorder with `factory action=worker_queue id=<worker> task_ids=["cas-c","cas-b"]`.
+Clear pending work with `task_ids=[]`. Add `expected_generation=<revision>` to
+reject a stale queue replacement. Queue edits require the worker's live owning
+supervisor in the same factory session; they preserve the current execution.
+
+A successful close or park releases the preceding lease, then starts the next
+eligible task through the normal start gates as that worker. It cuts the next
+task's branch from its own declared target and preserves the previous delivery
+ref. Repeated closes cannot consume another entry. An execution that becomes
+blocked keeps its current slot until it resumes, closes or parks. Reassigned, missing,
+terminal, blocked, foreign-leased and hard-start-gated entries are skipped with a
+durable note. A checkout/start failure retains the selected entry and records a
+deferred reason. The daemon reconciles durable cursors off its control loop,
+retrying after lock contention, restart or an unavailable brief recipient.
+Inspect and resolve the deferred cause; no repeated close is required.
+Queue dispatch never changes process identity or environment variables.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured

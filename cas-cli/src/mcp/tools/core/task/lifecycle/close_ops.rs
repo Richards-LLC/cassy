@@ -7531,6 +7531,36 @@ impl CasCore {
 
     pub async fn cas_task_close_with_dispositions(
         &self,
+        Parameters(req): Parameters<TaskCloseRequest>,
+        completion_receipt: Option<String>,
+        external_verification_receipt: Option<String>,
+        negative_result: Option<NegativeResultCloseRequest>,
+        evidence_only: Option<EvidenceOnlyCloseRequest>,
+        inline_external_ref: Option<String>,
+        inline_execution_note: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = req.id.clone();
+        let queue_enabled = self.task_has_worker_queue(&id)?;
+        let mut result = self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
+            external_verification_receipt, negative_result, evidence_only,
+            inline_external_ref, inline_execution_note, queue_enabled).await;
+        let note = self.advance_queue_after_delivery(&id).await;
+        match note {
+            Ok(Some(note)) => if let Ok(result) = result.as_mut() {
+                result.content.push(rmcp::model::Content::text(note));
+            },
+            Err(error) => tracing::warn!(task_id=%id, %error, "worker task queue advancement deferred"),
+            Ok(None) => {},
+        }
+        if queue_enabled && self.open_task_store()?.get(&id)
+            .is_ok_and(|task| task.status == TaskStatus::Closed) {
+            crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&id);
+        }
+        result
+    }
+
+    async fn close_task_with_dispositions_inner(
+        &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
         external_verification_receipt: Option<String>,
@@ -7538,6 +7568,7 @@ impl CasCore {
         evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
+        queue_enabled: bool,
     ) -> Result<CallToolResult, McpError> {
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
@@ -11563,7 +11594,9 @@ impl CasCore {
         // Everything below is post-commit work (indexing, reminders, the
         // lifecycle outbox, dependents, leases); the dispatch may answer
         // the caller while it finishes.
-        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+        if !queue_enabled {
+            crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+        }
 
         let epic_override_note_pending = deferred_epic_override_note.is_some();
         if let Some(note) = deferred_epic_override_note {

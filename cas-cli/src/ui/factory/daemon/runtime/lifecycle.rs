@@ -4473,6 +4473,9 @@ impl FactoryDaemon {
         for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
             self.finish_merge_alert_inbox(completed).await;
         }
+        self.relay_jobs.submit_worker_task_queue_reconciliation(
+            &mut self.queue_jobs, self.app.cas_dir().to_path_buf(), self.session_name.clone(),
+        );
         self.relay_jobs.submit_external_work_reconciliation(
             &mut self.queue_jobs,
             move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),

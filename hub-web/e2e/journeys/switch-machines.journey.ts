@@ -271,7 +271,10 @@ const PASSING = { name: "brisk-elk-6", supervisor: "brisk-elk-6", project_dir: "
 
 for (const width of [1280, 390]) {
   test.describe(`HUB-J8 at ${width}`, () => {
-    test.use(width === 390 ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 800 } });
+    // cas-ade2: activity no longer reorders rows, so the card that starts and
+    // ends above them is what moves a row under the finger. The whole list
+    // fits, so a scrolled list cannot clamp or anchor that movement away.
+    test.use(width === 390 ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 1200 } });
     test(`HUB-J8 every tap opens its conversation while the list re-renders under the finger at ${width} (cas-4646)`, journeyPart, async ({ page, journey }) => {
       test.setTimeout(240_000);
       // Each part streams into its own copy of the fleet.
@@ -282,11 +285,6 @@ for (const width of [1280, 390]) {
       await journey.open();
       const list = page.getByRole("navigation", { name: "Choose a supervisor" });
       await expect(list.locator(".conversation-row")).toHaveCount(4);
-      // cas-ade2: activity no longer reorders rows, so a card starting or
-      // ending above them is what moves a row under the finger. A scrolled
-      // list's scroll anchoring would hold the row still, which this part
-      // must not rely on.
-      await page.addStyleTag({ content: "#conversation-list { overflow-anchor: none; }" });
       // Raw input, as a hand gives it: a press and a release with nothing
       // between them but the live updates (no action overlay pauses).
       const input = await page.context().newCDPSession(page);

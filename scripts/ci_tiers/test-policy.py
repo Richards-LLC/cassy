@@ -232,6 +232,13 @@ fi
         self.assertNotIn('pull_request_target', ci['on'])
         jobs = lane['jobs']
         self.assertEqual(jobs['full']['uses'], './.github/workflows/ci.yml')
+        # GitHub validates every callee job, including jobs skipped on a lane.
+        authority = {'none':0,'read':1,'write':2}
+        ceiling = jobs['full']['permissions']
+        for name,job in ci['jobs'].items():
+            for permission,value in job.get('permissions',ci['permissions']).items():
+                self.assertLessEqual(authority[value],authority[ceiling.get(permission,'none')],
+                                     f'{name} requests {permission}:{value} above the reusable caller ceiling')
         # All slim factory diffs execute the rows once, in classification,
         # before either docs or code admission can pass. No worker receipt is trusted.
         fast_steps = [(name, step) for name, job in jobs.items()
@@ -508,6 +515,12 @@ else:
         self.assertEqual(self.run_body(shard['run'], {'SHARDS':'success'}).returncode, 0)
         for result in ['failure', 'cancelled']:
             self.assertNotEqual(self.run_body(shard['run'], {'SHARDS':result}).returncode, 0)
+        publication = next(s for s in job['steps'] if 'PUBLICATION' in s.get('env', {}))
+        self.assertIn('queue-flake-publication',job['needs'])
+        for result in ['success','skipped','failure','cancelled','']:
+            with self.subTest(publication=result):
+                self.assertEqual(self.run_body(publication['run'],{'PUBLICATION':result}).returncode == 0,
+                                 result in ['success','skipped'])
 
     def test_real_markdown_step_filters_assets_and_skips_an_asset_only_diff(self):
         source = {'file': '.github/workflows/ci.yml', 'job': 'docs-lint'}

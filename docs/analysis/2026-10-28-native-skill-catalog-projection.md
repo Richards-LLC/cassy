@@ -36,7 +36,9 @@ in characters.
 1. A real-account launch is not verified here. These are fixtures; that proof is
    deferred to batch QA on the release candidate.
 2. Skills outside the shipped inventory can raise the real budget. User-authored
-   Grok skills stay listed, because their contents are never read or copied.
+   Grok skills stay listed, because their contents are never read or copied. Grok
+   skills a repository tracks stay listed too, because changing them would dirty
+   the worker checkout; a Cassy-managed copy that is only in the checkout is hidden.
    Claude plugin skills stay listed, because `skillOverrides` does not reach them.
 3. Selection is by role, not task: a worker's task is unknown at launch.
 4. `GROK_FOLDER_TRUST=false` loads the worker checkout's project configuration

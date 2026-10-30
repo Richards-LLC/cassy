@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Conditional operand recognition
+
+- **Function and coprocess bodies keep arithmetic checks** — Unquoted `[[ … ]]`
+  operands receive numeric-only validation regardless of preceding command
+  words, including functions, coprocesses and nested substitutions.
+
 ### Fixed — Task close
 
 - **A changelog entry received by merging a predecessor's branch counts** — Was: a worker who merged an earlier worker's branch into its lane was refused with "CHANGELOG [Unreleased] REQUIRED", because the check skipped merge commits. → Now: close counts a titled Unreleased entry introduced by the commits it attributes to the task, including a merged branch of the same task. Entries brought in by a target refresh or another task's merged branch still do not count.

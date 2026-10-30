@@ -97,7 +97,7 @@ import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, typ
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
-import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ArtifactRef, AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
 
@@ -244,7 +244,8 @@ installAttachmentSheet((sheet, file, context) => {
   const thread = threadOf(context);
   if (!thread) return sheet;
   const available = () => connectionStates.get(thread.machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
+  const fetchImage = async (image: ArtifactRef) => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, image.artifact_id) : undefined;
+  return inlineAttachment(sheet, file, () => fetchImage(file), { machineId: thread.machineId, available, gallery: context.reply.attachments, fetchImage });
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;

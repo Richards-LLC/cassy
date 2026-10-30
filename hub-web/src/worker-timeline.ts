@@ -3,7 +3,7 @@
  * live, in a sheet opened from its row in Tasks & progress. It replaces
  * watching the worker's terminal. A right sheet on desktop and a bottom
  * sheet on a phone, the same frame as Raw output. Agent text is set only as
- * `textContent`.
+ * `textContent`, except published reasoning rendered through safe Markdown.
  */
 import { workerState, type WorkEventStream } from "./work-events";
 import { refocus, workRows, type WorkRowsContext } from "./work-rows-view";
@@ -68,6 +68,7 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
     if (subject.taskTitle) line.append(` · ${subject.taskTitle}`);
   } else line.append(" No task assigned");
   const body = dialog.querySelector<HTMLElement>(".worker-timeline-body")!;
+  const scroll = new Map([...body.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")].map(detail => [detail.dataset.focusKey, detail.scrollTop]));
   const children: HTMLElement[] = [];
   const note = (text: string): HTMLElement => { const p = document.createElement("p"); p.className = "worker-timeline-note"; p.setAttribute("role", "status"); p.textContent = text; return p; };
   if (subject.unavailable) children.push(note(subject.unavailable));
@@ -99,5 +100,6 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
     children.push(fallback);
   }
   body.replaceChildren(...children);
+  for (const detail of body.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")) detail.scrollTop = scroll.get(detail.dataset.focusKey) ?? 0;
   if (active) refocus(dialog, active);
 }

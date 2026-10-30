@@ -93,13 +93,10 @@ pub(super) fn for_tested_packages(
 
 /// The refusal a delivery gets at park, while its worker can still fix it.
 ///
-/// cas-eac2 (operator D1, D2): lane CI no longer runs the no-build fast rows
-/// or broad Rust tests for factory pushes. The worker's pre-push hook runs the
-/// rows, and the worker's capped targeted tests prove each changed crate. Park
-/// only READS those receipts for this exact tip. It never executes a row, test
-/// or build, because operator decision Q6 (2026-10-15) removed park re-runs.
-/// A missing receipt is refused with its fix, never passed silently. The
-/// merge queue still runs the full suite on the final tree.
+/// Capped targeted tests prove each changed crate at this exact tip. Park
+/// only reads those receipts; it never runs checks. Fast-row proof belongs
+/// to CI because local fast-row receipts are worker-writable. Park also
+/// requires a titled CHANGELOG `[Unreleased]` entry for product source.
 pub(super) fn park_refusal(
     cas_root: &Path,
     proof_repo: &Path,
@@ -110,9 +107,6 @@ pub(super) fn park_refusal(
 ) -> Option<String> {
     let short = &head[..head.len().min(12)];
     if let Some(refusal) = changelog_refusal(proof_repo, task, changed_paths, head, target) {
-        return Some(refusal);
-    }
-    if let Some(refusal) = fast_rows_refusal(cas_root, proof_repo, task, head, target) {
         return Some(refusal);
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -358,45 +352,6 @@ fn is_changelog_template_value(value: &str) -> bool {
     value.eq_ignore_ascii_case("title")
         || value.eq_ignore_ascii_case("what changed.")
         || (value.starts_with('<') && value.strip_suffix('.').unwrap_or(value).ends_with('>'))
-}
-
-/// cas-eac2 (D2): the refusal for a tip of a repository that ships
-/// `scripts/fast-rows-pre-push.sh` when no `fast-rows: PASS <tip>` receipt
-/// exists. That happens when the push skipped the hook through
-/// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed. Only a
-/// supervisor-issued exception bound to that failed result can substitute.
-fn fast_rows_refusal(cas_root: &Path, repo: &Path, task: &Task, head: &str, target: &str) -> Option<String> {
-    let task_id = &task.id;
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-    };
-    git(&["cat-file", "-e", &format!("{head}:scripts/fast-rows-pre-push.sh")])?;
-    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-    let directory = Path::new(String::from_utf8_lossy(&common.stdout).trim()).join("cas/fast-rows");
-    let receipt = directory.join(format!("{head}.pass"));
-    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
-    if text.starts_with(&format!("fast-rows: PASS {head} "))
-        || super::super::super::fast_rows_exception::approved(cas_root, &directory, task, head, &text)
-    {
-        return None;
-    }
-    let fixes: String = text
-        .lines()
-        .filter(|line| line.starts_with("FIX "))
-        .take(10)
-        .map(|line| format!("\n- {line}"))
-        .collect();
-    Some(format!(
-        "⚠️ FAST ROWS REQUIRED (cas-eac2): task {task_id}'s tip {short} has no fast-rows PASS receipt ({path}). Lane CI no longer runs these no-build rows for factory pushes; your pre-push hook runs them (scripts/fast-rows-pre-push.sh), and park only reads the receipt.{fixes}\nWith everything committed at {short}, run `./scripts/release-gate.sh --fast-rows --base origin/{target}` (the hook's command), apply each FIX, push, then retry close.",
-        short = &head[..head.len().min(12)],
-        path = receipt.display(),
-        target = target.strip_prefix("origin/").unwrap_or(target),
-    ))
 }
 
 /// cas-d6eb: the tested packages that cover every target a proof-scope

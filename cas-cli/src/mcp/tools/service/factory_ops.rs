@@ -2543,8 +2543,24 @@ impl CasService {
     pub(crate) async fn factory_spawn_workers_in(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
-        req: FactoryRequest,
+        mut req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(ids) = req.task_ids.as_ref() {
+            let distinct = ids.iter().collect::<std::collections::HashSet<_>>();
+            if req.task_id.is_some() || ids.is_empty() || distinct.len() != ids.len()
+                || ids.iter().any(|id| id.trim().is_empty()) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "spawn_workers requires either task_id or a nonempty ordered list of distinct task_ids"));
+            }
+            let tasks = self.inner.open_task_store()?;
+            for id in ids { tasks.get(id).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?; }
+            if req.isolate == Some(false) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Ordered task queues require isolate=true so each task starts in its worker's own checkout"));
+            }
+            req.isolate = Some(true);
+            req.task_id = ids.first().cloned();
+        }
         let provisioner_build = ctx
             .factory_session
             .as_ref()
@@ -3289,7 +3305,7 @@ impl CasService {
         };
 
         let request_id = queue
-            .enqueue_spawn_with_requester_account_dirs(
+            .enqueue_spawn_with_task_queue(
                 count,
                 &worker_names,
                 isolate,
@@ -3298,6 +3314,7 @@ impl CasService {
                 req.task_id.as_deref(),
                 requester_config_dir,
                 requester_secure_storage_dir,
+                req.task_ids.as_deref().unwrap_or_default(),
             )
             .map_err(|e| {
                 Self::error(
@@ -4330,6 +4347,12 @@ impl CasService {
         )))
     }
 
+    pub(super) async fn factory_worker_queue(&self, req: FactoryRequest) -> Result<CallToolResult, McpError> {
+        let worker = req.id.as_deref().or(req.target.as_deref()).ok_or_else(|| Self::error(
+            ErrorCode::INVALID_PARAMS, "worker_queue requires id=<worker>"))?;
+        self.inner.configure_worker_task_queue(worker, req.task_ids, req.expected_generation).await.map(Self::success)
+    }
+
     pub(super) async fn factory_worker_status(
         &self,
         req: FactoryRequest,
@@ -4355,9 +4378,19 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
-        let binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
+        let mut binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
             .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
+        match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.inner.cas_root) {
+            Ok(queues) => for worker in store.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))? {
+                if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }
+                if let Some(session) = worker.factory_session.as_deref() {
+                    let queue = queues.get(session, &worker.name).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+                    if queue.revision > 0 { binary_versions.push_str(&format!("\n{}", crate::worker_task_queue::render(&worker.name, &queue))); }
+                }
+            },
+            Err(error) => binary_versions.push_str(&format!("\nTask queues unavailable: {error}")),
+        }
         let (scoped_worker_count, outside_scope_worker_count) =
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;

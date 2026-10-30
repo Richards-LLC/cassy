@@ -1844,16 +1844,6 @@ check_fixture_paths_src() {
 # cas-e7d4: a cut once stopped at preflight on a Slack draft committed
 # hours earlier (a 26-word Dev punch). A Slack suffix identifies the channel,
 # not the workflow: route diary threads and runtime release drafts separately.
-draft_failure_scope() {
-    local path="$1" code="$2" output="$3"
-    # Tool/IO failures cannot be approved as historical wording exceptions.
-    if [[ "$code" == 1 && "$output" == *"error: $path: "* && "$output" != *'[Errno'* ]]; then
-        printf 'SCOPE release-notes-draft %s\n' "$path"
-    else
-        printf 'UNSCOPED release-notes-draft %s\n' "$path"
-    fi
-}
-
 check_release_notes_draft() {
     local -a diary_drafts=() runtime_drafts=()
     local path
@@ -1877,35 +1867,26 @@ check_release_notes_draft() {
         printf 'release-notes-draft: no release-notes draft change\n'
         return 0
     fi
-    local output code failed=0 scope_count=0
-    for path in "${diary_drafts[@]}"; do
-        if output="$(python3 scripts/release-diary-thread.py --lint "$path" 2>&1)"; then
+    local output failed=0
+    if [[ "${#diary_drafts[@]}" -gt 0 ]]; then
+        if output="$(python3 scripts/release-diary-thread.py --lint "${diary_drafts[@]}" 2>&1)"; then
             printf '%s\n' "$output"
         else
-            code=$?
             printf '%s\n' "$output"
             printf 'FIX: harness-diary drafts need one parent and exactly three replies ordered Grok, Claude, Codex, with no ticket IDs\n'
-            draft_failure_scope "$path" "$code" "$output"
-            scope_count=$((scope_count + 1))
             failed=1
         fi
-    done
-    for path in "${runtime_drafts[@]}"; do
-        if output="$(python3 scripts/release-train-announce.py --lint "$path" 2>&1)"; then
+    fi
+    if [[ "${#runtime_drafts[@]}" -gt 0 ]]; then
+        if output="$(python3 scripts/release-train-announce.py --lint "${runtime_drafts[@]}" 2>&1)"; then
             printf '%s\n' "$output"
         else
-            code=$?
             printf '%s\n' "$output"
             printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
                 "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
-            draft_failure_scope "$path" "$code" "$output"
-            scope_count=$((scope_count + 1))
             failed=1
         fi
-    done
-    # Written only after every draft has been checked. A killed row cannot
-    # authorize an exception for the partial scope it happened to emit.
-    printf 'scope complete count=%s\n' "$scope_count"
+    fi
     return "$failed"
 }
 
@@ -2437,11 +2418,6 @@ record_fast_rows_receipt() {
             printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$head" "$(IFS=,; printf '%s' "${failures[*]}")" \
                 "${fast_base:-HEAD^}" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             fast_row_fixes
-            # Complete file scope, independent of the bounded human FIX list.
-            # Only the draft row supports a file-scoped exception.
-            if [[ "$(IFS=,; printf '%s' "${failures[*]}")" == release-notes-draft ]]; then
-                grep -E '^((SCOPE|UNSCOPED) release-notes-draft |scope complete count=)' "$row_log_dir/release-notes-draft.log" || true
-            fi
         } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
     fi
     printf 'fast rows: receipt %s\n' "$dir/$head.pass"

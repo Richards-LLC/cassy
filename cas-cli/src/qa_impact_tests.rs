@@ -40,7 +40,7 @@ fn commit(repo: &Path) -> String {
     git(repo, &["rev-parse", "HEAD"])
 }
 
-fn commander_delivery_impact(paths: &[&str]) -> (Impact, crate::qa_pass::QaEligibility) {
+fn commander_delivery_impact(selection: &str, paths: &[&str]) -> (Impact, crate::qa_pass::QaEligibility) {
     let temp = repo();
     let repo = temp.path();
     write(
@@ -59,7 +59,7 @@ fn commander_delivery_impact(paths: &[&str]) -> (Impact, crate::qa_pass::QaEligi
     write(
         repo,
         crate::qa_registry::DEFAULT_PATH,
-        "version: 1\nupdated: '2026-10-30'\nselection: legacy_catalog\nsurfaces: ['hub-web/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: HUB-J1\n    status: live\n    entry: {url: /commander/, trigger: Open}\n    steps: [Arrive]\n    owners: ['hub-web/src/reply.ts']\n    invariants: [INV]\n",
+        &"version: 1\nupdated: '2026-10-30'\nselection: legacy_catalog\nsurfaces: ['hub-web/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: HUB-J1\n    status: live\n    entry: {url: /commander/, trigger: Open}\n    steps: [Arrive]\n    owners: ['hub-web/**']\n    invariants: [INV]\n".replace("selection: legacy_catalog", &format!("selection: {selection}")),
     );
     write(repo, "hub-web/src/reply.ts", "export const reply = true;");
     write(
@@ -104,34 +104,26 @@ fn commander_delivery_impact(paths: &[&str]) -> (Impact, crate::qa_pass::QaEligi
 
 #[test]
 fn qa_impact_test_only_delivery_is_not_user_facing_cas_63e9() {
-    let (report, eligibility) = commander_delivery_impact(&[
-        "hub-web/test-fixtures/vitest-stability/package.json",
-        "hub-web/test-fixtures/vitest-stability/package-lock.json",
-        "hub-web/src/reply.test.mjs",
-        "hub-web/e2e/fixtures/reply.json",
-    ]);
-    assert!(report.journeys.is_empty(), "{:?}", report.journeys);
-    assert!(
-        report.unowned.iter().all(|file| !file.surface),
-        "{:?}",
-        report.unowned
-    );
-    assert!(!eligibility.is_eligible(), "{eligibility:?}");
+    for selection in ["legacy_catalog", "globs"] {
+        let (report, eligibility) = commander_delivery_impact(selection, &[
+            "hub-web/test-fixtures/vitest-stability/package.json",
+            "hub-web/test-fixtures/vitest-stability/package-lock.json",
+            "hub-web/src/reply.test.mjs",
+            "hub-web/e2e/fixtures/reply.json",
+        ]);
+        assert!(report.journeys.is_empty(), "{selection}: {:?}", report.journeys);
+        assert!(report.unowned.iter().all(|file| !file.surface), "{:?}", report.unowned);
+        assert!(!eligibility.is_eligible(), "{eligibility:?}");
+    }
 }
 
 #[test]
 fn qa_impact_product_source_delivery_is_user_facing_cas_63e9() {
-    let (report, eligibility) = commander_delivery_impact(&["hub-web/src/new-view.ts"]);
-    assert_eq!(
-        report
-            .journeys
-            .iter()
-            .map(|journey| journey.id.as_str())
-            .collect::<Vec<_>>(),
-        ["HUB-J1"]
-    );
-    assert!(report.unowned.iter().any(|file| file.surface));
-    assert!(eligibility.is_eligible(), "{eligibility:?}");
+    for selection in ["legacy_catalog", "globs"] {
+        let (report, eligibility) = commander_delivery_impact(selection, &["hub-web/src/new-view.ts"]);
+        assert_eq!(report.journeys.iter().map(|journey| journey.id.as_str()).collect::<Vec<_>>(), ["HUB-J1"], "{selection}");
+        assert!(eligibility.is_eligible(), "{eligibility:?}");
+    }
 }
 
 #[test]

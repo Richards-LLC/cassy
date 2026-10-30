@@ -147,6 +147,12 @@ pub fn impact_for_changes(
     impact_for_selected_changes(registry, qa, changes, codemap, None)
 }
 
+fn journey_input(registry: &crate::qa_registry::Registry, path: &str) -> bool {
+    !crate::qa_pass::is_non_surface_path(path)
+        // Registered specs declare coverage without being product surfaces.
+        || registry.journeys.iter().any(|journey| journey.spec.as_deref() == Some(path))
+}
+
 /// Selection never grants ownership. Some(empty) authoritatively selects none.
 fn impact_for_selected_changes(
     registry: Option<&crate::qa_registry::Registry>,
@@ -187,7 +193,9 @@ fn impact_for_selected_changes(
         .collect();
     let mut remaining = Vec::new();
     for file in files {
-        if registry.is_some_and(|r| matches_path(r.ignore.iter().map(String::as_str), file)) {
+        if registry.is_some_and(|r| {
+            !journey_input(r, file) || matches_path(r.ignore.iter().map(String::as_str), file)
+        }) {
             report.ignored.push(file.to_owned());
         } else {
             remaining.push(file);

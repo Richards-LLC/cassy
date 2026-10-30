@@ -4295,9 +4295,11 @@ impl FactoryDaemon {
     async fn process_worker_control_tick(&mut self) {
         // Incoming cleanup intents are independent of the spawn FIFO. Poll
         // their small metadata queue even when the daemon has no other work.
-        self.poll_worker_cleanup_jobs_at(Instant::now());
         if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
+            // This path already polls before processing the spawn FIFO.
             self.process_pending_spawns().await;
+        } else {
+            self.poll_worker_cleanup_jobs_at(Instant::now());
         }
     }
 

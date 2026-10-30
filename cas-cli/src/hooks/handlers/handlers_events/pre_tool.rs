@@ -326,7 +326,7 @@ fn handle_pre_tool_use_inner(
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",
-            "🚫 WORKER PUSH HOOK BYPASS: `--no-verify`, `-n`, and `core.hooksPath` skip required factory push checks. Use a plain `git push`; if an exception is needed, ask the supervisor to run the supervisor-approved push.",
+            "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push.",
         ));
     }
 
@@ -2002,35 +2002,152 @@ pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
 }
 
 /// Return true when a Git push invocation disables the factory's required
-/// pre-push hooks, including a `core.hooksPath` configured on Git itself.
+/// pre-push hooks, including config from shell prefixes, Git aliases, and
+/// nested shell payloads.
 fn git_push_bypasses_required_hooks(command: &str) -> bool {
+    git_config_environment_bypass_in_shell(command, 0)
+        || shell_invocations(command)
+            .iter()
+            .any(|(name, args)| name == "git" && git_invocation_bypasses_required_hooks(args))
+}
+
+fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
+    if depth > 6 {
+        return false;
+    }
+
     shell_statement_words(command).iter().any(|words| {
-        let Some(command_index) = unwrapped_command_index(words) else {
-            return false;
-        };
-        if shell_word_basename(&words[command_index]) != "git" {
-            return false;
-        }
-
-        let git_words = &words[command_index + 1..];
-        let Some(push_index) = git_history_write_operation(git_words)
-            .filter(|index| git_words.get(*index).is_some_and(|word| word == "push"))
-        else {
-            return false;
-        };
-
-        if git_global_hooks_path_override(&git_words[..push_index]) {
+        if let Some(payload) = env_split_string_payload(words)
+            && git_config_environment_bypass_in_shell(&payload, depth + 1)
+        {
             return true;
         }
 
-        git_words[push_index + 1..]
-            .iter()
-            .take_while(|word| word.as_str() != "--")
-            .any(|word| matches!(word.as_str(), "--no-verify" | "-n"))
+        let Some(command_index) = unwrapped_command_index(words) else {
+            return false;
+        };
+        let name = shell_word_basename(&words[command_index]);
+        let args = &words[command_index + 1..];
+
+        if git_config_environment_override(&words[..command_index])
+            && shell_invocations(&words[command_index..].join(" "))
+                .iter()
+                .any(|(name, args)| {
+                    name == "git" && git_invocation_is_push_or_alias(args)
+                })
+        {
+            return true;
+        }
+
+        match name {
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
+                args.iter().enumerate().any(|(position, arg)| {
+                    let flags_c = arg.starts_with('-')
+                        && !arg.starts_with("--")
+                        && arg.contains('c');
+                    (flags_c || arg == "--command")
+                        && args.get(position + 1).is_some_and(|payload| {
+                            git_config_environment_bypass_in_shell(payload, depth + 1)
+                        })
+                })
+            }
+            "eval" => git_config_environment_bypass_in_shell(&args.join(" "), depth + 1),
+            _ => false,
+        }
     })
 }
 
+fn git_config_environment_override(words: &[String]) -> bool {
+    if std::env::vars_os().any(|(name, value)| {
+        name.to_str().is_some_and(|name| {
+            value.to_str().is_some_and(|value| git_config_env_value_bypasses_hooks(name, value))
+        })
+    }) {
+        return true;
+    }
+
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if let Some((name, value)) = word.split_once('=')
+            && git_config_env_value_bypasses_hooks(name, value)
+        {
+            return true;
+        }
+        if matches!(word.as_str(), "-u" | "--unset")
+            && words.get(index + 1).is_some_and(|name| name.starts_with("GIT_CONFIG_"))
+        {
+            return true;
+        }
+        if word.starts_with("--unset=GIT_CONFIG_")
+            || word == "-i"
+            || word == "--ignore-environment"
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn git_config_env_value_bypasses_hooks(name: &str, value: &str) -> bool {
+    if matches!(
+        name,
+        "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
+    ) {
+        return true;
+    }
+    let value = value.to_ascii_lowercase();
+    if name == "GIT_CONFIG_PARAMETERS" {
+        return value.contains("core.hookspath") || value.contains("alias.") || value.contains('$');
+    }
+    name.strip_prefix("GIT_CONFIG_KEY_").is_some_and(|index| {
+        index.chars().all(|character| character.is_ascii_digit())
+            && (value.trim_matches(['\'', '"']) == "core.hookspath" || value.contains('$'))
+    })
+}
+
+fn git_invocation_bypasses_required_hooks(git_words: &[String]) -> bool {
+    let Some(operation_index) = git_subcommand_index(git_words) else {
+        return false;
+    };
+    let operation = git_words[operation_index].as_str();
+    if operation != "push" {
+        return git_global_alias_override(&git_words[..operation_index], operation);
+    }
+
+    if git_global_hooks_path_override(&git_words[..operation_index]) {
+        return true;
+    }
+
+    git_words[operation_index + 1..]
+        .iter()
+        .take_while(|word| word.as_str() != "--")
+        .any(|word| {
+            matches!(word.as_str(), "-n" | "--dry-run") || {
+                let option = word.split('=').next().unwrap_or(word);
+                option.len() >= "--no-v".len() && "--no-verify".starts_with(option)
+            }
+        })
+}
+
+fn git_invocation_is_push_or_alias(git_words: &[String]) -> bool {
+    let Some(operation_index) = git_subcommand_index(git_words) else {
+        return false;
+    };
+    git_words[operation_index] == "push"
+        || git_global_alias_override(&git_words[..operation_index], &git_words[operation_index])
+}
+
 fn git_global_hooks_path_override(arguments: &[String]) -> bool {
+    git_global_config_override(arguments, "core.hookspath")
+}
+
+fn git_global_alias_override(arguments: &[String], command: &str) -> bool {
+    git_global_config_override(arguments, &format!("alias.{command}"))
+}
+
+fn git_global_config_override(arguments: &[String], key: &str) -> bool {
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
@@ -2044,7 +2161,7 @@ fn git_global_hooks_path_override(arguments: &[String]) -> bool {
             None
         };
 
-        if config_value.is_some_and(git_config_value_sets_hooks_path) {
+        if config_value.is_some_and(|value| git_config_value_sets_key(value, key)) {
             return true;
         }
 
@@ -2057,10 +2174,10 @@ fn git_global_hooks_path_override(arguments: &[String]) -> bool {
     false
 }
 
-fn git_config_value_sets_hooks_path(value: &str) -> bool {
+fn git_config_value_sets_key(value: &str, key: &str) -> bool {
     value
         .split_once('=')
-        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("core.hookspath"))
+        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(key))
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -2220,6 +2337,20 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
 fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     // Only the subcommand can change history, never a global option's value
     // or a read command's operand (e.g. `git log --grep commit`).
+    let operation_index = git_subcommand_index(git_words)?;
+    let operation = git_words.get(operation_index)?.as_str();
+    let args = &git_words[operation_index + 1..];
+    let is_write = match operation {
+        "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
+        "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
+        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
+        "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
+        _ => false,
+    };
+    is_write.then_some(operation_index)
+}
+
+fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
     let mut operation_index = 0;
     while let Some(word) = git_words.get(operation_index) {
         match word.as_str() {
@@ -2236,16 +2367,7 @@ fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
             _ => break,
         }
     }
-    let operation = git_words.get(operation_index)?.as_str();
-    let args = &git_words[operation_index + 1..];
-    let is_write = match operation {
-        "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
-        "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
-        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
-        "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
-        _ => false,
-    };
-    is_write.then_some(operation_index)
+    git_words.get(operation_index).map(|_| operation_index)
 }
 
 /// Resolve the small subset of shell variable forms used in worker guidance
@@ -10899,13 +11021,23 @@ mod worker_commit_guard_tests {
 
         let variants = [
             "git push --no-verify origin factory/guard-test".to_string(),
+            "git push --no-verif origin factory/guard-test".to_string(),
             "git push -n origin factory/guard-test".to_string(),
+            "git push --dry-run origin factory/guard-test".to_string(),
             "git -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test".to_string(),
             format!(
                 "git -C '{repo_path}' -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test"
             ),
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks git push origin factory/guard-test".to_string(),
+            "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" git push origin factory/guard-test".to_string(),
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks git push origin factory/guard-test".to_string(),
+            "git -c alias.p='push --no-verify' p origin factory/guard-test".to_string(),
+            "bash -c 'git push --no-verify origin factory/guard-test'".to_string(),
+            "eval 'git push --no-verify origin factory/guard-test'".to_string(),
+            "env -S 'git push --no-verify origin factory/guard-test'".to_string(),
         ];
 
+        let mut mismatches = Vec::new();
         for role in ["worker", "reviewer"] {
             let _env = TestEnvGuard::with_optional_vars(&[
                 ("CAS_AGENT_ROLE", Some(role)),
@@ -10919,17 +11051,25 @@ mod worker_commit_guard_tests {
                 let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
                 let value = serde_json::to_value(output).expect("serialize hook result");
                 let hook_output = &value["hookSpecificOutput"];
-                assert_eq!(
-                    hook_output["permissionDecision"], "deny",
-                    "{role}: {command}: {value}"
-                );
+                if hook_output["permissionDecision"] != "deny" {
+                    mismatches.push(format!("{role}: expected refusal: {command}: {value}"));
+                    continue;
+                }
                 let reason = hook_output["permissionDecisionReason"]
                     .as_str()
                     .unwrap_or_default();
-                assert!(
-                    reason.contains("supervisor-approved") && reason.contains("plain `git push`"),
-                    "the refusal must point to the exception route: {reason}"
-                );
+                if !reason.contains("supervisor-approved") || !reason.contains("plain `git push`")
+                {
+                    mismatches.push(format!("{role}: unclear exception route: {command}: {reason}"));
+                }
+                if command
+                    .split_whitespace()
+                    .any(|word| matches!(word, "-n" | "--dry-run"))
+                    && (!reason.contains("`-n` is a dry-run")
+                        || !reason.contains("still runs the pre-push hook"))
+                {
+                    mismatches.push(format!("{role}: inaccurate dry-run explanation: {reason}"));
+                }
             }
         }
 
@@ -10947,6 +11087,7 @@ mod worker_commit_guard_tests {
             value["hookSpecificOutput"]["permissionDecision"], "deny",
             "supervisors retain the approved exception route: {value}"
         );
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]

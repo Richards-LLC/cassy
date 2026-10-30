@@ -44,6 +44,12 @@ bug_families:
     tasks: [cas-51f6]
     invariants: [HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD]
     journeys: [HUB-J14]
+  project-card-display-name:
+    title: A project card is titled with the project's display name or folder, never its canonical id
+    found: '2026-10-29'
+    tasks: [cas-6f79]
+    invariants: [HUB-J14-PROJECT-DISPLAY-NAME]
+    journeys: [HUB-J14]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -285,6 +291,10 @@ invariants:
     statement: A live supervisor with no workers has no worker count; the connected machine and active session retain live status beside ended receipts; ended rows say Ended with their time and can be dismissed individually or cleared per project without removing history or offering controls for live sessions.
     check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip and non-offline active row, pill-radius chip, plain Ended preview and visible end time, row and project dismissal, live-row exclusion, persistence across reload and retained protocol history.
     bug: {task: cas-51f6}
+  HUB-J14-PROJECT-DISPLAY-NAME:
+    statement: A project card reads the project's display name, else its folder name, and never its canonical id; the canonical id still groups the project's sessions across machines and remains available as the name's title.
+    check: Run the cross-machine project fixture in HUB-J14 with a canonical id and a display name; verify the card name shows the display name, its title is the canonical id, and both machines' sessions share the card.
+    bug: {task: cas-6f79}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
       away once resolved, and nothing claims I replied when I didn't
@@ -1547,6 +1557,7 @@ journeys:
   invariants:
   - HUB-J14-GOAL
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
+  - HUB-J14-PROJECT-DISPLAY-NAME
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

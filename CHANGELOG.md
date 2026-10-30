@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA recording guidance
+
+- **Native Commander chapter captions respect its security policy** — QA
+  examples use the CSP-safe `showRecordingChapter` helper. The native upload
+  journey records its chapter and waits for it only when recording is enabled.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

@@ -64,6 +64,7 @@ export function openImageViewer(opener: HTMLElement, images: readonly GalleryIma
     status.textContent = `Loading ${entry.file.name}…`;
     button("Previous image").disabled = index === 0;
     button("Next image").disabled = index === images.length - 1;
+    if (document.activeElement instanceof HTMLButtonElement && dialog.contains(document.activeElement) && document.activeElement.disabled) canvas.focus({ preventScroll: true });
     button("Try image again").hidden = true;
     draw();
     const current = () => !closed && request === generation;
@@ -109,7 +110,7 @@ export function openImageViewer(opener: HTMLElement, images: readonly GalleryIma
   button("Zoom in").onclick = () => setZoom(zoom + 0.5);
   button("Zoom out").onclick = () => setZoom(zoom - 0.5);
   button("Fit image").onclick = () => setZoom(1);
-  button("Try image again").onclick = () => { void load(); };
+  button("Try image again").onclick = () => { canvas.focus({ preventScroll: true }); void load(); };
   dialog.addEventListener("close", close);
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
   dialog.addEventListener("keydown", event => {

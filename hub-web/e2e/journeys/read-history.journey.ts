@@ -49,6 +49,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     }
   });
   await journey.stage("Zoom and pan with keyboard, mouse and touch", async () => {
+    // At 1440 the 640 px fixture still fits at 1.5×, so it has nothing to pan.
+    await page.setViewportSize({ width: 390, height: 844 });
     const canvas = dialog.locator(".image-viewer-canvas");
     await page.keyboard.press("+");
     await expect(dialog.locator("output")).toHaveText("1.5×");
@@ -56,6 +58,11 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toContain("translate(0px, 0px)");
     await canvas.hover(); await page.mouse.wheel(0, -200);
     await expect(dialog.locator("output")).not.toHaveText("1.5×");
+    const beforeDrag = await dialog.locator("img").evaluate(image => image.style.transform);
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2); await page.mouse.up();
+    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toBe(beforeDrag);
     await canvas.evaluate(canvas => {
       const box = canvas.getBoundingClientRect();
       const fire = (type: string, id: number, x: number) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "touch", pointerId: id, clientX: box.left + x, clientY: box.top + box.height / 2 }));

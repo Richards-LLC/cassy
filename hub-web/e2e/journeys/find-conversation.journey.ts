@@ -819,15 +819,16 @@ for (const width of [1280, 390]) {
 // cas-ade2: the register is alphabetical. Two supervisors of one project on
 // two machines trade recency on every update; no card or row ever moves.
 test("HUB-J3 project cards and supervisor rows keep their places while two machines stay active (cas-ade2)", journeyPart, async ({ page, journey }) => {
+  // The catalog lists widget first; the register still puts cas-src first.
   const atlas: Machine = { ...ATLAS, sessions: [
-    { ...ATLAS.sessions[0]!, name: "zesty-heron-3", supervisor: "zesty-heron-3", project_dir: "/projects/cas-src" },
     { ...ATLAS.sessions[0]!, name: "amber-otter-5", supervisor: "amber-otter-5", project_dir: "/projects/widget" },
+    { ...ATLAS.sessions[0]!, name: "zesty-heron-3", supervisor: "zesty-heron-3", project_dir: "/projects/cas-src" },
   ] };
   const studio: Machine = { ...STUDIO, sessions: [{ ...STUDIO.sessions[0]!, name: "bright-robin-2", supervisor: "bright-robin-2", project_dir: "/projects/cas-src" }] };
   const stamp = (tick: number) => {
     // Each update makes a different session the newest, as live work does.
-    atlas.sessions[0]!.last_activity_at = journeyStamp(tick % 2 ? -1_000 : -90_000);
-    atlas.sessions[1]!.last_activity_at = journeyStamp(-30_000 - tick * 1_000);
+    atlas.sessions[0]!.last_activity_at = journeyStamp(-30_000 - tick * 1_000);
+    atlas.sessions[1]!.last_activity_at = journeyStamp(tick % 2 ? -1_000 : -90_000);
     studio.sessions[0]!.last_activity_at = journeyStamp(tick % 2 ? -90_000 : -1_000);
   };
   stamp(0);

@@ -5002,6 +5002,9 @@ mod upstream_unavailable_tests {
         let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = audit.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert!(rows.iter().any(|row| row["action"] == "supervisor_command_invalid" && row["outcome"] == "denied"));
+        // cas-7629: the refused unconfirmed Clear is denied, never left as a bare "requested".
+        let clear: Vec<_> = rows.iter().filter(|row| row["action"] == "supervisor_command_clear").map(|row| row["outcome"].as_str().unwrap()).collect();
+        assert_eq!(clear, ["denied"], "{audit}");
         assert!(rows.iter().any(|row| row["action"] == "supervisor_command_receipt" && row["outcome"] == "observed"));
     }
 

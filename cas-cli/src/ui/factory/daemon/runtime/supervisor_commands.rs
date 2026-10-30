@@ -8,6 +8,11 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use crate::ui::factory::supervisor_commands::{SupervisorCommand as Command, SupervisorCommandKey as Key, SupervisorCommandPhase as Phase, SupervisorCommandReceipt as Receipt};
 
 type Owner = (String, String);
+/// Receipts held at once. Only a burst inside the replay window can reach it.
+const RECEIPT_CAP: usize = 256;
+/// A finished receipt answers replays of its reference for this long after its
+/// last activity. Commander polls one reference for at most 95 seconds.
+const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
 #[derive(Default)]
 pub(crate) struct CommandState { records: HashMap<Owner, Record> }
 struct Record {
@@ -177,7 +182,7 @@ impl FactoryDaemon {
                 anyhow::ensure!(record.receipt.command == *command, "Command reference already belongs to another command.");
                 return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
             }
-            anyhow::ensure!(self.supervisor_commands.records.len() < 256, "This session's command receipt limit was reached.");
+            anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "This session's command receipt limit was reached.");
             anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
             anyhow::ensure!(!self.supervisor_commands.records.values().any(|r| r.receipt.phase == Phase::Submitted || r.receipt.interactive), "Another supervisor command is awaiting an outcome.");
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
@@ -360,6 +365,41 @@ mod tests {
         }).await.unwrap();
         let input = std::fs::read(root.path().join("input")).unwrap();
         assert!(!input.windows(b"$finish".len()).any(|bytes| bytes == b"$finish"), "Codex's skill picker must not consume the command submit");
+    }
+    /// cas-7629: receipts past the replay window are evicted, so command 257
+    /// still runs, while a replay inside the window returns its stored receipt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_receipts_expire_after_the_replay_window_but_replays_inside_it_do_not_rerun() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::command_receipts_expire_after_the_replay_window_but_replays_inside_it_do_not_rerun") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let usage = Request::Run { command: Command::Usage, confirmed: false };
+        let aged = Instant::now().checked_sub(REPLAY_WINDOW + Duration::from_secs(1)).unwrap();
+        for n in 0..=RECEIPT_CAP {
+            let reference = format!("cmd-{n}");
+            let sent = daemon.dispatch_supervisor_command(usage.clone(), reference.clone(), owner.clone()).await
+                .unwrap_or_else(|error| panic!("command {n} refused: {error:#}"));
+            assert!(matches!(sent, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while daemon.app.mux.pane_inject_busy(&name) { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            // The harness outcome was observed; all but the newest are past the window.
+            let record = daemon.supervisor_commands.records.get_mut(&("device-a".to_owned(), reference)).unwrap();
+            record.receipt.phase = Phase::Observed;
+            if n < RECEIPT_CAP { record.started = aged; }
+        }
+        let runs = || String::from_utf8_lossy(&std::fs::read(root.path().join("input")).unwrap()).matches("/usage").count();
+        tokio::time::timeout(Duration::from_secs(5), async { while runs() < RECEIPT_CAP + 1 { tokio::task::yield_now().await; } }).await.unwrap();
+        assert_eq!(runs(), RECEIPT_CAP + 1);
+        let newest = format!("cmd-{RECEIPT_CAP}");
+        let replay = daemon.dispatch_supervisor_command(usage, newest, owner).await.unwrap();
+        assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed),
+            "a replay inside the window returns the stored receipt");
+        assert_eq!(runs(), RECEIPT_CAP + 1, "a replay inside the window must not run the command again");
     }
     #[test]
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {

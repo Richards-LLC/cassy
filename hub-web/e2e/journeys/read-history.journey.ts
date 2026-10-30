@@ -30,6 +30,22 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
       await page.screenshot({ path: `${captures}/conversation-${width}-${colorScheme}.png` });
     }
   });
+  await journey.stage("Repeated viewer load failures leave one note", async () => {
+    const chunk = /\/chunk-image-viewer-[^/]+\.js$/;
+    await page.route(chunk, route => route.abort("failed"));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await first.click();
+      await expect(first).toContainText("Image viewer unavailable. Try again.");
+      expect.soft(await first.locator(".preview-note").count()).toBe(1);
+    }
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme });
+      await page.screenshot({ path: `${captures}/unavailable-390-${colorScheme}.png` });
+    }
+    await page.unroute(chunk);
+    await page.reload(); await openConversation(page, "cas-src");
+    await expect(first.locator("img")).toBeVisible();
+  });
   const dialog = page.getByRole("dialog", { name: "Image viewer" });
   await journey.stage("Expand an image and keep keyboard focus inside", async () => {
     await first.focus(); await first.press("Enter");
@@ -93,7 +109,16 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     await expect(dialog).toHaveAttribute("data-state", "ready");
     await dialog.getByRole("button", { name: "Next image" }).click();
     await expect(dialog.getByRole("status", { name: "Image load" })).toContainText("Couldn't load Missing screenshot.png");
-    await expect(dialog.getByRole("button", { name: "Try image again" })).toBeVisible();
+    const retry = dialog.getByRole("button", { name: "Try image again" });
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme });
+      await expect(retry).toBeInViewport({ ratio: 1 });
+      expect(await dialog.evaluate(node => node.scrollTop)).toBe(0);
+      await page.screenshot({ path: `${captures}/failed-390-${colorScheme}.png` });
+      await retry.click();
+      await expect(dialog.getByRole("status", { name: "Image load" })).toContainText("Couldn't load Missing screenshot.png");
+      await expect(dialog.getByRole("status", { name: "Image load" })).toHaveCount(1);
+    }
     await expect(dialog.getByRole("button", { name: "Next image" })).toBeDisabled();
     await page.keyboard.press("ArrowLeft");
     await expect(dialog).toHaveAttribute("data-state", "ready");

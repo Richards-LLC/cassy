@@ -92,7 +92,7 @@ import { enrollPairedInstallation } from "./inbox/hub-enrollment";
 import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
-import { countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
+import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
@@ -5931,10 +5931,7 @@ app.addEventListener("focusout", () => {
 app.addEventListener("click", (event) => { if (closeAppSwitcherAfterFollow(event.target)) countUsage("app-switch.explorer"); });
 
 // Count an explicit inspection, rather than every async diagram paint.
-app.addEventListener("toggle", (event) => {
-  const detail = event.target;
-  if (detail instanceof HTMLDetailsElement && detail.open && detail.closest(".rich-diagram, .rich-diff")) countUsage("rich-content.inspect");
-}, true);
+bindRichInspectionUsage(app);
 
 // A tap on any artifact (the thread's sheet, the context rail, the operator
 // thread) opens the hosted copy through a signed view URL (cassy issue 910).

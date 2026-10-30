@@ -8752,6 +8752,16 @@ EOF
             ("escaped delimiter", "cat <<\\EOF\n$(touch /outside/p)\nEOF\n".into(), false),
             ("partially single quoted delimiter", "cat <<E'O'F\n$(touch /outside/p)\nEOF\n".into(), false),
             ("partially double quoted delimiter", "cat <<\"E\"OF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("CR terminator", "cat <<EOF\nok\nEOF\r\necho '$(touch /outside/p)'\nEOF\n".into(), true),
+            ("CR delimiter suffix", "cat <<EOF\r\nok\nEOF\necho '$(touch /outside/p)'\nEOF\r\n".into(), true),
+            ("CR delimiter interior", "cat <<EOF\rX\nok\nEOF\necho '$(touch /outside/p)'\nEOF\rX\n".into(), true),
+            ("non-ASCII delimiter space", "cat <<EOF\u{a0}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{a0}\n".into(), true),
+            ("ANSI-C delimiter desync", "cat <<$'EOF'\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
+            ("locale delimiter desync", "cat <<$\"EOF\"\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
+            ("split heredoc operator", "cat <\\\n<EOF\necho '$(touch /outside/p)'\nEOF\n".into(), true),
+            ("quoted CR body", "cat <<'EOF'\r\n$(touch /outside/p)\r\nEOF\r\n".into(), false),
+            ("tab stripped literal", "cat <<-'EOF'\n\t$(touch /outside/p)\n\tEOF\n".into(), false),
+            ("tab stripped numeric", "cat <<-EOF\n\t$(( 1+2 ))\n\tEOF\n".into(), false),
         ] {
             // These are JSON request strings only. Never execute their payloads.
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();

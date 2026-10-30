@@ -210,6 +210,55 @@ describe("work events (cas-ff22)", () => {
     }
   });
 
+  it("folds only published reasoning into readable detail and retains the reader's state", () => {
+    const open = new Set(["work:published"]);
+    const requested = vi.fn();
+    const detail = { state: "ready" as const, text: "## Published detail\n\nKeep **the reader** here.\n\n- Check `src/a.ts`.\n\n<img src=x onerror=alert(1)> [unsafe](javascript:alert)", truncated: true };
+    let loaded = false;
+    const context = { detail: () => loaded ? detail : undefined, requestDetail: requested, isOpen: (key: string) => open.has(key), setOpen: (key: string, on: boolean) => void (on ? open.add(key) : open.delete(key)) };
+    const events = workEventsPage({ request_id: "x", events: [
+      wire("published", 1, { kind: "thinking", label: "Legacy label", reasoning: { summary: "Check **the lane**", source: "codex_summary" } }),
+      wire("summary-only", 2, { kind: "thinking", has_detail: false, lifecycle: { id: "active", stage: "start" }, reasoning: { summary: "Only **published text**", source: "claude_thinking" } }),
+      wire("legacy", 3, { kind: "thinking", label: "Legacy **literal**", reasoning: { summary: "Unknown source", source: "future_source" } }),
+    ] })!.events;
+    const item = { type: "work" as const, key: "work:published", events };
+    const node = document.createElement("div"); document.body.append(node);
+    renderWork(node, item, context, "supervisor");
+    const row = () => node.querySelector<HTMLElement>('[data-event-id="published"]')!;
+    const toggle = () => row().querySelector<HTMLButtonElement>(".work-row-toggle")!;
+    expect(row().textContent).toContain("Reasoning summaryCheck the lane");
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(requested).not.toHaveBeenCalled();
+    toggle().focus(); toggle().click();
+    expect(requested).toHaveBeenCalledExactlyOnceWith("published");
+    loaded = true;
+    renderWork(node, item, context, "supervisor");
+    expect(row().querySelector(".work-reasoning-content p strong")!.textContent).toBe("the reader");
+    expect(row().querySelectorAll("img, a[href^=javascript]")).toHaveLength(0);
+    expect(row().querySelector(".work-detail-limit")!.textContent).toContain("16 KB");
+    const raw = row().querySelector<HTMLDetailsElement>(".work-reasoning-raw")!;
+    raw.open = true; raw.dispatchEvent(new Event("toggle"));
+    expect(raw.querySelector("pre")!.textContent).toBe(detail.text);
+    row().querySelector<HTMLElement>(".work-detail")!.scrollTop = 42;
+    const revised = { ...item, events: events.map(event => event.id === "published" ? { ...event, reasoning: { ...event.reasoning!, summary: "Updated **summary**" } } : event) };
+    expect(workSignature(revised, context)).not.toBe(workSignature(item, context));
+    const updated = { ...revised, events: revised.events.map(event => event.id === "published" ? { ...event, lifecycle: { id: "turn", stage: "end" } } : event) };
+    expect(workSignature(updated, context)).not.toBe(workSignature(item, context));
+    renderWork(node, updated, context, "supervisor");
+    expect(row().querySelector(".work-reasoning-label")!.textContent).toBe("Thought");
+    expect(row().querySelector<HTMLDetailsElement>(".work-reasoning-raw")!.open).toBe(true);
+    expect(row().querySelector<HTMLElement>(".work-detail")!.scrollTop).toBe(42);
+    expect(document.activeElement?.getAttribute("data-focus-key")).toBe("row:published");
+    expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-label')!.textContent).toBe("Thinking");
+    node.querySelector<HTMLButtonElement>('[data-event-id="summary-only"] button')!.click();
+    expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-content p strong')!.textContent).toBe("published text");
+    expect(requested).toHaveBeenCalledTimes(1);
+    node.querySelector<HTMLButtonElement>('[data-event-id="legacy"] button')!.click();
+    expect(node.querySelector('[data-event-id="legacy"] .work-record')!.textContent).toBe(detail.text);
+    expect(node.querySelector('[data-event-id="legacy"] strong')).toBeNull();
+    node.remove();
+  });
+
   it("renders typed work evidence safely, lazily and without losing disclosure or focus", () => {
     const open = new Set<string>(["work:read"]);
     const requested: string[] = [];

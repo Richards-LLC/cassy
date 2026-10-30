@@ -1,0 +1,4 @@
+title: A supervisor command is refused while the harness turn is still running, including Claude's middle-dot spinner frame and a Codex reply streaming under an idle-looking prompt without busy text
+tasks: [cas-1a93]
+invariants: [HUB-J27-ALLOWLIST]
+journeys: [HUB-J27]

@@ -15,6 +15,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **An unstarted release looks empty** — The release progress bar in Team and the side rail now has a hollow, outlined track, so 0 of 4 merged no longer looks like a full bar.
 
+### Fixed — Supervisor commands during a running turn
+
+- **Slash commands wait for the supervisor's turn to end** — Commander no longer
+  types a command into a running turn. Claude's `·` spinner frame counts as busy,
+  and the supervisor's terminal must be quiet for 2 seconds first, so a Codex
+  reply that streams without busy text no longer looks like an idle prompt.
+
 ### Fixed — Backquote command inspection
 
 - **Nested backquote commands keep workspace and operator checks** — The shell

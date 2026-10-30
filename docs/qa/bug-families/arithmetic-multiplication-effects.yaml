@@ -1,0 +1,4 @@
+title: Arithmetic word parts are not executable glob contexts and nested substitutions still undergo workspace checks
+tasks: [cas-0c9c]
+invariants: []
+journeys: []

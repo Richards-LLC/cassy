@@ -73,14 +73,28 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
-/// Extract substitutions kept opaque inside a quoted shell word. Unquoted
-/// substitutions are already split into subprocess scopes by the tokenizer.
+/// Extract executable substitutions from a shell word. Arithmetic expressions
+/// stay data while their nested substitutions still contribute effects.
 fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes.get(index..index + 2) == Some(b"$(") {
+        if bytes.get(index..index + 3) == Some(b"$((") {
+            // The lexer validates word boundaries, but `$((command) )` can
+            // still be a command substitution with a subshell. Only `))`
+            // closes arithmetic; ambiguous forms must remain unresolved.
+            let end = substitution_end(bytes, index + 2, 0)
+                .ok_or("an unresolved shell payload")?;
+            if bytes.get(end - 1) != Some(&b')') {
+                return Err("an unresolved shell payload");
+            }
+            // Continue inside arithmetic to find executable substitutions,
+            // without interpreting its operators as shell commands.
+            index += 3;
+        } else if bytes.get(index..index + 2) == Some(b"$[") {
+            index += 2;
+        } else if bytes.get(index..index + 2) == Some(b"$(") {
             let literal_heredoc = literal_cat_heredoc_end(&word[index..]);
             let end = match literal_heredoc {
                 Some(end) => index + end,

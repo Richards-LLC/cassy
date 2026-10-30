@@ -13,6 +13,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   beyond its parked delivery through unowned work, close reports the kept anchor,
   ignored tip and offending commit instead of returning an ordinary merge request.
 
+### Fixed — Image viewer recovery
+
+- **Repeated image failures leave one clear note** — Unavailable previews and
+  viewer loads share a single notice that clears on recovery. Phone checks keep
+  Try again visible without scrolling in light and dark.
+
+### Fixed — Arithmetic workspace checks
+
+- **Multiplication stays arithmetic in shell arguments** — Workspace checks
+  keep arithmetic operators out of filesystem resolution while still checking
+  nested command substitutions and refusing unresolved effects.
+
+### Fixed — Duplicate baseline bug-family keys
+
+- **Malformed base registries refuse case checks** — A duplicate bug-family key
+  now names the key and file in a registry error instead of skipping the gate.
+  Unavailable Git inputs retain their existing nonblocking warning.
+
 ### Added — Emoji in Commander conversations
 
 - **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.
@@ -28,6 +46,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Case coverage keeps its Git error warning** — An unreadable base registry
   cannot credit an unchanged bug case as new. Journey status also reports new
   untracked family files as working-tree drift.
+
+### Fixed — Commander project order
+
+- **Project cards and supervisor rows stay put** — Was: Commander ordered
+  project cards and the supervisors inside them by recent activity, so a
+  project with supervisors on two machines flickered as they traded places.
+  Now: cards sort by project name and rows by supervisor name (then machine,
+  then session), and activity never moves either; the Most recent mark stays
+  on the newest session where it stands.
 
 ### Fixed — Commander clock correction
 

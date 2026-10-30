@@ -29,6 +29,21 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
   if (!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/pdf)$/.test(mime)) return sheet;
   const document = sheet.ownerDocument;
   const image = mime.startsWith("image/");
+  const note = document.createElement("span"); note.className = "preview-note"; note.setAttribute("role", "status");
+  let viewerUnavailable = false, previewUnavailable = false;
+  const updateNote = () => {
+    const label = sheet.dataset.label ?? file.name;
+    const previousLabel = `${label}. ${note.textContent}`;
+    const message = viewerUnavailable ? "Image viewer unavailable. Try again." : previewUnavailable ? "Preview unavailable" : "";
+    if (message) {
+      if (note.textContent !== message) note.textContent = message;
+      if (!note.isConnected) sheet.querySelector(".ftext")?.append(note);
+      sheet.setAttribute("aria-label", `${label}. ${message}`);
+    } else {
+      note.remove();
+      if (sheet.getAttribute("aria-label") === previousLabel) sheet.setAttribute("aria-label", label);
+    }
+  };
   if (image) sheet.addEventListener("click", event => {
     const click = event as MouseEvent;
     if (event.defaultPrevented || click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return;
@@ -37,10 +52,9 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
     void import("./image-viewer").then(({ openImageViewer }) => {
       if (!sheet.isConnected) return;
       openImageViewer(sheet, files.map(entry => ({ file: entry, fetchView: () => entry.artifact_id === file.artifact_id ? fetchView() : options.fetchImage!(entry) })), Math.max(0, files.findIndex(entry => entry.artifact_id === file.artifact_id)));
+      viewerUnavailable = false; updateNote();
     }).catch(() => {
-      sheet.setAttribute("aria-label", `${file.name}. Image viewer unavailable. Try again.`);
-      const note = sheet.ownerDocument.createElement("span"); note.className = "preview-note"; note.setAttribute("role", "status"); note.textContent = "Image viewer unavailable. Try again.";
-      sheet.querySelector(".ftext")?.append(note);
+      viewerUnavailable = true; updateNote();
     });
   });
   const root = document.createElement("div"); root.className = "rich-attachment"; root.style.width = image ? "320px" : "640px"; root.style.maxWidth = "100%"; root.style.minWidth = "0";
@@ -56,19 +70,11 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
   const label = document.createElement("p"); label.textContent = "Loading preview…"; viewport.append(label);
   const plate = image ? sheet.querySelector<HTMLElement>(".plate") : null;
   const mark = document.createElement("span"); mark.textContent = plate?.textContent ?? ""; mark.hidden = true; mark.setAttribute("aria-hidden", "true");
-  const note = document.createElement("span"); note.className = "preview-note"; note.textContent = "Preview unavailable"; note.setAttribute("role", "status");
   viewport.previewStateChanged = (state) => {
     const failed = state === "waiting" || state === "failed";
     viewport.style.display = failed ? "none" : "grid";
     if (plate) { mark.hidden = !failed; plate.classList.toggle("thumbnail-failed", failed); }
-    const text = sheet.querySelector(".ftext");
-    if (failed) {
-      if (text && !note.isConnected) text.append(note);
-      sheet.setAttribute("aria-label", `${sheet.dataset.label}. Preview unavailable`);
-    } else {
-      note.remove();
-      if (sheet.getAttribute("aria-label")?.endsWith(". Preview unavailable")) sheet.setAttribute("aria-label", sheet.dataset.label ?? "");
-    }
+    previewUnavailable = failed; updateNote();
   };
   viewport.loadPreview = async () => {
     try {

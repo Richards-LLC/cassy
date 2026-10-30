@@ -91,7 +91,7 @@ struct Entry {
 /// The whole release of one task's leases waits at most this long.
 const RELEASE_BUDGET: Duration = Duration::from_secs(5);
 
-fn ledger_path(cas_root: &Path, agent_id: &str) -> PathBuf {
+pub(crate) fn ledger_path(cas_root: &Path, agent_id: &str) -> PathBuf {
     let safe: String = agent_id
         .chars()
         .map(|c| {

@@ -269,40 +269,98 @@ fn apply_changelog_string_edit(text: &str, edit: &serde_json::Value) -> Option<S
 fn changelog_diff_adds_whole_lines(old: &str, new: &str) -> bool {
     use similar::{ChangeTag, TextDiff};
     let mut inserted = false;
-    let mut insertion = String::new();
-    let is_new_entry = |block: &str| {
-        block.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with("# ")
-                || line.starts_with("## ")
-                || line.starts_with("### ")
-                || line.starts_with("#### ")
-                || line.starts_with("##### ")
-                || line.starts_with("###### ")
-                || line.starts_with("- ")
-                || line.starts_with("* ")
-                || line.starts_with("1. ")
-        })
-    };
-    for change in TextDiff::from_lines(old, new).iter_all_changes() {
-        match change.tag() {
+    let diff = TextDiff::from_lines(old, new);
+    let changes: Vec<_> = diff.iter_all_changes().collect();
+    let mut previous_equal: Option<&str> = None;
+    let mut index = 0;
+    while index < changes.len() {
+        match changes[index].tag() {
             ChangeTag::Delete => return false,
-            ChangeTag::Insert => {
-                inserted = true;
-                if !change.value().ends_with('\n') {
-                    return false;
-                }
-                insertion.push_str(change.value());
-            }
             ChangeTag::Equal => {
-                if !insertion.is_empty() && !is_new_entry(&insertion) {
+                previous_equal = Some(changes[index].value());
+                index += 1;
+            }
+            ChangeTag::Insert => {
+                let start = index;
+                while index < changes.len() && changes[index].tag() == ChangeTag::Insert {
+                    if !changes[index].value().ends_with('\n') {
+                        return false;
+                    }
+                    index += 1;
+                }
+                let block = changes[start..index]
+                    .iter()
+                    .map(|change| change.value())
+                    .collect::<String>();
+                let next_nonblank_equal = changes[index..]
+                    .iter()
+                    .find(|change| {
+                        change.tag() == ChangeTag::Equal && !change.value().trim().is_empty()
+                    })
+                    .map(|change| change.value());
+                if !is_changelog_entry_block(&block)
+                    || !is_changelog_entry_boundary(previous_equal, next_nonblank_equal)
+                {
                     return false;
                 }
-                insertion.clear();
+                inserted = true;
             }
         }
     }
-    inserted && (insertion.is_empty() || is_new_entry(&insertion))
+    inserted
+}
+
+fn is_changelog_entry_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    if !is_changelog_heading(first) && !is_changelog_bullet(first) {
+        return false;
+    }
+
+    let mut follows_inserted_bullet = is_changelog_bullet(first);
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            if !follows_inserted_bullet {
+                return false;
+            }
+            continue;
+        }
+        if is_changelog_heading(line) {
+            follows_inserted_bullet = false;
+        } else if is_changelog_bullet(line) {
+            follows_inserted_bullet = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_changelog_entry_boundary(previous: Option<&str>, next: Option<&str>) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    if previous.trim().is_empty() || is_changelog_heading(previous) {
+        return true;
+    }
+    // A following indented line is still part of the preceding wrapped entry.
+    // Ignore blank separators when deciding whether the insertion split it.
+    let next_nonblank = next.filter(|line| !line.trim().is_empty());
+    !next_nonblank.is_some_and(|line| line.starts_with([' ', '\t']))
+}
+
+fn is_changelog_heading(line: &str) -> bool {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&hashes) && line[hashes..].starts_with(' ')
+}
+
+fn is_changelog_bullet(line: &str) -> bool {
+    line.starts_with("- ") || line.starts_with("* ") || line.starts_with("1. ")
 }
 
 fn apply_changelog_patch(text: &str, patch: &str) -> Option<String> {
@@ -7294,11 +7352,11 @@ mod workspace_contract_tests {
     fn changelog_new_bullet_is_append_only() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("CHANGELOG.md");
-        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n  Wrapped detail.\n\n").unwrap();
         let input = tool_input(
             "apply_patch",
             serde_json::json!({
-                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n   Wrapped detail.\n \n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
             }),
             root.path(),
         );
@@ -7361,18 +7419,41 @@ mod workspace_contract_tests {
     }
 
     #[test]
-    fn worker_file_lease_notes_checks_changelog_edit_before_claim() {
+    fn changelog_edit_continuation_plus_new_bullet_warns() {
         let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("project");
+        let file = root.path().join("CHANGELOG.md");
+        let old = "- Existing delivery entry.\n  Existing wrapped detail.\n";
+        std::fs::write(&file, old).unwrap();
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "old_string": old,
+                "new_string": "- Existing delivery entry.\n  Existing wrapped detail.\n  Continuation edited by another delivery.\n\n- New task entry.\n"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
+    fn worker_file_lease_notes_checks_changelog_edit_before_claim() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(&project)
             .status()
             .unwrap();
+        let project = project.canonicalize().unwrap();
         let file = project.join("CHANGELOG.md");
         std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
-        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let cas_root = crate::store::init_cas_dir(env.home()).unwrap();
+        assert_eq!(
+            std::env::var_os("CAS_ROOT").as_deref(),
+            Some(cas_root.as_os_str()),
+            "fixture stores and production hook root must share TestEnvGuard's canonical CAS_ROOT"
+        );
         crate::cloud::set_canonical_id_in_config_toml(&cas_root, "github.com/acme/lease-test").unwrap();
         crate::cloud::CloudConfig {
             endpoint: "http://127.0.0.1:9".into(),
@@ -7386,14 +7467,12 @@ mod workspace_contract_tests {
         task.assignee = Some("lease-test-session".into());
         crate::store::open_task_store(&cas_root).unwrap().add(&task).unwrap();
         let project_path = project.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_AGENT_NAME", Some("lease-test-worker")),
-            ("CAS_SESSION_ID", Some("lease-test-session")),
-            ("CAS_CLONE_PATH", Some(&project_path)),
-            ("CAS_USER_CLOUD_JSON", None),
-        ]);
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "lease-test-worker");
+        env.set("CAS_SESSION_ID", "lease-test-session");
+        env.set("CAS_CLONE_PATH", &project_path);
+        env.remove("CAS_USER_CLOUD_JSON");
         let input = tool_input(
             "Edit",
             serde_json::json!({
@@ -7404,7 +7483,7 @@ mod workspace_contract_tests {
             &project,
         );
         assert!(worker_file_lease_notes(&input, &cas_root, false).is_empty());
-        assert!(cas_root.join("file-leases/lease-test-session.json").exists(),
+        assert!(crate::cloud::file_leases::ledger_path(&cas_root, "lease-test-session").exists(),
             "a rewrite-plus-add must not bypass the file-lease check");
     }
 

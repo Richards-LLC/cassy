@@ -37,9 +37,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Workers can add their own changelog entries without coordination** — Was:
   append-only detection accepted edits that rewrote another entry while adding
-  a new bullet. Now: the hook applies edits to current text and only skips the
-  warning for whole-line new entries; rewrites, deletions and continuations to
-  existing bullets still warn.
+  a new bullet. Now: the hook applies edits to current text and skips the
+  warning only when an insertion starts with a bullet or heading at an entry
+  boundary; indented lines must follow a newly inserted bullet. Rewrites,
+  deletions and continuations to existing bullets still warn.
 
 ### Fixed — Cacheless worker delivery cleanup
 
@@ -108,9 +109,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   never on a green push alone.
 
 ### Fixed — Shared-file advisories
-
-- **New CHANGELOG entries skip coordination warnings** — Adding an independent
-  bullet or section is append-only; modifying an existing entry still warns.
 
 - **Remote file holders keep the coordination hint** — Was: a named holder on
   another machine lost the cross-session supervisor hint. Now: recorded remote

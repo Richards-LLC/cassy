@@ -10899,11 +10899,20 @@ mod worker_commit_guard_tests {
 
         let variants = [
             "git push --no-verify origin factory/guard-test".to_string(),
+            "git push --no-verif origin factory/guard-test".to_string(),
             "git push -n origin factory/guard-test".to_string(),
+            "git push --dry-run origin factory/guard-test".to_string(),
             "git -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test".to_string(),
             format!(
                 "git -C '{repo_path}' -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test"
             ),
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks git push origin factory/guard-test".to_string(),
+            "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" git push origin factory/guard-test".to_string(),
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks git push origin factory/guard-test".to_string(),
+            "git -c alias.p='push --no-verify' p origin factory/guard-test".to_string(),
+            "bash -c 'git push --no-verify origin factory/guard-test'".to_string(),
+            "eval 'git push --no-verify origin factory/guard-test'".to_string(),
+            "env -S 'git push --no-verify origin factory/guard-test'".to_string(),
         ];
 
         for role in ["worker", "reviewer"] {
@@ -10929,6 +10938,11 @@ mod worker_commit_guard_tests {
                 assert!(
                     reason.contains("supervisor-approved") && reason.contains("plain `git push`"),
                     "the refusal must point to the exception route: {reason}"
+                );
+                assert!(
+                    reason.contains("-n is a dry-run")
+                        && reason.contains("still runs the pre-push hook"),
+                    "the refusal must explain that -n does not skip hooks: {reason}"
                 );
             }
         }

@@ -92,17 +92,25 @@ test("screenshot settle has a deadline when the renderer is suspended", async ({
   }
 });
 
-test("screenshot settle tolerates a 400ms renderer task after product assertions", async ({ page }) => {
+test("screenshot settle tolerates a 1000ms renderer task after product assertions", async ({ page }) => {
   await page.setContent("<h1>Product assertions passed</h1>");
   await expect(page.getByRole("heading")).toHaveText("Product assertions passed");
-  await page.evaluate(() => {
-    setTimeout(() => {
-      const started = performance.now();
-      while (performance.now() - started < 400) { /* a long renderer task */ }
-      document.querySelector("h1")!.textContent = "Renderer recovered";
-    }, 0);
-  });
-  await settle(page);
+  const session = await page.context().newCDPSession(page);
+  await session.send("Runtime.enable");
+  const busy = new Promise<void>((resolve) => { session.once("Runtime.consoleAPICalled", () => resolve()); });
+  const renderer = session.send("Runtime.evaluate", { expression: `
+    console.debug("renderer task started");
+    const started = performance.now();
+    while (performance.now() - started < 1000) {}
+    document.querySelector("h1").textContent = "Renderer recovered";
+  ` });
+  await busy;
+  try {
+    await settle(page);
+  } finally {
+    await renderer;
+    await session.detach();
+  }
   expect((await page.screenshot()).subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   await expect(page.getByRole("heading")).toHaveText("Renderer recovered");
 });

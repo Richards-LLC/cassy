@@ -1209,6 +1209,42 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
   });
 
+  it("resumes a requested session when its ended catalog entry becomes live again (cas-5049)", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("replacement-after-ended"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const welcome = { channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } };
+    socket.receive(welcome);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame))
+      .filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+
+    // The real HUB-J11 trace: Closed, the old daemon's end receipt, then a
+    // live replacement under the same session name. Ended must pause retries.
+    socket.receive({ channel: "pty:session-a", closed: true });
+    connection.setSessionEnded("session-a", true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(subscriptions()).toHaveLength(1);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Too soon" } })).toBe(false);
+    connection.setSessionEnded("session-a", false);
+    await vi.waitFor(() => expect(subscriptions()).toHaveLength(2));
+    socket.receive(welcome);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
+    connection.setSessionEnded("session-a", false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(subscriptions()).toHaveLength(2);
+    expect(TransportSocket.instances).toHaveLength(1);
+  });
+
   it("keeps a responsive machine live when the session catalog fails under load", async () => {
     transport(true);
     TransportSocket.instances = [];

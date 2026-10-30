@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander project order
+
+- **Project cards and supervisor rows stay put** — Was: Commander ordered
+  project cards and the supervisors inside them by recent activity, so a
+  project with supervisors on two machines flickered as they traded places.
+  Now: cards sort by project name and rows by supervisor name (then machine,
+  then session), and activity never moves either; the Most recent mark stays
+  on the newest session where it stands.
+
 ### Fixed — Commander clock correction
 
 - **A refused proof cannot shift the clock by an arbitrary amount** — Commander

@@ -130,6 +130,10 @@ invariants:
     statement: A supervisor exit closes its conversation with a dated receipt, confirmed worker stop count and named surviving workers; the row and header say Ended and sends cannot queue to the dead session.
     check: 'Run the session-ended case in conversation-stage.test.ts and hub::tests::cec1_session_end_projection_survives_cleanup_without_ending_a_replacement; capture a real supervisor /exit with at least two workers and verify the receipt within ten seconds, local twelve-hour time, ended row/header and composer guidance.'
     bug: {task: cas-cec1}
+  HUB-J3-STABLE-ORDER:
+    statement: Project cards sort by project name and supervisor rows by supervisor name, then machine, then session; activity never moves a card or a row.
+    check: 'Run the cas-ade2 HUB-J3 part in find-conversation.journey.ts (two supervisors of one project on two machines trade recency across four catalog updates; card and row order and DOM nodes stay put) and the cas-ade2 case in hub-web/src/project-navigation.test.ts; walk a real two-machine project and watch the list through several live updates.'
+    bug: {task: cas-ade2}
   HUB-J3-DELIBERATE-EXIT-QUIET:
     statement: A deliberate supervisor exit with code 0 and the clean daemon exit after it raise no attention item, and the session-ended receipt names the exit in plain words; a supervisor crash still alerts as Supervisor stopped.
     check: 'Run the HUB-J3 supervisor exit case in find-conversation.journey.ts (only the sentinel crash row is stored and the session badge stays hidden), the cas-c095 cases in hub-web/src/attention.test.ts, hub::tests::h1_aggregate_events_cover_session_and_pane_lifecycle and queue_and_events::tests::supervisor_exit_reason_is_plain_words_without_option_debug_text; walk a real supervisor /exit and verify no Daemon connection lost or Worker stopped item and no Some(...)/None text.'
@@ -692,6 +696,7 @@ journeys:
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
   - HUB-J3-DELIBERATE-EXIT-QUIET
+  - HUB-J3-STABLE-ORDER
   - HUB-J3-MACHINE-VERSIONS
   - HUB-J3-MACHINE-CHIP-FOCUS
   traffic:

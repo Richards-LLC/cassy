@@ -87,6 +87,20 @@ impl Fixture {
     fn decision(&mut self, body: &str) {
         append_close_decision_note(&self.store, &mut self.task, &format!("✅ DECISION {body}"));
     }
+    fn duplicate_family() -> Self {
+        let mut f = Self::new(&format!(
+            "{YAML}bug_families:\n  duplicate: {{title: Alternate case, tasks: [cas-5678], invariants: [INV], journeys: [signup]}}\n"
+        ));
+        write(
+            f.repo.path(),
+            "docs/qa/bug-families/duplicate.yaml",
+            "title: Existing case\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n",
+        );
+        f.base = commit(f.repo.path());
+        f.task.task_type = TaskType::Bug;
+        f.task.updated_at = f.store.update(&f.task).unwrap();
+        f
+    }
 }
 
 #[test]
@@ -385,30 +399,55 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
 }
 
 #[test]
-fn registry_upkeep_duplicate_base_family_refuses_with_key_and_file() {
-    const FAMILY_PATH: &str = "docs/qa/bug-families/duplicate.yaml";
-    let family = "title: Existing case\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n";
-    let mut f = Fixture::new(&format!(
-        "{YAML}bug_families:\n  duplicate: {{title: Existing case, tasks: [cas-1234], invariants: [INV], journeys: [signup]}}\n"
-    ));
-    write(f.repo.path(), FAMILY_PATH, family);
-    f.base = commit(f.repo.path());
-    f.task.task_type = TaskType::Bug;
-    f.task.updated_at = f.store.update(&f.task).unwrap();
-    // Repair the delivered registry so only the base has a duplicate key.
-    // The unchanged case must not disable the gate for this bug delivery.
+fn registry_upkeep_repaired_base_duplicate_evaluates_ownership_and_changed_case() {
+    let mut f = Fixture::duplicate_family();
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, YAML);
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    write(f.repo.path(), "src/pages/email.ts", "new entry");
+    let head = commit(f.repo.path());
+    let error = f.run(&head).unwrap_err();
+    assert!(
+        error.contains("base registry duplicate repaired")
+            && error.contains("UNOWNED USER-FACING FILE")
+            && error.contains("BUG FIX WITHOUT A CASE"),
+        "{error}"
+    );
+    // Adding an actual new case and owning the new file must satisfy both gates.
+    let repaired = YAML
+        .replace("check: Read state", "check: Read state, bug: {task: cas-1234}")
+        .replace("'src/pages/signup.ts'", "'src/pages/signup.ts', 'src/pages/email.ts'");
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &repaired);
+    let head = commit(f.repo.path());
+    assert!(f.run(&head).unwrap().join("\n").contains("base registry duplicate repaired"));
+}
+
+#[test]
+fn registry_upkeep_registry_escape_cannot_skip_g3_after_duplicate_repair() {
+    let mut f = Fixture::duplicate_family();
     write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, YAML);
     write(f.repo.path(), "src/pages/signup.ts", "another fix");
     let head = commit(f.repo.path());
+    f.decision("registry unchanged: duplicate repair reviewed");
+    let error = f.run(&head).expect_err("G1 escape cannot skip the unchanged-case gate");
+    assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    f.decision("no case: reviewed copy correction without behavior change");
+    f.run(&head).expect("explicit G3 waiver remains available after evaluation");
+}
 
-    let error = f.run(&head).expect_err("duplicate base keys must refuse, not warn");
+#[test]
+fn registry_upkeep_persistent_duplicate_refuses_even_with_registry_escape() {
+    let mut f = Fixture::duplicate_family();
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    let head = commit(f.repo.path());
+    let error = f.run(&head).expect_err("persistent duplicate must refuse, not warn");
     assert!(
-        error.contains("BASE JOURNEY REGISTRY INVALID")
+        error.contains("DELIVERED JOURNEY REGISTRY INVALID")
             && error.contains("duplicate bug family \"duplicate\"")
-            && error.contains(FAMILY_PATH)
-            && error.contains(crate::qa_registry::DEFAULT_PATH),
+            && error.contains("docs/qa/bug-families/duplicate.yaml"),
         "{error}"
     );
+    f.decision("registry unchanged: existing duplicate reviewed");
+    assert!(f.run(&head).unwrap_err().contains("DELIVERED JOURNEY REGISTRY INVALID"));
 }
 
 #[test]

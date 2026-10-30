@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Conditional and parameter operands
+
+- **Recursive parameter operands stay unresolved** — Arithmetic comparisons,
+  array indices, substring positions and indirection cannot hide executable
+  subscript text. Literal numeric comparisons, indices and slices stay allowed.
+
 ### Fixed — QA impact for test fixtures
 
 - **Test fixtures stay outside product QA impact** — Changes confined to tests

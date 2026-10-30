@@ -8799,7 +8799,27 @@ mod workspace_contract_tests {
             assert_eq!(status, "deny", "{command}: {reason}");
             assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
         }
+        // cas-d6f2: these operands recursively evaluate subscript text.
+        let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
+        for expression in [
+            "[[ x -eq 0 ]]",
+            "[[ 0 -ge x ]]",
+            "[[ 1 -eq 1 && x -ne 0 ]]",
+            "echo \"${b[x]}\"",
+            "echo \"${s:x}\"",
+            "echo \"${s:0:x}\"",
+            "echo \"${!x}\"",
+        ] {
+            let command = format!("{indirect}{expression}");
+            let (status, reason) = decision(&command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
         for allowed in [
+            "[[ 1 -eq 1 ]]",
+            "echo \"${b[0]}\"",
+            "echo \"${s:0:2}\"",
+            "[[ \"literal\" == \"-eq\" ]]",
             "cas config get factory.write_roots",
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",

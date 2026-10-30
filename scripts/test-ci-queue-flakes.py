@@ -69,6 +69,9 @@ class QueueRecovery(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(['git', *args], cwd=self.repo, text=True).strip()
 
+    def calls(self):
+        return [json.loads(line) for line in (self.repo/'attempts.jsonl').read_text().splitlines()]
+
     def run_queue(self, engine, test="sometimes", event="merge_group"):
         shutil.rmtree(self.repo/'receipts',ignore_errors=True)
         return subprocess.run([sys.executable,str(SCRIPT),'run',engine,'--repo',str(self.repo),
@@ -88,7 +91,7 @@ class QueueRecovery(unittest.TestCase):
                     self.assertEqual(receipt['outcome'],outcome)
                     self.assertEqual(receipt['initial_status'],1)
                     self.assertEqual(receipt['tree'],before)
-                    calls = [json.loads(l) for l in (self.repo/'attempts.jsonl').read_text().splitlines()]
+                    calls = self.calls()
                     self.assertEqual(len(calls),2)
                     self.assertNotIn('--partition',calls[1])
                     self.assertFalse(any(a.startswith('--shard') for a in calls[1]))
@@ -101,7 +104,7 @@ class QueueRecovery(unittest.TestCase):
                 (self.repo/'attempts.jsonl').unlink(missing_ok=True)
                 result = self.run_queue(engine,event='workflow_dispatch')
                 self.assertNotEqual(result.returncode,0)
-                self.assertEqual(len((self.repo/'attempts.jsonl').read_text().splitlines()),1)
+                self.assertEqual(len(self.calls()),1)
 
     def test_checked_in_quarantine_excludes_only_the_named_test(self):
         for engine in ('rust','playwright'):
@@ -118,7 +121,7 @@ class QueueRecovery(unittest.TestCase):
                 receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
                 self.assertEqual(receipt['outcome'],'PASS')
                 self.assertEqual(receipt['quarantine'],[test])
-                self.assertEqual(len((self.repo/'attempts.jsonl').read_text().splitlines()),1)
+                self.assertEqual(len(self.calls()),1)
                 self.assertIn(test['issue'],result.stdout)
 
 

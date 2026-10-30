@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Parameter expansion boundaries
+
+- **Parameter data cannot hide policy commands** — Shell checks keep parameter
+  and arithmetic expansions together, inspect nested executable substitutions,
+  and refuse unfinished expansions before accepting their command boundaries.
+
 ### Fixed — Merge completion guidance
 
 - **Parked workers wait for the merge verdict** — Recycle briefs, merge alerts

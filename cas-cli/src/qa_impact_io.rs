@@ -181,7 +181,11 @@ pub(super) fn analyze(
             .iter()
             .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
             .filter(|path| {
-                !crate::qa_pass::is_non_surface_path(path)
+                // Registered specs declare journey coverage without being product surfaces.
+                (!crate::qa_pass::is_non_surface_path(path)
+                    || registry.journeys.iter().any(|journey| {
+                        journey.spec.as_deref() == Some(path.as_str())
+                    }))
                     && !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
             })
             .collect::<Vec<_>>();

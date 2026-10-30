@@ -36,6 +36,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Supervisor commands during a running turn
 
+- **Commands sent just after a reply wait for the prompt to settle** — Was:
+  promptly sending Exit after a supervisor reply could be refused as busy.
+  → Now: an idle prompt gets up to 3 seconds to complete its 2-second quiet
+  window, with fresh output and busy state checked again before typing.
 - **Slash commands wait for the supervisor's turn to end** — Commander no longer
   types a command into a running turn. Claude's `·` spinner frame counts as busy,
   and the supervisor's terminal must be quiet for 2 seconds first. A Codex

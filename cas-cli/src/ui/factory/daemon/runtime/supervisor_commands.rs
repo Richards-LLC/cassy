@@ -27,6 +27,9 @@ const RESTART_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 /// while it streams a reply, so an idle-looking screen alone is insufficient;
 /// Codex's own turn markers are the busy signal, this is a second guard.
 const COMMAND_SETTLE: Duration = Duration::from_secs(2);
+/// A completed reply may still be inside the silence window when its operator
+/// sends a command. Give it time to settle, without waiting on a running turn.
+const COMMAND_SETTLE_WAIT: Duration = Duration::from_secs(3);
 impl CommandState {
     /// Drop finished receipts past the replay window. An in-flight command or
     /// open chooser is never evicted, and nothing inside the window is, so a
@@ -307,6 +310,36 @@ impl FactoryDaemon {
         self.last_pane_output_bytes.get(pane.id()) == Some(&pane.bytes_received())
             && self.pane_silent_since.get(pane.id()).is_some_and(|since| since.elapsed() >= COMMAND_SETTLE)
     }
+    async fn wait_for_command_prompt(&mut self) -> anyhow::Result<()> {
+        let rollout = if self.app.mux.supervisor().is_some_and(|pane| pane.harness() == cas_mux::SupervisorCli::Codex) {
+            let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
+            let path = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cas_mux::SupervisorCli::Codex)).await.ok().flatten();
+            if path.is_none() { tracing::warn!("Codex supervisor rollout unavailable; command readiness falls back to output settle"); }
+            path
+        } else { None };
+        let progress = super::loop_watchdog::LoopProgress::new();
+        loop {
+            // This handler owns the daemon loop while it waits. Drain through
+            // the normal exchange so fresh output resets silence, and retain
+            // its buffering, client delivery and process-exit observations.
+            self.exchange_terminal(&progress).await;
+            if let Some(path) = rollout.clone() {
+                let open = tokio::task::spawn_blocking(move || codex_turn_open(&path)).await.ok().flatten();
+                anyhow::ensure!(open != Some(true), "The supervisor is busy: its Codex turn has not ended. Wait until its turn ends.");
+            }
+            let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
+            anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
+                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&screen(pane)),
+                "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
+            let bytes = pane.bytes_received();
+            if self.last_pane_output_bytes.insert(pane.id().to_owned(), bytes) != Some(bytes) || !self.pane_silent_since.contains_key(pane.id()) {
+                self.pane_silent_since.insert(pane.id().to_owned(), Instant::now());
+            }
+            if self.output_settled(pane) { return Ok(()); }
+            let remaining = COMMAND_SETTLE.saturating_sub(self.pane_silent_since.get(pane.id()).map_or(Duration::ZERO, Instant::elapsed));
+            tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+        }
+    }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
         let device = attribution.device_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("missing command owner"))?;
@@ -327,20 +360,11 @@ impl FactoryDaemon {
             anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "Too many supervisor commands in the last 10 minutes. Try again shortly.");
             anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
             anyhow::ensure!(!self.supervisor_commands.records.values().any(|r| r.receipt.phase == Phase::Submitted || r.receipt.interactive), "Another supervisor command is awaiting an outcome.");
-            if self.app.mux.supervisor().is_some_and(|pane| pane.harness() == cas_mux::SupervisorCli::Codex) {
-                let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-                let open = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cas_mux::SupervisorCli::Codex)
-                    .and_then(|path| codex_turn_open(&path))).await.ok().flatten();
-                // An unreadable rollout leaves the screen and settle checks below in charge.
-                if open.is_none() { tracing::warn!("Codex supervisor rollout unavailable; command readiness falls back to output settle"); }
-                anyhow::ensure!(open != Some(true), "The supervisor is busy: its Codex turn has not ended. Wait until its turn ends.");
-            }
+            tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
+                .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))??;
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
             let before = screen(pane);
-            anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
-                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before) && self.output_settled(pane),
-                "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
             let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
@@ -443,6 +467,48 @@ mod tests {
         daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn command_immediately_after_real_reply_waits_for_silence_then_sends() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::command_immediately_after_real_reply_waits_for_silence_then_sends") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        // A real PTY reply, not feed() or a backdated silence sample. The
+        // command arrives as soon as the reply's empty prompt is visible.
+        let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1HReply complete\\r\\n❯'; exec cat > \"$1\"".into(),
+                "fixture".into(), root.path().join("command-input").to_str().unwrap().into()],
+            cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let mut pane = cas_mux::Pane::with_pty(&name, cas_mux::PaneKind::Supervisor, pty, 24, 80, cas_mux::SupervisorCli::Claude).unwrap();
+        // Only skip harness startup grace; command silence still uses real time.
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+        daemon.app.mux.add_pane(pane);
+        daemon.last_pane_output_bytes.remove(&name);
+        daemon.pane_silent_since.remove(&name);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pane = daemon.app.mux.get_mut(&name).unwrap();
+                pane.drain_output();
+                if idle_prompt(&screen(pane)) && root.path().join("command-input").exists() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let replied = Instant::now();
+        let receipt = tokio::time::timeout(Duration::from_secs(4), daemon.dispatch_supervisor_command(
+            Request::Run { command: Command::Exit, confirmed: true }, "cmd-after-reply".into(),
+            MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() },
+        )).await.expect("idle command must settle within a short bound").expect("a fresh idle reply must not cause a final busy refusal");
+        assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        assert!(replied.elapsed() >= COMMAND_SETTLE, "do not type before real silence is observed");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("command-input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let input = std::fs::read(root.path().join("command-input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/exit").count(), 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser") { return; }
@@ -493,14 +559,27 @@ mod tests {
         let name = codex.app.supervisor_name().to_owned();
         codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
-        // Codex streams under an idle-looking prompt with no busy text (cas-1a93).
-        quiet_for(&mut codex, &name, Duration::ZERO);
+        // Codex can pause past the silence window under an idle-looking
+        // prompt. Its real rollout must still refuse a command (cas-3980).
+        let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        let sid = "019f84af-3121-7950-ba14-b01db2dad6c7";
+        agent.cc_session_id = Some(sid.into());
+        agent.metadata.insert("supervisor_account_dir".into(), root.path().to_str().unwrap().into());
+        store.update(&agent).unwrap();
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join(format!("rollout-{sid}.jsonl"));
+        let meta = serde_json::json!({"type":"session_meta","payload":{"id":sid,"cwd":root.path(),"originator":"codex-tui","source":"cli"}});
+        let turn = |kind: &str| serde_json::json!({"type":"event_msg","payload":{"type":kind,"turn_id":"t1"}});
+        std::fs::write(&rollout, format!("{meta}\n{}\n", turn("task_started"))).unwrap();
+        assert!(supervisor_transcript(codex.app.cas_dir(), &codex.session_name, &name, cas_mux::SupervisorCli::Codex).is_some());
+        quiet_for(&mut codex, &name, COMMAND_SETTLE);
         let input = std::fs::read(root.path().join("input")).unwrap();
         assert!(codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-streaming".into(), owner.clone()).await.is_err());
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input, "a streaming turn must receive no command");
+        std::fs::write(&rollout, format!("{meta}\n{}\n{}\n", turn("task_started"), turn("task_complete"))).unwrap();
         quiet_for(&mut codex, &name, COMMAND_SETTLE);
-        let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
-        let mut agent = store.get("single-sup").unwrap();
         agent.metadata.insert("supervisor_model".into(), "old-model".into());
         store.update(&agent).unwrap();
         codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-select".into(), owner.clone()).await.unwrap();

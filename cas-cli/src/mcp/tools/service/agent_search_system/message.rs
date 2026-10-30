@@ -235,6 +235,14 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
     "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
 
+fn commander_alias_reply_hint() -> String {
+    format!(
+        "Reply once in this pane; completed supervisor answers mirror to Commander. \
+         Use explicit routing only for disabled or unmirrored delivery.\n\
+         {COMMANDER_REPLY_CONTRACT_POINTER}"
+    )
+}
+
 /// A verified question needs one answer. Completed supervisor pane replies
 /// already enter the durable Commander lane, including offline catch-up.
 /// Keep the explicit-routing exception in the shared reference, rather than
@@ -1484,10 +1492,9 @@ impl CasService {
                     Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "target='commander:{selector}' requires an active factory session; \
-                             once a verified Commander message exists, call `coordination \
-                             action=message target=operator in_reply_to=<notification_id> \
-                             summary=\"...\" message=\"...\"`"
+                            "target='commander:{selector}' requires an active factory session. \
+                             Once a verified Commander message exists:\n{}",
+                            commander_alias_reply_hint()
                         ),
                     )
                 })?;
@@ -1522,9 +1529,8 @@ impl CasService {
                         ErrorCode::INVALID_PARAMS,
                         format!(
                             "No verified Commander message from '{selector}' is addressed to \
-                             this supervisor. Reply with `coordination action=message \
-                             target=operator in_reply_to=<notification_id> summary=\"...\" \
-                             message=\"...\"` after a verified Commander row arrives."
+                             this supervisor. After a verified Commander row arrives:\n{}",
+                            commander_alias_reply_hint()
                         ),
                     )
                 })?;
@@ -1535,9 +1541,8 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "target='commander:{selector}' resolves to notification_id={} \
-                         (not in_reply_to={explicit}); use `coordination action=message \
-                         target=operator in_reply_to={} summary=\"...\" message=\"...\"`",
-                        prior.id, prior.id
+                         (not in_reply_to={explicit}).\n{}",
+                        prior.id, commander_alias_reply_hint()
                     ),
                 ));
             }

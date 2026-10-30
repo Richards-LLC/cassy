@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander reply hints
+
+- **Commander alias errors follow the pane-once rule** — Missing-session, unmatched-label and reply-ID mismatch hints say to answer once in the pane. Explicit routing is reserved for disabled or unmirrored delivery, with the shared reply contract linked for that fallback.
+
 ### Fixed — Merge CI diagnostics
 
 - **Delivery Git failures name their cause** — Merge CI receipts distinguish Git timeouts, start failures and nonzero exits by subcommand without exposing stderr. A failed delivery-range inspection says the GitHub endpoint was not queried; repository lookup failures keep their separate headline.

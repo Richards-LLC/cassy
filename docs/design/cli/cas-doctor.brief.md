@@ -103,7 +103,37 @@ review, without a close call or commit receipt. Normal deliveries retain their
 existing close call. Unavailable or budget-limited tree checks are stated as
 unknown and withhold delivery suggestions. The existing JSON check object
 carries the same message; palettes, grouping and the 80-column renderer stay
-unchanged. Fresh candidate captures and scores follow after implementation.
+unchanged. Review text avoids the shared `. Review ` remediation delimiter,
+so subsequent backlog sections stay in the JSON diagnostic message.
+
+Exact-build comparison: `d8d1b862` → `1d7e501a4`, against identical isolated
+Git/task inputs. The historical main snapshot reproduces the unsafe
+`e696570f0` receipt before, then shows the task as reverted without that receipt
+after. The source task is now cancelled; only the disposable snapshot's
+lifecycle was restored to open for this historical reproduction. No candidate
+accessed the live main store.
+
+`terminal-qa: PASS cas-doctor-reverted-final · 12 runs · 0 fail · 4 warn · 0 allowed`
+at `<artifacts>/cas-0048/terminal-final/report.json`. The four warnings flag the
+120-column whitespace wrap between the complete words `delivered` and `then`;
+there is no split token. The baseline matrix also passes, with zero warnings.
+The [before](captures/backlog-hygiene/before.80.txt) and
+[after](captures/backlog-hygiene/after.80.txt) captures use the same control
+fixture: normal deliveries keep receipts while the reverted task is counted
+separately. The artifact ledger records seven passing real-build cells,
+including unnamed tree restoration, later re-delivery, empty state and missing
+Git history. JSON remains one document with all backlog sections in `message`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Verdict remains first; the backlog summary distinguishes delivered and reverted counts. |
+| Fit | 4 | The grouped row stays bounded and the existing verbose escape exposes the complete evidence. |
+| Craft | 4 | Both widths preserve hanging alignment and whole-word wrapping; reverted entries carry no close call. |
+| Theme safety | 5 | Four palettes, NO_COLOR and the C locale pass without contrast, control or glyph failures. |
+| Machine contract | 5 | One JSON document retains subsequent sections; normal receipts survive and reverted receipts are absent. |
+
+Scored by Codex on 2026-10-30. Candidate receipt and the private-input safety
+record are retained with the task's selected proof artifacts.
 
 ### ASCII status contrast (cas-506d)
 

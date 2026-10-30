@@ -8664,6 +8664,7 @@ mod workspace_contract_tests {
         // An unfinished word expansion cannot provide a trustworthy boundary.
         assert_eq!(decision("echo ${x:-unfinished").0, "deny");
         assert_eq!(decision("echo $[1 + (2)").0, "deny");
+        assert_eq!(decision("cat <<EOF\n$(echo ${x:-abc)\nEOF").0, "deny");
         for operation in [
             r#"set factory.write_roots "~/x""#,
             "grant-write --task cas-1234 --path /x --reason example",

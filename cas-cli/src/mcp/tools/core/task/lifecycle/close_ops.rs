@@ -6168,7 +6168,6 @@ impl CasCore {
             // Exact retries validate and recover only their own boundary.
             cas_store::create_verification_dispatch_bound(
                 &self.cas_root,
-                configured_artifacts_root.as_deref(),
                 &task.id,
                 &caller.id,
                 &owner_id,
@@ -12119,6 +12118,7 @@ impl CasCore {
             );
             if let Ok(compact) = gate_text::compact_receipt(
                 &self.cas_root,
+                configured_artifacts_root.as_deref(),
                 &task.id,
                 "close",
                 &summary,

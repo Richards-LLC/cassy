@@ -5735,6 +5735,7 @@ impl CasCore {
             && ci_policy_notice.is_empty()
             && let Ok(compact) = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::compact_receipt(
                 &cas_root,
+                config.factory().artifacts_root.as_deref(),
                 task_id,
                 "merge",
                 &summary,

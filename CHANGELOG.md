@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Compact factory gate receipts
+
+- **Routine merge and close receipts keep full details fetchable** — Successful
+  gate replies now keep the task, delivery, CI and next-action facts in a short
+  response, with the full immutable receipt available at its content-hashed path.
+
 ### Fixed — Shared-file warnings
 
 - **Workers can add their own changelog entries without coordination** — Was:

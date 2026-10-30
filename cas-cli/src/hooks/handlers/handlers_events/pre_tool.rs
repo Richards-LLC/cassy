@@ -11065,7 +11065,7 @@ mod worker_commit_guard_tests {
                 if command
                     .split_whitespace()
                     .any(|word| matches!(word, "-n" | "--dry-run"))
-                    && (!reason.contains("-n is a dry-run")
+                    && (!reason.contains("`-n` is a dry-run")
                         || !reason.contains("still runs the pre-push hook"))
                 {
                     mismatches.push(format!("{role}: inaccurate dry-run explanation: {reason}"));

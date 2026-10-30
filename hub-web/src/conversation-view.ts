@@ -61,6 +61,10 @@ export interface TurnRenderContext {
   readonly history?: ConversationHistory;
   /** Sends `text` as the operator's reply to `reply` (in_reply_to = its notification_id). Absent when this view cannot send. */
   readonly respond?: (reply: OperatorReply, text: string) => void;
+  /** Answers a secret request over the hub's secrets route, never as a message (cas-1996). Absent when this view cannot send. */
+  readonly answerSecret?: SecretAnswerer;
+  /** The machine this thread's session runs on, as the operator knows it. */
+  readonly machine?: string;
   /** True when rendering the copy pinned above the composer rather than the one in the flow. */
   readonly pinned?: boolean;
 }
@@ -70,7 +74,9 @@ export interface TurnRenderContext {
  * (Pebble 3, the fused-tray objects); `attachment` is called once per artifact
  * on any turn that carries one (Pebble 4, the dog-eared sheet).
  */
-export type RenderableKind = "ask" | "blocker" | "attachment";
+export type RenderableKind = "ask" | "blocker" | "secret" | "attachment";
+/** Saves (`value`) or declines a secret request; resolves with where the hub saved it. */
+export type SecretAnswerer = (request: OperatorReply, answer: { value: string } | { decline: true }) => Promise<{ path?: string }>;
 export type TurnRenderer = (event: OperatorReply, context: TurnRenderContext) => HTMLElement;
 
 const turnRenderers = new Map<RenderableKind, TurnRenderer>();
@@ -164,6 +170,12 @@ export interface ConversationViewOptions {
    * in the history with the same replyTo, which is what marks the ask answered.
    */
   respond?: (ask: OperatorReply, text: string) => void;
+  /**
+   * A secret request's Save securely / Decline (cas-1996). The caller POSTs
+   * to the hub's secrets route; the value never enters a send, the journal
+   * or the history.
+   */
+  answerSecret?: SecretAnswerer;
   /**
    * What the session is doing while it has said nothing to Commander
    * (cas-55a4): when it last did anything and between whom. The empty
@@ -1190,6 +1202,8 @@ export class ConversationView {
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
+      ...(this.options.answerSecret ? { answerSecret: this.options.answerSecret } : {}),
+      ...(this.options.machine ? { machine: this.options.machine } : {}),
       pinned,
     };
     return context;
@@ -1205,12 +1219,12 @@ export class ConversationView {
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
   private turnSignature(turn: ThreadTurn): string {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
-    const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
+    const answered = reply?.kind === "ask" || reply?.kind === "secret" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The bookmark target changes when the newest waiting question changes.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
-    const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
+    const retired = reply?.kind === "ask" || reply?.kind === "blocker" || reply?.kind === "secret" ? this.history.retirement(reply.notification_id) : undefined;
     const delivered = turn.event.kind === "send" ? this.history.showsDeliveryStatus(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
@@ -1796,7 +1810,7 @@ export class ConversationView {
   private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): { bubble: HTMLElement; sheets: HTMLElement[] } {
     const kind = reply.kind ?? "answer";
     const context = this.context(document, turn, reply);
-    const custom = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind)?.(reply, context) : undefined;
+    const custom = kind === "ask" || kind === "blocker" || kind === "secret" ? turnRenderers.get(kind)?.(reply, context) : undefined;
     const sheetRenderer = turnRenderers.get("attachment");
     const sheets: HTMLElement[] = [];
     const bubble = custom ?? document.createElement("div");

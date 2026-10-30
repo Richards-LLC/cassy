@@ -918,6 +918,15 @@ export class HubConnectionSupervisor {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/write-grants`, body);
   }
 
+  /**
+   * Answer an agent's secret request (cas-1996). Needs factory:manage. The
+   * hub writes the value to a private file on its machine and replies to the
+   * supervisor with the path; the value never travels as a message.
+   */
+  async answerSecret(session: string, notificationId: number, answer: { value: string } | { decline: true }): Promise<{ name?: string; path?: string; saved?: boolean; declined?: boolean }> {
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/secrets/${notificationId}`, answer);
+  }
+
   async status(session: string): Promise<Record<string, unknown>> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/status`);
   }

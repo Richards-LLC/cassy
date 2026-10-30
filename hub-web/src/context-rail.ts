@@ -133,7 +133,7 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump";
     jump.dataset.kind = reply.kind ?? "ask";
     jump.dataset.replyTo = String(reply.notification_id);
-    const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : "Question";
+    const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : reply.kind === "secret" ? "Secret" : "Question";
     const text = document.createElement("span"); text.className = "context-text"; text.textContent = entryText(reply.message);
     jump.append(kind, text);
     // A blocker says how it clears (journey F12); the jump alone did not.

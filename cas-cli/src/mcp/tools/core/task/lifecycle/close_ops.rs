@@ -19783,11 +19783,10 @@ impl<'a> CloseNoteTracker<'a> {
 /// the same meaning here as in the sync union; every distinct block survives.
 fn preserves_close_note_history(before: &str, after: &str) -> bool {
     cas_store::task_note_markers::note_blocks(before).iter().all(|block| {
-        after.match_indices(block).any(|(start, _)| {
-            let end = start + block.len();
-            (start == 0 || after.as_bytes()[start - 1] == b'\n')
-                && (end == after.len() || after.as_bytes()[end] == b'\n')
-        })
+        std::iter::once(0)
+            .chain(after.match_indices('\n').map(|(offset, _)| offset + 1))
+            .any(|start| after[start..].strip_prefix(*block)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n')))
     })
 }
 

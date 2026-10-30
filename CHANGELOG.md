@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Expanding heredoc workspace checks
+
+- **Heredoc substitutions respect workspace write boundaries** — Unquoted
+  heredoc bodies now receive the same filesystem-effect and numeric-only
+  arithmetic checks as command arguments, including tab-stripped heredocs.
+  Quoted bodies and escaped substitution markers remain literal data.
+
 ### Fixed — QA impact for test fixtures
 
 - **Test fixtures stay outside product QA impact** — Changes confined to tests

@@ -205,6 +205,53 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
     Ok(bodies)
 }
 
+/// Heredoc quotes are data, but escaped markers are inert. Remove shell
+/// line continuations, then pass only complete, unescaped expansions through
+/// the ordinary substitution/arithmetic checks without rewriting their source.
+fn heredoc_substitution_bodies(body: &str) -> Result<Vec<String>, &'static str> {
+    let mut logical = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'\n') {
+            chars.next();
+            continue;
+        }
+        logical.push(ch);
+        if ch == '\\' && let Some(next) = chars.next() {
+            logical.push(next);
+        }
+    }
+    let bytes = logical.as_bytes();
+    let mut bodies = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        let end = if bytes.get(index..index + 2) == Some(b"$(") {
+            literal_cat_heredoc_end(&logical[index..])
+                .map(|end| index + end)
+                .or_else(|| substitution_end(bytes, index + 2, 0))
+        } else if bytes.get(index..index + 2) == Some(b"$[") {
+            logical[index + 2..].find(']').map(|end| index + 2 + end)
+        } else if bytes[index] == b'`' {
+            let mut end = index + 1;
+            while end < bytes.len() && bytes[end] != b'`' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            (end < bytes.len()).then_some(end)
+        } else {
+            index += 1;
+            continue;
+        };
+        let end = end.ok_or("an unresolved shell payload")?;
+        bodies.extend(substitution_bodies(&logical[index..=end])?.into_iter().map(str::to_owned));
+        index = end + 1;
+    }
+    Ok(bodies)
+}
+
 /// Closing `)` of exactly `$(cat <<'WORD'\n...\nWORD\n)` (also double
 /// quoted delimiters and <<-). No options, redirects or extra commands are
 /// accepted. The quoted body cannot expand, so its quotes/parentheses are data.
@@ -444,7 +491,14 @@ fn collect_script(
     let conditional_bindings = tokens.iter().any(|token| matches!(token,
         ShellToken::Word(word) if matches!(word.as_str(), "if" | "while" | "until" | "for" | "case")));
     let mut alternatives = Vec::new();
-    let mut heredocs = shell_heredoc_bodies(script).into_iter();
+    // Rendering quotes every word, including originally unquoted delimiters.
+    // Keep the source's expansion provenance paired with the shared extractor.
+    let delimiters: Vec<_> = projected.lines().flat_map(heredoc_delimiters).collect();
+    let bodies = shell_heredoc_bodies(script);
+    if delimiters.iter().skip(bodies.len()).any(|delimiter| !delimiter.literal_body) {
+        return Err("an unresolved shell payload");
+    }
+    let mut heredocs = delimiters.into_iter().zip(bodies);
     let mut scopes = Vec::new();
     let mut continuation = false;
     let mut start: usize = 0;
@@ -488,12 +542,16 @@ fn collect_script(
             }
             // The existing script-write recognizer needs the body attached to
             // its receiving command, rather than interpreted as shell words.
-            for delimiter in heredoc_delimiters(&command) {
-                if let Some(body) = heredocs.next() {
+            let mut expanding_bodies = Vec::new();
+            for _ in heredoc_delimiters(&command) {
+                if let Some((delimiter, body)) = heredocs.next() {
                     command.push('\n');
                     command.push_str(&body);
                     command.push_str(&delimiter.value);
                     command.push('\n');
+                    if !delimiter.literal_body {
+                        expanding_bodies.extend(heredoc_substitution_bodies(&body)?);
+                    }
                 }
             }
             let words: Vec<String> = statement
@@ -543,6 +601,17 @@ fn collect_script(
             } else {
                 dirs.clone()
             };
+
+            for body in expanding_bodies {
+                collect_script(
+                    &body,
+                    statement_dirs.clone(),
+                    original,
+                    &directory_values,
+                    depth + 1,
+                    effects,
+                )?;
+            }
 
             // A quoted argument may execute a substitution even though the
             // outer tokenizer correctly keeps it as one word. Its filesystem

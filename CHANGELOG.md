@@ -17,6 +17,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   while cloud sync collates its audit notes. Earlier notes must remain intact;
   review rejections and changes to task scope still invalidate the close.
 
+### Fixed — Bug-family registry comparisons
+
+- **Case coverage keeps its Git error warning** — An unreadable base registry
+  cannot credit an unchanged bug case as new. Journey status also reports new
+  untracked family files as working-tree drift.
+
 ### Fixed — Commander clock correction
 
 - **A refused proof cannot shift the clock by an arbitrary amount** — Commander

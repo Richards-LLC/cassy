@@ -195,7 +195,7 @@ pub enum QaCommand {
 }
 
 /// Compare the checkout with the pinned upkeep commit, including a newly
-/// created registry that Git has not tracked yet. Unavailable is not equal.
+/// created registry or family file that Git has not tracked yet. Unavailable is not equal.
 fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> Option<bool> {
     let (_, sha) = upkeep.measured_ref.rsplit_once('@')?;
     let diff = Command::new("git")
@@ -206,6 +206,24 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
     match diff.status.code()? {
         1 => Some(true),
         0 => {
+            let families = Path::new(registry).parent()?.join("bug-families");
+            // Include ignored files too: the working registry loader reads them.
+            let untracked = Command::new("git")
+                .args(["--literal-pathspecs", "ls-files", "--others", "-z", "--"])
+                .arg(families)
+                .current_dir(root)
+                .output()
+                .ok()?;
+            if !untracked.status.success() {
+                return None;
+            }
+            if std::str::from_utf8(&untracked.stdout)
+                .ok()?
+                .split('\0')
+                .any(|path| crate::qa_registry::is_registry_input(registry, path))
+            {
+                return Some(true);
+            }
             let committed = Command::new("git")
                 .args(["show", &format!("{sha}:{registry}")])
                 .current_dir(root)

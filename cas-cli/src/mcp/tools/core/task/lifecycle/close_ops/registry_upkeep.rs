@@ -419,9 +419,12 @@ fn inspect(
         }
     };
     let before_paths = tracked(repo, base)?;
-    let before = read_registry(repo, base, &qa.registry.path, &before_paths)
-        .ok()
-        .flatten();
+    let before = match read_registry(repo, base, &qa.registry.path, &before_paths) {
+        Ok(registry) => registry,
+        // Malformed YAML is existing debt; unavailable Git data cannot establish causality.
+        Err(error) if error.is::<serde_yaml::Error>() => None,
+        Err(error) => return Err(error),
+    };
     let old_problems = before
         .as_ref()
         .map(|r| r.validate(&before_paths).problems)

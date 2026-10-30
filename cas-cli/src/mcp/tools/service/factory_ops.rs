@@ -8013,6 +8013,7 @@ impl CasService {
             orphan_process_summary.records_cleared.len(),
             orphan_process_summary.skipped,
         );
+        output.push('\n');
         output.push_str(&artifact_cleanup.render());
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
@@ -8042,16 +8043,19 @@ impl CasService {
                 text
             }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Simulator cleanup worker failed: {error}")))?;
+            output.push('\n');
             output.push_str(&text);
         }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
-                "\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
+                "\n\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
             )),
-            Err(error) => output.push_str(&format!("\nJourney recording cleanup incomplete: {error}\n")),
+            Err(error) => output.push_str(&format!("\n\nJourney recording cleanup incomplete: {error}\n")),
         }
 
+        output.push('\n');
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push('\n');
         output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
@@ -8077,6 +8081,7 @@ impl CasService {
         // orphan is indistinguishable from one Cassy never saw, and that is the
         // difference between "the port is free" and a wasted morning.
         if !orphan_processes.is_empty() {
+            output.push('\n');
             output.push_str(&orphan_processes.render());
         }
         if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
@@ -8239,25 +8244,6 @@ fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
         .or_else(|| full_report.strip_prefix(CLEANUP_HEADER))
         .unwrap_or(full_report)
         .trim_start_matches('\n');
-    // Cleanup's producers append several inventories with a single newline.
-    // Separate their headings before projecting; otherwise all artifact paths
-    // become part of the unbounded initial counter paragraph.
-    let cleanup_detail = cleanup.then(|| {
-        let mut normalized = String::new();
-        let mut inventory = false;
-        for line in detail.lines() {
-            inventory |= line.starts_with("Durable task artifacts:") || line.starts_with("Cargo target caches:");
-            if inventory && !line.is_empty() && !line.starts_with(char::is_whitespace)
-                && !gc_report_is_inventory_item(line) && !gc_report_is_machine_status_line(line)
-            {
-                normalized.push('\n');
-            }
-            normalized.push_str(line);
-            normalized.push('\n');
-        }
-        normalized
-    });
-    let detail = cleanup_detail.as_deref().unwrap_or(detail);
 
     if let GcReportView::Page { limit, offset } = view {
         let lines = detail.lines().collect::<Vec<_>>();
@@ -8371,9 +8357,13 @@ fn summarize_gc_report(full_report: &str, detail: &str, cleanup: bool) -> String
                 .find_map(|word| word.strip_prefix("bytes=")?.parse::<u64>().ok()).unwrap_or(0)));
         }
         let item_count = item_lines.len();
-        summary.push_str(&format!(
-            "- {label}: {item_count} items\n"
-        ));
+        if cleanup && item_count == 0 && artifact_counts.is_none()
+            && !heading.starts_with("Cargo target caches:")
+        {
+            summary.push_str(&format!("- {}\n", gc_report_short_line(heading)));
+        } else {
+            summary.push_str(&format!("- {label}: {item_count} items\n"));
+        }
 
         if let Some(counts) = artifact_counts {
             summary.push_str(&format!("  Counts: closed-task candidates={counts}\n"));
@@ -8631,7 +8621,7 @@ mod gc_report_render_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let status = serde_json::json!({"dry_run": true, "caches": ["all original data"]});
-        let full = format!("Factory GC cleanup complete.\n\nStale agents marked: 0\nDurable task artifacts: root=/{} closed-task candidates=0 stray inventory=1000 mode=review-only\n{artifacts}\nCargo target caches: mode=dry-run\n{items}\nTARGET_CACHE_STATUS_JSON={status}\n", "é/".repeat(100));
+        let full = format!("Factory GC cleanup complete.\n\nStale agents marked: 0\n\nDurable task artifacts: root=/{} closed-task candidates=0 stray inventory=1000 mode=review-only\n{artifacts}\n\nCargo target caches: mode=dry-run\n{items}\nTARGET_CACHE_STATUS_JSON={status}\n", "é/".repeat(100));
         let summary = render_gc_report_response(&full, GcReportView::Summary);
         assert!(summary.starts_with("[INFO] GC cleanup complete:"), "{summary}");
         assert!(summary.is_ascii() && summary.lines().all(|line| line.len() <= 79));

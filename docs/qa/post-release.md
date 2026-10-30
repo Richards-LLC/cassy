@@ -18,7 +18,7 @@ contains a minimal PATH and LANG plus only the named allow-list variables.
 Scripts must implement read-only access; Cassy cannot enforce database permissions.
 Use read-only credentials. Raw error stdout/stderr is never stored.
 
-Start after the merge lands:
+The operator can start a check after the merge lands from their own terminal:
 
 ```bash
 cas qa post-release start --epic cas-1234 --sha <full-release-sha>
@@ -53,10 +53,24 @@ fix-forward release SHA.
 
 Each run appends `POST-RELEASE k/n <sha>: ok | ALARM … | ERROR …` to the epic.
 The durable receipt lives under the configured project artifacts directory at
-`<epic>/post-release.json`; `.cas/post-release/` holds the runner's atomic state.
+`<epic>/post-release.json`; `.cas/operator/post-release/` holds the protected
+runner state and recorded SHA. Agents cannot run `start` or write this state.
+Legacy state under `.cas/post-release/` is not trusted or imported; restart its
+observation with an operator start or let an armed release start automatically.
 An epic merge request also arms a durable `branch_contained_in` reminder. When
-origin contains its tip on a configured release branch, the check starts even
-if the release skill omitted start. Empty `release_branches` uses the default branch.
+origin contains a first-parent merge that introduced the epic tip on a configured
+release branch, Cassy starts the check against that release merge SHA. A
+fast-forward, squash, missing origin ref or merge confined to another branch
+cannot establish that identity; use the operator start for observation. Empty
+`release_branches` uses the default branch.
+
+During an operator-enabled rapid-response window, pending and failed checks can
+be deferred only for a protected recorded release merge that introduced the epic
+on a configured origin release branch. Cassy scans `<sha>^1..<sha>`, including
+merge-resolution edits: a migration, secret-shaped added line or unreadable diff
+keeps the gate. An unverified, fast-forward, foreign or squash SHA keeps the
+gate too. A deferred check is recorded in the window's back-fill ledger; closing
+the window restores the gate. The background observations continue.
 
 Pending and failed checks refuse release-note posts and epic close. Violet
 posts marked `release_notes: true`, or whose first nonempty line has a rubric

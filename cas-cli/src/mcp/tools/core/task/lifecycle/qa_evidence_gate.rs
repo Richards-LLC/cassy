@@ -213,7 +213,7 @@ pub(crate) fn ledger_preflight(
     let dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
     let ledger = dir.join("LEDGER.md");
     // Batch proof is owned by the existing shared-receipt gate, not an
-    // individual ledger. Existing ledgers still undergo the same format check.
+    // individual ledger. Uncovered existing ledgers still need a format check.
     if !ledger.exists()
         && (!require_missing
             || !config.qa().evidence_gate
@@ -228,6 +228,21 @@ pub(crate) fn ledger_preflight(
         return Err(
             "QA LEDGER REJECTED: task artifact directory escapes its project namespace".into(),
         );
+    }
+    // A covering review owns the canonical evidence for shipped work. Do not
+    // apply a newer producer-ledger grammar retroactively to that delivery.
+    // Resolve the actual delivery, rather than using an old anchor alone: a
+    // newer unmerged task tip must not inherit its predecessor's approval.
+    // Only positively validated proof replaces lint; lookup failures retain
+    // the existing producer-ledger check below.
+    if let Ok((repo, target)) = crate::qa_batch::task_context(cas_root, task)
+        && let Some(head) = delivered_head(task, &repo, &target, None)
+        && (crate::qa_batch::satisfying_receipt(cas_root, task, &repo, &target, &head)
+            .is_ok_and(|receipt| receipt.is_some())
+            || crate::qa_batch::covering_pass(cas_root, task, &repo, &target, &head)
+                .is_ok_and(|pass| pass.is_some()))
+    {
+        return Ok(());
     }
     let report = crate::qa_ledger::check(&ledger, crate::qa_ledger::minimum_rows(task));
     if report.ok {

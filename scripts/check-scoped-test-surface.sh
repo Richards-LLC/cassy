@@ -74,8 +74,9 @@ resolve_test_target_name() {
     printf '%s\n' "$wanted"
 }
 
-# Proof scope comes from committed Git paths. Keep the Git-only discovery
-# contract (cas-81bc): a host rg must not stall close before its main scan.
+# Proof scope comes from committed Git paths, so use Git for discovery too.
+# A PATH-provided rg is unnecessary and can stall before main (cas-81bc),
+# exhausting close's checker budget even for a tiny diff. No probe is needed.
 grep_backend=git
 tracked_rust_test_paths=('cas-cli/tests/*.rs' 'cas-cli/tests/**/*.rs')
 

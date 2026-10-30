@@ -112,20 +112,35 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
         }
     }
 
+    // Never reset a native /model observation to the original launch recipe
+    // during repeated MCP registration, SessionStart or compaction.
+    if let Some(prefix) = crate::agent_model::metadata_prefix(agent.role) {
+        for suffix in ["model", "effort"] {
+            if !agent.metadata.contains_key(&format!("{prefix}_{suffix}_observed"))
+                && let Ok(value) = std::env::var(format!("CAS_FACTORY_{}_{}", prefix.to_uppercase(), suffix.to_uppercase()))
+                && !value.trim().is_empty()
+            {
+                agent.metadata.insert(format!("{prefix}_{suffix}"), value);
+            }
+        }
+    }
+
     let is_worker = agent.role == AgentRole::Worker
-        || std::env::var("CAS_AGENT_ROLE")
-            .map(|role| role.eq_ignore_ascii_case("worker"))
-            .unwrap_or(false);
+        || (agent.role == AgentRole::Standard
+            && std::env::var("CAS_AGENT_ROLE").is_ok_and(|role| role.eq_ignore_ascii_case("worker")));
+    if is_worker && agent.role == AgentRole::Standard {
+        for suffix in ["MODEL", "EFFORT"] {
+            if let Ok(value) = std::env::var(format!("CAS_FACTORY_WORKER_{suffix}"))
+                && !value.trim().is_empty()
+            {
+                agent.metadata.insert(format!("worker_{}", suffix.to_lowercase()), value);
+            }
+        }
+    }
     if !is_worker {
         return;
     }
 
-    if let Ok(model) = std::env::var("CAS_FACTORY_WORKER_MODEL") {
-        agent.metadata.insert("worker_model".to_string(), model);
-    }
-    if let Ok(effort) = std::env::var("CAS_FACTORY_WORKER_EFFORT") {
-        agent.metadata.insert("worker_effort".to_string(), effort);
-    }
     // cas-058f (EPIC cas-8888 Phase 4): persist which harness this worker
     // runs so a separate process (`cas factory is-wedged`/`kill`, which only
     // has the agent-store row to go on) can pick the right transcript
@@ -171,7 +186,24 @@ pub(crate) fn register_with_role_reconciliation(
     agent: &Agent,
     configured_role: Option<AgentRole>,
 ) -> crate::store::Result<Agent> {
-    store.register(agent)?;
+    let mut agent = agent.clone();
+    if let Ok(prior) = store.get(&agent.id)
+        && prior.role == agent.role
+        && let Some(prefix) = crate::agent_model::metadata_prefix(agent.role)
+    {
+        for suffix in ["model", "effort"] {
+            let observed = format!("{prefix}_{suffix}_observed");
+            if prior.metadata.contains_key(&observed) {
+                agent.metadata.insert(observed, "true".into());
+                let key = format!("{prefix}_{suffix}");
+                agent.metadata.remove(&key);
+                if let Some(value) = prior.metadata.get(&key) {
+                    agent.metadata.insert(key, value.clone());
+                }
+            }
+        }
+    }
+    store.register(&agent)?;
     let mut persisted = store.get(&agent.id)?;
     if let Some(role) = configured_role
         && (persisted.role != role

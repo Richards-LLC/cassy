@@ -1275,6 +1275,26 @@ override global policy; Commander uses global policy. `accounts.disabled` retain
 the absolute folder list managed by `cas accounts disable` / `enable` in
 `global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
+The hub session catalog reports the supervisor's optional `harness`, `model`
+and `effort`. Model version is part of the reported model ID or display name
+(for example `claude-opus-5-5` or `gpt-6.1-sol`), not the CLI version. The
+additive `agents` array carries `id`, `name`, `role` and the same optional
+identity fields for registered supervisors and workers in that session;
+`workers` remains the existing array of worker names. `/status` uses these
+role-specific identity fields in its `agents` rows too. Absent observations
+are omitted so Commander can show “Not reported”. Neither endpoint borrows the
+hub process's model, worker defaults or another session's metadata.
+
+Factory launch records the model and effort explicitly passed to that pane.
+Claude's native `SessionStart.model`, `PostModelSwitch.to_model` and effective
+hook `effort.level` (or `CLAUDE_EFFORT`) replace launch evidence. Hooks are
+installed by `cas hook configure`; Codex's generated native hook projection
+keeps its supported lifecycle/tool events. A confirmed Codex Commander `/model`
+selection records the model and effort from its fresh native success cell.
+Opening a chooser, navigation, cancellation and failed saves do not change the
+record. A changed model clears an unreported old effort; repeated MCP startup
+and compaction cannot restore the original launch defaults over an observation.
+
 The shared account registry reads Claude email/account/organization metadata
 only from non-secret `.claude.json` `oauthAccount` fields. It never opens
 provider credential files for catalog metadata. Codex email, account and
@@ -1683,9 +1703,11 @@ spawn/reuse means enforcement is not proven.
 
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
 every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
-Park executes neither checks nor tests. Local fast-row receipts and exception
-files are not park proof: workers can write them. CI runs the fast rows before
-merge admission; the pre-push hook provides early local feedback.
+Park executes neither checks nor tests. Local fast-row receipts are not park
+proof because workers can write them, and park reads no fast-row exception
+file. CI runs the fast rows before merge admission; the pre-push hook provides
+early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
+to `overrides.log`.
 
 ## Project capture configuration
 

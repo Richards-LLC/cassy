@@ -28,6 +28,12 @@ bug_families:
     tasks: [cas-3286, cas-8e01]
     invariants: [HUB-J12-GOAL]
     journeys: [HUB-J12]
+  supervisor-only-project-card:
+    title: Supervisor-only projects show no phantom workers, connection state remains machine-scoped, and empty end receipts stay concise
+    found: '2026-10-29'
+    tasks: [cas-51f6]
+    invariants: [HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD]
+    journeys: [HUB-J14]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -111,9 +117,12 @@ invariants:
     check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist. Verify old, current and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
   HUB-J4-GOAL:
     statement: I can read what was said before, back to the start
-    check: 'Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
+    check: 'Run the render-before-scroll regression in conversation-view.test.ts with a pending tail pin;
+      scrolling up to Load earlier must survive an intervening render. Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: history pages come from
       the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`'
+    bug:
+      task: cas-eaef
   HUB-J4-VISUAL-SANDBOX:
     statement: A supervisor's HTML page shows inline and in its own tab, and a hostile page can't run script, reach Commander's storage, leave its frame or call out to another host
     check: 'Run the cas-3aff parts of hub-web/e2e/journeys/read-history.journey.ts at desktop and phone, whose double serves the policy file the hub embeds, and the hub route test visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets. Threat model: docs/design/hub-web/visual-replies-threat-model.md.'
@@ -254,6 +263,10 @@ invariants:
       edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the daemon''s session-bound
       history page, the catalog''s last activity and the hub''s End session are doubled; that ending a session stops
       its daemon is proven on a real machine at epic assembly'
+  HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD:
+    statement: A live supervisor with no workers has no worker count; the connected machine and active session retain live status beside ended receipts; ended rows say Ended with their time and can be dismissed individually or cleared per project without removing history or offering controls for live sessions.
+    check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip and non-offline active row, pill-radius chip, plain Ended preview and visible end time, row and project dismissal, live-row exclusion, persistence across reload and retained protocol history.
+    bug: {task: cas-51f6}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
       away once resolved, and nothing claims I replied when I didn't
@@ -1513,6 +1526,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J14-GOAL
+  - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -2197,6 +2211,7 @@ journeys:
   - hub-web/src/conversation-shell.ts
   - hub-web/src/main.ts
   - hub-web/src/styles.css
+  - cas-cli/src/agent_model.rs
   - cas-cli/src/bridge/server/session.rs
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs

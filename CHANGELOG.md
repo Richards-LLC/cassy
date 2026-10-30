@@ -12,15 +12,58 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Large deliveries resolve proof targets together** — Source and builtin
   references now share one test-tree search per kind, keeping proof-surface
   discovery within the close budget when many paths change.
-- **Parked delivery anchors stay on the branch** — Worker pushes refuse
+- **Idle delivery alerts follow worker activity** — Live background children
+  suppress idle alerts while the worker waits for its command. An unchanged
+  task, branch tip and CI state no longer produce another alert just because
+  time passed; an idle worker still alerts once when its state changes.
+
+### Fixed — Rapid response release checks
+
+- **Verify the release merge before deferring observation** — Rapid response
+  defers the post-release wait only for a protected recorded merge that brought
+  the epic into a configured release branch. Its full first-parent diff must
+  clear migration and secret checks; fast-forward, squash and foreign merges
+  keep the gate. Automatic observation records the release merge SHA, and
+  manual SHA recording is operator-only.
+
+## [3.91.0] - 2026-10-30
+
+### Fixed — Factory workflow
+
+- **Parked delivery anchors stay on the branch** — Was: A push could replace a
+  published delivery with rewritten history, and re-parking could refuse a
+  recovery merge that restored its recorded anchor. → Now: Worker pushes refuse
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.
-- **Worker pushes keep required hooks** — Workers and reviewers cannot skip
-  anchor and fast-row checks with `--no-verify`, exported
-  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` overrides, or persistent
-  `core.hooksPath` changes. Inherited `GIT_CONFIG_GLOBAL` and
+- **Worker pushes keep required hooks** — Was: `--no-verify`, exported
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, persistent `core.hooksPath`
+  changes, `git config --unset` and `git config --unset-all` of
+  `core.hooksPath`, `git config unset` of the same key, assignment then export,
+  `declare -x`, and `set -a` could bypass factory push checks. → Now: Workers
+  and reviewers are refused these bypasses. Inherited `GIT_CONFIG_GLOBAL` and
   `GIT_CONFIG_NOSYSTEM` settings no longer block a plain worker push;
   supervisors retain the approved exception route.
+- **Queued closes report completion before the handoff** — Was: A close could
+  finish writing Closed, then report that its status was unchanged when starting
+  the next task ran past the response deadline. → Now: The close is marked
+  committed before the handoff, so the response reflects the completed close.
+  An interrupted handoff is recovered from the durable queue.
+- **Worker starts share one checkout safely** — Was: A manual start could race
+  with the first queue assignment or a refilled queue, leaving two tasks running
+  and changing branches in the same checkout. → Now: Every factory worker start
+  holds the same start lock through its Git and lease work. Starts without a
+  queue wait for the lock; queued starts refuse a busy lock, and both re-read
+  queue state before proceeding.
+
+### Added — Factory workflow
+
+- **Workers move through an ordered task list** — Was: A worker received one
+  task at a time and could wait for another assignment after delivery. → Now:
+  Spawning and assignment accept an ordered list; closing or parking starts the
+  next eligible task on its own target branch and keeps the prior delivery ref.
+  Supervisors can inspect, reorder or clear pending work, and stale entries are
+  skipped with notes. A returned delivery can resume while unfinished successor
+  work is held, preserving that successor's place in the queue.
 
 ### Added — Delivery process
 
@@ -38,6 +81,146 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   verdict on record keeps that verdict. Each skipped check is recorded under
   `.cas/operator/`, and when the window closes the factory files one back-fill task
   under the epic and tells the supervisor.
+
+### Removed — Delivery process
+
+- **Park no longer reads local fast-row receipts or exceptions** — Was: Park
+  required a local fast-row PASS receipt or a supervisor-approved exception
+  file, both written by the same user as the worker. → Now: CI runs the fast
+  rows once per lane and is the only fast-row proof; the pre-push hook stays
+  early feedback, and the exception writer, validator and hook reader are gone.
+  This closes the 3.90 known limit that same-user PASS receipts were still
+  trusted.
+
+### Fixed — Commander
+
+- **Quick rich-content inspections are counted** — Was: opening and closing a
+  diagram source or unified diff in quick succession could collapse into one
+  toggle event, leaving the inspection uncounted. → Now: the usage counter
+  increments when the opening summary is activated, even if the browser
+  coalesces the toggles.
+- **Messages kept in two tabs all go out after an outage** — Was: with two
+  Commander tabs open, a message kept during an outage could stay "Waiting for
+  the connection" under a Live header after reconnecting, and was never sent
+  until the page was reloaded. → Now: each kept message is sent once when the
+  connection returns, whichever tab sends it.
+
+### Fixed — Delivery process
+
+- **Capture keeps its receipt when checkouts run out of time** — Was: if the
+  capture budget ran out while Git prepared the private before/after checkouts,
+  `cas deliverable capture` exited with a usage error and printed no receipt.
+  → Now: it prints a receipt with a capture-timeout finding, as it already did
+  for a slow server.
+
+### Fixed — factory reliability
+
+- **A removed Codex worker model stays removed** — Was: a Codex worker launch
+  whose model and effort were removed after setup still passed them to its CAS
+  tools. → Now: only the launch's final model and effort reach the CAS tools.
+
+## [3.90.0] - 2026-10-29
+
+### Added — Commander
+
+- **Supervisor model and effort appear** — Was: Commander could not say which model or
+  effort a supervisor was running. → Now: Panes record the reported model and effort in
+  the session catalog and status, and the conversation header shows them (for example
+  "Claude Opus 5.5"). Unreported effort is cleared rather than left stale,
+  and the model chooser no longer treats old history as confirmation after a failed
+  selection. This completes the header item planned in the 3.89 known limits.
+- **Ended sessions can be dismissed** — Was: Ended sessions stayed in the project list
+  with no way to tidy them. → Now: Each ended session offers Dismiss and each project
+  card offers Clear ended. Dismissal applies to this device only; session history stays
+  available.
+
+### Added — Delivery process
+
+- **Park requires a titled changelog entry** — Product-source deliveries need
+  a task-scoped Unreleased entry or a reasoned decision note before they park.
+
+### Changed — Commander
+
+- **Refreshed Accounts, left nav and header** — Was: Accounts, the left nav and the
+  conversation header used older, inconsistent shapes. → Now: One shape scale with
+  shared card, pill and avatar rules; provider marks as avatars; Accounts grouped by
+  machine with Default and Recommended badges; and a header and Accounts usage rows that
+  fit a phone while keeping the machine and codename. This is the visual refresh planned
+  in the 3.89 known limits.
+
+### Fixed — Commander
+
+- **Ended project cards read correctly** — Was: An ended session could read "Ended · 0
+  workers stopped" and still count toward live workers. → Now: The stopped count appears
+  only when workers stopped, with correct singular and plural wording, and ended sessions
+  no longer count as live.
+- **Load earlier keeps your place** — Was: Loading earlier history could drop the reader
+  far below the previous reading position. → Now: A pending pin to the latest message is
+  cancelled when the reader has scrolled up, so the prior position is kept.
+- **Revoked sends offer Re-pair** — Was: Revoking a device's access during a pending send
+  could offer Take control. → Now: The hub keeps the pairing or message-permission cause
+  on a refused send, so Commander offers Re-pair (or re-pairing with Send messages)
+  instead. This resolves the 3.89 known limit.
+
+### Fixed — Factory
+
+- **Shutdown no longer stalls messages** — Was: Worktree cleanup and target retirement
+  ran on the daemon control loop, which could hold up message delivery for over an hour.
+  → Now: Cleanup runs off the control loop, a long cleanup warns once, and daemon exit
+  waits a bounded time for owned cleanups and saves any unfinished work for the next
+  start.
+- **Dead-worker shutdown leaves the store free** — Was: Shutting down an already-dead
+  worker retired its target inline on the store write lane, without reserving its name.
+  → Now: Retirement runs off that lane, and the name stays reserved until queued cleanup
+  finishes.
+- **Held cleanups complete** — Was: Cleanup records for deliberately held retirements
+  never completed, replayed on every daemon start and piled up. → Now: Held retirements
+  complete their cleanup record.
+- **Idle daemons reclaim dead workers** — Was: Staged dead-worker cleanups ran only when a
+  spawn or another cleanup was pending. → Now: An idle daemon picks up staged cleanups on
+  its regular tick, and duplicate staging is removed.
+
+### Fixed — Delivery process
+
+- **Approved fast-row exceptions are honored** — Was: Push and park ignored an approved,
+  logged fast-row exception. → Now: Both accept an authenticated exception whose approval
+  covers the delivery's scope.
+- **Forged exception approvals are refused** — Was: Park trusted exception files in the
+  receipts directory without checking who approved them. → Now: The approver must be a
+  live registered supervisor and the approved draft scope must be complete. PASS
+  receipts written by the same user are still trusted; a stronger attestation is
+  tracked separately.
+- **Close uses the corrected push** — Was: After a refused push and a corrected delivery,
+  close could read the stale delivery tip. → Now: Close honors the explicitly pushed
+  tip.
+- **Older evidence ledgers still close** — Was: The stricter evidence grammar blocked
+  closing deliveries that had already shipped with older ledgers. → Now: A covering
+  review is trusted before the older ledger is checked.
+- **Proof checks are fast and use Git** — Was: The proof-surface checker ran one search
+  per symbol, could exceed the close budget, and could hang on a bundled ripgrep. → Now:
+  Symbol searches are combined into one Git search with color disabled, and committed
+  surfaces are resolved with Git rather than the host ripgrep.
+
+### Fixed — Releases
+
+- **Known limits stay out of shipped totals** — Release-report shipped totals
+  exclude Known limits sections while keeping their entries, tests and
+  documentation in the report prose.
+- **Release gates accept empty post-cut sections and reject placeholders** — Fast
+  rows accept an empty [Unreleased] section, and both fast and park gates reject
+  template entries, including angle-bracket descriptions with trailing punctuation.
+
+### Changed — Developer tooling
+
+- **Steadier tests and factory tooling** — Was: Several tests depended on timing,
+  entropy, shared environment or elapsed waits, and some tooling paths were untested.
+  → Now: Timing and calendar assertions are deterministic; fixture identities are
+  collision-free; process environment and fixture stores share one guard; async fixtures
+  are observed rather than waited on; socket, port and proxy fixtures keep exclusive
+  ownership; full-size journey video encoding is bounded; the clickable Commander
+  preview no longer imports Node test tooling; a real-hub exit journey covers typed
+  /exit; release fixtures run for script changes in scoped CI lanes; and the v3.89.0
+  release report and posted notes are archived.
 
 ## [3.89.0] - 2026-10-29
 

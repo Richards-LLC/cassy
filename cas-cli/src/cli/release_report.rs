@@ -1241,11 +1241,11 @@ fn classify_area(title: &str, body: &str) -> String {
     OTHER_AREA.to_string()
 }
 
-/// CHANGELOG categories that record tests and documentation, not product
-/// changes; reports list them under the hood but do not count them.
-fn is_test_or_docs_category(category: &str) -> bool {
+/// Non-shipped CHANGELOG categories remain in report prose, but do not
+/// contribute to change totals or the change map. Classify by source heading.
+fn is_non_shipped_category(category: &str) -> bool {
     let category = category.to_ascii_lowercase();
-    category.starts_with("test") || category.starts_with("doc")
+    category.starts_with("test") || category.starts_with("doc") || category == "known limits"
 }
 
 /// Strip trailing reference lists such as `(#1203, cas-d697)` from a title.
@@ -1321,12 +1321,12 @@ fn changelog_changes(body: &str) -> Vec<ShippedChange> {
                 .map(|(category, title)| (category.trim(), Some(title.trim())))
                 .unwrap_or((heading.trim(), None));
             kind = category.to_string();
-            if is_test_or_docs_category(&kind) {
+            if is_non_shipped_category(&kind) {
                 continue;
             }
             titled = title.map(|title| (title.to_string(), String::new()));
             titled_has_entry = false;
-        } else if is_test_or_docs_category(&kind) {
+        } else if is_non_shipped_category(&kind) {
             continue;
         } else if let Some((_, text)) = titled.as_mut() {
             titled_has_entry |= line.starts_with("- ");
@@ -1833,7 +1833,7 @@ fn assemble_markdown(
             "Changes shipped".to_string(),
             change_count.to_string(),
             format!(
-                "{}; tests and docs not counted",
+                "{}; tests, docs and known limits not counted",
                 kinds
                     .iter()
                     .map(|(kind, count)| format!("{count} {kind}"))
@@ -1957,7 +1957,7 @@ fn assemble_markdown(
         })
         .collect::<Vec<_>>();
     let mut method = vec![format!(
-        "Changes and GitHub issues are counted separately. A change is one titled entry in the {tag} CHANGELOG section; tests and documentation entries are listed under the hood but not counted."
+        "Changes and GitHub issues are counted separately. A change is one titled entry in the {tag} CHANGELOG section; entries under Test, Doc or Known limits headings are listed under the hood but not counted."
     )];
     match (&sources.release_pr, &sources.closure_window) {
         (Some(pr), Some(window)) => method.push(format!(
@@ -2211,7 +2211,7 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
             .or_default()
             .push(entry);
     }
-    for category in [
+    let mut categories = vec![
         "Added",
         "Changed",
         "Fixed",
@@ -2219,7 +2219,18 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
         "Deprecated",
         "Removed",
         "Changes",
-    ] {
+    ];
+    // Keep the established product order, then preserve all remaining source
+    // categories under the hood, including entries excluded from the totals.
+    if !user_facing {
+        for entry in entries {
+            let category = entry.category.as_str();
+            if !categories.contains(&category) {
+                categories.push(category);
+            }
+        }
+    }
+    for category in categories {
         let Some(category_entries) = groups.get(category) else {
             continue;
         };
@@ -3442,7 +3453,7 @@ mod tests {
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
         assert!(
-            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests and docs not counted |"),
+            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests, docs and known limits not counted |"),
             "{report}"
         );
         assert!(report.contains(

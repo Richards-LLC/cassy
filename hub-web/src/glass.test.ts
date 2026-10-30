@@ -435,3 +435,14 @@ describe("the rail's rounded corners (cas-d043 H10)", () => {
     expect(flat).toMatch(/::after \{ content: ""; position: sticky;[^}]*pointer-events: none;/);
   });
 });
+
+describe("the shape scale (DESIGN.md Shapes)", () => {
+  it("re-shapes the house corners so no card or control is square-cornered", () => {
+    const shape = block(":root, html[data-scheme]");
+    const px = (name: string) => Number.parseFloat(shape[name]);
+    expect([px("--radius-inline"), px("--radius-control"), px("--radius-surface"), px("--glass-radius"), px("--radius-sheet")]).toEqual([4, 12, 16, 22, 24]);
+    // House 4px/8px corners resolve to the control and surface steps in Glass.
+    expect(shape["--radius-card"]).toBe(shape["--radius-control"]);
+    expect(shape["--radius-pane"]).toBe(shape["--radius-surface"]);
+  });
+});

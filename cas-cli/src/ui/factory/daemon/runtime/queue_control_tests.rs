@@ -200,6 +200,7 @@ async fn cas_08e6_refused_recycle_preserves_existing_pane_grace() {
         request_id: 1,
         name: "worker-a".into(),
         spec: None,
+        stopped: false,
     }), false)
     .await;
 }

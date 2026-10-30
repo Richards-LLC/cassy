@@ -48,6 +48,8 @@ pub enum HookCommand {
     Status,
     /// Handle SessionStart hook event
     SessionStart,
+    /// Record a completed native model switch
+    PostModelSwitch,
     /// Handle SessionEnd hook event
     SessionEnd,
     /// Handle Stop hook event
@@ -98,6 +100,7 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::Cleanup { dry_run } => execute_cleanup(*dry_run, cli),
         HookCommand::Status => execute_status(cli),
         HookCommand::SessionStart => execute_event("SessionStart", cli),
+        HookCommand::PostModelSwitch => execute_event("PostModelSwitch", cli),
         HookCommand::SessionEnd => execute_event("SessionEnd", cli),
         HookCommand::Stop => execute_event("Stop", cli),
         HookCommand::SubagentStart => execute_event("SubagentStart", cli),
@@ -546,6 +549,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 
     let has_session_start = check_hook("SessionStart");
     let has_session_end = check_hook("SessionEnd");
+    let has_post_model_switch = check_hook("PostModelSwitch");
     let has_stop = check_hook("Stop");
     let has_subagent_stop = check_hook("SubagentStop");
     let has_post_tool = check_hook("PostToolUse");
@@ -557,7 +561,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 
     if cli.json {
         println!(
-            r#"{{"configured":{has_hooks},"session_start":{has_session_start},"session_end":{has_session_end},"stop":{has_stop},"subagent_stop":{has_subagent_stop},"post_tool_use":{has_post_tool},"pre_tool_use":{has_pre_tool},"user_prompt_submit":{has_user_prompt},"permission_request":{has_permission_request},"notification":{has_notification},"pre_compact":{has_pre_compact}}}"#
+            r#"{{"configured":{has_hooks},"session_start":{has_session_start},"session_end":{has_session_end},"post_model_switch":{has_post_model_switch},"stop":{has_stop},"subagent_stop":{has_subagent_stop},"post_tool_use":{has_post_tool},"pre_tool_use":{has_pre_tool},"user_prompt_submit":{has_user_prompt},"permission_request":{has_permission_request},"notification":{has_notification},"pre_compact":{has_pre_compact}}}"#
         );
     } else {
         let theme = ActiveTheme::default();
@@ -577,6 +581,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
         KeyValue::new()
             .add("SessionStart", status_str(has_session_start))
             .add("SessionEnd", status_str(has_session_end))
+            .add("PostModelSwitch", status_str(has_post_model_switch))
             .add("Stop", status_str(has_stop))
             .add("SubagentStop", status_str(has_subagent_stop))
             .add("PostToolUse", status_str(has_post_tool))
@@ -588,6 +593,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
             .render(&mut fmt)?;
 
         let all_configured = has_session_start
+            && has_post_model_switch
             && has_session_end
             && has_stop
             && has_subagent_stop

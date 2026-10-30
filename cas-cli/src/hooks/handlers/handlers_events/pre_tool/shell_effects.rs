@@ -330,8 +330,12 @@ fn collect_script(
     if depth > 8 {
         return Err("a shell payload beyond the resolution limit");
     }
-    let (tokens, literal_words) =
-        factory_shell_tokens_with_literals(&shell_command_without_heredoc_bodies(script));
+    let projected = shell_command_without_heredoc_bodies(script);
+    let lexed = factory_shell_lex(&projected, false, 0);
+    if lexed.unresolved_at.is_some() {
+        return Err("an unresolved shell payload");
+    }
+    let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
     // Directory operands use only bindings visible before that cd. The

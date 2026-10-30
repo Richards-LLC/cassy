@@ -46,6 +46,9 @@ refused() {
     fi
 }
 
+# Only this self-test may run the script from inside a factory agent. HOME below is
+# disposable and every host command is a fake.
+export CAS_HUB_PIN_TEST_ALLOW_AGENT=1
 export HOME="$tmp/home"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_STATE_HOME="$HOME/.local/state"
@@ -148,6 +151,18 @@ printf '[Service]\nMemoryLow=256M\n' >"$unit.d/60-interactive-reserve.conf"
 
 snapshot() { (cd "$HOME" && find . -type f -o -type l | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null); }
 run_install() { CAS_BIN="$install_cli" "$pin" install "$@"; }
+
+# --- who may run it ----------------------------------------------------------
+refused 'operator runs this' 'a worker is refused' env -u CAS_HUB_PIN_TEST_ALLOW_AGENT CAS_AGENT_ROLE=worker "$pin" inspect
+refused 'operator runs this' 'any other agent role is refused' env -u CAS_HUB_PIN_TEST_ALLOW_AGENT CAS_AGENT_ROLE=director "$pin" inspect
+refused 'operator runs this' 'the test override is refused outside a disposable HOME' env HOME=/home/not-disposable CAS_AGENT_ROLE=worker "$pin" inspect
+check 'env -u CAS_HUB_PIN_TEST_ALLOW_AGENT -u CAS_AGENT_ROLE "$pin" inspect >/dev/null' 'an operator shell runs it'
+check 'env -u CAS_HUB_PIN_TEST_ALLOW_AGENT CAS_AGENT_ROLE=supervisor "$pin" inspect >/dev/null' 'an operator command in a supervisor pane runs it'
+
+# An installed copy has no drop-ins beside it, and must say so before changing anything.
+cp "$pin" "$tmp/fixtures/installed-hub-pin.sh"
+refused 'from a checkout' 'install refuses without its drop-ins' env CAS_BIN="$install_cli" "$tmp/fixtures/installed-hub-pin.sh" install
+check '[[ ! -e "$current" ]] && grep -q "^ExecStart=$install_cli " "$unit"' 'that refusal changes nothing'
 
 # --- install ---------------------------------------------------------------
 before="$(snapshot)"

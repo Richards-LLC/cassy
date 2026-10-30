@@ -138,6 +138,7 @@
 - **Release tools:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`.
 - **Host release installation:** `scripts/install-on-publish.sh` installs a Linux systemd user timer or macOS LaunchAgent; `scripts/test-install-on-publish.sh` proves the scheduler lifecycle and release timer.
 - **Hosted publication:** `.github/workflows/release.yml`, `scripts/deploy-hub-release.py`, `scripts/verify-hub-dist.sh`.
+- **Queue flake recovery:** `scripts/ci-queue-flakes.py` owns queue-only native result classification, routed GitHub issue publication and open-issue quarantine; `scripts/test-ci-queue-flakes.py` covers the native runner and HTTP boundaries. `.github/workflows/ci.yml` wires read-only shards and the required publication fan-in.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
 - **Runtime/config:** `ops/systemd/`, `docs/ci/`, `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`.
 - **CLI/library:** `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`; **TUI/daemon:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`.

@@ -1029,6 +1029,10 @@ jobs:
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
+    permissions:
+      contents: read
+      issues: read
+      actions: read
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1044,6 +1048,7 @@ jobs:
         working-directory: hub-web
         env:
           SHARD: ${{ matrix.shard }}
+          GH_TOKEN: ${{ github.token }}
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
           npm ci
@@ -1052,21 +1057,34 @@ jobs:
           else
             npx playwright install chromium
           fi
-          npm run journeys -- --workers=2 --shard="$SHARD/6"
+          python3 ../scripts/ci-queue-flakes.py run playwright --shard "$SHARD/6" \
+            --issues-repo Richards-LLC/cassy --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"
 
       # cas-4ce5: a journey flake in the queue left no trace to diagnose.
       # Keep Playwright's traces, error-context.md and screenshots on failure.
       - name: Upload Commander journey evidence on failure
-        if: failure()
+        if: failure() || github.event_name == 'merge_group'
         uses: actions/upload-artifact@v4
         with:
           name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
-          path: hub-web/e2e/.results/
+          path: |
+            hub-web/e2e/.results/
+            target/queue-flakes/
           # .results is a dot-directory: upload-artifact@v4 skips hidden files
           # unless told otherwise, which shipped an empty artifact (cas-4ce5 QA).
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Publish queue playwright recovery receipts
+        if: always() && github.event_name == 'merge_group'
+        uses: actions/upload-artifact@v4
+        with:
+          name: queue-flakes-playwright-${{ matrix.shard }}
+          path: target/queue-flakes/playwright-${{ matrix.shard }}/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
   # Compile the workspace test graph once. The archive contains the binaries
   # and nextest metadata needed by the shard jobs below, avoiding three cold
@@ -1240,6 +1258,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
+    permissions:
+      contents: read
+      issues: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1286,19 +1308,25 @@ jobs:
         env:
           INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
           SHARD: ${{ matrix.shard }}
+          GH_TOKEN: ${{ github.token }}
           IMPACT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
           mkdir -p target/ci-impact
           start_seconds=$SECONDS
           export VERIFIED_TEST_LOG="target/ci-impact/full-shard-$SHARD.log"
           set +e
-          scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"
+          python3 scripts/ci-queue-flakes.py run rust --shard "$SHARD/3" \
+            --issues-repo Richards-LLC/cassy --out "target/queue-flakes/rust-$SHARD"
           suite_status=$?
           set -e
+          initial_status="$suite_status"
+          if [[ "$GITHUB_EVENT_NAME" == merge_group && -f "target/queue-flakes/rust-$SHARD/receipt.json" ]]; then
+            initial_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["initial_status"])' "target/queue-flakes/rust-$SHARD/receipt.json")"
+          fi
           if [[ -x scripts/ci-test-impact.py ]]; then
             python3 scripts/ci-test-impact.py record \
               --base-sha "$IMPACT_BASE_SHA" \
-              --log "$VERIFIED_TEST_LOG" --status "$suite_status" \
+              --log "$VERIFIED_TEST_LOG" --status "$initial_status" \
               --elapsed "$((SECONDS - start_seconds))"
           fi
           exit "$suite_status"
@@ -1326,6 +1354,64 @@ jobs:
           export CAS_REAL_DBS="$guard_dir/.cas/cas.db"
           export CARGO_CMD="nextest run --archive-file $GITHUB_WORKSPACE/fast-validation-suite.tar.zst --workspace-remap $GITHUB_WORKSPACE"
           make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
+
+      - name: Publish queue rust recovery receipts
+        if: always() && github.event_name == 'merge_group'
+        uses: actions/upload-artifact@v4
+        with:
+          name: queue-flakes-rust-${{ matrix.shard }}
+          path: target/queue-flakes/rust-${{ matrix.shard }}/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Writable credentials live only in the hosted fan-in, never in test processes.
+  queue-flake-publication:
+    name: Queue flake publication
+    if: >-
+      always() && github.event_name == 'merge_group'
+      && (needs.fast-validation-suite-shards.result != 'skipped'
+      || needs.fast-validation-journeys.result != 'skipped')
+    needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-suite-shards, fast-validation-journeys]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Atomic publication lock ref; no evaluated-tree edits.
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: queue-flakes-*
+          path: target/queue-flake-receipts
+      - name: Persist every recovered failure before allowing a green queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUST_UNAFFECTED: ${{ needs.ci-diff.outputs.rust-unaffected }}
+          RUN_SUITE: ${{ needs.fast-validation-main-push-dedupe.outputs.run-fast-validation }}
+          WEB_NEEDED: ${{ needs.ci-diff.outputs.web-check-needed }}
+          JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse }}
+        run: |
+          expected=()
+          if [[ "$RUN_SUITE" == true && "$RUST_UNAFFECTED" != true ]]; then
+            for shard in 1 2 3; do expected+=(--expect "rust:$shard/3"); done
+          fi
+          if [[ "$WEB_NEEDED" == true && ( "$RUN_SUITE" == true || "$JOURNEYS_REUSE" != true ) ]]; then
+            for shard in 1 2 3 4 5 6; do expected+=(--expect "playwright:$shard/6"); done
+          fi
+          # All Rust shards can legitimately skip without producing receipts.
+          if (( ${#expected[@]} == 0 )); then exit 0; fi
+          python3 scripts/ci-queue-flakes.py reconcile --issues-repo Richards-LLC/cassy \
+            --receipts target/queue-flake-receipts "${expected[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: queue-flake-publication
+          path: target/queue-flake-receipts/publication.json
+          if-no-files-found: ignore
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and
@@ -1486,6 +1572,7 @@ jobs:
       - fast-validation-slack-bridge
       - fast-validation-web
       - fast-validation-journeys
+      - queue-flake-publication
       - fast-validation-suite
       - fast-validation-docs
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
@@ -1511,6 +1598,16 @@ jobs:
         run: |
           test "$CI_DIFF" = success
           echo "Fast Validation is deferred to the canonical merge-queue tree."
+
+      - name: Require durable queue flake publication
+        if: github.event_name == 'merge_group'
+        env:
+          PUBLICATION: ${{ needs.queue-flake-publication.result }}
+        run: |
+          case "$PUBLICATION" in
+            success|skipped) ;;
+            *) echo "::error::Queue flake publication did not complete"; exit 1 ;;
+          esac
 
       - name: Require every Fast Validation lane to pass
         if: >-

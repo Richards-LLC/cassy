@@ -7315,6 +7315,7 @@ fn factory_workspace_contract_denial(
         | "an unresolved shell payload"
         | "an unresolved shell executable"
         | "an unresolved shell write target"
+        | "an unresolved arithmetic operand"
         | "a shell command without a resolvable payload"
         | "a shell payload beyond the resolution limit"
         | "an unmatched shell scope") {
@@ -8712,6 +8713,12 @@ EOF
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
+            if command.contains("ambient") && !response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str().unwrap_or("")
+                .contains("cannot resolve shell filesystem effects (an unresolved arithmetic operand)")
+            {
+                failures.push(format!("arithmetic diagnostic {command}: {response}"));
+            }
             if response["hookSpecificOutput"]["permissionDecision"] != "deny" {
                 failures.push(format!("{command}: {response}"));
             }

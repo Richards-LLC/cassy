@@ -11,6 +11,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.
 
+### Fixed — Hub pin safety
+
+- **The hub pin refuses agents, partial installs and a stale update** — Was: only a hook stopped a worker running `scripts/hub-pin.sh`; the installed copy could start `install` and stop partway without its drop-ins; and `cas update` could overwrite a rollback that finished just before it took the pin lock. → Now: the script refuses every factory agent role except an operator command in a supervisor pane, `install` says to run from a checkout before changing anything, and the update checks the pin again under the lock.
+
 ### Added — Release-pinned hub and host isolation
 
 - **The hub is pinned to release builds** — Was: a live hub hotfix could run any
@@ -26,6 +30,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   heredoc bodies now receive the same filesystem-effect and numeric-only
   arithmetic checks as command arguments, including tab-stripped heredocs.
   Quoted bodies and escaped substitution markers remain literal data.
+
+### Fixed — Team tab shows the whole team
+
+- **Four workers fit without scrolling** — Team lanes now take three compact rows, and the release block is a slim rule above them, so four workers fit at 1280x800 and 390x844. While Team is open on desktop, the side rail no longer repeats the release block.
+
+### Added — Merge queue flake recovery
+
+- **A recovered test no longer ejects the release** — The merge queue reruns
+  failed Rust tests or journey specs once on the same tree, preserving both
+  attempts. A fail-then-pass files a deduplicated P1 issue; a second independent
+  flake quarantines that identity through an open issue label. Closing its fix
+  issue restores the test. Persistent failures still eject, and worker/lane
+  checks retain zero retries. Rust recovery adds at most 30 seconds.
 
 ### Fixed — QA impact for test fixtures
 
@@ -76,8 +93,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   stays available: `/name` or `$name` still expands, and `skill action=list_all`
   and `skill action=show` now serve the shipped catalog and its references even
   when no project synced it. Grok workers in a Cassy-managed worktree run with
-  `GROK_FOLDER_TRUST=false` and a generated, git-excluded `.grok/skills`; other
-  checkouts keep the full listing. A user's own Grok skills stay listed,
+  `GROK_FOLDER_TRUST=false` and a generated `.grok/skills` that ignores itself, so
+  the shared exclude file stays untouched; other checkouts keep the full listing.
+  A user's own Grok skills and skills a repository tracks stay listed,
   as do Claude plugin skills, which Claude's control does not reach.
 
 ### Fixed — Delivery process
@@ -120,14 +138,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Arithmetic workspace checks
 
+- **Command-line arithmetic refuses unproven operands** — Factory checks
+  require numeric source in `$(( ))`, `$[ ]`, `let` and `(( ))`, and refuse
+  persistent integer declarations whose later assignments could run arithmetic.
+
 - **Shell syntax cannot hide inside arithmetic** — Arithmetic with comment
   markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
   keeps its existing allowance.
-
-- **Arithmetic operands cannot hide commands in array subscripts** — Factory
-  checks accept numeric arithmetic and refuse variable or command-output
-  operands, quoted `let` expressions and persistent integer declarations whose
-  secondary evaluation cannot be proven inert.
 
 - **Ambiguous arithmetic keeps command checks** — Parentheses must match the
   arithmetic boundary. Command substitutions and dynamic arithmetic operands

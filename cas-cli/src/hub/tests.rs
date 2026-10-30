@@ -3410,12 +3410,27 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     );
     assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), persisted,
         "ordinary DPoP traffic must not rewrite durable identities");
+    // cas-3b22: future proofs must never enter the volatile replay set.
+    // Otherwise a restart forgets the jti before its future iat is reached.
+    for ahead in [1, 60] {
+        let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(ahead), "future");
+        let refused = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now).unwrap_err();
+        let refusal = refused.downcast_ref::<super::AuthRefusal>().unwrap();
+        assert_eq!(*refusal, super::AuthRefusal::StaleProof { skew_secs: ahead });
+        assert!(refusal.retryable());
+    }
     // A pre-boot proof with an unused jti must also be refused: after restart
     // the previous process's in-memory replay set no longer exists.
     let pre_boot = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now, "pre-boot-unused");
     let restarted = AuthStore::open_at(temp.path().join("hub"), "machine-test", now + chrono::Duration::seconds(1)).unwrap();
     let refused = restarted.authenticate_dpop(&authorization, &pre_boot, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
     assert!(matches!(refused.downcast_ref::<super::AuthRefusal>(), Some(super::AuthRefusal::StaleProof { .. })));
+
+    // Replaying the formerly accepted +60s proof after restarting must fail
+    // even though its iat clears the boot cutoff and its jti was forgotten.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(60), "future");
+    let refused = restarted.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
+    assert_eq!(refused.downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 58 }));
 
     let wrong_method = sign_dpop(
         &signing,

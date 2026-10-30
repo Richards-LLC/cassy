@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Workspace guard and `case`
+
+- **A `case` statement no longer reads as an unmatched scope** — Was: the workspace guard denied any `case` arm, even a harmless heredoc, because it took the pattern's `)` for the end of a subshell. → Now: pattern text and `)` are read as `case` syntax, and what an arm runs is checked as before. A pattern with a substitution or `$`, and an unterminated `case`, stay denied, and a `cd` in one arm no longer hides the directory the next arm runs in.
+
 ### Added — Supervisor Cassy versions in Commander
 
 - **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.

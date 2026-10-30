@@ -19,6 +19,7 @@ mod receipt_scope;
 mod merge_queue_proof;
 mod verified_delivery;
 mod merged_verification;
+mod verification_tier;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
@@ -9551,10 +9552,29 @@ impl CasCore {
                     "close verification not sampled (one task in four runs it)",
                 )
             });
+        // cas-5207: a delivery that changes nothing that runs has no independent
+        // verifier. An existing dispatch or verdict keeps its authority, and the
+        // delivery, CI and QA gates all sit outside this decision.
+        let verification_tier = (verification_enabled
+            && !skip_verification
+            && !depth_light
+            && close_disposition.requires_delivery_gates())
+        .then(|| verification_tier::tier_for_delivery(&task, &close_project_root))
+        .flatten();
+        let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
+            decision.tier == verification_tier::VerificationTier::Mechanical
+        }) && no_verification_on_record;
+        if let Some(decision) = verification_tier.as_ref()
+            && (decision.tier != verification_tier::VerificationTier::Mechanical || tier_skips_verifier)
+            && !task.notes.contains(&decision.note())
+        {
+            close_notes.record(&mut task, &decision.note());
+        }
         if verification_enabled
             && !skip_verification
             && !depth_light
             && !rapid_unsampled
+            && !tier_skips_verifier
         {
             let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 

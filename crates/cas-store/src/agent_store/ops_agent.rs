@@ -542,9 +542,11 @@ impl SqliteAgentStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             drop(stmt);
 
-            // Mark agent as stale (was: dead)
+            // Mark agent as stale (was: dead). A pane-exit observation can
+            // be delayed behind recycle's synchronous shutdown write; do not
+            // let that older event move a terminal registration backwards.
             tx.execute(
-                "UPDATE agents SET status = 'stale' WHERE id = ?",
+                "UPDATE agents SET status = 'stale' WHERE id = ? AND status <> 'shutdown'",
                 params![id],
             )?;
 

@@ -475,7 +475,10 @@ fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
 }
 
 /// The ref whose history counts as released upstream for a lane bound to
-/// `target`: the repository's trunk, read from local and origin, when it is not the target.
+/// `target`: `origin/<trunk>` when it exists (cas-3d57: a local trunk can be
+/// ahead of origin or moved by hand, so it never vouches for release), else
+/// the local trunk in a repository without that remote ref. None when the
+/// trunk is the target itself or unresolvable.
 pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
     let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
     let target = target.strip_prefix("origin/").unwrap_or(target);
@@ -484,7 +487,6 @@ pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
     }
     [format!("origin/{trunk}"), trunk]
         .into_iter()
-        .rev()
         .find(|reference| git_ref_exists(repo, reference))
 }
 

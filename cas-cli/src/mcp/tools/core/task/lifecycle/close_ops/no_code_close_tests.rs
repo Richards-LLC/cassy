@@ -1922,7 +1922,6 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
     let parked_anchor = f.task(id).deliverables.factory_branch_anchor;
     merge_main("three.rs", "fix(cas-0e2b): unreleased, only on local main", false);
     let refused = call(&f.worker, close).await;
-    assert!(!refused.contains("MERGE REQUIRED") || f.task(id).deliverables.factory_branch_anchor == parked_anchor,
-        "a local main ahead of origin is not released: {refused}");
-    assert!(refused.contains("cas-0e2b") || refused.contains("not an attributable continuation"), "{refused}");
+    assert_eq!(f.task(id).deliverables.factory_branch_anchor, parked_anchor,
+        "a local main ahead of origin is not released, so the anchor must not advance: {refused}");
 }

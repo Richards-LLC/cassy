@@ -1367,7 +1367,7 @@ describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
     const proof = (init?.headers as Record<string, string>).DPoP;
     return JSON.parse(Buffer.from(proof.split(".")[1]!, "base64url").toString("utf8"));
   };
-  async function supervisorWith(replies: (path: string, call: number) => Reply | Promise<never>) {
+  async function supervisorWith(replies: (path: string, call: number, init?: RequestInit) => Reply | Promise<never>) {
     vi.stubGlobal("window", globalThis);
     const { privateKey, publicKey } = await createDeviceKey();
     const machine = {
@@ -1380,22 +1380,58 @@ describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
       onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     let calls = 0;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => replies(new URL(String(input)).pathname, calls++));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => replies(new URL(String(input)).pathname, calls++, _init));
     vi.stubGlobal("fetch", fetchMock);
     return { supervisor: new HubConnectionSupervisor(machine, callbacks), callbacks, fetchMock };
   }
 
-  it("retries a stale proof once with a fresh one on the hub's clock, and recovers", async () => {
-    const hubNow = Math.floor(Date.now() / 1000) + 600;
-    const { supervisor, fetchMock } = await supervisorWith((_path, call) => call === 0
-      ? reply(401, { error: "unauthorized", reason: "stale_proof", retryable: true, server_time: hubNow })
-      : reply(200, { schema_version: 1 }));
-    await expect(supervisor.request("GET", "/v1/machine")).resolves.toEqual({ schema_version: 1 });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const [first, second] = fetchMock.mock.calls.map(([, init]) => claims(init));
-    expect(second!.jti).not.toBe(first!.jti);
-    // Signed on the hub's clock, ten minutes ahead of this device's.
-    expect(Math.abs(second!.iat - hubNow)).toBeLessThanOrEqual(2);
+  it("retries a stale proof once on the hub's clock, including clients 1–4 seconds ahead", async () => {
+    const hubNow = 1_800_000_000;
+    const clock = vi.spyOn(Date, "now");
+    try {
+      // Recover within the hub's proof window, including small fast clocks.
+      for (const ahead of [-60, 1, 2, 3, 4]) {
+        clock.mockReturnValue(hubNow * 1000 + ahead * 1000 + 750);
+        const { supervisor, fetchMock } = await supervisorWith((_path, _call, init) => claims(init).iat !== hubNow
+          ? reply(401, { error: "unauthorized", reason: "stale_proof", retryable: true, server_time: hubNow })
+          : reply(200, { schema_version: 1 }));
+        await expect(supervisor.request("GET", "/v1/machine")).resolves.toEqual({ schema_version: 1 });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        const [first, second] = fetchMock.mock.calls.map(([, init]) => claims(init));
+        expect(first!.iat).toBe(hubNow + ahead);
+        expect(second!.iat).toBe(hubNow);
+        expect(second!.jti).not.toBe(first!.jti);
+        // Subsequent requests retain the correction without another refusal.
+        await supervisor.request("GET", "/v1/machine");
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+      }
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each([86_400, -365 * 86_400])("refuses an oversized hub clock offset (%s seconds) without poisoning later proofs", async (offset) => {
+    const now = 1_800_000_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now * 1000 + 250);
+    try {
+      const { supervisor, fetchMock, callbacks } = await supervisorWith((_path, call) => call === 0
+        ? reply(401, { reason: "stale_proof", retryable: true, server_time: now + offset })
+        : reply(200, { schema_version: 1 }));
+      await expect(supervisor.request("GET", "/v1/machine")).rejects.toThrow(/clocks.*60 seconds/i);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+      await expect(supervisor.request("GET", "/v1/machine")).resolves.toEqual({ schema_version: 1 });
+      expect(fetchMock.mock.calls.map(([, init]) => claims(init).iat)).toEqual([now, now]);
+      fetchMock.mockImplementation(async (input) => new URL(String(input)).pathname === "/v1/health"
+        ? reply(200, { status: "ok" })
+        : reply(401, { reason: "stale_proof", retryable: true, server_time: now + offset }));
+      supervisor.start();
+      try {
+        await vi.waitFor(() => expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({
+          phase: "backoff", stage: "auth", cause: expect.objectContaining({ code: "clock_skew" }),
+        })));
+        expect(supervisor.snapshot().reason).toMatch(/clocks.*60 seconds/i);
+        expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+      } finally { supervisor.stop(); }
+    } finally { clock.mockRestore(); }
   });
 
   it("reads a definitive refusal as a lost pairing at once, without a retry", async () => {

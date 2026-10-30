@@ -5525,7 +5525,6 @@ impl CasCore {
         {
             cas_store::record_observed_delivery_merge(
                 &cas_root,
-                config.factory().artifacts_root.as_deref(),
                 task_id,
                 source_branch,
                 target_branch,

@@ -225,6 +225,11 @@ fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
         })
 }
 
+/// Whether HEAD's titled Unreleased entries add or change one relative to the
+/// merge-base with the target. Comparing trees rather than walking commits
+/// counts an entry that arrives through a merge's second parent, such as a
+/// predecessor worker's branch (cas-2a65); refreshing from the target cannot
+/// claim the target's entries because they are already at the merge-base.
 fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -238,49 +243,17 @@ fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
     let Some(base) = git(&["merge-base", head, target]) else {
         return false;
     };
-    let range = format!("{}..{head}", base.trim());
-    let Some(commits) = git(&["rev-list", "--first-parent", "--reverse", &range]) else {
+    let Some(final_entries) = git(&["show", &format!("{head}:CHANGELOG.md")])
+        .and_then(|text| titled_unreleased_entries(&text))
+    else {
         return false;
     };
-    let Some(final_text) = git(&["show", &format!("{head}:CHANGELOG.md")]) else {
-        return false;
-    };
-    let Some(final_entries) = titled_unreleased_entries(&final_text) else {
-        return false;
-    };
-
-    for commit in commits.lines().filter(|commit| !commit.is_empty()) {
-        let Some(parents) = git(&["rev-list", "--parents", "-n", "1", commit]) else {
-            continue;
-        };
-        let parents: Vec<_> = parents.split_whitespace().collect();
-        let [_, parent] = parents.as_slice() else {
-            continue;
-        };
-        let Some(changed) = git(&["diff", "--name-only", parent, commit, "--", "CHANGELOG.md"])
-        else {
-            continue;
-        };
-        if !changed.lines().any(|path| path == "CHANGELOG.md") {
-            continue;
-        }
-        let Some(previous) = git(&["show", &format!("{parent}:CHANGELOG.md")]) else {
-            continue;
-        };
-        let Some(current) = git(&["show", &format!("{commit}:CHANGELOG.md")]) else {
-            continue;
-        };
-        let old_entries = titled_unreleased_entries(&previous).unwrap_or_default();
-        let Some(new_entries) = titled_unreleased_entries(&current) else {
-            continue;
-        };
-        if new_entries.iter().any(|(key, entry)| {
-            old_entries.get(key) != Some(entry) && final_entries.get(key) == Some(entry)
-        }) {
-            return true;
-        }
-    }
-    false
+    let base_entries = git(&["show", &format!("{}:CHANGELOG.md", base.trim())])
+        .and_then(|text| titled_unreleased_entries(&text))
+        .unwrap_or_default();
+    final_entries
+        .iter()
+        .any(|(key, entry)| base_entries.get(key) != Some(entry))
 }
 
 fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), String>> {
@@ -882,6 +855,41 @@ mod tests {
         .unwrap();
         let extended = commit_changelog_fixture(repo.path(), "extend release note");
         assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &extended, "main").is_none());
+    }
+
+    /// cas-2a65: a lane that merges its predecessor's branch receives that
+    /// entry through the merge's second parent; a target refresh does not.
+    #[test]
+    fn changelog_entry_received_by_merge_counts_but_target_entries_do_not() {
+        let repo = changelog_fixture();
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let entry = |title: &str| format!(
+            "# Changelog\n\n## [Unreleased]\n\n### Added — Commander\n\n- **{title}** — It is visible.\n\n## [1.0.0] - 2026-01-01\n"
+        );
+        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+
+        git(&["checkout", "-qb", "predecessor", "main"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        std::fs::write(repo.path().join("CHANGELOG.md"), entry("Badges show versions")).unwrap();
+        commit_changelog_fixture(repo.path(), "predecessor delivery");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "--no-ff", "--no-edit", "predecessor"]);
+        let received = commit_changelog_fixture(repo.path(), "after merge");
+        assert!(changelog_refusal(repo.path(), &task, &changed, &received, "main").is_none());
+
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("CHANGELOG.md"), entry("Another lane's change")).unwrap();
+        commit_changelog_fixture(repo.path(), "target entry");
+        git(&["checkout", "-qb", "refresh", "main~1"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 3;\n").unwrap();
+        commit_changelog_fixture(repo.path(), "source only");
+        git(&["merge", "-q", "--no-edit", "main"]);
+        let refreshed = commit_changelog_fixture(repo.path(), "after refresh");
+        assert!(changelog_refusal(repo.path(), &task, &changed, &refreshed, "main").is_some());
     }
 
     #[test]

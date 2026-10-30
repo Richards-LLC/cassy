@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Shell substitution policy checks
+
+- **Executable substitutions receive complete policy checks** — Inspect
+  substitutions in expanding heredocs and double-quoted words using shared
+  shell tokenization, preserve parameter and arithmetic boundaries, and refuse
+  unfinished heredoc scopes. Single-quoted words and quoted heredocs stay data.
+
 ## [3.91.0] - 2026-10-30
 
 ### Fixed — Factory workflow

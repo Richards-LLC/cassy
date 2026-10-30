@@ -31,6 +31,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   supervisor also counts as busy from its turn start to its turn end in Codex's
   session file, because Codex can pause for more than 2 seconds mid-reply with
   no busy text.
+- **A repeat Codex status is confirmed** — Was: sending Status again while the
+  last status was still on screen never showed as done, and every other command
+  waited 90 seconds. → Now: the new status output Codex prints confirms it, even
+  when the screen looks the same.
 
 ### Fixed — Backquote command inspection
 

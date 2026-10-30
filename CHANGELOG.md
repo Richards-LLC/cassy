@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Compact merge and close receipts
+
+- **Routine merges now return their compact receipt** with the merge policy, CI commit and immutable detail reference. Overrides, unparked deliveries, push failures and close gates retain their full diagnostics; close summaries keep worktree warnings and verification skip reasons. Closed tasks correctly report no next action.
+
 ### Fixed — Supervisor idle alerts
 
 - **A worker waiting on its own tests no longer pages the supervisor every minute** — Was: a worker that told the supervisor it was not blocked, or that kept rerunning its background tests, drew the same "pending delivery" idle alert about once a minute. → Now: a changed condition (new tip, CI result or task state) still alerts at once. The same alert repeats at most once in 10 minutes after a background run ends, and is held for 10 minutes after the worker's own status for that task that needs nothing. A blocker, question, ready report or stated need never quiets it.

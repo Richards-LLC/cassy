@@ -8,6 +8,7 @@ import { accountCapacity, type AccountWindow } from "./accounts-model";
 // Wire contracts (cas-cli hub/projects.rs, hub/server.rs):
 //   GET  /v1/projects                  {projects[], browse_roots[]}
 //   GET  /v1/projects/browse?root&path {root, path, entries[], truncated}
+//   GET  /v1/launch/profiles?target   {claude, codex, grok}; optional JSON LaunchTarget
 //   POST /v1/sessions {target, supervisor_cli, workers?}
 //        202/200 {session, attached} · error {error, detail} · 403 scope_denied
 import { escapeHtml, projectTitle } from "./cloud-brand";

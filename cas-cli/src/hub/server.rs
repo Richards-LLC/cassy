@@ -696,8 +696,15 @@ async fn machine<R: SessionReadModel>(
     )
 }
 
+#[derive(Deserialize)]
+struct LaunchProfilesQuery {
+    /// The same opaque target as POST /v1/sessions, encoded as JSON.
+    target: Option<String>,
+}
+
 async fn launch_profiles<R: SessionReadModel>(
     State(state): State<HubState<R>>,
+    Query(query): Query<LaunchProfilesQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(error) = authorize(
@@ -710,9 +717,25 @@ async fn launch_profiles<R: SessionReadModel>(
     ) {
         return with_cors(unauthorized_for(&error), &headers);
     }
+    let project_cas_root = if let Some(target) = query.target {
+        let target = match serde_json::from_str::<super::projects::LaunchTarget>(&target) {
+            Ok(target) => target,
+            Err(error) => return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_target", &error.to_string()), &headers),
+        };
+        // Resolve both known-project and browse targets through the launch
+        // allowlist; a caller never supplies a config path directly.
+        match tokio::task::spawn_blocking(move || super::projects::resolve_launch_target(&target)).await {
+            Ok(Ok(root)) => Some(root.path.join(".cas")),
+            Ok(Err(error)) => return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_target", &error.to_string()), &headers),
+            Err(_) => return with_cors(launch_error(StatusCode::INTERNAL_SERVER_ERROR, "launch_failed", "could not resolve the selected project"), &headers),
+        }
+    } else {
+        None
+    };
+    let claude_root = project_cas_root.clone();
     let (claude, codex, grok) = tokio::join!(
-        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Claude)),
-        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Codex)),
+        tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Claude, claude_root.as_deref())),
+        tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Codex, project_cas_root.as_deref())),
         tokio::task::spawn_blocking(|| {
             super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).map(|_| Vec::new())
         }),

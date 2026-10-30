@@ -1603,14 +1603,15 @@ pub(crate) fn environ_candidate_score(cmdline: Option<&[u8]>) -> i32 {
     50
 }
 
-/// Enumerate live descendants of a worker's resolved pane PID on Linux.
+/// Enumerate live descendants of a worker's resolved pane PID.
 ///
 /// The kernel's `children` files give a bounded, ownership-preserving walk:
 /// a cargo build started by the worker is a descendant, while an unrelated
 /// host build never is. Process start ages use the same `/proc/<pid>/stat`
 /// starttime fingerprint source used elsewhere in Cassy. If either the root
 /// traversal or uptime clock cannot be read, return `Unavailable` rather than
-/// pretending there are no jobs (cas-058e's fail-honest contract).
+/// pretending there are no jobs (cas-058e's fail-honest contract). macOS uses
+/// libproc's parent relation and epoch-based start fingerprints instead.
 pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState {
     #[cfg(target_os = "linux")]
     {
@@ -1655,11 +1656,140 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         processes.sort_by(|a, b| a.command.cmp(&b.command).then(a.age_secs.cmp(&b.age_secs)));
         BackgroundProcessState::Available(processes)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
+            return BackgroundProcessState::Unavailable;
+        };
+        let mut queue = VecDeque::from([root_pid]);
+        let mut visited = HashSet::from([root_pid]);
+        let mut processes = Vec::new();
+        while let Some(parent) = queue.pop_front() {
+            let Some(children) = macos_descendant_pids(parent) else {
+                if parent == root_pid {
+                    return BackgroundProcessState::Unavailable;
+                }
+                continue;
+            };
+            for child in children {
+                if !visited.insert(child) {
+                    continue;
+                }
+                queue.push_back(child);
+                let Some(start_micros) = crate::mcp::daemon::read_pid_starttime(child) else {
+                    continue;
+                };
+                let raw = macos_process_cmdline(child);
+                let command = raw
+                    .as_deref()
+                    .and_then(|raw| raw.split(|byte| *byte == 0).next())
+                    .and_then(|arg| std::str::from_utf8(arg).ok())
+                    .and_then(|arg| Path::new(arg).file_name()?.to_str())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        macos_process_executable(child)
+                            .ok()?
+                            .file_name()?
+                            .to_str()
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "<command unavailable>".to_string());
+                if !raw
+                    .as_deref()
+                    .is_some_and(|raw| is_known_sidecar_commandline(&command, raw))
+                {
+                    processes.push(BackgroundProcess {
+                        command,
+                        age_secs: now.as_secs().saturating_sub(start_micros / 1_000_000),
+                    });
+                }
+            }
+        }
+        processes.sort_by(|a, b| a.command.cmp(&b.command).then(a.age_secs.cmp(&b.age_secs)));
+        BackgroundProcessState::Available(processes)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = root_pid;
         BackgroundProcessState::Unavailable
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_descendant_pids(parent: u32) -> Option<Vec<u32>> {
+    // libproc reports zero for both an empty list and an error. Prove the
+    // parent exists and clear errno so a failed root scan stays unavailable.
+    crate::mcp::daemon::read_pid_starttime(parent)?;
+    let mut pids = vec![0 as libc::pid_t; 64];
+    loop {
+        // SAFETY: __error returns this thread's errno; libproc writes only
+        // within the allocated PID buffer and retains no pointer.
+        let count = unsafe {
+            *libc::__error() = 0;
+            libc::proc_listchildpids(
+                parent.try_into().ok()?,
+                pids.as_mut_ptr().cast(),
+                std::mem::size_of_val(pids.as_slice()) as libc::c_int,
+            )
+        };
+        if count < 0 || (count == 0 && std::io::Error::last_os_error().raw_os_error() != Some(0)) {
+            return None;
+        }
+        if (count as usize) < pids.len() {
+            pids.truncate(count as usize);
+            return Some(
+                pids.into_iter()
+                    .filter_map(|pid| u32::try_from(pid).ok().filter(|pid| *pid > 0))
+                    .collect(),
+            );
+        }
+        // Never silently truncate a large or rapidly growing process tree.
+        if pids.len() >= 65_536 {
+            return None;
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_cmdline(pid: u32) -> Option<Vec<u8>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid.try_into().ok()?];
+    // SAFETY: sysconf is a read-only query without pointer arguments.
+    let max = usize::try_from(unsafe { libc::sysconf(libc::_SC_ARG_MAX) }).ok()?;
+    let mut raw = vec![0u8; max];
+    let mut size = raw.len();
+    // SAFETY: sysctl writes at most `size` bytes into the allocated buffer.
+    // The MIB and size pointers live through the call and are not retained.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            raw.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    raw.truncate(size);
+    // KERN_PROCARGS2: argc, executable path, NUL padding, argv, environ.
+    // Return only argc arguments: an inherited environment marker must not
+    // turn an ordinary build into a supposedly persistent MCP sidecar.
+    let argc = i32::from_ne_bytes(raw.get(..4)?.try_into().ok()?);
+    if argc <= 0 {
+        return None;
+    }
+    let mut start = 4 + raw.get(4..)?.iter().position(|byte| *byte == 0)?;
+    while raw.get(start) == Some(&0) {
+        start += 1;
+    }
+    let mut end = start;
+    for _ in 0..argc {
+        end += raw.get(end..)?.iter().position(|byte| *byte == 0)? + 1;
+    }
+    Some(raw.get(start..end)?.to_vec())
 }
 
 /// Discover immediate children spawned from *any* thread of `parent`.
@@ -1758,7 +1888,7 @@ fn is_cas_sidecar(command: &str, pid: u32) -> bool {
     is_known_sidecar_commandline(command, &raw)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
     if (command == "cas" || command.starts_with("cas-"))
         && raw.split(|byte| *byte == 0).any(|part| part == b"serve")
@@ -3743,37 +3873,80 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn background_processes_reports_a_real_long_running_child_and_no_child_case() {
-        // This process is the fake pane PID. Its direct `sleep` child is the
-        // same shape as `codex -> shell -> cargo` after a backgrounded build.
-        assert_eq!(
-            background_processes_for(std::process::id()),
-            BackgroundProcessState::Available(vec![]),
-            "the fake pane must begin with no descendants"
-        );
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn long-running fake background job");
-        // Linux publishes the child relationship asynchronously relative to
-        // `spawn` returning; settle only the test fixture, never production.
-        std::thread::sleep(Duration::from_millis(20));
-        let observed = background_processes_for(std::process::id());
-        child.kill().expect("stop fake background job");
-        child.wait().expect("reap fake background job");
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
 
-        let BackgroundProcessState::Available(processes) = observed else {
-            panic!("live /proc child walk unexpectedly unavailable: {observed:?}");
-        };
-        assert!(
-            processes
-                .iter()
-                .any(|process| process.command == "sleep" && process.age_secs < 5),
-            "expected named, age-bearing child evidence: {processes:?}"
+        struct HeldJob(Child);
+        impl Drop for HeldJob {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = std::process::id();
+        assert_eq!(
+            background_processes_for(root),
+            BackgroundProcessState::Available(vec![])
         );
-        assert!(BackgroundProcessState::Available(processes).is_active());
+        assert_eq!(
+            background_processes_for(u32::MAX),
+            BackgroundProcessState::Unavailable
+        );
+        for (command, argument, active) in [
+            ("cargo", "build", true),
+            ("cas", "serve", false),
+            ("node", "@playwright/mcp/cli.js", false),
+            ("node", "node_modules/playwright/cli.js", true),
+        ] {
+            let started = std::time::Instant::now();
+            let mut child = HeldJob(
+                Command::new("/bin/bash")
+                    .arg0(command)
+                    .args([
+                        "--noprofile",
+                        "--norc",
+                        "-c",
+                        "printf 'ready\\n'; read -r _",
+                        "fixture",
+                        argument,
+                    ])
+                    // The lookup must inspect argv, never inherited env markers.
+                    .env("CAS_PROCESS_TEST_MARKER", "@playwright/mcp")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .expect("spawn owned background fixture"),
+            );
+            let mut ready = String::new();
+            BufReader::new(child.0.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready, "ready\n", "fixture must be running before lookup");
+            let observed = background_processes_for(root);
+            let BackgroundProcessState::Available(processes) = &observed else {
+                panic!("native child lookup unexpectedly unavailable: {observed:?}");
+            };
+            assert_eq!(
+                has_active_work(false, &observed),
+                active,
+                "{command} {argument}: {observed:?}"
+            );
+            if active {
+                assert!(
+                    processes.iter().any(|process| process.command == command
+                        && process.age_secs <= started.elapsed().as_secs() + 1),
+                    "expected named, age-bearing evidence: {processes:?}"
+                );
+            }
+            drop(child);
+        }
+        assert_eq!(
+            background_processes_for(root),
+            BackgroundProcessState::Available(vec![])
+        );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn known_mcp_sidecars_do_not_count_as_worker_background_jobs() {
         assert!(is_known_sidecar_commandline(
@@ -3796,7 +3969,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cas_6eec_background_activity_excludes_another_process_tree() {
         let mut idle_pane = std::process::Command::new("sleep").arg("30").spawn().unwrap();

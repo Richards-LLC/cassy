@@ -13,6 +13,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   beyond its parked delivery through unowned work, close reports the kept anchor,
   ignored tip and offending commit instead of returning an ordinary merge request.
 
+### Fixed — Parked delivery attribution
+
+- **Upkeep excludes later work on a reused lane** — When an integration merge
+  brings in a tip beyond the parked delivery, close checks use the task's own
+  changes and record an integration-parent mismatch diagnostic.
+
 ### Fixed — Image viewer recovery
 
 - **Repeated image failures leave one clear note** — Unavailable previews and
@@ -30,6 +36,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Malformed base registries refuse case checks** — A duplicate bug-family key
   now names the key and file in a registry error instead of skipping the gate.
   Unavailable Git inputs retain their existing nonblocking warning.
+
+### Fixed — Factory cleanup feedback
+
+- **Cleanup stays readable while large inventories run** — Factory GC shows
+  bounded counts and the largest items, with complete details under `--full`
+  or `--json`. Human cleanup reports progress on stderr; JSON stays silent
+  until its single result. Existing deletion consent gates are unchanged.
 
 ### Added — Emoji in Commander conversations
 
@@ -56,12 +69,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   then session), and activity never moves either; the Most recent mark stays
   on the newest session where it stands.
 
-### Fixed — Commander clock correction
-
-- **A refused proof cannot shift the clock by an arbitrary amount** — Commander
-  accepts clock corrections only within 60 seconds and shows clock-setting
-  guidance for larger differences, while still correcting small clock drift.
-
 ### Fixed — Deliverable capture on macOS
 
 - **Capture from linked directories returns its receipt** — Evidence capture
@@ -87,12 +94,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   stylesheet retains its served name, while every lazy stylesheet receives a
   hashed chunk name that the hub can serve.
 
-### Fixed — Unresolved heredoc substitutions
-
-- **Incomplete substitutions are refused** — Expanding heredoc checks preserve
-  unresolved scope errors through nested command scans and refuse the request
-  instead of accepting an uninspectable body.
-
 ### Added — Commander reading frames
 
 - **Shared source frames and compact work rows** — Diagrams, diffs and code
@@ -111,12 +112,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Published reasoning stays easy to skim** — Commander shows a folded summary preview with formatted detail and an exact raw-text fallback. Opening or updating it preserves focus and reading position; Thinking and Thought labels require reported lifecycle events.
 
-### Fixed — Parameter expansion boundaries
-
-- **Parameter data cannot hide policy commands** — Shell checks keep parameter
-  and arithmetic expansions together, inspect nested executable substitutions,
-  and refuse unfinished expansions before accepting their command boundaries.
-
 ### Fixed — Merge completion guidance
 
 - **Parked workers wait for the merge verdict** — Recycle briefs, merge alerts
@@ -129,13 +124,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   patch records expose optional line counts through the Commander v2 contract
   and parser. Counts describe each file's latest edit event; missing counts stay
   unknown. The changed-files card can consume these facts in a follow-up.
-
-### Fixed — Complete command substitution boundaries
-
-- **Case patterns and comments cannot hide policy commands** — Substitution
-  boundaries use the shell tokenizer across heredoc, quoted-word and file-effect
-  checks. Parentheses in comments or case patterns no longer truncate a check;
-  single-quoted text and quoted heredoc bodies remain data.
 
 ### Added — Conversation image inspection
 
@@ -167,12 +155,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   links to the caveats that a green push alone is not ready and pending or red CI
   requires override authority and a reason. The Codex coordination note now says
   the merge verdict closes or reopens the task, so workers do not re-close it.
-
-### Fixed — Policy commands in quoted substitutions
-
-- **Double-quoted substitutions enforce operator-only commands** — The shell
-  guard inspects executable substitution bodies with the full command tokenizer,
-  including quote-split command names. Single-quoted command text stays data.
 
 ### Fixed — Composer file uploads
 
@@ -207,12 +189,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Routine merge and close receipts keep full details fetchable** — Successful
   gate replies now keep the task, delivery, CI and next-action facts in a short
   response, with the full immutable receipt available at its content-hashed path.
-
-### Fixed — Policy substitutions in heredocs
-
-- **Expanding heredocs keep operator-only commands protected** — The shell
-  guard inspects commands inside heredoc substitutions even when quote splitting
-  hides their spelling. Quoted bodies and escaped substitution text remain data.
 
 ### Fixed — Duplicate account EOF
 
@@ -284,13 +260,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   name busy-pane, debounce or rate-limit holds when recorded, and say when the
   cause is unrecorded. Message status retains the cause after hook acknowledgment
   without changing delivery or confirmation receipts.
-
-### Fixed — Commander daemon replacement
-
-- **An open conversation reconnects to a replacement daemon** — If Commander
-  sees the old daemon's ended session before its replacement becomes live,
-  it resumes the requested conversation automatically. Ended sessions still
-  stop retries and sends while no replacement is available.
 
 ### Fixed — Merge readiness
 
@@ -623,6 +592,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Picked images preview in native Commander** — Was: the native image policy
   blocked local raster thumbnails before sending. → Now: picked PNG, JPEG,
   GIF and WebP images can preview, while SVG and HTML stay named files.
+
+## [3.91.1] - 2026-10-30
+
+### Fixed — Commander daemon replacement
+
+- **An open conversation reconnects to a replacement daemon** — Was: if
+  Commander saw the old daemon's session end before its replacement was live,
+  the conversation stopped and never resumed. Now: Commander resumes the
+  requested conversation on the replacement automatically; an ended session
+  with no replacement still stops retries and sends.
+
+### Fixed — Shell substitution policy checks
+
+- **Operator-only commands cannot hide inside substitutions** — Was: an
+  operator-only command written inside a double-quoted substitution, an
+  expanding heredoc, or a substitution containing a case pattern or comment
+  parenthesis could pass the worker guard. Now: every executable substitution
+  is checked with the shared shell tokenizer, parameter and arithmetic
+  boundaries are preserved, unfinished heredoc scopes are refused, and
+  single-quoted words and quoted heredocs stay data.
+
+### Fixed — Commander clock correction
+
+- **Clock corrections stay inside the proof window** — Was: after a
+  stale-proof refusal, Commander adopted any clock offset the hub reported,
+  however large. Now: corrections are capped at the hub's 60-second proof
+  window; a larger difference shows "Device and machine clocks differ by more
+  than 60 seconds" instead of signing with a skewed time.
 
 ## [3.91.0] - 2026-10-30
 

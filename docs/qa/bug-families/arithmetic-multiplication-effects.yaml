@@ -1,4 +1,4 @@
-title: Arithmetic word parts are not executable glob contexts and nested substitutions still undergo workspace checks
-tasks: [cas-0c9c]
+title: Numeric arithmetic stays inert while dynamic operands and array-subscript re-expansion are refused
+tasks: [cas-0c9c, cas-a3ac]
 invariants: []
 journeys: []

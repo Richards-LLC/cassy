@@ -95,6 +95,16 @@ by the existing `--json` check object.
 
 ## Critique
 
+### Reverted task receipts (cas-0048)
+
+The backlog summary counts delivered tasks and reverted tasks separately. A
+`delivered then reverted` entry names the task and commit evidence and asks for
+review, without a close call or commit receipt. Normal deliveries retain their
+existing close call. Unavailable or budget-limited tree checks are stated as
+unknown and withhold delivery suggestions. The existing JSON check object
+carries the same message; palettes, grouping and the 80-column renderer stay
+unchanged. Fresh candidate captures and scores follow after implementation.
+
 ### ASCII status contrast (cas-506d)
 
 Exact-build comparison, `e5d99081` → `47c23acbc`, using the same initialized

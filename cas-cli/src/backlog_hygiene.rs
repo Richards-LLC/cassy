@@ -2,7 +2,7 @@
 //!
 //! The 2026-10-16 cleanup found about 60 stale open tasks, about 25 of them
 //! already delivered on the default branch, and 11 epics whose children had
-//! all closed. Nothing flagged any of them. This module finds three kinds:
+//! all closed. Nothing flagged any of them. This module finds these kinds:
 //!
 //! 1. an open task whose delivery commit is on the default branch: a
 //!    non-merge commit whose subject names the task;
@@ -12,6 +12,8 @@
 //!    or qualified symbol it names is absent from the default branch, and git
 //!    history dates each removal. Citations git never saw (planned code, typos)
 //!    do not count either way.
+//! 5. an open task whose latest named effect is a revert, or whose changed
+//!    paths have been completely restored on the default branch.
 //!
 //! Each finding carries its evidence. Kinds 1 and 2 also carry the one call
 //! that closes them through the ordinary close gates; nothing here closes,
@@ -133,6 +135,9 @@ pub(crate) struct BacklogReport {
     /// Why kind 1 could not be measured, when it could not.
     pub delivery_unknown: Option<String>,
     pub delivered: Vec<DeliveredOpen>,
+    /// Latest task effect was a revert, or its changed paths are restored.
+    /// These findings never carry a close call.
+    pub reverted: Vec<DeliveredOpen>,
     pub finished_epics: Vec<FinishedEpic>,
     pub idle: Vec<IdleOpen>,
     /// Kind 4 (cas-d9038).
@@ -144,9 +149,11 @@ pub(crate) struct BacklogReport {
 impl BacklogReport {
     pub(crate) fn is_clean(&self) -> bool {
         self.delivered.is_empty()
+            && self.reverted.is_empty()
             && self.finished_epics.is_empty()
             && self.idle.is_empty()
             && self.stale_citations.is_empty()
+            && self.delivery_unknown.is_none()
     }
 }
 
@@ -381,6 +388,11 @@ pub(crate) fn delivered_open(tasks: &[Task], commits: &[CommitRecord]) -> Vec<De
                 .iter()
                 .filter(|commit| message_references_task(&commit.subject, &task.id));
             let commit = matching.next()?.clone();
+            // Never fall back to an older delivery when the latest effect
+            // naming this task is a revert. A later normal delivery can count.
+            if is_revert(&commit.subject) {
+                return None;
+            }
             Some(DeliveredOpen {
                 task_id: task.id.clone(),
                 title: task.title.clone(),
@@ -392,6 +404,143 @@ pub(crate) fn delivered_open(tasks: &[Task], commits: &[CommitRecord]) -> Vec<De
         .collect();
     found.sort_by(|a, b| a.task_id.cmp(&b.task_id));
     found
+}
+
+fn is_revert(subject: &str) -> bool {
+    subject.starts_with("revert(")
+        || subject.starts_with("revert:")
+        || subject.starts_with("Revert \"")
+}
+
+/// Separate explicit reverts before checking positive delivery candidates.
+/// A subject alone cannot establish that a revert-of-a-revert re-delivered
+/// the work, so it also requires review rather than an automatic close hint.
+fn reverted_open(tasks: &[Task], commits: &[CommitRecord]) -> Vec<DeliveredOpen> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::message_references_task;
+    tasks
+        .iter()
+        .filter(|task| task.is_open() && task.task_type != TaskType::Epic)
+        .filter_map(|task| {
+            let commit = commits.iter().find(|c| message_references_task(&c.subject, &task.id))?;
+            is_revert(&commit.subject).then(|| DeliveredOpen {
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                status: task.status.to_string(),
+                commit: commit.clone(),
+                more_commits: 0,
+            })
+        })
+        .collect()
+}
+
+type TreeEntries = std::collections::HashMap<Vec<u8>, (String, String)>;
+
+fn git_output(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot inspect delivery tree: {e}"))?;
+    if !output.status.success() {
+        return Err("cannot inspect delivery tree (missing history or Git failure)".into());
+    }
+    Ok(output.stdout)
+}
+
+/// Exact path-entry comparison, including file modes, additions, deletions
+/// and both sides of renames. Unrelated later work cannot hide a rollback.
+/// This detects complete restoration, not semantic equivalence or a partial
+/// revert. Use the first pre-delivery entry of every path across task commits
+/// since its last explicit revert, not just the newest commit's parent tree.
+fn delivery_tree_restored(
+    repo: &Path,
+    finding: &DeliveredOpen,
+    commits: &[CommitRecord],
+    target: &TreeEntries,
+    deadline: std::time::Instant,
+    cache: &mut std::collections::HashMap<String, Vec<u8>>,
+) -> Result<bool, String> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::message_references_task;
+    let matching: Vec<_> = commits
+        .iter()
+        .filter(|c| message_references_task(&c.subject, &finding.task_id))
+        .take_while(|c| !is_revert(&c.subject))
+        .collect();
+    let mut before = TreeEntries::new();
+    for commit in matching.into_iter().rev() {
+        if std::time::Instant::now() >= deadline {
+            return Err("delivery tree check exceeded scan budget; unchecked receipts withheld".into());
+        }
+        if !cache.contains_key(&commit.sha) {
+            let raw = git_output(repo, &["diff-tree", "--root", "--no-commit-id", "--raw",
+                "--no-abbrev", "--no-renames", "-r", "-z", &commit.sha])?;
+            cache.insert(commit.sha.clone(), raw);
+        }
+        let fields: Vec<_> = cache[&commit.sha].split(|b| *b == 0).collect();
+        for pair in fields.chunks_exact(2) {
+            let header = std::str::from_utf8(pair[0]).map_err(|_| "invalid Git diff header")?;
+            let parts: Vec<_> = header.split_whitespace().collect();
+            if parts.len() != 5 || !parts[0].starts_with(':') {
+                return Err("invalid Git diff header".into());
+            }
+            before.entry(pair[1].to_vec())
+                .or_insert_with(|| (parts[0][1..].to_string(), parts[2].to_string()));
+        }
+    }
+    // Empty commits are still subject-attributed bookkeeping, not evidence
+    // of a tree rollback. Preserve their pre-existing attribution behavior.
+    Ok(!before.is_empty() && before.iter().all(|(path, (mode, oid))| {
+        if mode == "000000" {
+            !target.contains_key(path)
+        } else {
+            target.get(path).is_some_and(|entry| &entry.0 == mode && &entry.1 == oid)
+        }
+    }))
+}
+
+fn verify_delivery_trees(
+    repo: &Path,
+    reference: &str,
+    commits: &[CommitRecord],
+    report: &mut BacklogReport,
+    budget: CitationBudget,
+) -> Result<(), String> {
+    if report.delivered.is_empty() {
+        return Ok(());
+    }
+    let candidates = std::mem::take(&mut report.delivered);
+    let deadline = std::time::Instant::now() + budget.lookup_deadline;
+    if git_output(repo, &["rev-parse", "--is-shallow-repository"])? == b"true\n" {
+        return Err("delivery tree history is shallow; unchecked receipts withheld".into());
+    }
+    let raw = git_output(repo, &["ls-tree", "-r", "-z", reference])?;
+    let mut target = TreeEntries::new();
+    for entry in raw.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let tab = entry.iter().position(|b| *b == b'\t').ok_or("invalid Git tree entry")?;
+        let header = std::str::from_utf8(&entry[..tab]).map_err(|_| "invalid Git tree header")?;
+        let parts: Vec<_> = header.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err("invalid Git tree header".into());
+        }
+        target.insert(entry[tab + 1..].to_vec(), (parts[0].into(), parts[2].into()));
+    }
+    let mut cache = std::collections::HashMap::new();
+    let mut unknown = None;
+    for (index, finding) in candidates.into_iter().enumerate() {
+        let result = if index >= budget.max_tasks {
+            Err("delivery tree check exceeded task budget; unchecked receipts withheld".into())
+        } else {
+            delivery_tree_restored(repo, &finding, commits, &target, deadline, &mut cache)
+        };
+        match result {
+            Ok(true) => report.reverted.push(finding),
+            Ok(false) => report.delivered.push(finding),
+            Err(error) => unknown = Some(error),
+        }
+    }
+    report.reverted.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+    unknown.map_or(Ok(()), Err)
 }
 
 /// Kind 2 over every task and dependency. An epic counts only when it has
@@ -485,7 +634,15 @@ pub(crate) fn scan_with(
     match default_ref(repo) {
         Ok(reference) => {
             match read_commits(repo, &reference, oldest_open - chrono::Duration::days(1)) {
-                Ok(commits) => report.delivered = delivered_open(&tasks, &commits),
+                Ok(commits) => {
+                    report.delivered = delivered_open(&tasks, &commits);
+                    report.reverted = reverted_open(&tasks, &commits);
+                    if let Err(error) = verify_delivery_trees(repo, &reference, &commits, &mut report, budget) {
+                        // If even the target tree was unavailable, none of
+                        // the positive candidates were verified.
+                        report.delivery_unknown = Some(error);
+                    }
+                }
                 Err(error) => report.delivery_unknown = Some(error),
             }
             (report.stale_citations, report.citations_unchecked) =
@@ -586,12 +743,13 @@ fn short(sha: &str) -> &str {
 /// `1 delivered but open, 2 finished epics open, 3 idle 14+ days`.
 pub(crate) fn summary_line(report: &BacklogReport) -> String {
     format!(
-        "{} delivered but open, {} finished epic{} open, {} idle {IDLE_DAYS}+ days, {} citing removed code",
+        "{} delivered but open, {} finished epic{} open, {} idle {IDLE_DAYS}+ days, {} citing removed code, {} delivered then reverted",
         report.delivered.len(),
         report.finished_epics.len(),
         if report.finished_epics.len() == 1 { "" } else { "s" },
         report.idle.len(),
         report.stale_citations.len(),
+        report.reverted.len(),
     )
 }
 
@@ -610,6 +768,14 @@ pub(crate) fn delivered_line(finding: &DeliveredOpen, default_ref: &str) -> Stri
             n => format!(", +{n} more commit{}", if n == 1 { "" } else { "s" }),
         },
         delivered_close_call(finding, default_ref),
+    )
+}
+
+pub(crate) fn reverted_line(finding: &DeliveredOpen, default_ref: &str) -> String {
+    format!(
+        "{} ({}) \"{}\": delivered then reverted on {default_ref}; evidence {} {}. Review before re-delivery.",
+        finding.task_id, finding.status, clip(&finding.title, 50),
+        short(&finding.commit.sha), clip(&finding.commit.subject, 60),
     )
 }
 
@@ -662,9 +828,13 @@ pub(crate) fn session_start_block(report: &BacklogReport) -> Option<(String, Str
         lines.extend(entries.into_iter().take(limit).map(|line| format!("- {line}")));
     };
     take(report.delivered.iter().map(|f| delivered_line(f, reference)).collect(), 3, &mut lines);
+    take(report.reverted.iter().map(|f| reverted_line(f, reference)).collect(), 2, &mut lines);
     take(report.finished_epics.iter().map(epic_line).collect(), 2, &mut lines);
     take(report.idle.iter().map(idle_line).collect(), 2, &mut lines);
     take(report.stale_citations.iter().map(stale_citation_line).collect(), 2, &mut lines);
+    if let Some(reason) = &report.delivery_unknown {
+        lines.push(format!("- Delivery check unknown: {}", clip(reason, 180)));
+    }
     let mut full = head.clone();
     let tail_reserve = 80;
     let mut shown = 0usize;

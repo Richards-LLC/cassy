@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   arithmetic checks as command arguments, including tab-stripped heredocs.
   Quoted bodies and escaped substitution markers remain literal data.
 
+### Fixed — Team tab shows the whole team
+
+- **Four workers fit without scrolling** — Team lanes now take three compact rows, and the release block is a slim rule above them, so four workers fit at 1280x800 and 390x844. While Team is open on desktop, the side rail no longer repeats the release block.
+
 ### Fixed — QA impact for test fixtures
 
 - **Test fixtures stay outside product QA impact** — Files in fixture directories

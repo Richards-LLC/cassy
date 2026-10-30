@@ -3315,6 +3315,8 @@ struct ShellLexed {
     /// Byte after each token in the original source, including removed quotes.
     ends: Vec<usize>,
     unresolved_at: Option<usize>,
+    /// Raw parameter bodies: numeric operand checks must retain source quoting.
+    parameters: Vec<(usize, usize)>,
 }
 
 fn factory_shell_tokens_for_projection(
@@ -3380,6 +3382,7 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
     let mut literals = Vec::new();
     let mut ends = Vec::new();
     let mut unresolved_at = None;
+    let mut parameters = Vec::new();
     let mut word = String::new();
     let mut literal = true;
     let mut word_quoted = false;
@@ -3436,12 +3439,30 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
             escaped = false;
             continue;
         }
+        // Escaped ${ is literal data inside a double-quoted word. Its braces
+        // must not manufacture a parameter quoting context for later text.
+        if quote == Some('"') && expansions.is_empty() && ch == '\\'
+            && command.as_bytes().get(index + 1..index + 3) == Some(b"${")
+        {
+            word.push_str("\\$");
+            chars.next();
+            continue;
+        }
         if let Some(expansion) = expansions.last_mut() && expansion.escaped {
             word.push(ch);
             expansion.escaped = false;
             continue;
         }
         let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        // Single quotes inside a double-quoted parameter default differ
+        // across Bash modes. Retain potentially active nested operands too.
+        if quote == Some('"') && active_quote == Some('\'') && !expansions.is_empty()
+            && ch == '$' && command.as_bytes().get(index + 1) == Some(&b'{')
+            && command.as_bytes()[..index].iter().rev().take_while(|&&ch| ch == b'\\').count() % 2 == 0
+        {
+            let end = command[index + 2..].find('}').map_or(command.len(), |end| index + 2 + end);
+            parameters.push((index + 2, end));
+        }
         // Shell line continuations disappear before word matching, including
         // inside double quotes; single-quoted backslash/newline stays data.
         if active_quote != Some('\'') && ch == '\\'
@@ -3525,7 +3546,12 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
                 None if ch == expansion.opening => expansion.balance += 1,
                 None if ch == expansion.closing => {
                     expansion.balance -= 1;
-                    if expansion.balance == 0 { expansions.pop(); }
+                    if expansion.balance == 0 {
+                        if expansion.opening == '{' {
+                            parameters.push((expansion.start + 2, index));
+                        }
+                        expansions.pop();
+                    }
                 }
                 _ => {},
             }
@@ -3629,7 +3655,7 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         &mut word_quoted,
         &mut ends, command.len(),
     );
-    ShellLexed { tokens, literals, ends, unresolved_at }
+    ShellLexed { tokens, literals, ends, unresolved_at, parameters }
 }
 
 /// Return shell statements with heredoc bodies and comments removed. Quoted
@@ -9004,7 +9030,36 @@ EOF
             assert_eq!(status, "deny", "{command}: {reason}");
             assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
         }
+        // cas-d6f2: these operands recursively evaluate subscript text.
+        let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
+        for expression in [
+            "[[ x -eq 0 ]]",
+            "[[ 0 -ge x ]]",
+            "[[ 1 -eq 1 && x -ne 0 ]]",
+            "test x -eq 0",
+            "echo \"${b[x]}\"",
+            "echo \"${s:x}\"",
+            "echo \"${s:0:x}\"",
+            "echo \"${!x}\"",
+            "cat <<EOF\n${b[x]}\nEOF",
+            r#"echo "\${default:-'${b[x]}'}""#,
+            r#"echo "${default:-'${b[x]}'}""#,
+        ] {
+            let command = format!("{indirect}{expression}");
+            let (status, reason) = decision(&command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
         for allowed in [
+            "[[ 1 -eq 1 ]]",
+            "test 1 -eq 1",
+            "test -n -eq",
+            "echo \"${b[0]}\"",
+            "echo \"${s:0:2}\"",
+            "cat <<EOF\n${s:0:2}\nEOF",
+            "[[ \"literal\" == \"-eq\" ]]",
+            r#"echo "\${b[x]}""#,
+            r#"echo '${b[x]}'"#,
             "cas config get factory.write_roots",
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",

@@ -23,6 +23,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Supervisors are told when merged work waits for QA** — Was: a batch QA round could be held for hours while merged tasks waited, and nothing flagged it. → Now: if a merged delivery has no receipt after 60 minutes and no round started in that time, every supervisor on the epic, on both machines, gets one notice an hour. The supervisor guidance now says a round covers what is merged at the tip and never waits for lanes still in review.
 
+### Fixed — Conditional and parameter operands
+
+- **Recursive parameter operands stay unresolved** — `[[ … ]]` comparisons and
+  `${…}` array indices, substring positions and indirection cannot hide executable
+  subscript text. Literal numeric comparisons, indices and slices stay allowed.
+
 ### Fixed — Merge admission after a cancelled lane run
 
 - **A cancelled code run no longer reads as pending forever** — Was: when a docs push cancelled the code commit's lane run, `worktree_merge` refused with "CI PENDING", though that run could never finish. → Now: once the tip's run is green, the code commit's cancelled and lingering jobs are set aside. A passed code check admits the merge, and with none it needs the docs-only override, because a docs tip validates no code. A job still running in a live run stays refused.

@@ -80,6 +80,11 @@ Each listed task can then close without a per-task `qa-bundle:` note or an
 automatic independent pass. `verification action=qa_status task_id=<id>`
 shows its valid batch receipt, and task notes retain the receipt citation.
 Keep the published ledger file available and unchanged for subsequent closes.
+When a valid batch receipt or covering passed independent QA round already
+reviews the delivery, close uses that review's canonical evidence rather than
+rechecking the producer ledger against a newer matrix grammar. Historical
+producer evidence stays unchanged. Without valid coverage, existing producer
+ledgers still undergo the current format check before verification dispatch.
 Changed ledger bytes, a new delivery anchor, a different project, a target
 that does not contain reviewed staging, or an omitted task cannot reuse it. Corrections require a new
 published ledger and receipt; existing receipts cannot be edited.

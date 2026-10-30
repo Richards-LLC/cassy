@@ -1372,6 +1372,29 @@ mv "$repo/CHANGELOG.md.tmp" "$repo/CHANGELOG.md"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure changelog-and-versions "$output"
 
+# A post-cut tree has no entries in [Unreleased]. The release row validates
+# entries that exist without imposing the per-delivery park policy.
+repo="$(new_fixture changelog-empty-unreleased)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only changelog-and-versions 2>&1 || true)"
+grep -qF 'PASS changelog-and-versions' <<<"$output" && ok 'changelog-and-versions accepts an empty Unreleased section' \
+    || bad "changelog-and-versions rejected an empty Unreleased section: $output"
+
+# The documented template is an example, not a real release entry.
+repo="$(new_fixture changelog-placeholder)"
+cat >"$repo/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
+### Added — <area>
+
+- **Title** — What changed.
+
+## [9.99.7] - 2026-09-02
+
+- Fixture release.
+EOF
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only changelog-and-versions 2>&1 || true)"
+assert_named_failure changelog-and-versions "$output"
+
 repo="$(new_fixture dirty-tree)"
 printf 'untracked\n' >"$repo/untracked.txt"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
@@ -2623,6 +2646,10 @@ if [[ "${1:-}" == --release-binary-isa-only ]]; then
     run_sections section_release_binary_isa
 elif [[ "${1:-}" == --concurrency-only ]]; then
     run_sections section_concurrency
+elif [[ "${1:-}" == --failure-scenarios-only ]]; then
+    run_sections section_failure_scenarios
+elif [[ "${1:-}" == --changelog-only ]]; then
+    run_sections section_web_and_source_rows
 else
     run_sections section_release_binary_isa \
         section_admission_and_script_tier \

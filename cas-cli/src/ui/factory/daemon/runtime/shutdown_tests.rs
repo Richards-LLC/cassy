@@ -1748,6 +1748,12 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         } else {
             runtime.app.shutdown_worker(name, false).await.unwrap();
         }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while runtime.app.worker_worktree_cleanups_pending() {
+            runtime.app.poll_worker_worktree_cleanups();
+            assert!(Instant::now() < deadline, "target cleanup did not finish");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         assert_eq!(
             !target.exists(),
             reclaimed,

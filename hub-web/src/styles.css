@@ -3330,7 +3330,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-machine-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-3); }
 .project-machine-chip { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: 28px; padding: var(--space-1) var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
 .project-machine-chip:hover { background: var(--bg-hover); color: var(--ink); }
-.project-machine-chip { flex-wrap: wrap; border-radius: var(--radius-card); }
+.project-machine-chip { flex-wrap: wrap; }
 .machine-version { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; max-width: 100%; color: var(--ink-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .machine-version-installed { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .machine-version-update { color: var(--state-warn); }

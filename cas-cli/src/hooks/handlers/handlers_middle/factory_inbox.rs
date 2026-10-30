@@ -1217,9 +1217,10 @@ mod tests {
 
     #[test]
     fn turn_start_does_not_replay_a_transport_delivered_spawn_brief_after_progress() {
-        let _guard = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT", &cas_root);
         let task_store = crate::store::open_task_store(&cas_root).unwrap();
         let mut task = cas_types::Task::new(
             "cas-7c1e".to_string(),
@@ -1251,11 +1252,8 @@ mod tests {
             )
             .unwrap();
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-1");
-            std::env::set_var("CAS_FACTORY_SESSION", "session");
-        }
+        env.set("CAS_AGENT_NAME", "worker-1");
+        env.set("CAS_FACTORY_SESSION", "session");
         let mut input = HookInput {
             hook_event_name: "UserPromptSubmit".to_string(),
             ..Default::default()
@@ -1267,12 +1265,6 @@ mod tests {
             None,
             "a stale spawn brief must be consumed without replaying task-start boilerplate"
         );
-
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
     }
 
     /// cas-78d3 (GH #165) — the regression this whole task exists for.
@@ -1292,11 +1284,12 @@ mod tests {
     /// the bug invisible for a full release.
     #[test]
     fn stalled_nudge_hooks_skip_routine_alarm_at_turn_and_tool_boundaries() {
-        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+        let mut env = crate::test_support::TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_NAME", Some("worker-stall-hook")),
             ("CAS_FACTORY_SESSION", Some("stall-hook-session")),
         ]);
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         let outcome = store.enqueue_worker_stall_nudge("worker-stall-hook", "you are stalled",
@@ -1324,19 +1317,17 @@ mod tests {
 
     #[test]
     fn claude_real_payload_surfaces_mail_and_stamps_hook_surfaced() {
-        let _guard = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         let id = store
             .enqueue_with_session("supervisor", "worker-78d3", "ship cas-78d3", "sess-78d3")
             .unwrap();
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-78d3");
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-78d3");
-        }
+        env.set("CAS_AGENT_NAME", "worker-78d3");
+        env.set("CAS_FACTORY_SESSION", "sess-78d3");
 
         let mut input: HookInput = serde_json::from_str(
             r#"{
@@ -1367,12 +1358,6 @@ mod tests {
             "surfaced context missing the message body: {context}"
         );
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
-
         let report = store
             .message_delivery_report(id)
             .unwrap()
@@ -1390,19 +1375,17 @@ mod tests {
     /// not depend on a capture precondition it has nothing to do with.
     #[test]
     fn a_blank_prompt_still_surfaces_mail() {
-        let _guard = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         store
             .enqueue_with_session("supervisor", "worker-blank", "urgent context", "sess-blank")
             .unwrap();
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-blank");
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-blank");
-        }
+        env.set("CAS_AGENT_NAME", "worker-blank");
+        env.set("CAS_FACTORY_SESSION", "sess-blank");
 
         let mut input = HookInput {
             hook_event_name: "UserPromptSubmit".to_string(),
@@ -1411,14 +1394,9 @@ mod tests {
         };
         input.agent_role = Some("worker".to_string());
 
-        let out = super::super::prompt_capture::handle_user_prompt_submit(&input, Some(temp.path()))
-            .expect("handler must not error");
-
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
+        let out =
+            super::super::prompt_capture::handle_user_prompt_submit(&input, Some(temp.path()))
+                .expect("handler must not error");
 
         assert!(
             out.user_prompt_context()
@@ -1432,7 +1410,9 @@ mod tests {
     /// second turn start never re-injects it. This is the GH #124 storm guard.
     #[test]
     fn a_surfaced_row_is_never_surfaced_twice() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         store

@@ -587,6 +587,26 @@ jobs:
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
         run: ./scripts/test-cas-install.sh
 
+      - name: Test release and install script fixtures
+        if: steps.pr-dedupe.outputs.covered != 'true'
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+        run: |
+          # Use the same resolved comparison base as the other scoped checks.
+          # Unknown bases run the fixtures, matching the classifier's fail-closed policy.
+          if [[ -n "$BASE_SHA" ]]; then
+            changed_scripts="$(git diff --name-only "$BASE_SHA" HEAD -- scripts/)"
+            if [[ -z "$changed_scripts" ]]; then
+              echo 'No scripts/ changes; skipping release and install fixtures.'
+              exit 0
+            fi
+          fi
+          # Report Python availability for the script fixtures.
+          python3 --version
+          ./scripts/test-release.sh
+          ./scripts/test-release-publish.sh
+          ./scripts/test-install-on-publish.sh
+
       - name: Detect runner lock fixture changes
         id: runner-lock-diff
         if: github.event_name != 'push' && steps.pr-dedupe.outputs.covered != 'true'

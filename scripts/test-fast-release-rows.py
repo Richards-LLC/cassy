@@ -143,7 +143,11 @@ class FastRows(unittest.TestCase):
         with (self.repo / "cas-cli/Cargo.toml").open("a") as stream:
             stream.write('[[test]]\nname = "sample"\npath = "tests/sample.rs"\n')
         self.write("cas-cli/tests/sample.rs", "#[test]\nfn sample() {}\n")
-        self.write("CHANGELOG.md", "## [Unreleased]\n\n## [9.99.7] - 2026-09-30\n\n- Fixture.\n")
+        self.write("CHANGELOG.md", (
+            "## [Unreleased]\n\n### Added — Fixture\n\n"
+            "- **Fixture entry** — Example release note.\n\n"
+            "## [9.99.7] - 2026-09-30\n\n- Fixture.\n"
+        ))
         skill = "cas-cli/src/builtins/skills/cas-cut-release/"
         self.write(skill + "SKILL.md", (ROOT / (skill + "SKILL.md")).read_text())
         self.write(skill + "references/failure-log.md", "- **version-literals** — fixture\n")
@@ -247,6 +251,27 @@ class FastRows(unittest.TestCase):
         self.assertIn("test-env", (row_dir / "plan.txt").read_text().splitlines())
         self.assertNotIn("test-shape", (row_dir / "plan.txt").read_text().splitlines())
         self.assertEqual(LANE.unfinished_rows(row_dir), [])
+
+    def test_changelog_row_requires_a_titled_unreleased_entry(self):
+        self.write("CHANGELOG.md", (
+            "## [Unreleased]\n\n### Fixed\n\n- Generic note.\n\n"
+            "## [9.99.7] - 2026-09-30\n\n- Fixture.\n"
+        ))
+        self.commit()
+        missing_title = self.fast()
+        self.assertNotEqual(missing_title.returncode, 0, missing_title.stdout + missing_title.stderr)
+        self.assertIn("FAIL changelog-and-versions", missing_title.stdout)
+        self.assertIn("titled category and area format", missing_title.stdout)
+
+        self.write("CHANGELOG.md", (
+            "## [Unreleased]\n\n### Fixed — Fixture\n\n"
+            "- **Fixture entry** — Restored a titled release note.\n\n"
+            "## [9.99.7] - 2026-09-30\n\n- Fixture.\n"
+        ))
+        self.commit()
+        restored = self.fast()
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertIn("PASS changelog-and-versions", restored.stdout)
 
     def receipt(self):
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()

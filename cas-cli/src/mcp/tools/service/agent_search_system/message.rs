@@ -5120,7 +5120,7 @@ mod inbox_poll_identity_tests {
     fn message_report_is_enriched_only_by_target_codex_rollout_records() {
         use cas_store::ObservationStatus;
 
-        let _lock = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let cas_root = temp.path().join("project");
         std::fs::create_dir_all(&cas_root).unwrap();
@@ -5146,8 +5146,8 @@ mod inbox_poll_identity_tests {
         )
         .unwrap();
 
-        let old_codex_home = std::env::var("CODEX_HOME").ok();
-        unsafe { std::env::set_var("CODEX_HOME", &codex_home) };
+        env.set("CAS_ROOT", &cas_root);
+        env.set("CODEX_HOME", &codex_home);
 
         let agent_store = crate::store::open_agent_store(&cas_root).unwrap();
         let mut agent =
@@ -5175,12 +5175,6 @@ mod inbox_poll_identity_tests {
 
         enrich_report_from_harness_artifact(&cas_root, &mut report);
 
-        unsafe {
-            match old_codex_home {
-                Some(value) => std::env::set_var("CODEX_HOME", value),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
-        }
         assert_eq!(report.wake, ObservationStatus::Observed);
         assert_eq!(report.reaction, ObservationStatus::Observed);
         assert!(report.wake_evidence.as_deref().is_some_and(|evidence| {

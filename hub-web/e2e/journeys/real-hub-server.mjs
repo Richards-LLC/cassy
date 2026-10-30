@@ -243,10 +243,11 @@ def reply(message):
  payload=json.dumps(dict(schema_version=2,reply_to=None,message=message,summary=message,device_id='*',kind='status',attachments=[]))
  subprocess.run([${JSON.stringify(cli)},'--json','factory','message','--session',os.environ['CAS_FACTORY_SESSION'],'--project-dir',os.getcwd(),'--target','operator','--from','supervisor','--no-wrap','--message',payload],stdout=subprocess.DEVNULL,check=True)
  hook('Stop')
- print('> ',flush=True)
-print('Claude Code disposable test supervisor\\n> ',flush=True)
+ print('❯ ',flush=True)
+print('Claude Code disposable test supervisor\\n❯ ',flush=True)
 started=False
 for line in sys.stdin:
+ if '/exit' in line: sys.exit(0)
  if not started:
   reply('Supervisor ready');started=True
  if 'ping launch supervisor' in line: reply('Launch supervisor answered')

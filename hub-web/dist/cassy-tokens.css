@@ -2,7 +2,7 @@
  * Source: docs/design/design-tokens.json -> hub-web/src/tokens.css + hub-web/src/glass.css (token blocks only).
  * Scheme: light by default, dark under prefers-color-scheme: dark; html[data-scheme="light"|"dark"] forces one.
  * Sync and check: node hub-web/scripts/sync-cassy-tokens.mjs (cassy hub-web/DESIGN.md "Shared tokens").
- * cassy-tokens-sha256: 35ea13a0f663b81f46da7655c694869c7f043c6f780985e756f2c31c62de89e2
+ * cassy-tokens-sha256: 58af54024354b52c8203841ceeea6bf22809e2a592d1d5130beaf9d395c413f2
  */
 /* House roles (src/tokens.css) */
 :root {
@@ -493,6 +493,21 @@ html[data-scheme="dark"] {
   --glass-radius: 22px;
   --glass-inset: 8px;
   --look-blur: blur(16px) saturate(160%);
+  --radius-inline: 4px;
+  --radius-control: 12px;
+  --radius-surface: 16px;
+  --radius-sheet: 24px;
+  --radius-card: 12px;
+  --radius-pane: 16px;
+  --card-padding: 12px;
+  --card-gap: 8px;
+  --pill-status-height: 24px;
+  --pill-action-height: 32px;
+  --avatar-size: 42px;
+  --avatar-mark: 24px;
+  --avatar-lane-size: 32px;
+  --avatar-lane-mark: 18px;
+  --status-dot: 10px;
 }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root, html[data-scheme] {

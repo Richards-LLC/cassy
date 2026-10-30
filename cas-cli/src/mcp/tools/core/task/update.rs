@@ -3106,6 +3106,25 @@ mod status_transition_tests {
 
     #[tokio::test]
     async fn task_update_rejects_terminal_status_changes_and_reopen_clears_factory_branch_anchor() {
+        use futures::FutureExt;
+
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set("CAS_AGENT_ROLE", "worker");
+        for unwind in [false, true] {
+            let result = std::panic::AssertUnwindSafe(task_update_reopen_fixture(unwind))
+                .catch_unwind()
+                .await;
+            assert_eq!(result.is_err(), unwind);
+            let _lock = crate::test_env_guard::test_env_lock();
+            assert_eq!(
+                std::env::var("CAS_AGENT_ROLE").as_deref(),
+                Ok("worker"),
+                "the actual update/reopen fixture must restore its caller's role (unwind={unwind})"
+            );
+        }
+    }
+
+    async fn task_update_reopen_fixture(unwind: bool) {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-q", "-b", "main"]);
@@ -3124,6 +3143,8 @@ mod status_transition_tests {
 
         let cas_dir = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        assert_eq!(crate::store::find_cas_root_from(repo).unwrap(), cas_dir);
         let core = CasCore::with_daemon(cas_dir, None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
@@ -3158,17 +3179,15 @@ mod status_transition_tests {
 
         // The attributed supervisor-only reopen path remains the sanctioned
         // way to start a fresh close cycle.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        env.set("CAS_AGENT_ROLE", "supervisor");
         core.cas_task_reopen(Parameters(TaskReopenRequest {
             id: "cas-anchor".into(),
             reason: Some("delivery needs a fresh review cycle".into()),
         }))
         .await
         .unwrap();
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
+        if unwind {
+            panic!("exercise fixture restoration after the real reopen");
         }
 
         let updated = store.get("cas-anchor").unwrap();

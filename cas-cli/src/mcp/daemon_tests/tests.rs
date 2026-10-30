@@ -221,6 +221,22 @@ fn test_daemon_config_conversion() {
 }
 
 #[test]
+fn supervisor_registration_records_own_model_and_effort() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_SUPERVISOR_MODEL", Some("claude-opus-5-5")),
+        ("CAS_FACTORY_SUPERVISOR_EFFORT", Some("high")),
+        ("CAS_FACTORY_WORKER_MODEL", Some("gpt-6.1-sol")),
+        ("CAS_FACTORY_WORKER_EFFORT", Some("xhigh")),
+    ]);
+    let mut agent = Agent::new_with_role("lead".into(), "lead".into(), AgentRole::Supervisor);
+    apply_factory_worker_metadata(&mut agent, None);
+    assert_eq!(agent.metadata.get("supervisor_model").map(String::as_str), Some("claude-opus-5-5"));
+    assert_eq!(agent.metadata.get("supervisor_effort").map(String::as_str), Some("high"));
+    assert!(!agent.metadata.contains_key("worker_model"));
+}
+
+#[test]
 fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
     let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),

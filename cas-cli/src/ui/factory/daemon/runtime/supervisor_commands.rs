@@ -15,6 +15,8 @@ struct Record {
     started: Instant,
     at: DateTime<Utc>,
     before: String,
+    // Keep the pre-command history when chooser navigation replaces `before`.
+    before_command: String,
     write: Box<dyn Fn() -> Option<Result<(), String>> + Send>,
     hook: Option<tokio::task::JoinHandle<Option<String>>>,
     last_key: Option<Key>,
@@ -55,12 +57,35 @@ fn native_observation(command: Command, before: &str, current: &str) -> Option<(
                 Some(("Codex returned to its fresh native welcome prompt after Clear.".into(), false)),
         Command::Model if fresh("select model") || fresh("select a model")
             || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
-        Command::Model if fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
+        Command::Model if codex_model_selection(before, current).is_some() || fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
         Command::Usage if fresh("current session") && (lower.contains("current week") || lower.contains("resets"))
             || command == Command::Usage && fresh("context window") && lower.contains("model:") =>
                 Some(("Usage displayed by the supervisor's harness.".into(), !idle_prompt(current))),
         _ => None,
     }
+}
+
+/// Codex's native info cell, emitted after the model selection succeeds.
+/// Source: openai/codex codex-rs/tui/src/app/event_dispatch.rs.
+fn codex_model_selection(before: &str, current: &str) -> Option<(String, Option<String>)> {
+    current.lines().filter(|line| !before.lines().any(|old| old == *line)).find_map(|line| {
+        let line = line.trim().strip_prefix("• ")?;
+        let selected = line.strip_prefix("Model changed to ")?;
+        let selected = selected.strip_suffix(" for this conversation").unwrap_or(selected);
+        let mut words = selected.split_whitespace();
+        let model = words.next()?;
+        if !model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':')) { return None; }
+        let effort = words.next().filter(|level| matches!(*level, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"));
+        if words.next().is_some() { return None; }
+        Some((model.to_owned(), effort.map(str::to_owned)))
+    })
+}
+
+fn record_supervisor_model(root: &std::path::Path, session: &str, supervisor: &str, model: &str, effort: Option<&str>) {
+    let Some(agent) = crate::store::open_agent_store(root).ok().and_then(|store| store.list(None).ok())
+        .and_then(|agents| agents.into_iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor
+            && agent.name == supervisor && agent.factory_session.as_deref() == Some(session)).max_by_key(|agent| agent.registered_at)) else { return };
+    crate::agent_model::record(root, &agent.id, Some(model), effort);
 }
 
 /// A recorded request alone is still only submission. Observe its own native
@@ -164,7 +189,7 @@ impl FactoryDaemon {
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before, write: Box::new(move || write.result()), hook: None, last_key: None });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         let record = self.supervisor_commands.records.get_mut(&owner).ok_or_else(|| anyhow::anyhow!("The original command receipt is unavailable. Do not resend an uncertain command."))?;
@@ -208,6 +233,18 @@ impl FactoryDaemon {
                 record.receipt.detail = format!("Command write failed; execution is uncertain: {error}. Do not resend automatically.");
             } else if let Some((detail, interactive)) = native_observation(record.receipt.command,
                 if matches!(record.last_key, Some(Key::Next | Key::Previous | Key::Select)) && current != record.before { "" } else { &record.before }, &current) {
+                if record.receipt.command == Command::Model && !interactive && record.last_key == Some(Key::Select)
+                    && pane.harness() == cas_mux::SupervisorCli::Codex
+                {
+                    let Some((model, effort)) = codex_model_selection(&record.before_command, &current) else {
+                        record.receipt.phase = Phase::Unconfirmed;
+                        record.receipt.detail = "No fresh model selection was confirmed by the harness.".into();
+                        record.receipt.interactive = false;
+                        record.receipt.output = super::work_events::redact(&current).chars().take(8 * 1024).collect();
+                        return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
+                    };
+                    record_supervisor_model(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &model, effort.as_deref());
+                }
                 record.receipt.phase = Phase::Observed;
                 record.receipt.detail = detail;
                 record.receipt.interactive = interactive;
@@ -287,8 +324,36 @@ mod tests {
         assert!(finish_observation(cas_dir, "another-session", &name, cas_mux::SupervisorCli::Claude, at).is_none());
         let (root, mut codex) = super::super::supervisor_single_turn_tests::fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = codex.app.supervisor_name().to_owned();
-        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H› Ask Codex to do anything".as_bytes()).unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.metadata.insert("supervisor_model".into(), "old-model".into());
+        store.update(&agent).unwrap();
+        codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-select".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while codex.app.mux.pane_inject_busy(&name) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\ngpt-6.1-sol").unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
+        assert_eq!(store.get("single-sup").unwrap().metadata.get("supervisor_model").map(String::as_str), Some("old-model"));
+        codex.dispatch_supervisor_command(Request::Step { key: Key::Select }, "cmd-select".into(), owner.clone()).await.unwrap();
+        // The old chat history reappears after a failed save. It is not a new selection.
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n• Failed to save default model: denied\r\n›".as_bytes()).unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select".into(), owner.clone()).await.unwrap();
+        assert!(!store.get("single-sup").unwrap().metadata.contains_key("supervisor_effort"), "resurfaced history cannot invent a fresh observation");
+        codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while codex.app.mux.pane_inject_busy(&name) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\ngpt-6.1-sol").unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        codex.dispatch_supervisor_command(Request::Step { key: Key::Select }, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H• Model changed to gpt-6.1-sol xhigh for this conversation\r\n›".as_bytes()).unwrap();
+        codex.dispatch_supervisor_command(Request::Status, "cmd-select-2".into(), owner.clone()).await.unwrap();
+        let observed = store.get("single-sup").unwrap();
+        assert_eq!(observed.metadata.get("supervisor_model").map(String::as_str), Some("gpt-6.1-sol"));
+        assert_eq!(observed.metadata.get("supervisor_effort").map(String::as_str), Some("xhigh"));
         codex.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "cmd-finish".into(), owner).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
@@ -324,6 +389,11 @@ mod tests {
         assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet").is_none());
         let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯").unwrap();
         assert!(!confirmed.1);
+        assert_eq!(codex_model_selection("Select model", "• Model changed to gpt-6.1-sol xhigh for this conversation\n›"), Some(("gpt-6.1-sol".into(), Some("xhigh".into()))));
+        for text in ["Select model\ngpt-6.1-sol", "› /model gpt-6.1-sol", "Model changed to gpt-6.1-sol xhigh", "• Failed to save default model: error"] {
+            assert!(codex_model_selection("", text).is_none(), "{text}");
+        }
+        assert!(codex_model_selection("• Model changed to gpt-6.1-sol high", "• Model changed to gpt-6.1-sol high\n›").is_none());
     }
     #[tokio::test(flavor = "current_thread")]
     async fn native_clear_is_observed_when_codex_returns_to_its_welcome_prompt() {

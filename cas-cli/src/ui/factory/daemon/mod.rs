@@ -143,6 +143,7 @@ enum PendingSpawn {
         request_id: i64,
         name: String,
         spec: Option<cas_mux::WorkerSpec>,
+        stopped: bool,
     },
     /// Spawn a shell pane
     Shell { name: String, shell: Option<String> },

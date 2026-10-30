@@ -41,6 +41,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    CI owns fast-row proof; local receipts are pre-push feedback. Park reads
    exact-tip capped test receipts, never runs checks.
    Add milestones with `task action=notes note_type=progress`.
+   Changes to shipped Rust, `hub-web/src`, user-run scripts or builtin skills
+   need a titled `CHANGELOG.md` Unreleased entry
+   ([close-gate.md](references/close-gate.md#changelog-at-park)).
 4. Scaffold with `cas qa ledger init --task <id>`; run
    `cas qa ledger check <path> --task <id>` before close. Follow
    [verify-before-claim](../verify-before-claim/SKILL.md) and

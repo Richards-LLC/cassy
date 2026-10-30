@@ -29,6 +29,25 @@
   --glass-radius: 22px;
   --glass-inset: 8px;
   --look-blur: blur(16px) saturate(160%); /* 26px measurably slowed timing-sensitive journeys (HUB-J5) */
+  /* Shape (DESIGN.md "Shapes"): Glass has no square-cornered rectangles.
+     Every bounded thing takes one step of this scale; the house 4px/8px
+     corners are re-shaped here so existing consumers inherit it. */
+  --radius-inline: 4px;    /* inline code, key hints, focus-outline rounding */
+  --radius-control: 12px;  /* fields, menu items, rows and wells nested in a card */
+  --radius-surface: 16px;  /* cards, list rows, search, code frames */
+  --radius-sheet: 24px;    /* dialogs and sheets */
+  --radius-card: 12px;     /* house alias of --radius-control */
+  --radius-pane: 16px;     /* house alias of --radius-surface */
+  /* Cards, pills and avatars (DESIGN.md "Components"). */
+  --card-padding: 12px;
+  --card-gap: 8px;
+  --pill-status-height: 24px;
+  --pill-action-height: 32px;
+  --avatar-size: 42px;
+  --avatar-mark: 24px;
+  --avatar-lane-size: 32px;
+  --avatar-lane-mark: 18px;
+  --status-dot: 10px;
 }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root, html[data-scheme] { --conversation-rail-width: 374px; }
@@ -486,3 +505,63 @@ html[data-scheme="dark"] {
 @media (forced-colors: none) and (prefers-contrast: more) {
   :root .thread .turn.you .bub:not(:is([data-state="error"], [data-state="unconfirmed"])) { background: var(--you-bubble-bg); box-shadow: none; }
 }
+
+/* ------------------------------------------------- shared components
+   DESIGN.md "Cards and rows", "Pills" and "Avatars": one card, three pill
+   kinds and the provider-mark avatar, written once so the worker cards,
+   Team lanes, project cards, Needs you and machine chips inherit them. */
+
+/* Card: raised fill, surface corners, a hairline edge, spacing not outlines. */
+:root .status-row,
+:root .team-lane,
+:root .conversation-group.project-card { border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-surface); background: var(--bg-raised); }
+:root .status-row { gap: var(--card-gap); margin-block-start: var(--card-gap); padding: var(--card-padding); }
+:root .team-lane { grid-template-columns: auto minmax(0, 1fr) auto; margin-block-end: var(--card-gap); padding: var(--card-padding); }
+:root .team-lane > :not(.provider-avatar, .team-identity, .team-state) { grid-column: 2 / -1; }
+:root .needs-you-section { border-radius: var(--radius-surface); }
+/* Rows nested in a card are one step smaller. */
+:root :is(.project-card-toggle, .needs-you-shortcut) { border-radius: var(--radius-control); }
+
+/* Status pill: a fact, never a button. */
+:root .status-chip { min-height: var(--pill-status-height); border: 0; }
+/* Action pill in a card header: a 32px face; touch reaches 44px by padding. */
+:root .status-timeline { position: relative; min-height: var(--pill-action-height); min-width: 0; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+:root .status-timeline:hover { background: var(--bg-hover); }
+:root .status-timeline::after { content: ""; position: absolute; inset: calc((var(--pill-action-height) - var(--rail-item-min)) / 2) 0; }
+
+/* Machine chip: a pill — dot, name, quiet mono runtime. */
+:root .project-machine-chip { border-radius: var(--radius-pill); border-color: var(--line-subtle); background: var(--bg-raised); color: var(--ink); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2); }
+
+/* Avatar: the provider's mark on a disc, or two letters; the dot rides its edge. */
+:root .provider-avatar { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: var(--avatar-size); height: var(--avatar-size); border-radius: var(--radius-pill); }
+:root .provider-avatar.harness-mark { background: var(--bg-panel); color: var(--ink); border: var(--line-width) solid var(--line-subtle); box-sizing: border-box; }
+:root .provider-mark { width: var(--avatar-mark); height: var(--avatar-mark); }
+:root .provider-letters { font: var(--weight-semibold) var(--fs-meta)/1 var(--font-ui); letter-spacing: 0; }
+:root .provider-avatar--lane { width: var(--avatar-lane-size); height: var(--avatar-lane-size); }
+:root .provider-avatar--lane .provider-mark { width: var(--avatar-lane-mark); height: var(--avatar-lane-mark); }
+:root .provider-avatar .supervisor-state { right: -1px; bottom: -1px; width: var(--status-dot); height: var(--status-dot); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  :root .conversation-identity .provider-avatar { width: 36px; height: 36px; }
+}
+@media (prefers-contrast: more), (forced-colors: active) {
+  :root .status-row, :root .team-lane, :root .conversation-group.project-card, :root .project-machine-chip { border-color: var(--line-strong); }
+}
+/* Conversation header line 2: the harness (model, once cas-2dcc reports it) leads in UI type. */
+:root .conversation-identity .conversation-model { flex: none; margin-inline-end: var(--space-2); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1.25 var(--font-ui); }
+:root .conversation-identity .conversation-host { position: relative; min-width: 0; }
+/* Phone header (one avatar row): the provider mark carries the model's maker
+   and the model label stays spoken; machine and codename keep the line. */
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  :root .conversation-identity .conversation-host > .conversation-model { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; margin: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
+}
+/* Conversation header on one row (operator, 2026-10-29): identity left, actions right.
+   Line 2 (model, machine, session) is one typeface. */
+:root .conversation-identity .conversation-host { font-family: var(--font-ui); }
+@media not ((max-width: 53rem) or ((max-height: 30rem) and (pointer: coarse))) {
+  :root .conversation-heading { flex-direction: row-reverse; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); }
+  /* Too narrow for both (the rail open on a small desktop): the actions keep their row above. */
+  :root .conversation-heading > .conversation-identity { flex: 1 1 20rem; min-width: 0; }
+  :root .conversation-heading > .conversation-topline { flex: none; }
+}
+/* Machine chip runtime: a version number is mono; "Version unknown" is evidence in UI type. */
+:root .project-machine-chip .machine-version-installed.unknown { font-family: var(--font-ui); font-variant-numeric: normal; }

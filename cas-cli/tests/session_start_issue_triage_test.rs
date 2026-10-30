@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
+use crate::test_env_guard;
 
 /// Build a `cas` invocation that cannot see this machine's factory session.
 ///

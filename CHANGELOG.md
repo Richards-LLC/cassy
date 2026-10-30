@@ -13,6 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   journey guidance points to the finalization trace step to monitor the
   remaining encoder drain during four-worker release runs.
 
+### Fixed — Recycled worker shutdown
+
+- **Completed replacements stop retaining shutdown mail** — Registration retries a failed lifecycle write, so a later shutdown can cancel unread mail and retire its alarms. Dead-pane recycle failures now use the same stale fallback and visible deferred-retirement warning as live panes. Alarm scans query replacement intent only for shut-down recipients, once per recipient.
+
 ### Fixed — Portable QA guidance
 
 - **QA examples work outside the Cassy repository** — The generic evidence

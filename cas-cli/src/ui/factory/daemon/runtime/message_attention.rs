@@ -68,13 +68,22 @@ impl AttentionInputs {
         let mut transcript_cache = HashMap::new();
         let mut merge_cache = HashMap::<String, bool>::new();
         let mut decisions = HashMap::new();
-        let spawns = open_spawn_queue_store(&self.cas_dir).ok();
+        // Only shutdown evidence needs a durable replacement lookup. Cache by
+        // recipient, preserving pending intent when the store is unreadable.
+        let spawns = std::cell::OnceCell::new();
+        let mut replacement_cache = HashMap::new();
+        let mut replacement_pending = |target: &str| {
+            self.replacement_workers.contains(target)
+                || *replacement_cache.entry(target.to_owned()).or_insert_with(|| {
+                    spawns.get_or_init(|| open_spawn_queue_store(&self.cas_dir).ok())
+                        .as_ref().and_then(|store|
+                            store.has_pending_spawn(target, Some(&self.session_name)).ok())
+                        .unwrap_or(true)
+                })
+        };
         for row in rows {
-            let replacement_pending = self.replacement_workers.contains(&row.target)
-                || spawns.as_ref().and_then(|store|
-                    store.has_pending_spawn(&row.target, Some(&self.session_name)).ok()).unwrap_or(true);
             if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents, &self.replacement_workers)
-                && !replacement_pending
+                && !replacement_pending(&row.target)
             {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
@@ -139,7 +148,7 @@ impl AttentionInputs {
                 continue;
             };
             if recipient.status == cas_types::AgentStatus::Shutdown {
-                decisions.insert(row.id, if replacement_pending {
+                decisions.insert(row.id, if replacement_pending(&row.target) {
                     MessageAttention::Needed
                 } else {
                     MessageAttention::Satisfied

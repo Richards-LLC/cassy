@@ -2406,6 +2406,35 @@ pub(crate) fn release_preassign_if_bound(
     }
 }
 
+/// Use the same bounded retirement and visible retry fallback whether or not
+/// the worker still has a pane. Recycle must not silently retain an active row.
+fn retire_worker_identities(
+    cas_dir: &std::path::Path,
+    agent_store: &dyn cas_store::AgentStore,
+    name: &str,
+    agents: &[&cas_types::Agent],
+) -> Option<String> {
+    let mut failures = Vec::new();
+    for agent in agents {
+        if let Err(error) = agent_store.graceful_shutdown(&agent.id) {
+            let fallback = agent_store.mark_stale(&agent.id);
+            failures.push(format!(
+                "{}: {error} (fallback: {})",
+                agent.id,
+                match fallback {
+                    Ok(()) => "marked stale".to_string(),
+                    Err(mark_error) => format!("failed: {mark_error}"),
+                }
+            ));
+            defer_worker_retirement(cas_dir, &agent.id, &error.to_string());
+        }
+    }
+    (!failures.is_empty()).then(|| format!(
+        "Worker '{name}' is being stopped, but retiring its Cassy identity is deferred until the store frees up: {}",
+        failures.join("; ")
+    ))
+}
+
 /// Retire a stopped worker's identity on the daemon's store worker, which
 /// retries without the loop's wait budget (cas-00d5). `graceful_shutdown` is
 /// idempotent, so a retry after a partial failure is safe.
@@ -3277,10 +3306,9 @@ impl FactoryApp {
                     // task bindings and unread mail belong to the replacement.
                     let group: Vec<_> = matching.iter().map(|agent| (**agent).clone()).collect();
                     let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(self.cas_dir(), &group);
-                    for agent in matching {
-                        if let Err(error) = agent_store.graceful_shutdown(&agent.id) {
-                            defer_worker_retirement(self.cas_dir(), &agent.id, &error.to_string());
-                        }
+                    if let Some(detail) = retire_worker_identities(self.cas_dir(), agent_store.as_ref(), name, &matching) {
+                        tracing::warn!(worker = name, "{detail}");
+                        self.set_error(detail);
                     }
                     self.queue_workers_cleanup(&agent_store, group, tasks, false);
                     self.last_db_fingerprint = None;
@@ -3372,29 +3400,7 @@ impl FactoryApp {
         // allowed nested headless Claude calls to register child session IDs
         // under the parent worker name; shutting down only `.find()` left the
         // remaining rows fresh/Active after the pane and worktree were gone.
-        let mut retirement_failures = Vec::new();
-        for matching in &matching_agents {
-            if let Err(error) = agent_store.graceful_shutdown(&matching.id) {
-                let fallback = agent_store.mark_stale(&matching.id);
-                retirement_failures.push(format!(
-                    "{}: {error} (fallback: {})",
-                    matching.id,
-                    match fallback {
-                        Ok(()) => "marked stale".to_string(),
-                        Err(mark_error) => format!("failed: {mark_error}"),
-                    }
-                ));
-                // cas-00d5: a busy store must never keep the worker alive.
-                // The process is stopped below; its retirement lands on the
-                // store worker, which waits out the contention.
-                defer_worker_retirement(&cas_dir, &matching.id, &error.to_string());
-            }
-        }
-        if !retirement_failures.is_empty() {
-            let detail = format!(
-                "Worker '{name}' is being stopped, but retiring its Cassy identity is deferred until the store frees up: {}",
-                retirement_failures.join("; ")
-            );
+        if let Some(detail) = retire_worker_identities(&cas_dir, agent_store.as_ref(), name, &matching_agents) {
             tracing::warn!(worker = name, "{detail}");
             self.set_error(detail);
         }
@@ -6767,6 +6773,48 @@ mod tests {
     use super::*;
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn dead_pane_recycle_reports_and_retries_retirement_failure_cas_f501() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        for busy in [true, false] {
+            let project = env.home().join(if busy { "busy" } else { "shutdown-failure" });
+            std::fs::create_dir_all(&project).unwrap();
+            let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let mut agent = cas_types::Agent::new_with_role("old-id".into(), "dead-worker".into(), cas_types::AgentRole::Worker);
+            agent.pid = Some(i32::MAX as u32);
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
+            agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
+            agents.register(&agent).unwrap();
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            if busy {
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            } else {
+                conn.execute_batch("CREATE TRIGGER fail_retirement BEFORE UPDATE OF status ON agents
+                    WHEN NEW.status = 'shutdown'
+                    BEGIN SELECT RAISE(ABORT, 'injected retirement failure'); END;").unwrap();
+            }
+            let mut app = FactoryApp::for_test_at(cas_dir.clone());
+            let result = {
+                let _budget = cas_store::wait_budget::bound_waits_for(std::time::Duration::from_millis(1));
+                app.shutdown_worker_for_recycle("dead-worker").await
+            };
+            let status_before_retry: String = conn.query_row("SELECT status FROM agents WHERE id = ?", [&agent.id], |row| row.get(0)).unwrap();
+            conn.execute_batch(if busy { "ROLLBACK" } else { "DROP TRIGGER fail_retirement" }).unwrap();
+            let (done, receive) = std::sync::mpsc::channel();
+            crate::ui::factory::daemon::runtime::store_worker::global().submit("retirement retry sentinel", move || { done.send(()).unwrap(); });
+            receive.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            app.join_worker_worktree_cleanups();
+            result.unwrap();
+            assert!(app.error_message.as_deref().is_some_and(|error| error.contains("old-id") && error.contains("deferred")),
+                "retirement failure must be surfaced even without a pane: {:?}", app.error_message);
+            if !busy {
+                assert_eq!(status_before_retry, "stale", "failed shutdown falls back to stale");
+            }
+            assert_eq!(agents.get(&agent.id).unwrap().status, cas_types::AgentStatus::Shutdown);
+        }
+    }
 
     #[test]
     fn exit_joins_held_cleanup_before_releasing_name_cas_af63() {

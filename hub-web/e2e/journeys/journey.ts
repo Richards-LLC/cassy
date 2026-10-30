@@ -7,7 +7,7 @@
 // scripts/journey-eval.sh keeps one passing trace per bundle for qa_evidence,
 // keeps failed or incomplete diagnostics, and writes bundle.json (producer
 // "journey"). Redundant passing traces are discarded.
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, errors, expect, type Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -270,10 +270,14 @@ export async function settle(page: Page): Promise<void> {
   // app's RAF callbacks. The first predicate runs immediately, then two paint
   // opportunities follow. Keep the old 250ms budget on the native operation:
   // a host Promise.race did not bound the finish/drain evaluations in finally.
-  // Missing native frames now fail capture instead of leaving cleanup waiting
-  // on the same renderer that could not finish painting (cas-fc03).
+  // A busy renderer can use that budget without producing another frame.
+  // Capture what is painted then; no cleanup evaluation may wait on it.
+  // Closure/navigation and other errors still fail the journey (cas-fc03).
   const painted = await page.waitForFunction((state) => ++state.frames === 3,
-    { frames: 0 }, { polling: "raf", timeout: 250 });
+    { frames: 0 }, { polling: "raf", timeout: 250 }).catch((error: unknown) => {
+      if (!(error instanceof errors.TimeoutError)) throw error;
+    });
+  if (!painted) return;
   await painted.dispose();
 }
 

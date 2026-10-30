@@ -1420,6 +1420,17 @@ describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
       expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
       await expect(supervisor.request("GET", "/v1/machine")).resolves.toEqual({ schema_version: 1 });
       expect(fetchMock.mock.calls.map(([, init]) => claims(init).iat)).toEqual([now, now]);
+      fetchMock.mockImplementation(async (input) => new URL(String(input)).pathname === "/v1/health"
+        ? reply(200, { status: "ok" })
+        : reply(401, { reason: "stale_proof", retryable: true, server_time: now + offset }));
+      supervisor.start();
+      try {
+        await vi.waitFor(() => expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({
+          phase: "backoff", stage: "auth", cause: expect.objectContaining({ code: "clock_skew" }),
+        })));
+        expect(supervisor.snapshot().reason).toMatch(/clocks.*60 seconds/i);
+        expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+      } finally { supervisor.stop(); }
     } finally { clock.mockRestore(); }
   });
 

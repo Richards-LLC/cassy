@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Documentation — Release report recognition
+
+- **Malformed report coverage and tool formatting** — Was: unclosed front matter
+  lacked an upload regression, and the file-posting tool name lost its inline
+  formatting. Now: the existing upload test checks the focused-epic refusal,
+  and the tool name is formatted as code within the skill size limit.
+
 ### Fixed — Screencast guidance
 
 - **QA examples recommend 10 fps** — Lower frame rates reduce encoding work;

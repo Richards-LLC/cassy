@@ -1399,6 +1399,20 @@ printf '%s' '[{"number":85,"title":"Release v3.85.0","headRefName":"epic/release
     );
     result.expect("generated custom output retains the release identity");
     assert_eq!(seen.borrow().last().unwrap()["epic_id"], "cas-released");
+    // An unclosed front-matter block cannot confer the released epic's identity.
+    std::fs::write(custom_pdf.with_extension("md"), concat!(
+        "---\nversion: 3.85.0\n",
+        "# Project v3.85.0\n\n## Evidence and scope\n",
+    )).unwrap();
+    let malformed_hub = ScriptedHub::default();
+    let (_, result) = run_cli_at(
+        &["post", "--channel", "cas-internal", "--file", custom_pdf.to_str().unwrap()],
+        &malformed_hub, false, &gate, None, Some(&root),
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "publication_blocked");
+    assert!(error.message.contains("cas-focused"), "{error:?}");
+    assert_eq!(malformed_hub.connects(), 0);
     // The released epic's own pending verification remains a hard gate.
     let mut released = store.get("cas-released").unwrap();
     released.pending_verification = true;

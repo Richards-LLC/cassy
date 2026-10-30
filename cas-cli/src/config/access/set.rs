@@ -1182,6 +1182,15 @@ impl Config {
                 self.secrets.get_or_insert_with(SecretsConfig::default).destination =
                     (!value.is_empty()).then(|| value.to_string());
             }
+            "secrets.auto_delete" => {
+                let value = value.trim();
+                let Some(policy) = crate::hub::secret_auto_delete::AutoDelete::parse(value) else {
+                    return Err(MemError::Parse(
+                        "secrets.auto_delete must be off, after_use, or a time from 1m to 30d such as 1h".into(),
+                    ));
+                };
+                self.secrets.get_or_insert_with(SecretsConfig::default).auto_delete = policy.label();
+            }
             // Issues section
             "issues.repo" => {
                 let issues = self.issues.get_or_insert_with(IssuesConfig::default);

@@ -168,6 +168,10 @@ pub struct SecretsConfig {
     /// `<project>` to the project folder's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
+    /// When a saved secret is deleted unless the card chooses otherwise:
+    /// `off` (default), `after_use`, or a time such as `1h` (cas-2f55).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delete: Option<String>,
 }
 
 /// The built-in `secrets.destination`.

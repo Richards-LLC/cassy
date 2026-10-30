@@ -1038,7 +1038,13 @@ mod tests {
 
         let (fresh, pending) = prepare_login_profile(&home, "fresh@x.com").unwrap();
         assert!(pending.is_some());
-        assert!(!home.join(".claude-fresh@x.com").exists());
+        let final_alias = home.join(".claude-fresh@x.com");
+        if cfg!(target_os = "macos") {
+            // Claude's Keychain service is bound to this final path on macOS.
+            assert_eq!(fresh, final_alias);
+        } else {
+            assert!(!final_alias.exists());
+        }
         assert_eq!(
             std::fs::read_link(fresh.join("skills")).unwrap(),
             home.join(".claude/skills")

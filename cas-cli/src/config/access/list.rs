@@ -527,6 +527,10 @@ impl Config {
                 "secrets.destination".to_string(),
                 self.get("secrets.destination").unwrap_or_default(),
             ),
+            (
+                "secrets.auto_delete".to_string(),
+                self.get("secrets.auto_delete").unwrap_or_default(),
+            ),
             // History section
             (
                 "history.github_repo".to_string(),

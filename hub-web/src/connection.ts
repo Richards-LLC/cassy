@@ -923,7 +923,7 @@ export class HubConnectionSupervisor {
    * hub writes the value to a private file on its machine and replies to the
    * supervisor with the path; the value never travels as a message.
    */
-  async answerSecret(session: string, notificationId: number, answer: { value: string } | { decline: true }): Promise<{ name?: string; path?: string; saved?: boolean; declined?: boolean }> {
+  async answerSecret(session: string, notificationId: number, answer: { value: string; auto_delete?: string } | { decline: true }): Promise<{ name?: string; path?: string; saved?: boolean; declined?: boolean; auto_delete?: string | null }> {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/secrets/${notificationId}`, answer);
   }
 

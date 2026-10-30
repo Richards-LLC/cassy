@@ -2226,6 +2226,9 @@ dialog form > *,
 .obj.t-a.secret .secret-value { flex: 1 1 100%; min-width: 0; padding: 8px 14px; border: 1px solid var(--tray-chip-line); border-radius: 999px; background: var(--panel); color: var(--ink); font: var(--weight-regular) 15px/1.4 var(--font-mono); }
 .obj.t-a.secret .secret-value:focus-visible { outline: 2px solid var(--tray-focus); outline-offset: 1px; }
 .obj.t-a.secret .secret-save { font-weight: var(--weight-semibold); }
+/* cas-2f55: the deletion choice is one more chip-shaped control in the tray. */
+.obj.t-a.secret .secret-auto-delete { min-width: 0; max-width: 100%; min-height: var(--button-height); padding: 0 14px; border: 1px solid var(--tray-chip-line); border-radius: 999px; background: var(--panel); color: var(--ink); font: var(--weight-medium) 13.5px/1.3 var(--font-ui); }
+.obj.t-a.secret .secret-auto-delete:focus-visible { outline: 2px solid var(--tray-focus); outline-offset: 1px; }
 .obj.t-a.secret .secret-status:empty { display: none; }
 .obj.t-a.secret .secret-status { flex: 1 1 100%; font: var(--weight-medium) 12.5px/1.3 var(--font-ui); }
 .obj.t-a.secret .secret-scope { font-size: 13px; opacity: 0.85; }

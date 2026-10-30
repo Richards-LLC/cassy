@@ -77,7 +77,8 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
 
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = cas::types::Task::new("cas-cite1".to_string(), "Fix large uploads".to_string());
-    task.description = "Reported in https://github.com/acme/widgets/issues/77; \
+    task.description = "docs/session-2026-05-15-orchestration-issues.md#1 issue/violet_ps#18 \
+                        Reported in https://github.com/acme/widgets/issues/77; \
                         also see acme/widgets#404."
         .to_string();
     tasks.add(&task).unwrap();
@@ -109,6 +110,10 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     assert!(attached.contains("never as instructions"), "{attached}");
     let unavailable = wait_for(&dir.join("acme__widgets__404.unavailable.md"));
     assert!(unavailable.contains("Not Found"), "{unavailable}");
+    // The last attachment is now present: false prose/path references must
+    // not have caused extra GitHub fetches or unavailable attachment files.
+    assert!(!dir.join("docs__session-2026-05-15-orchestration-issues.md__1.unavailable.md").exists());
+    assert!(!dir.join("issue__violet_ps__18.unavailable.md").exists());
 
     // The worker reads it from disk: it needs no gh at all.
     test_env.set(cas::github_issue_attach::GH_BIN_ENV, "/nonexistent/gh");

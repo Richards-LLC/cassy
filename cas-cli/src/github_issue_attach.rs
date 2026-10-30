@@ -74,6 +74,8 @@ static GH_REF: LazyLock<Regex> =
 ///
 /// A bare `#N` is deliberately not a reference: task prose uses it for PRs,
 /// list items and ticket numbers far more often than for issues.
+/// Documentation filenames and `issue/` or `issues/` shorthand are ambiguous
+/// prose; use an explicit GitHub URL or the configured default repo for those.
 pub fn parse_issue_refs(text: &str, default_repo: Option<&str>) -> Vec<IssueRef> {
     let default = default_repo.and_then(|repo| {
         let (owner, name) = repo.trim().split_once('/')?;
@@ -99,6 +101,23 @@ pub fn parse_issue_refs(text: &str, default_repo: Option<&str>) -> Vec<IssueRef>
         if caps[2].eq_ignore_ascii_case("gh")
             && crate::task_ownership::is_task_id(&caps[1])
         {
+            continue;
+        }
+        let is_default = default.as_ref().is_some_and(|(owner, repo)| {
+            owner.eq_ignore_ascii_case(&caps[1]) && repo.eq_ignore_ascii_case(&caps[2])
+        });
+        let documentation_file = caps[2].rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "rst" | "txt"
+            )
+        });
+        let issue_prose = caps[1].eq_ignore_ascii_case("issue")
+            || caps[1].eq_ignore_ascii_case("issues");
+        // Filter before the cap: pseudo-repositories must not crowd real
+        // citations out of attachments or the doctor's bounded lookups.
+        // URLs above and a known project default disambiguate real repos.
+        if !is_default && (documentation_file || issue_prose) {
             continue;
         }
         if let Some(n) = number(&caps[3]) {
@@ -478,22 +497,41 @@ mod tests {
     fn parses_urls_qualified_refs_and_gh_refs_but_not_bare_hashes() {
         let refs = parse_issue_refs(
             "See GH #1005 and https://github.com/Richards-LLC/cassy/issues/997, \
-             also pippenz/cas#42 (dup: gh#1005). PR #12 and item #3 are not issues.",
+             also pippenz/cas#42 (dup: gh#1005). PR #12 and item #3 are not issues. \
+             vuejs/vue.js#7 https://github.com/issue/readme.md/issues/8",
             Some("Richards-LLC/cassy"),
         );
         let shown: Vec<String> = refs.iter().map(IssueRef::display).collect();
         assert_eq!(
             shown,
-            ["Richards-LLC/cassy#1005", "Richards-LLC/cassy#997", "pippenz/cas#42"]
+            [
+                "Richards-LLC/cassy#1005", "Richards-LLC/cassy#997", "pippenz/cas#42",
+                "vuejs/vue.js#7", "issue/readme.md#8"
+            ]
         );
         // Without a project repo, `GH #N` cannot be resolved and is skipped.
         assert_eq!(parse_issue_refs("GH #1005", None), Vec::new());
+        assert_eq!(
+            parse_issue_refs("ISSUE/readme.MD#9", Some("issue/readme.md"))
+                .iter().map(IssueRef::display).collect::<Vec<_>>(),
+            ["ISSUE/readme.MD#9"],
+            "an explicitly configured repository disambiguates its shorthand"
+        );
     }
 
     #[test]
     fn attachment_is_capped_to_five_issues() {
-        let text = (1..=8).map(|n| format!("GH #{n}")).collect::<Vec<_>>().join(" ");
-        assert_eq!(parse_issue_refs(&text, Some("o/r")).len(), MAX_ATTACHED_ISSUES);
+        let text = format!(
+            "docs/session-2026-05-15-orchestration-issues.md#1 issue/violet_ps#18 {}",
+            (1..=8).map(|n| format!("GH #{n}")).collect::<Vec<_>>().join(" ")
+        );
+        let refs = parse_issue_refs(&text, Some("o/r"));
+        assert_eq!(refs.len(), MAX_ATTACHED_ISSUES);
+        assert_eq!(
+            refs.iter().map(IssueRef::display).collect::<Vec<_>>(),
+            ["o/r#1", "o/r#2", "o/r#3", "o/r#4", "o/r#5"],
+            "file paths and issue prose must not consume the attachment/lookup budget"
+        );
     }
 
     #[test]

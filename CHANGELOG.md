@@ -40,6 +40,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   prompt. Now: EOF ends the prompt line before the notice; entered answers
   keep their spacing and the existing account stays intact.
 
+### Fixed — GitHub issue citation filtering
+
+- **Documentation anchors and issue prose keep lookup slots free** — Issue
+  citations skip documentation filenames and ambiguous `issue/` or `issues/`
+  shorthand before applying attachment and doctor lookup limits. Explicit GitHub
+  URLs and the configured project repository still resolve those names, and
+  dotted repository names such as `vue.js` remain valid shorthand.
+
 ### Fixed — Shared-file warnings
 
 - **Workers can add their own changelog entries without coordination** — Was:

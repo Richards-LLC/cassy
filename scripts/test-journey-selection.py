@@ -180,6 +180,13 @@ class SelectionTests(unittest.TestCase):
         for path in ['hub-web/package.json', 'hub-web/vite.config.ts', 'hub-web/tsconfig.json', 'hub-web/src/unmapped.ts']:
             self.assertEqual(self.ids(path, base=self.base), {'HUB-J1', 'HUB-J2', 'HUB-J3'})
 
+        # An unmapped renderer remains unknown even when it queries owned UI.
+        path = 'hub-web/src/orphan.ts'
+        self.write(path, 'export const panel = `<section class="new-panel"></section>`; document.querySelector(".reply-card");\n')
+        result = json.loads(self.run_selector('--paths', path, base=self.base).stdout)
+        self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
+        self.assertTrue(all(j['reason'] == f'surface-wide:unmapped-source:{path}' for j in result['journeys']))
+
     def test_explicit_head_ignores_working_tree_drift(self):
         self.write('hub-web/src/reply.ts', 'import "./leaf"; export const reply = true;')
         self.write('hub-web/src/leaf.ts', 'export const leaf = true;')

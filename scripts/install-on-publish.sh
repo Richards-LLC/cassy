@@ -84,7 +84,11 @@ install_agent() {
 EOF
     chmod 0644 "$plist"
     launchctl enable "$domain/$agent_label"
-    launchctl bootstrap "$domain" "$plist"
+    if ! launchctl bootstrap "$domain" "$plist"; then
+        # bootout can return while the previous job is still shutting down.
+        sleep 1
+        launchctl bootstrap "$domain" "$plist"
+    fi
     log "installed $agent_label LaunchAgent; logs: $state_dir/install-on-publish.log"
 }
 

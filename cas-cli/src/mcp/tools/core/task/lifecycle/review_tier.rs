@@ -55,6 +55,19 @@ fn changes_nothing_that_runs(path: &str) -> bool {
     }
     let mut directories = path.split('/').collect::<Vec<_>>();
     directories.pop();
+    // Markdown beside source can be compiled in, as the CLI's `*.brief.md` are.
+    if directories.contains(&"src") {
+        return false;
+    }
+    // These look like docs, but they ship or drive gates: the design and review
+    // directories are `include_str!`ed by product code, and the QA catalog decides
+    // which journeys a delivery owes. Only its bug families are records.
+    if path.starts_with("docs/design/")
+        || path.starts_with("docs/review/")
+        || (path.starts_with("docs/qa/") && !path.starts_with("docs/qa/bug-families/"))
+    {
+        return false;
+    }
     path.starts_with("docs/")
         || path.ends_with(".md")
         || path.starts_with("hub-web/e2e/")
@@ -146,7 +159,17 @@ mod tests {
     /// Markdown that instructs agents and ordinary source both get a verifier.
     #[test]
     fn product_source_and_agent_instructions_get_one_verifier() {
-        for path in ["cas-cli/src/lib.rs", "cas-cli/src/builtins/skills/cas-worker.md", "AGENTS.md", ".claude/agents/x.md"] {
+        for path in [
+            "cas-cli/src/lib.rs",
+            "cas-cli/src/builtins/skills/cas-worker.md",
+            "AGENTS.md",
+            ".claude/agents/x.md",
+            // Shaped like docs, but compiled in or read by a gate.
+            "cas-cli/src/cli/qa.brief.md",
+            "docs/design/design-tokens.json",
+            "docs/review/pr-body.md",
+            "docs/qa/journeys.yaml",
+        ] {
             assert_eq!(tier(&[path]), VerificationTier::Standard, "{path}");
         }
     }

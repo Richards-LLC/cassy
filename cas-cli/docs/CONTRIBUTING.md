@@ -1020,7 +1020,7 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 | Tier | Paths | Verification | QA |
 | --- | --- | --- | --- |
-| 0 | `docs/**`, Markdown that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
+| 0 | `docs/**` except `docs/design`, `docs/review` and the QA catalog, Markdown outside `src/` that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
 | 1 | Everything else, including skills, agents and an unmeasurable diff | One verifier | The impacted journeys |
 | 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | One verifier plus an adversarial probe | An `Adversarial probe:` row in the task ledger, in batch mode too |
 

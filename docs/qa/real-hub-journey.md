@@ -147,10 +147,19 @@ npm run journeys:real-hub -- real-hub.journey.ts --grep 'HUB-J13 real hub'
 ```
 
 Only OS service placement and the provider executable are test boundaries.
+The fixture sets `SHELL` to a private adapter that executes `-lc` probes without
+loading host login profiles. This keeps its `HOME/bin/claude` first even when
+macOS `path_helper` or a profile would prepend Homebrew; no host provider or
+account credentials are used. The preflight regression plants a fake host
+provider in a login profile and requires lookup and the login probe to use the
+disposable provider instead.
+
 The fixture's local `systemd-run` adapter executes the real reaper/daemon under
 its private HOME and registered containment, instead of the operator's user
-manager. Its recorded process group and start fingerprint bound cleanup to the
-owned launch. This does not prove host systemd/cgroup placement or model action.
+manager on Linux. Its recorded process group and start fingerprint bound cleanup
+to the owned launch. On macOS the hub uses its native direct process-session
+launch, so that Linux adapter and its `/proc` fingerprint are not invoked.
+This does not prove host systemd/cgroup placement or model action.
 The installed official provider and login remain a separate bounded live check;
 never use an existing hub or read/copy credentials into this fixture.
 

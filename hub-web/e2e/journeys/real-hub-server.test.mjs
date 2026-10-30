@@ -1,10 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { once } from "node:events";
-import { stat } from "node:fs/promises";
+import { stat, mkdir, writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { createRealHubHome, createRealHubEnvironment } from "./real-hub-home.mjs";
+
+test("real-hub login probe resolves only the disposable provider despite host profiles", async t => {
+  const home = await createRealHubHome();
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const bin = join(home, "bin");
+  const hostBin = join(home, "host-bin");
+  await mkdir(bin);
+  await mkdir(hostBin);
+  // A hostile login profile models path_helper putting host installs first.
+  // Its provider is a sentinel, so this regression never executes a real CLI.
+  await writeFile(join(home, ".profile"), `export PATH='${hostBin}:/usr/bin:/bin'\n`);
+  await writeFile(join(hostBin, "claude"), "#!/bin/sh\nprintf 'HOST PROVIDER LEAKED'\nexit 91\n", { mode: 0o700 });
+  await writeFile(join(bin, "claude"), '#!/bin/sh\nprintf \'{"loggedIn":true}\\n\'\n', { mode: 0o700 });
+  const env = await createRealHubEnvironment(home, join(home, "project"));
+  const run = promisify(execFile);
+  // Same login-shell boundary as hub/launch_env.rs::launch_path.
+  const shell = env.SHELL ?? "/bin/sh";
+  const { stdout } = await run(shell, ["-lc", "command -v claude"], { env });
+  assert.equal(stdout.trim(), join(bin, "claude"), "login-shell lookup must keep the fixture provider first");
+  const auth = await run(stdout.trim(), ["auth", "status", "--json"], { env });
+  assert.deepEqual(JSON.parse(auth.stdout), { loggedIn: true });
+});
 
 test("real-hub candidate assets cannot fall back to external dist", { timeout: 15000 }, async t => {
   // The external bundle really has this stylesheet; this candidate lacks it.

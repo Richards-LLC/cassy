@@ -14,7 +14,7 @@ import {
   readdir,
 } from "node:fs/promises";
 import { existsSync, createWriteStream } from "node:fs";
-import { createRealHubHome } from "./real-hub-home.mjs";
+import { createRealHubHome, createRealHubEnvironment } from "./real-hub-home.mjs";
 import { resolve, join } from "node:path";
 import { redactQaText, redactQaValue } from "../../../scripts/visual-qa.mjs";
 const run = promisify(execFile);
@@ -261,19 +261,7 @@ with open(log,'ab',buffering=0) as out:
 starttime=open('/proc/'+str(p.pid)+'/stat').read().split(') ',1)[1].split()[19]
 with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(dict(pid=p.pid,starttime=starttime),f)
 `, { mode: 0o700 });
-  const env = {
-    HOME: home,
-    XDG_CONFIG_HOME: join(home, "config"),
-    XDG_RUNTIME_DIR: join(home, "runtime"),
-    CAS_ROOT: join(project, ".cas"),
-    CAS_AGENT_NAME: process.env.CAS_AGENT_NAME ?? "real-hub-qa",
-    PATH: `${bin}:/usr/bin:/bin`,
-    TERM: "xterm-256color",
-    LANG: "C.UTF-8",
-    CAS_SKIP_FACTORY_TOOLING: "1",
-    CAS_SUPPRESS_DUPLICATE_WARNING: "1",
-    RUST_LOG: "cas=debug",
-  };
+  const env = await createRealHubEnvironment(home, project);
   state = { home, project, env, session: "real-hub-journey" };
   await run("git", ["init", "-q", project], { env, timeout: 5000 });
   await cas(["init", "--yes", "--no-integrations"]);

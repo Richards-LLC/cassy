@@ -34,6 +34,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Edit keeps a refused message's files as cards** — Was: Edit put each file's raw reference, including the machine's file path, into the composer. Now: the files come back as their attachment cards and only your text returns to the composer.
 - **Previews check an upload once** — Was: every preview ticket and content request re-read and re-hashed the whole upload, up to 10 MiB. Now: the hub keeps each upload's verified digest and re-checks only when the file changes.
 
+### Fixed — Deliberate supervisor exit
+
+- **A deliberate /exit ends quietly** — Was: exiting a supervisor raised
+  "Daemon connection lost" and "Worker stopped" attention items, even with no
+  workers, and the session-ended receipt read `pane_exit: code=Some(0),
+  signal=None`. Now: a supervisor exit with code 0 and the clean daemon exit
+  after it raise no attention item, the receipt says "exited normally", and a
+  supervisor crash still alerts as "Supervisor stopped".
+
 ### Fixed — Generated artifact regeneration
 
 - **Current dependencies survive regeneration** — Was: every changed hub-web

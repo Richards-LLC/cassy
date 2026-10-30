@@ -193,6 +193,28 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
     Some(bounded_tail_text(trimmed))
 }
 
+/// A PTY exit in plain words: the signal wins, then the code; a missing status
+/// stays explicitly unavailable rather than becoming a guessed code.
+fn pane_exit_status(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
+    match exit_signal.filter(|signal| !signal.trim().is_empty()) {
+        Some(signal) => format!("terminated by signal {signal}"),
+        None => match exit_code {
+            Some(code) => format!("exited with code {code}"),
+            None => "exit status unavailable".to_string(),
+        },
+    }
+}
+
+/// cas-c095: the supervisor's end reason is shown to the operator in the
+/// session-ended receipt, so it is plain words, never `Option` debug text.
+fn supervisor_exit_reason(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
+    let signalled = exit_signal.is_some_and(|signal| !signal.trim().is_empty());
+    if exit_code == Some(0) && !signalled {
+        return "exited normally".to_string();
+    }
+    format!("supervisor {}", pane_exit_status(exit_code, exit_signal))
+}
+
 /// Render only child-wait evidence for a genuine PTY exit. The pane tail is
 /// already bounded by `timeout_pane_tail`; keeping it alongside the status
 /// makes a crash actionable after the pane is removed and the live process
@@ -203,13 +225,7 @@ fn worker_exit_info(
     exit_signal: Option<&str>,
     pane_tail: Option<&str>,
 ) -> String {
-    let status = match exit_signal.filter(|signal| !signal.trim().is_empty()) {
-        Some(signal) => format!("terminated by signal {signal}"),
-        None => match exit_code {
-            Some(code) => format!("exited with code {code}"),
-            None => "exit status unavailable".to_string(),
-        },
-    };
+    let status = pane_exit_status(exit_code, exit_signal);
     let tail = pane_tail
         .filter(|tail| !tail.trim().is_empty())
         .map(|tail| {
@@ -5600,7 +5616,7 @@ impl FactoryDaemon {
                     if let Ok(agents) = open_agent_store(self.app.cas_dir())
                         && let Ok(rows) = agents.list(None)
                     {
-                        let reason = format!("pane_exit: code={exit_code:?}, signal={exit_signal:?}");
+                        let reason = supervisor_exit_reason(exit_code, exit_signal.as_deref());
                         for agent in rows.iter().filter(|a| a.name == pane_id && a.factory_session.as_deref() == Some(self.session_name.as_str())) {
                             if let Err(error) = crate::supervisor_continuity::record_end(self.app.cas_dir(), &agent.id, Some(&reason)) {
                                 tracing::warn!(%error, "could not retain supervisor pane-exit evidence");
@@ -13748,6 +13764,7 @@ mod tests {
         spawn_provisioning_timed_out,
         spawn_queue_reset_report,
         stalled_spawn_requests,
+        supervisor_exit_reason,
         take_next_pending_spawn,
         take_spawn_cancellation,
         take_unverified_spawn_on_exit,
@@ -14768,6 +14785,23 @@ mod tests {
         let lone = closed_death_group(rest, chrono::Utc::now(), window).expect("closed");
         assert_eq!(lone.len(), 1, "a lone exit is dropped, not flagged");
         assert!(closed_death_group(&[], chrono::Utc::now(), window).is_none());
+    }
+
+    #[test]
+    fn supervisor_exit_reason_is_plain_words_without_option_debug_text() {
+        assert_eq!(supervisor_exit_reason(Some(0), None), "exited normally");
+        assert_eq!(
+            supervisor_exit_reason(Some(1), None),
+            "supervisor exited with code 1"
+        );
+        assert_eq!(
+            supervisor_exit_reason(None, Some("Killed")),
+            "supervisor terminated by signal Killed"
+        );
+        assert_eq!(
+            supervisor_exit_reason(None, None),
+            "supervisor exit status unavailable"
+        );
     }
 
     #[test]

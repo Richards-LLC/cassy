@@ -103,7 +103,7 @@ review, without a close call or commit receipt. Normal deliveries retain their
 existing close call. Unavailable or budget-limited tree checks are stated as
 unknown and withhold delivery suggestions. The existing JSON check object
 carries the same message; palettes, grouping and the 80-column renderer stay
-unchanged. Review text avoids the shared `. Review ` remediation delimiter,
+unchanged. Review text avoids the shared `". Review "` remediation delimiter,
 so subsequent backlog sections stay in the JSON diagnostic message.
 
 Exact-build comparison: `d8d1b862` → `1d7e501a4`, against identical isolated

@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory context
+
+- **Idle workers reset through their own harness** — Was: context reset could
+  skip an Idle Codex registration and use an older Active Claude row, then
+  refuse because no Claude transcript directory existed. → Now: Active and
+  Idle registrations are eligible within the factory session, and reset uses
+  the current registration's harness metadata. Codex queues its durable
+  recycle path, Claude keeps its verified control command, and unverified
+  Grok or OpenCode resets remain refused.
+
 ### Fixed — Factory delivery
 
 - **Merging released main into a delivery branch no longer blocks close** — Was:

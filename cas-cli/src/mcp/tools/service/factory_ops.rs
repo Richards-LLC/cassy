@@ -6171,12 +6171,16 @@ impl CasService {
         })?;
         let factory_session = current_factory_session();
         let owned = supervisor_owned_workers();
-        let live_agents = agent_store.list(Some(AgentStatus::Active)).map_err(|e| {
+        let live_agents: Vec<_> = agent_store.list(None).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to list agents: {e}"),
             )
-        })?;
+        })?.into_iter()
+            // An idle registration is still the current worker. Ignoring it
+            // can select an older active row with a different harness recipe.
+            .filter(|agent| matches!(agent.status, AgentStatus::Active | AgentStatus::Idle))
+            .collect();
 
         // Resolve the concrete recipients. `all_workers` fans out over this
         // supervisor's live workers; every other target names exactly one.
@@ -6193,7 +6197,8 @@ impl CasService {
         } else {
             let found = live_agents
                 .iter()
-                .find(|agent| agent.name == target)
+                .find(|agent| agent.name == target
+                    && agent.visible_to_factory_session(factory_session.as_deref()))
                 .cloned()
                 .ok_or_else(|| {
                     Self::error(

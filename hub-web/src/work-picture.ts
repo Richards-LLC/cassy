@@ -40,6 +40,8 @@ function streamKey(machineId: string, session: string, agent?: string): string {
 
 export class WorkPicture {
   private readonly streams = new Map<string, WorkEventStream>();
+  /** A live notice newer than the page currently being read. */
+  private readonly invalidated = new Set<WorkEventStream>();
   private readonly open = new Set<string>();
   private show: boolean;
   private thread: Watch | undefined;
@@ -146,6 +148,7 @@ export class WorkPicture {
       if (!stream.owns(page.request_id)) continue;
       const gap = stream.accept(page);
       if (gap !== undefined) stream.requested(this.deps.transport(machineId)?.requestWorkEvents(session, { before: gap, ...(stream.agent ? { agent: stream.agent } : {}) }), "gap");
+      this.refreshInvalidated(machineId, session, stream);
       this.repaint(machineId, session, stream);
       return;
     }
@@ -159,20 +162,30 @@ export class WorkPicture {
 
   failed(machineId: string, session: string, requestId: string, reason: string): void {
     for (const stream of this.sessionStreams(machineId, session)) {
-      if (stream.failed(requestId, reason)) { this.repaint(machineId, session, stream); return; }
+      if (stream.failed(requestId, reason)) {
+        this.refreshInvalidated(machineId, session, stream);
+        this.repaint(machineId, session, stream);
+        return;
+      }
     }
   }
 
   /** The daemon's stream grew: re-read the newest page of what is on screen. */
   appended(machineId: string, session: string): void {
     for (const watch of this.watching()) {
-      if (watch.machineId === machineId && watch.session === session) this.readNewest(watch);
+      if (watch.machineId === machineId && watch.session === session) {
+        this.invalidated.add(this.stream(machineId, session, watch.agent));
+        this.readNewest(watch);
+      }
     }
   }
 
   /** The session's socket closed: answers in flight will never come. */
   disconnected(machineId: string, session: string): void {
-    for (const stream of this.sessionStreams(machineId, session)) stream.abandon();
+    for (const stream of this.sessionStreams(machineId, session)) {
+      stream.abandon();
+      this.invalidated.delete(stream);
+    }
   }
 
   /** A reattach: re-read the newest page of what is on screen. */
@@ -199,7 +212,17 @@ export class WorkPicture {
     const stream = this.stream(watch.machineId, watch.session, watch.agent);
     if (stream.pending("newest")) return;
     if (watch.agent && !this.timelineSupported(watch.machineId, watch.session)) return;
-    stream.requested(this.deps.transport(watch.machineId)?.requestWorkEvents(watch.session, watch.agent ? { agent: watch.agent } : {}), "newest");
+    const request = this.deps.transport(watch.machineId)?.requestWorkEvents(watch.session, watch.agent ? { agent: watch.agent } : {});
+    stream.requested(request, "newest");
+    if (request !== undefined) this.invalidated.delete(stream);
+  }
+
+  /** Coalesce notices during a newest/gap read into one follow-up, only while visible. */
+  private refreshInvalidated(machineId: string, session: string, stream: WorkEventStream): void {
+    if (!this.invalidated.has(stream) || stream.pending("newest")) return;
+    const watch = this.watching().find(watch => watch.machineId === machineId && watch.session === session && watch.agent === stream.agent);
+    if (watch) this.readNewest(watch);
+    else this.invalidated.delete(stream);
   }
 
   private repaint(machineId: string, session: string, stream: WorkEventStream): void {

@@ -423,6 +423,17 @@ fn inspect(
         Ok(registry) => registry,
         // Malformed YAML is existing debt; unavailable Git data cannot establish causality.
         Err(error) if error.is::<serde_yaml::Error>() => None,
+        Err(error) if error.is::<crate::qa_registry::DuplicateBugFamily>() => {
+            return Ok((
+                vec![Finding {
+                    gate: "G1",
+                    token: "registry unchanged:",
+                    title: "BASE JOURNEY REGISTRY INVALID",
+                    detail: format!("{} at delivery base {base}: {error:#}", qa.registry.path),
+                }],
+                vec![],
+            ));
+        }
         Err(error) => return Err(error),
     };
     let old_problems = before

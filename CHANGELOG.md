@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
+- **Picked images preview in native Commander** — Was: the native image policy
+  blocked local raster thumbnails before sending. → Now: picked PNG, JPEG,
+  GIF and WebP images can preview, while SVG and HTML stay named files.
+
 - **Messages kept in two tabs all go out after an outage** — Was: with two
   Commander tabs open, a message kept during an outage could stay "Waiting for
   the connection" under a Live header after reconnecting, and was never sent

@@ -130,6 +130,10 @@ invariants:
     statement: A supervisor exit closes its conversation with a dated receipt, confirmed worker stop count and named surviving workers; the row and header say Ended and sends cannot queue to the dead session.
     check: 'Run the session-ended case in conversation-stage.test.ts and hub::tests::cec1_session_end_projection_survives_cleanup_without_ending_a_replacement; capture a real supervisor /exit with at least two workers and verify the receipt within ten seconds, local twelve-hour time, ended row/header and composer guidance.'
     bug: {task: cas-cec1}
+  HUB-J3-DELIBERATE-EXIT-QUIET:
+    statement: A deliberate supervisor exit with code 0 and the clean daemon exit after it raise no attention item, and the session-ended receipt names the exit in plain words; a supervisor crash still alerts as Supervisor stopped.
+    check: 'Run the HUB-J3 supervisor exit case in find-conversation.journey.ts (only the sentinel crash row is stored and the session badge stays hidden), the cas-c095 cases in hub-web/src/attention.test.ts, hub::tests::h1_aggregate_events_cover_session_and_pane_lifecycle and queue_and_events::tests::supervisor_exit_reason_is_plain_words_without_option_debug_text; walk a real supervisor /exit and verify no Daemon connection lost or Worker stopped item and no Some(...)/None text.'
+    bug: {task: cas-c095}
   HUB-J3-GOAL:
     statement: I can tell which conversation has something new and get to it quickly
     check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
@@ -679,6 +683,7 @@ journeys:
   - HUB-J3-GOAL
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
+  - HUB-J3-DELIBERATE-EXIT-QUIET
   - HUB-J3-MACHINE-VERSIONS
   - HUB-J3-MACHINE-CHIP-FOCUS
   traffic:

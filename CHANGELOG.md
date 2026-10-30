@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Improved — Factory guidance size
+### Fixed — Factory guidance size
 
 - **Factory instructions leave room to grow** — Shared check, delivery and blocker
   rules have one owner, reached when that phase starts. Workers and supervisors

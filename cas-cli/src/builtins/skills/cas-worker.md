@@ -72,7 +72,7 @@ Do not preload later phases.
 | Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
 | Delivery | [close-gate.md](references/close-gate.md); look up `qa.mode`, then [Batch QA](references/details.md#batch-qa) for a batch park |
 | Capacity refusal | [Capacity waits](references/discipline.md#capacity-waits), before treating it as a blocker |
-| Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before `task action=update id=<task-id> status=blocked` or `coordination action=message target=supervisor task_id=<task-id> blocker=true`; use `blocker: <cause>` in the return contract |
+| Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before `task action=update id=<task-id> status=blocked` or `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`; use `blocker: <cause>` in the return contract |
 | Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>` |
 | Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md); close records it |

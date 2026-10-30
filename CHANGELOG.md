@@ -22,6 +22,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   heredoc bodies now receive the same filesystem-effect and numeric-only
   arithmetic checks as command arguments, including tab-stripped heredocs.
   Quoted bodies and escaped substitution markers remain literal data.
+  Ambiguous body ownership and joined terminators now fail closed; escaped
+  and partially quoted delimiters retain their literal body semantics.
 
 ### Fixed — Team tab shows the whole team
 

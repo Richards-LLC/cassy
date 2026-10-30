@@ -1,19 +1,51 @@
 # Native catalog projection: controls, interfaces and remaining launch limits
 
-Claude and Codex have promising launch-local recipes that preserve native named
-invocation and reduce the complete isolated catalog below 2,500 characters.
-Grok can produce the same result when its fixture account configuration contains
-an extra discovery root, but its invocation-local config overlay rejects that
-discovery setting. The process-local filesystem alternative cannot run in this
-worker's namespace. No production launch or real account is changed; the feature
-acceptance criteria remain unmet.
-Task-specific selection and lifecycle integration are not implemented in
-production; the prototype selects one skill by audience.
+Factory workers now list six role skills through each harness's own control,
+under 2,500 characters on Claude, Codex, Grok and OpenCode. Named invocation
+still expands on all four. The earlier conclusion that Grok had no launch-local
+route was wrong: the fixture never trusted its repository, and Grok skips project
+skills in an untrusted folder.
 
-This updates the initial project-copy investigation. The earlier finding that
-no Claude skill-only control had been found was bounded and incomplete:
-`--settings skillOverrides` is a supported control and works in the native probe.
-The initial 13-case evidence remains available as `art-2fc71fc5`.
+## Shipped recipe and replay
+
+`python3 scripts/probe-skill-catalog.py --matrix <dir>` replays each shipped
+recipe against the installed CLI and a local stub model, using only the public
+inventory and disposable homes. Measurements are complete native skills sections
+in characters.
+
+| Native CLI | Before | Worker | Standalone reviewer | Verifier child | Control |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Claude Code 2.1.312 | 14,772 | 841 | 257 | 0 | `--settings` `skillOverrides`, merged with worker settings |
+| Codex 0.165.0 | 12,078 | 0 | 0 | 0, was 12,074 | `-c skills.include_instructions=false`; role TOML `[skills]` |
+| Grok 1.0.70 | 12,450 | 1,377 | 326 | 0 | `GROK_FOLDER_TRUST=false` with explicit-only `.grok/skills` copies |
+| OpenCode 1.18.33 | 18,484 | 1,844 | 398 | none | agent `permission.skill` |
+
+- **Verifier children** are measured from a scripted native spawn. Claude and Grok
+  already listed nothing, because the verifier role has no skill tool. Codex
+  children inherited the whole listing until the role TOML disabled it, and that
+  holds under a parent launched with the full catalog. OpenCode has no native
+  verifier child in Cassy.
+- **On demand:** `skill action=list_all` lists the catalog and `skill action=show
+  id=<skill>` returns any shipped skill or `<skill>/<relative path>` resource, with
+  or without a project sync. The worker contract names this route and the role
+  skills, which is Codex's only listing.
+- **Supervisors are unchanged.**
+
+### Remaining limits
+
+1. A real-account launch is not verified here. These are fixtures.
+2. Skills outside the shipped inventory can raise the real budget. User-authored
+   Grok skills stay listed, because their contents are never read or copied.
+   Claude plugin skills stay listed, because `skillOverrides` does not reach them.
+3. Selection is by role, not task: a worker's task is unknown at launch.
+4. `GROK_FOLDER_TRUST=false` loads the worker checkout's project configuration
+   without a trust prompt, which is the trust Claude and Codex record for the same
+   checkout. It applies to that launch only; the shared trust store is untouched.
+5. A model on Claude or Grok cannot run an explicit-only skill through its native
+   skill tool. It reads the instructions through `skill action=show` instead.
+
+The sections below are the investigation that led here. Where they call the Grok
+route unavailable, this section supersedes them.
 
 ## Native fixtures and complete catalog measurements
 

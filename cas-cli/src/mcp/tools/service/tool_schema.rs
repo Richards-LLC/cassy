@@ -308,31 +308,23 @@ mod tests {
         assert_eq!(tool.description.as_deref(), Some("fixture tool"));
     }
 
-    /// cas-269ab (cas-c6ef review): `interrupt` once dispatched while the
-    /// coordination description omitted it. Each tool's description names
-    /// every action of its registry list, aliases included.
+    /// The coordination description documents its actions; factory's schema
+    /// enum separately publishes the factory action naming contract.
     #[test]
-    fn coordination_and_factory_descriptions_name_every_registry_action() {
+    fn coordination_description_names_every_registry_action() {
         let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
-        for (name, actions) in [
-            ("coordination", cas_mcp::actions::COORDINATION_ACTIONS),
-            ("factory", cas_mcp::actions::FACTORY_ACTIONS),
-        ] {
-            let description = tools
-                .iter()
-                .find(|tool| tool.name == name)
-                .unwrap_or_else(|| panic!("{name} tool is not registered"))
-                .description
-                .as_deref()
-                .unwrap_or_default()
-                .to_string();
-            let words: std::collections::HashSet<&str> = description
-                .split(|c: char| !c.is_ascii_lowercase() && c != '_')
-                .collect();
-            for action in actions {
-                assert!(words.contains(action), "{name} description omits `{action}`: {description}");
-            }
+        let coordination = tools
+            .iter()
+            .find(|tool| tool.name == "coordination")
+            .expect("coordination tool is registered");
+        let description = coordination.description.as_deref().unwrap_or_default();
+        let words: std::collections::HashSet<&str> = description
+            .split(|c: char| !c.is_ascii_lowercase() && c != '_')
+            .collect();
+        for action in cas_mcp::actions::COORDINATION_ACTIONS {
+            assert!(words.contains(action), "coordination description omits `{action}`: {description}");
         }
+
     }
 
     /// cas-8563b (D2): the two tools sharing `CoordinationRequest` publish

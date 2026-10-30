@@ -443,6 +443,47 @@ mod tests {
         daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn command_immediately_after_real_reply_waits_for_silence_then_sends() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::command_immediately_after_real_reply_waits_for_silence_then_sends") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        // A real PTY reply, not feed() or a backdated silence sample. The
+        // command arrives as soon as the reply's empty prompt is visible.
+        let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "stty raw -echo; printf '\\033cReply complete\\r\\n❯'; exec cat > \"$1\"".into(),
+                "fixture".into(), root.path().join("command-input").to_str().unwrap().into()],
+            cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let mut pane = cas_mux::Pane::with_pty(&name, cas_mux::PaneKind::Supervisor, pty, 24, 80, cas_mux::SupervisorCli::Claude).unwrap();
+        // Only skip harness startup grace; command silence still uses real time.
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+        daemon.app.mux.add_pane(pane);
+        daemon.last_pane_output_bytes.remove(&name);
+        daemon.pane_silent_since.remove(&name);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pane = daemon.app.mux.get_mut(&name).unwrap();
+                pane.drain_output();
+                if idle_prompt(&screen(pane)) && root.path().join("command-input").exists() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let replied = Instant::now();
+        let receipt = tokio::time::timeout(Duration::from_secs(4), daemon.dispatch_supervisor_command(
+            Request::Run { command: Command::Exit, confirmed: true }, "cmd-after-reply".into(),
+            MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() },
+        )).await.expect("idle command must settle within a short bound").expect("a fresh idle reply must not cause a final busy refusal");
+        assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        assert!(replied.elapsed() >= COMMAND_SETTLE, "do not type before real silence is observed");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("command-input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(std::fs::read(root.path().join("command-input")).unwrap(), b"/exit\r");
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser") { return; }

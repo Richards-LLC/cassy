@@ -1031,7 +1031,8 @@ sys.exit(100 if failed else 0)
             .arg("--verified-script").arg(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/run-verified-tests.sh")))
             .arg("--count-file").arg(repo.join("target/python-count"))
             .arg("--").args(&args).current_dir(&repo)
-            .env_remove("CAS_WORKER_STABILITY_TARGET").output().unwrap();
+            .env_remove("CAS_WORKER_STABILITY_TARGET")
+            .env("VERIFIED_TEST_REPO_ROOT", &repo).output().unwrap();
         assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         let proof: serde_json::Value = serde_json::from_slice(&std::fs::read(repo.join("target/python-count.stability.json")).unwrap()).unwrap();
         assert_eq!(proof["tests"], serde_json::json!(["src-tauri/widget/checks.rs::nested_test"]));

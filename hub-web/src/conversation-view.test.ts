@@ -938,7 +938,7 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
 
   // The content grew after the last pin without a scroll event (late layout),
   // so the reader's first scroll up was read as layout and pinned back.
-  it.each(["wheel", "keyboard", "touch"])("after the content grew without a scroll of its own (%s)", (input) => {
+  it.each(["wheel", "keyboard", "touch"])("after the content grew without a scroll of its own (%s)", async (input) => {
     const flush = frames();
     const { history, view, jump } = longThread();
     const content = { height: 1400 };
@@ -953,7 +953,11 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
       view.element.dispatchEvent(new TouchEvent("touchstart", { touches: [{ clientY: 100 } as Touch] }));
       view.element.dispatchEvent(new TouchEvent("touchmove", { touches: [{ clientY: 200 } as Touch] }));
     }
-    readTop(view);
+    view.element.scrollTop = 0;
+    // Preview mutation delivery may precede the reader's queued scroll.
+    view.element.querySelector('[role="log"]')!.setAttribute("data-layout", "late");
+    await Promise.resolve();
+    view.element.dispatchEvent(new Event("scroll"));
     flush(); flush();
     expect(view.element.scrollTop).toBe(0);
     expect(jump.hidden).toBe(false);

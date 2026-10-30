@@ -162,7 +162,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Edge paths
 
-- A late attachment preview shrinks during the deferred tail pin, then content grows before its queued scroll: the latest turn stays visible without Jump to latest; an intentional scroll up still keeps the reader's place (cas-d587).
+- A late attachment preview shrinks in a deferred pin or browser clamp, then grows before its queued scroll, even back to the same height: the latest turn stays visible without Jump to latest; upward wheel, keyboard and touch gestures still keep the reader's place (cas-d587).
 - The hub never answers a history request ("Loading earlier…" has no timeout).
 - The socket closes while loading.
 - A hub without history support: the thread starts empty.

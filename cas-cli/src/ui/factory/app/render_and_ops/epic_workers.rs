@@ -8013,6 +8013,7 @@ mod tests {
         assert_eq!(queued.source, "zen-condor");
         assert_eq!(queued.factory_session.as_deref(), Some("session-a622"));
         let brief = &queued.prompt;
+        // pin: recycled workers must await the merge verdict.
         assert!(!brief.contains("re-close"), "merge verdict owns parked completion: {brief}");
 
         assert!(

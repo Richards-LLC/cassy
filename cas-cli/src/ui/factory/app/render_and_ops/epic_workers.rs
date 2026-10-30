@@ -6871,30 +6871,42 @@ mod tests {
 
     #[tokio::test]
     async fn staged_cleanup_adoption_waits_for_file_commit_cas_c35a() {
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
-        let store = open_agent_store(&root).unwrap();
-        let mut agent = cas_types::Agent::new("pending-stage-id".into(), "pending-stage".into());
-        agent.metadata.insert("clone_path".into(), root.join("worktrees/pending-stage").display().to_string());
-        store.register(&agent).unwrap();
-        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-        conn.execute_batch("CREATE TRIGGER fail_cleanup_mark BEFORE UPDATE ON agents
-            WHEN NEW.metadata LIKE '%shutdown_target_cleanup_staged%'
-            BEGIN SELECT RAISE(ABORT, 'fixture: stage mark refused'); END;").unwrap();
-        assert!(FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).is_err());
-        conn.execute_batch("DROP TRIGGER fail_cleanup_mark").unwrap();
-        // A database mark alone must not make an incomplete file adoptable.
-        // It also must not strand the file when the staging call is retried.
-        agent.metadata.insert(WORKER_CLEANUP_STAGED.into(), "true".into());
-        store.update(&agent).unwrap();
-        let mut app = FactoryApp::for_test_at(root.clone());
-        app.resume_deferred_worker_cleanups();
-        assert!(!app.worker_worktree_cleanups_pending(), "adoption must use file readiness, not reread the database mark");
-        FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).unwrap();
-        app.resume_deferred_worker_cleanups();
-        assert!(app.worker_worktree_cleanups_pending(), "a retry must commit the existing intent even if its database mark is set");
-        app.join_worker_worktree_cleanups();
-        assert_eq!(std::fs::read_dir(root.join("worker-cleanups/incoming")).unwrap().count(), 0);
+        for legacy in [false, true] {
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+            let store = open_agent_store(&root).unwrap();
+            let mut agent = cas_types::Agent::new("pending-stage-id".into(), "pending-stage".into());
+            agent.metadata.insert("clone_path".into(), root.join("worktrees/pending-stage").display().to_string());
+            store.register(&agent).unwrap();
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            conn.execute_batch("CREATE TRIGGER fail_cleanup_mark BEFORE UPDATE ON agents
+                WHEN NEW.metadata LIKE '%shutdown_target_cleanup_staged%'
+                BEGIN SELECT RAISE(ABORT, 'fixture: stage mark refused'); END;").unwrap();
+            assert!(FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).is_err());
+            conn.execute_batch("DROP TRIGGER fail_cleanup_mark").unwrap();
+            let mut app = FactoryApp::for_test_at(root.clone());
+            if legacy {
+                let path = std::fs::read_dir(root.join("worker-cleanups/incoming")).unwrap().next().unwrap().unwrap().path();
+                let mut request: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                request.as_object_mut().unwrap().remove("staging_complete");
+                std::fs::write(path, serde_json::to_vec(&request).unwrap()).unwrap();
+                // An old unmarked intent gets one registry read. Its negative
+                // result must survive later ticks, just like a new pending file.
+                app.resume_deferred_worker_cleanups();
+                assert!(!app.worker_worktree_cleanups_pending());
+            }
+            // A database mark alone must not make an incomplete file adoptable.
+            // It also must not strand the file when the staging call is retried.
+            agent.metadata.insert(WORKER_CLEANUP_STAGED.into(), "true".into());
+            store.update(&agent).unwrap();
+            app.resume_deferred_worker_cleanups();
+            assert!(!app.worker_worktree_cleanups_pending(), "adoption must use file readiness, not reread the database mark");
+            FactoryApp::stage_dead_worker_cleanup(&root, std::slice::from_ref(&agent)).unwrap();
+            app.resume_deferred_worker_cleanups();
+            assert!(app.worker_worktree_cleanups_pending(), "a retry must commit the existing intent even if its database mark is set");
+            app.join_worker_worktree_cleanups();
+            assert_eq!(std::fs::read_dir(root.join("worker-cleanups/incoming")).unwrap().count(), 0);
+        }
     }
 
     #[tokio::test]

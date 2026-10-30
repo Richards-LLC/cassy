@@ -181,7 +181,8 @@ pub(super) fn analyze(
             .iter()
             .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
             .filter(|path| {
-                !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
+                journey_input(registry, path)
+                    && !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
             })
             .collect::<Vec<_>>();
         let ids = catalog_ids(&tree, &paths, base)?;

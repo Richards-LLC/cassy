@@ -529,6 +529,13 @@ html[data-scheme="dark"] {
   :root .team-lane > .team-trail { grid-column: 1 / -1; margin-block-start: var(--space-1); }
 }
 :root .needs-you-section { border-radius: var(--radius-surface); }
+/* Tabs and the Team panel share one rounded surface: Glass has no square-cornered fills. */
+:root .conversation-tabs [role="tab"] { border-radius: var(--radius-control) var(--radius-control) 0 0; }
+@media (min-width: 721px) {
+  :root .conversation-main > .conversation-tabs { margin: var(--space-2) var(--space-2) 0; border-radius: var(--radius-surface); }
+  :root .conversation-main.team-open > .conversation-tabs { border-radius: var(--glass-radius) var(--glass-radius) 0 0; }
+  :root .conversation-main > .team-panel { margin: 0 var(--space-2) var(--space-2); border-radius: 0 0 var(--glass-radius) var(--glass-radius); }
+}
 /* Rows nested in a card are one step smaller. */
 :root :is(.project-card-toggle, .needs-you-shortcut) { border-radius: var(--radius-control); }
 

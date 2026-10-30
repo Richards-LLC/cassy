@@ -1866,7 +1866,7 @@ dialog form > *,
 .compose-fab svg { width: 20px; height: 20px; display: block; flex: none; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .conversation-tabs { display: flex; flex: none; gap: var(--space-4); padding: 0 var(--space-4); border-bottom: 1px solid var(--line-subtle); background: var(--bg-panel); color: var(--ink); }
-.conversation-tabs [role="tab"] { border: 0; border-radius: var(--radius-control) var(--radius-control) 0 0; border-bottom: 2px solid transparent; padding: var(--space-3) var(--space-2); background: transparent; color: var(--ink-mid); min-height: 44px; }
+.conversation-tabs [role="tab"] { border: 0; border-radius: 0; border-bottom: 2px solid transparent; padding: var(--space-3) var(--space-2); background: transparent; color: var(--ink-mid); min-height: 44px; }
 .conversation-tabs [aria-selected="true"] { color: var(--color-action); border-bottom-color: var(--color-action); }
 .conversation-tabs [role="tab"]:focus-visible { outline: 2px solid var(--color-action); outline-offset: -4px; }
 .conversation-main.team-open > .conversation-pane-slot, .conversation-main.team-open > #conversation-composer-slot { display: none; }
@@ -1888,17 +1888,13 @@ dialog form > *,
 /* Beside Team the rail is a quiet control list: the lanes already say who is on
    what, and these rows keep the only worker controls. Phone sheets stay full. */
 @media (min-width: 721px) {
-  .conversation-main.team-open ~ .conversation-context .status-agent { margin: 0; padding: var(--space-1) 0; border-color: transparent; background: transparent; box-shadow: none; }
+  .conversation-main.team-open ~ .conversation-context .status-agent { margin: 0; padding: var(--space-1) 0; border-color: transparent; background: transparent; }
   /* The name replaces the avatar, task and state the lane already shows, so each control still says whose it is. */
   .conversation-main.team-open ~ .conversation-context .status-agent :is(.provider-avatar, .status-chip) { display: none; }
   .conversation-main.team-open ~ .conversation-context .status-agent .status-line > .status-identifier { display: inline; flex: 1; color: var(--ink-mid); }
   .conversation-main.team-open ~ .conversation-context .status-agent > :is(.status-activity, .status-last-activity) { display: none; }
   .conversation-main.team-open ~ .conversation-context .status-agent .status-timeline { border-color: transparent; background: transparent; color: var(--ink-mid); }
   .conversation-main.team-open ~ .conversation-context .status-agent .fleet-ops-trigger { border-color: transparent; background: transparent; color: var(--ink-mid); }
-  /* Tabs and panel share one rounded surface; Glass has no square-cornered fills. */
-  .conversation-main > .conversation-tabs { margin: var(--space-2) var(--space-2) 0; border-radius: var(--radius-surface); }
-  .conversation-main.team-open > .conversation-tabs { border-radius: var(--glass-radius) var(--glass-radius) 0 0; }
-  .conversation-main > .team-panel { margin: 0 var(--space-2) var(--space-2); border-radius: 0 0 var(--glass-radius) var(--glass-radius); }
 }
 .team-needs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-block: var(--space-1); margin-block-end: var(--space-2); border-block: 1px solid var(--line-subtle); }
 .team-needs h3, .team-needs p { margin: 0; font-size: 13px; }

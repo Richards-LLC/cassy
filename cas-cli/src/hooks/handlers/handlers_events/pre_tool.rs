@@ -8751,6 +8751,18 @@ mod workspace_contract_tests {
             assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
+        // Backquote bodies remove one shell escape layer before parsing.
+        // These are inert hook inputs: no command payload is ever executed.
+        for command in [
+            r#"echo "`echo "\`touch /outside/cas-6e99-nested\`"`""#,
+            r#"echo "`echo "\`rm -rf /outside/cas-6e99-nested\`"`""#,
+            r#"echo "`echo "\$(touch /outside/cas-6e99-nested)"`""#,
+            r#"echo "`echo "\`cas config gr''ant-write --task cas-1234 --path /x --reason r\`"`""#,
+            r#"echo "`cas config gr\\ant-write --task cas-1234 --path /x --reason r`""#,
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+        }
         // Executable backticks and arithmetic data still undergo filesystem
         // checks. A separated closing pair can denote a subshell substitution.
         for command in [

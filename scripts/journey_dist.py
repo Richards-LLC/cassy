@@ -28,7 +28,7 @@ CAPTURE_INSTRUMENTATION = (
     'hub-web/e2e/journeys/receipt-directory.mjs',
     'hub-web/e2e/journeys/receipt-directory.d.mts',
 )
-GUARDED_INPUTS = ('hub-web', 'docs/qa/journeys.md', 'scripts/journey-eval.sh',
+GUARDED_INPUTS = ('hub-web', 'docs/qa/journeys.md', 'docs/qa/journeys.yaml', 'docs/qa/bug-families', 'scripts/journey-eval.sh',
                   'scripts/journey-receipt.py', 'scripts/journey-bundles.py',
                   'scripts/journeys-for-diff.py', 'scripts/journey_dist.py', 'scripts/journey-background.py',
                   'cas-cli/Cargo.toml', 'docs/design/design-tokens.json')
@@ -122,7 +122,7 @@ def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | No
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['build', 'verify'])
+    parser.add_argument('action', choices=['check', 'build', 'verify'])
     parser.add_argument('--repo', required=True, type=Path)
     parser.add_argument('--plan', type=Path)
     parser.add_argument('--manifest', type=Path)
@@ -131,6 +131,9 @@ def main() -> int:
     repo = args.repo.resolve()
     plan = json.loads(args.plan.read_text()) if args.plan else {}
     source = plan.get('head_sha') or git(repo, 'rev-parse', 'HEAD^{commit}')
+    if args.action == 'check':
+        check_source(repo, source, plan.get('comparison'))
+        return 0
     if args.action == 'verify':
         if not args.manifest:
             parser.error('verify requires --manifest')

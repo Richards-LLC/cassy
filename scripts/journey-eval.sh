@@ -7,13 +7,7 @@
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plan="$(python3 "$repo/scripts/journey-receipt.py" plan --repo "$repo" "$@")"
-# Default runs retain their exact-tip guard. Opt-in comparison validates its
-# narrow, head-identical instrumentation overlay in the producer itself.
-mapfile -t fields < <(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["artifacts"]); print(p["head_sha"]); print(p["workers"]); print(p["scope"]); print(p["grep"] or ""); print("compare" if "comparison" in p else "normal")' <<<"$plan")
-if [[ "${fields[5]}" != compare ]] && [[ -n "$(git -C "$repo" status --porcelain -- hub-web docs/qa/journeys.md scripts/journey-eval.sh scripts/journey-receipt.py scripts/journey-bundles.py scripts/journeys-for-diff.py)" ]]; then
-    printf 'journey-eval: commit product/catalog/runner inputs before recording an exact-tip receipt\n' >&2
-    exit 2
-fi
+mapfile -t fields < <(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["artifacts"]); print(p["head_sha"]); print(p["workers"]); print(p["scope"]); print(p["grep"] or "")' <<<"$plan")
 artifacts="${fields[0]}"
 commit="${fields[1]}"
 workers="${fields[2]}"
@@ -43,6 +37,7 @@ if [[ "$scope" == full ]] && [[ -f "$repo/scripts/journey-background.py" ]] \
     exit 0
 fi
 printf '%s\n' "$plan" > "$artifacts/journey-selection.json"
+python3 "$repo/scripts/journey_dist.py" check --repo "$repo" --plan "$artifacts/journey-selection.json"
 mkdir -p "$artifacts/journeys" "$artifacts/playwright"
 status=0
 if [[ -n "$pattern" ]]; then

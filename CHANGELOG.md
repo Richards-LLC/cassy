@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander daemon replacement
+
+- **An open conversation reconnects to a replacement daemon** — If Commander
+  sees the old daemon's ended session before its replacement becomes live,
+  it resumes the requested conversation automatically. Ended sessions still
+  stop retries and sends while no replacement is available.
+
 ### Fixed — Merge readiness
 
 - **A worker's ready message counts, and the supervisor waits for it** — Was:

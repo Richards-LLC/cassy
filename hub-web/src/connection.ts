@@ -325,6 +325,8 @@ export class HubConnectionSupervisor {
   private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
   private readonly endedSessions = new Set<string>();
+  /** Requested streams paused by an end receipt, until a live replacement appears. */
+  private readonly endedAttachRequests = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private healthPing?: { id: number; startedAt: number };
   private attachStarts: number[] = [];
@@ -378,6 +380,7 @@ export class HubConnectionSupervisor {
     this.machineSocketReady = false;
     this.machineSocketOpening = undefined;
     this.desiredSessions.clear();
+    this.endedAttachRequests.clear();
     this.machineSubscriptions.clear();
     this.paneBootstraps.clear();
     this.healthPing = undefined;
@@ -1313,9 +1316,18 @@ export class HubConnectionSupervisor {
 
   /** A durable end receipt stops retries; transport closure alone does not. */
   setSessionEnded(session: string, ended: boolean): void {
-    if (!ended) { this.endedSessions.delete(session); return; }
+    if (!ended) {
+      if (this.endedSessions.delete(session) && this.endedAttachRequests.delete(session)) {
+        void this.attach(session);
+      }
+      return;
+    }
     this.endedSessions.add(session);
-    this.desiredSessions.delete(session);
+    // A daemon replacement can be preceded by the old daemon's end receipt.
+    // Keep the requested stream separate from active demand: ended sessions
+    // still fence traffic and retries, but the next live catalog can resume it.
+    if (this.desiredSessions.delete(session)) this.endedAttachRequests.add(session);
+    this.machineSubscriptions.delete(session);
     const timer = this.attachRetryTimers.get(session);
     if (timer !== undefined) window.clearTimeout(timer);
     this.attachRetryTimers.delete(session);

@@ -13,6 +13,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   accepts clock corrections only within 60 seconds and shows clock-setting
   guidance for larger differences, while still correcting small clock drift.
 
+### Fixed — Extracted handler journey coverage
+
+- **Rich inspection stays in source-impact selection** — Literal DOM lookups
+  retain the journeys that own their UI when a handler moves into an existing
+  shared module. Existing import ownership and conservative fallbacks remain.
+
+### Fixed — Changelog category validation
+
+- **Documentation and test entries pass release validation** — Titled non-shipped
+  changelog categories follow the release report rules; unknown categories and
+  malformed entries remain refused.
+
+### Fixed — Commander stylesheet loading
+
+- **Commander keeps its page styles when opening images** — The global
+  stylesheet retains its served name, while every lazy stylesheet receives a
+  hashed chunk name that the hub can serve.
+
 ### Added — Commander reading frames
 
 - **Shared source frames and compact work rows** — Diagrams, diffs and code

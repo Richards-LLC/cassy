@@ -4,11 +4,12 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const dist = new URL("../dist/", import.meta.url);
+// Scratch production builds let factory lanes prove output without committing dist.
+const dist = new URL(process.env.HUB_WEB_DIST_URL ?? "../dist/", import.meta.url);
 const chunkName = /^chunk-[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|css)$/;
 const server = new URL("../../cas-cli/src/hub/server.rs", import.meta.url);
 
-describe("committed dist", () => {
+describe("production dist", () => {
   it("contains exactly the files the hub embeds", () => {
     const embedded = [...readFileSync(server, "utf8").matchAll(/include_bytes!\("\.\.\/\.\.\/\.\.\/hub-web\/dist\/([^"]+)"\)/g)].map((match) => match[1]);
     expect(embedded.length).toBeGreaterThan(0);
@@ -22,6 +23,14 @@ describe("committed dist", () => {
     ] as const) expect(chunkName.test(name), name).toBe(accepted);
     const built = readdirSync(dist).filter((name) => !name.startsWith("."));
     expect(built.filter((name) => !chunkName.test(name)).toSorted()).toEqual([...new Set(embedded)].toSorted());
+    // pin: The embedded hub serves the entry stylesheet only at /commander/app.css.
+    expect(readFileSync(new URL("index.html", dist), "utf8")).toContain('href="/commander/app.css"');
+    const globalStyles = readFileSync(new URL("app.css", dist), "utf8");
+    expect(globalStyles).toContain("body{");
+    expect(globalStyles).not.toContain(".image-viewer{");
+    const viewerStyles = built.find((name) => /^chunk-image-viewer-.*\.css$/.test(name));
+    expect(viewerStyles, "the lazy viewer has its own hub-served stylesheet").toBeDefined();
+    expect(readFileSync(new URL(viewerStyles!, dist), "utf8")).toContain(".image-viewer{");
   });
 
   it("carries no dynamic import the hub could not serve", () => {

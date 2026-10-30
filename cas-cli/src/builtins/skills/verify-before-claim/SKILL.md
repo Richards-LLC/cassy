@@ -39,7 +39,8 @@ For a Rust change, the factory worker proof under `cas-worker/references/discipl
 - Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit, or the exact runtime denial if execution is deferred.
 - Any non-Rust suite the change touches, with its passed count.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once. Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+Full-suite ownership and receipt reuse follow
+[worker discipline](../cas-worker/references/discipline.md). Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
 
 ## The Four-Step Protocol
 

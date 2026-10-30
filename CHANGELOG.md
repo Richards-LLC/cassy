@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Improved — Worker guidance size
+
+- **Worker instructions leave room to grow** — Shared check, delivery and blocker
+  rules have one owner, reached when that phase starts. Workers reuse each
+  reference within a context; the startup guidance reserves at least 2,000 bytes
+  below its 8,000-byte cap while preserving the tested instruction contracts.
+
 ### Fixed — Hub authentication clock correction
 
 - **Fast device clocks recover automatically** — The hub refuses future-dated

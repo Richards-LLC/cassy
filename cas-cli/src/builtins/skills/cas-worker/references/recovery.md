@@ -1,6 +1,14 @@
 # Recovery — Rejections and Interrupted Work
 
-Read when a tool rejects delivery, connectivity fails or assignment changes.
+Read for a rejection, blocked work, interruption or branch transition.
+
+- [Merge required](#merge-required)
+- [Queued successor and branch reuse](#queued-successor-and-branch-reuse)
+- [Blockers and review waits](#blockers-and-review-waits)
+- [Verification-required close](#verification-required-close)
+- [Connectivity failure](#universal-denial-or-connectivity-failure)
+- [Tool loading](#toolsearch-resolved-the-tool-but-you-still-cant-call-it)
+- [Interrupted assignment or checkout](#interrupted-assignment-or-checkout)
 
 ## MERGE REQUIRED
 
@@ -56,6 +64,29 @@ which is scarcest late in a lane.
 - When the supervisor says it owns the merge or the close, or asks you to stop
   polling, cancel those reminders (`coordination action=remind_cancel`) and
   stay idle until it messages you.
+
+## Blockers and review waits
+
+For build-admission capacity refusals, use [Capacity waits](discipline.md#capacity-waits)
+before this sequence.
+
+When required supervisor review or approval blocks work (e.g. publication),
+enter awaiting supervisor review:
+
+1. Add a `note_type=blocker` task note with the required decision, blocked next
+   action, commit and proof; run `task action=update id=<task-id> status=blocked`.
+2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
+   using the return contract with `status: blocked` and `blocker: <cause>`.
+   Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
+3. Save the notification ID; wait for the review reply. Record its ID and actual
+   decision/action. Clear the review hold with
+   `task action=update id=<task-id> status=open`, then
+   `task action=start id=<task-id>` before resuming.
+   Track transport delivery and inbox receipt separately with `message_status`.
+   Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
+
+Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
+Wake eligibility never guarantees a turn.
 
 ## Verification-required close
 

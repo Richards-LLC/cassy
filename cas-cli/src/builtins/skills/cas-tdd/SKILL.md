@@ -35,7 +35,8 @@ Use a red → green loop to produce tests worth keeping. Keep durable decisions 
 - Record the scoped command's result in the task; a zero-test success is not proof.
 - Factory workers run targeted tests under [`cas-worker` discipline](../cas-worker/references/discipline.md): commit and run red, then commit the fix and run that filter green.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+Full-suite ownership and receipt reuse follow
+[worker discipline](../cas-worker/references/discipline.md).
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

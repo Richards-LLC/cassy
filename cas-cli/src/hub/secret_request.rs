@@ -186,8 +186,8 @@ fn save(
 ) -> Result<(String, Outcome), Refusal> {
     let _answering = ANSWERING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let project = FsPath::new(project);
-    let cas_dir = crate::store::find_cas_root_ignoring_env(project).map_err(Refusal::Storage)?;
-    let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(Refusal::Storage)?;
+    let cas_dir = crate::store::find_cas_root_ignoring_env(project).map_err(|error| Refusal::Storage(error.into()))?;
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|error| Refusal::Storage(error.into()))?;
     let request = queue
         .queued_prompt(notification_id)
         .map_err(|error| Refusal::Storage(error.into()))?

@@ -83,6 +83,21 @@ describe("work events (cas-ff22)", () => {
     expect(forA(), "a repaint of the same thread reads nothing").toBe(2);
   });
 
+  it.each([undefined, "worker"])("retains live append invalidations while the newest page is pending (agent: %s)", (agent) => {
+    let request = 0;
+    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: vi.fn(() => `r${++request}`), requestWorkEventDetail: () => undefined };
+    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {} } });
+    if (agent) picture.watchTimeline({ machineId: "m", session: "s", agent });
+    else picture.watchThread("m", "s");
+    picture.appended("m", "s"); picture.appended("m", "s");
+    expect(transport.requestWorkEvents, "notices coalesce while the page is in flight").toHaveBeenCalledTimes(1);
+    picture.page("m", "s", workEventsPage({ request_id: "r1", events: [wire("read", 1, { agent })], has_earlier: false })!);
+    expect(transport.requestWorkEvents, "the answer cannot consume a newer append notice").toHaveBeenCalledTimes(2);
+    picture.page("m", "s", workEventsPage({ request_id: "r2", events: [wire("read", 1, { agent }), wire("bash", 2, { agent })], has_earlier: false })!);
+    expect(picture.stream("m", "s", agent).events.map(event => event.id)).toEqual(["read", "bash"]);
+    expect(transport.requestWorkEvents, "the caught-up answer needs no extra read").toHaveBeenCalledTimes(2);
+  });
+
   it("renders typed work evidence safely, lazily and without losing disclosure or focus", () => {
     const open = new Set<string>(["work:read"]);
     const requested: string[] = [];

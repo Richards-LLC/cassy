@@ -1854,6 +1854,35 @@ draft_failure_scope() {
     fi
 }
 
+draft_has_posted_receipt() {
+    python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+fence = None
+posted = False
+receipt = re.compile(
+    r"\bmessage_id=[0-9]+(?:\.[0-9]+)?\b"
+    r"|https://(?:[A-Za-z0-9-]+\.)?slack\.com/archives/[A-Za-z0-9]+/p[0-9]+\b"
+)
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if fence:
+        if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line):
+            fence = None
+    else:
+        opening = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+        elif re.match(r" {0,3}##(?:[ \t]|$)", line):
+            posted = re.fullmatch(r" {0,3}##[ \t]+POSTED[ \t]*", line) is not None
+            continue
+    if posted and receipt.search(line):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 check_release_notes_draft() {
     local -a diary_drafts=() runtime_drafts=()
     local path
@@ -1863,8 +1892,9 @@ check_release_notes_draft() {
     fi
     while IFS= read -r path; do
         [[ -f "$path" ]] || continue
-        # Posted bodies are historical records, not drafts for this release.
-        if grep -Eq '^## POSTED[[:space:]]*$' "$path"; then
+        # Only a real posting receipt makes this a historical record. Fenced
+        # examples and empty/template POSTED sections remain lintable drafts.
+        if draft_has_posted_receipt "$path"; then
             printf 'release-notes-draft: skipping posted draft %s\n' "$path"
             continue
         fi

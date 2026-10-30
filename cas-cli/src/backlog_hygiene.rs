@@ -773,7 +773,7 @@ pub(crate) fn delivered_line(finding: &DeliveredOpen, default_ref: &str) -> Stri
 
 pub(crate) fn reverted_line(finding: &DeliveredOpen, default_ref: &str) -> String {
     format!(
-        "{} ({}) \"{}\": delivered then reverted on {default_ref}; evidence {} {}. Review before re-delivery.",
+        "{} ({}) \"{}\": delivered then reverted on {default_ref}; evidence {} {}. Needs review before re-delivery.",
         finding.task_id, finding.status, clip(&finding.title, 50),
         short(&finding.commit.sha), clip(&finding.commit.subject, 60),
     )

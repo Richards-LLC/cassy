@@ -199,32 +199,6 @@ impl CasCore {
         Ok(render(&worker.name, &queue))
     }
 
-    pub(crate) fn task_has_worker_queue(&self, id: &str) -> Result<bool, McpError> {
-        let task = self.open_task_store()?.get(id).map_err(error)?;
-        let Some(assignee) = task.assignee.as_deref() else {
-            return Ok(false);
-        };
-        let agents = self.open_agent_store()?;
-        let Some(worker) = agents
-            .list(None)
-            .map_err(error)?
-            .into_iter()
-            .filter(|a| a.role == AgentRole::Worker && (a.name == assignee || a.id == assignee))
-            .max_by_key(|a| a.registered_at)
-        else {
-            return Ok(false);
-        };
-        let Some(session) = worker.factory_session.as_deref() else {
-            return Ok(false);
-        };
-        Ok(SqliteWorkerTaskQueueStore::open(&self.cas_root)
-            .map_err(error)?
-            .get(session, &worker.name)
-            .map_err(error)?
-            .revision
-            > 0)
-    }
-
     /// Called after either close or park commits, including immutable receipts.
     pub(crate) async fn advance_queue_after_delivery(
         &self,

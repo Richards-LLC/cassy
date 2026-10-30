@@ -1848,7 +1848,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
         {
             assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
-            // The real park committed during another queue operation. Its
+            // The real close/park committed during another queue operation. Its
             // durable cursor survives the failed immediate handoff and restart.
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
             assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
@@ -2025,6 +2025,14 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     })).await;
     let reordered = queue_control(&f, Some(vec!["cas-8488-two","cas-8488-one"])).await;
     assert!(reordered.contains("cas-8488-two -> cas-8488-one"), "{reordered}");
+    let start_lock = crate::worker_task_queue::worker_lock(
+        &f.cas_dir(), &isolated, "start").unwrap();
+    let refused = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":"cas-8488-two",
+    })).unwrap())).await.unwrap_err();
+    assert!(refused.message.contains("start operation in progress"), "{refused}");
+    assert_eq!(f.task("cas-8488-two").status, TaskStatus::Open);
+    drop(start_lock);
     let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "summary_mode":true})).unwrap();
     let status = f.supervisor.factory(Parameters(request)).await.unwrap();
     let status = format!("{status:?}");

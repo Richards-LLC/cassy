@@ -7534,8 +7534,12 @@ async fn test_gc_cleanup_without_force() {
     let pq = env.prompt_queue();
     pq.enqueue("src", "wolf", "test").expect("enqueue");
 
-    let req = factory_req("gc_cleanup");
-    let result = env.service.factory_request(Parameters(req)).await;
+    // Exercise the public action allowlist, including CLI's explicit false
+    // presentation flags, rather than bypassing dispatch via factory_request.
+    let mut req = coord_req("gc_cleanup");
+    req.json = Some(false);
+    req.full = Some(false);
+    let result = env.service.factory(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());

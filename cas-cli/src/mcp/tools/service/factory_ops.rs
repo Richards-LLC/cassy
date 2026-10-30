@@ -8401,8 +8401,9 @@ fn summarize_gc_report(full_report: &str, detail: &str, cleanup: bool) -> String
         }
     }
     let action = if cleanup { "cleanup" } else { "report" };
+    let pages = if cleanup { "" } else { "MCP pages: factory action=gc_report limit=100 offset=0\n" };
     summary.push_str(&format!(
-        "\nDetails: cas factory gc {action} --full\nJSON: cas factory gc {action} --json\nMCP pages: factory action=gc_{action} limit=100 offset=0\nReport: {} bytes; full text and status are opt-in.\n",
+        "\nDetails: cas factory gc {action} --full\nJSON: cas factory gc {action} --json\n{pages}Report: {} bytes; full text and status are opt-in.\n",
         full_report.len(),
     ));
     gc_report_fit_human(&summary)

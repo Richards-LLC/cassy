@@ -1839,6 +1839,20 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let _ = call(closer, close).await;
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         assert!(f.task("cas-8488-c").assignee.is_none());
+        if park {
+            let returned = call(&f.supervisor, serde_json::json!({
+                "action":"request_changes", "id":first.id,
+                "reason":"Correct the returned delivery while the successor is unfinished",
+            })).await;
+            assert_eq!(f.task(&first.id).status, TaskStatus::Open, "{returned}");
+            let refused = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"start", "id":first.id,
+            })).unwrap())).await.unwrap_err();
+            let hold = format!("task action=update id={} status=blocked", next.id);
+            assert!(refused.message.contains(&hold),
+                "Recovery must name the exact successor hold command: {refused}");
+            assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
+        }
         let blocked = call(&f.worker, serde_json::json!({
             "action":"update", "id":"cas-8488-b", "status":"blocked",
         })).await;
@@ -1846,6 +1860,24 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open,
             "An execution waiting on a blocked hold must not advance its pending queue");
+        if park {
+            // Follow the recovery instruction: hold unfinished B, switch back
+            // to A's retained delivery ref, then start A without parking B.
+            git(&checkout, &["switch", LANE]);
+            let resumed = call(&f.worker, serde_json::json!({
+                "action":"start", "id":first.id,
+            })).await;
+            assert_eq!(f.task(&first.id).status, TaskStatus::InProgress, "{resumed}");
+            assert_eq!(f.task(&next.id).status, TaskStatus::Blocked);
+            assert_eq!(git(&checkout, &["branch", "--show-current"]), LANE);
+            let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
+                .unwrap().get("queue-session", WORKER).unwrap();
+            assert_eq!(queue.current_task.as_deref(), Some(next.id.as_str()));
+            assert_eq!(queue.pending, vec!["cas-8488-c"]);
+            assert!(agents.list_active_leases().unwrap().iter()
+                .filter(|lease| lease.agent_id == "nocode-worker-session")
+                .all(|lease| lease.task_id == first.id));
+        }
     }
 }
 
@@ -1889,6 +1921,18 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
 async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
     let f = queue_control_fixture(&mut env);
+    // Queue policy must not change the existing non-queue start API.
+    let mut legacy = assigned("cas-8488-legacy", TaskType::Task, "main");
+    legacy.status = TaskStatus::Open;
+    legacy.deliverables.work_target = None;
+    f.put(&legacy);
+    let legacy_start = call(&f.worker, serde_json::json!({
+        "action":"start", "id":legacy.id,
+    })).await;
+    assert_eq!(f.task(&legacy.id).status, TaskStatus::InProgress, "{legacy_start}");
+    let _ = call(&f.worker, serde_json::json!({
+        "action":"update", "id":legacy.id, "status":"blocked",
+    })).await;
     let agents = open_agent_store(&f.cas_dir()).unwrap();
     let isolated = agents.get("nocode-worker-session").unwrap();
     let mut shared = isolated.clone();

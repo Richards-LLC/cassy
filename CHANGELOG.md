@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Supervisor idle alerts
+
+- **A worker waiting on its own tests no longer pages the supervisor every minute** — Was: a worker that told the supervisor it was not blocked, or that kept rerunning its background tests, drew the same "pending delivery" idle alert about once a minute. → Now: the worker's own message to the supervisor quiets that alert for 10 minutes, and a finished background run re-arms an unchanged alert on a 10-minute window instead of sending it again at once. A new tip, CI result or task state still alerts right away.
+
 ### Fixed — Conditional operand recognition
 
 - **Function and coprocess bodies keep arithmetic checks** — Unquoted `[[ … ]]`

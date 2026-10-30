@@ -1929,7 +1929,7 @@ impl FactoryApp {
                     // Missing refs or an unavailable fresh read still owe one
                     // liveness relay, not an unbounded relay every retry minute.
                     let unknown = merge_alert::WorkerWait {
-                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false,
+                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false, reported_at: None,
                     };
                     let read = worker_waits.get(worker)
                         .filter(|read| read.task == task.task_id).unwrap_or(&unknown);

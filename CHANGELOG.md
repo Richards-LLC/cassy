@@ -130,6 +130,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Arithmetic workspace checks
 
+- **Command-line arithmetic refuses unproven operands** — Factory checks
+  require numeric source in `$(( ))`, `$[ ]`, `let` and `(( ))`, and refuse
+  persistent integer declarations whose later assignments could run arithmetic.
+
 - **Shell syntax cannot hide inside arithmetic** — Arithmetic with comment
   markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
   keeps its existing allowance.

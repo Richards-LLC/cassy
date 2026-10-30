@@ -24,6 +24,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   guard inspects executable substitution bodies with the full command tokenizer,
   including quote-split command names. Single-quoted command text stays data.
 
+### Fixed — Composer file uploads
+
+- **Slow photo uploads show progress and have more time** — File transfers reserve
+  25% margin on a 512 kbit/s link, show their byte progress and storage step, and
+  keep a refusal in one place. Generic HEIF photos retain their image type.
+
 ### Fixed — Release draft linting
 
 - **Unused draft helper removed** — Delete the orphan failure classifier.

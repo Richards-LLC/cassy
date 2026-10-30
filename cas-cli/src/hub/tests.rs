@@ -5964,6 +5964,10 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),
         (&b"mif1\0\0\0\0heic"[..], "image/heic"),
         (&b"avif\0\0\0\0mif1"[..], "image/avif"),
+        (&b"mif1\0\0\0\0"[..], "image/heif"),
+        (&b"heim\0\0\0\0"[..], "image/heif"),
+        (&b"heis\0\0\0\0"[..], "image/heif"),
+        (&b"msf1\0\0\0\0"[..], "image/heif"),
         (&b"qt  \0\0\0\0"[..], "video/quicktime"),
         (&b"isom\0\0\0\0mp42"[..], "video/mp4"),
     ] {

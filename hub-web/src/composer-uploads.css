@@ -11,3 +11,5 @@
 .conversation-composer:has(.composer-uploads:not([hidden])) { grid-template-areas: "uploads uploads uploads" "clip field send" "status status status"; }
 
 .composer-upload-files { display: flex; flex-wrap: wrap; gap: var(--space-2); max-height: 30vh; overflow: auto; }
+
+.composer-uploads progress { width: 100%; height: var(--space-2); accent-color: var(--color-action); }

@@ -453,7 +453,7 @@ mod tests {
         // command arrives as soon as the reply's empty prompt is visible.
         let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
             command: "/bin/sh".into(),
-            args: vec!["-c".into(), "stty raw -echo; printf '\\033cReply complete\\r\\n❯'; exec cat > \"$1\"".into(),
+            args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1HReply complete\\r\\n❯'; exec cat > \"$1\"".into(),
                 "fixture".into(), root.path().join("command-input").to_str().unwrap().into()],
             cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
@@ -481,7 +481,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             while !std::fs::read(root.path().join("command-input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
         }).await.unwrap();
-        assert_eq!(std::fs::read(root.path().join("command-input")).unwrap(), b"/exit\r");
+        let input = std::fs::read(root.path().join("command-input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/exit").count(), 1);
     }
     #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {

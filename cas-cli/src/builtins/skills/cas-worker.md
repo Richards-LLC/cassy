@@ -51,8 +51,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    naming target and SHA. Do not ACK or poll; merge PASS closes, FAIL reopens.
    See [recovery.md](references/recovery.md).
 
-One event gets one message. A close is the lifecycle report. No follow-up after
-merge request; the verdict closes or reopens.
+One event, one message. A close is the report. Don't re-close or block on it;
+the verdict closes or reopens. Stay available after handoff.
 
 Finish or hand off before another task. Follow injected supervisor
 messages. Start only direct supervisor assignments or tasks in `mine`. Never self-dispatch:

@@ -53,7 +53,7 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
   const edits = files.map((path, index) => event(`edit-${index}`, "tool", "Edited file", -160_000 + index, {
     turn: "edit-turn", tool: { name: "Edit", operation: "edit", targets: [path] },
     lifecycle: { id: `call-${index}`, stage: "end", outcome: "success" },
-    changed_files: { files: files.slice(0, index + 1).map((path, index) => ({ path, operation: "edit", source_event_id: `edit-${index}` })), provenance: "successful_tool_calls", complete: false },
+    changed_files: { files: files.slice(0, index + 1).map((path, index) => ({ path, operation: "edit", source_event_id: `edit-${index}`, ...(index === 0 ? { line_counts: { added: 12, removed: 4 } } : {}) })), provenance: "successful_tool_calls", complete: false },
   }));
   const patch = `--- a/${files[0]}\n+++ b/${files[0]}\n@@ -1 +1 @@\n-old summary\n+compact edit summary`;
   const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, work: { [PELICAN]: { supervisor: PELICAN, events: edits, details: { "edit-0": patch, "edit-1": "Exact edit input and output <b>as text</b>" } } } });
@@ -66,7 +66,9 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
     await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "false");
     expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(0);
     await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
-    const file = card.getByRole("button", { name: `${files[0]} edit`, exact: true });
+    const file = card.getByRole("button", { name: `${files[0]} edit 12 lines added, 4 lines removed in the latest successful edit`, exact: true });
+    await expect(card.locator(".changed-file-count-visual")).toHaveText("+12/−4");
+    await expect(card.getByRole("button", { name: `${files[1]} edit`, exact: true })).toBeVisible();
     await file.focus(); await page.keyboard.press("Enter");
     await expect(file).toBeFocused();
     await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
@@ -105,7 +107,7 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
     await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "true");
     await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
     await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
-    for (const file of files) await card.getByRole("button", { name: `${file} edit`, exact: true }).click();
+    for (const toggle of await card.locator(".changed-file-toggle").all()) await toggle.click();
     await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
     expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("commander.workDisclosure:")))).toEqual([]);
   });

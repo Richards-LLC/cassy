@@ -278,6 +278,9 @@ for (const [index, variant] of variants.entries()) {
         }
         expect(videoRanges.some((range) => range.startsWith("bytes="))).toBe(true);
         const unavailable = log.locator('.rich-attachment:has(a[data-artifact-id="art-local-preview"])');
+        // Claim this card as the reader's destination before scrolling: a pending
+        // thread resize can otherwise restore the previous reading anchor.
+        await unavailable.getByRole("link").focus();
         await unavailable.scrollIntoViewIfNeeded();
         await expect(unavailable.locator('a.sheet .preview-note')).toHaveText("Preview unavailable");
         await expect(unavailable.locator('.rich-media')).toBeHidden();

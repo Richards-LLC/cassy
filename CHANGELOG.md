@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA impact for test fixtures
+
+- **Test fixtures stay outside product QA impact** — Changes confined to tests
+  and fixtures no longer select every Commander journey or appear as unowned
+  product surfaces. Product source changes retain their journey and QA checks.
+
+### Added — Per-file edit sizes in Commander
+
+- **Tool-reported files show known edit sizes** — Changed-file rows display added and removed line counts when a successful edit reports them, including zeroes. Unknown counts stay absent. Screen readers hear both numbers and their meaning; the counts describe the latest successful edit, not Git or turn totals.
+
+### Fixed — Quoted shell data
+
+- **Escaped backticks stay literal inside double quotes** — Factory workspace
+  checks allow quoted backtick data while still inspecting executable backtick
+  substitutions for filesystem writes and operator-only commands.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned
@@ -24,6 +40,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Re-parking names work it cannot attribute** — When a pushed branch advances
   beyond its parked delivery through unowned work, close reports the kept anchor,
   ignored tip and offending commit instead of returning an ordinary merge request.
+
+### Fixed — Case checks after registry repairs
+
+- **Registry repairs retain ownership and regression checks** — Fixing a base
+  duplicate evaluates the delivered registry and compares every old case variant.
+  Registry escape notes cannot bypass the case gate; duplicates still present in
+  the delivery refuse with a named error. Unavailable Git inputs retain their
+  existing nonblocking warning.
 
 ### Fixed — Parked delivery attribution
 
@@ -43,6 +67,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
   keeps its existing allowance.
 
+- **Arithmetic operands cannot hide commands in array subscripts** — Factory
+  checks accept numeric arithmetic and refuse variable or command-output
+  operands, quoted `let` expressions and persistent integer declarations whose
+  secondary evaluation cannot be proven inert.
+
 - **Ambiguous arithmetic keeps command checks** — Parentheses must match the
   arithmetic boundary. Command substitutions and dynamic arithmetic operands
   retain workspace checks and unresolved effects are refused.
@@ -50,12 +79,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Multiplication stays arithmetic in shell arguments** — Workspace checks
   keep arithmetic operators out of filesystem resolution while still checking
   nested command substitutions and refusing unresolved effects.
-
-### Fixed — Duplicate baseline bug-family keys
-
-- **Malformed base registries refuse case checks** — A duplicate bug-family key
-  now names the key and file in a registry error instead of skipping the gate.
-  Unavailable Git inputs retain their existing nonblocking warning.
 
 ### Fixed — Factory cleanup feedback
 

@@ -1,0 +1,4 @@
+title: Inspecting a visibility-driven local thumbnail claims the file card as the reading destination before scrolling, so a saved earlier anchor cannot hide it before its ticket request
+tasks: [cas-4b28]
+invariants: [HUB-J22-GOAL]
+journeys: [HUB-J22]

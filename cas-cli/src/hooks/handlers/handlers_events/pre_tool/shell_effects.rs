@@ -73,17 +73,70 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
-/// Extract executable substitutions from a shell word. Arithmetic expressions
-/// stay data while their nested substitutions still contribute effects.
+/// Only numeric source is inert under arithmetic's recursive evaluation. Even
+/// a bare variable can contain an array subscript that executes a substitution.
+fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
+    if expression.bytes().all(|ch| ch.is_ascii_digit() || ch.is_ascii_whitespace()
+        || b"()+-*/%<>=!&|^~?:,".contains(&ch))
+    {
+        Ok(())
+    } else {
+        Err("an unresolved arithmetic operand")
+    }
+}
+
+/// Validate arithmetic commands before their operators become shell scopes.
+/// Use source positions: quoted/comment parentheses are ordinary word data.
+fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'static str> {
+    let mut index = 0;
+    while index + 1 < lexed.tokens.len() {
+        if lexed.tokens[index..index + 2] != [ShellToken::Operator('('), ShellToken::Operator('(')]
+            || lexed.ends[index] + 1 != lexed.ends[index + 1]
+        {
+            index += 1;
+            continue;
+        }
+        let start = lexed.ends[index + 1];
+        let mut balance = 2;
+        let mut closing = None;
+        for end in index + 2..lexed.tokens.len() {
+            match lexed.tokens[end] {
+                ShellToken::Operator('(') => balance += 1,
+                ShellToken::Operator(')') => {
+                    balance -= 1;
+                    if balance == 0 {
+                        closing = Some(end);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = closing.ok_or("an unresolved arithmetic operand")?;
+        let offset = lexed.ends[end];
+        if lexed.tokens[end - 1] != ShellToken::Operator(')')
+            || lexed.ends[end - 1] + 1 != offset
+        {
+            return Err("an unresolved arithmetic operand");
+        }
+        numeric_arithmetic(&source[start..offset - 2])?;
+        // Numeric arithmetic has no filesystem effects. Leave the enclosing
+        // command and its redirections in place for the ordinary collector.
+        lexed.tokens.splice(index..=end, [ShellToken::Word("true".into())]);
+        lexed.literals.splice(index..=end, [true]);
+        lexed.ends.splice(index..=end, [offset]);
+        index += 1;
+    }
+    Ok(())
+}
+
+/// Extract executable substitutions from a shell word. Arithmetic operands
+/// must be numeric source, never values obtained from shell expansion.
 fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
-    let mut arithmetic_end = None;
     while index < bytes.len() {
-        if arithmetic_end.is_some_and(|end| index > end) {
-            arithmetic_end = None;
-        }
         let bracket = bytes.get(index..index + 2) == Some(b"$[");
         let prefix = if bytes.get(index..index + 3) == Some(b"$((") {
             Some(3)
@@ -121,8 +174,9 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
                 }
             }
             if let Some(end) = end {
-                arithmetic_end = Some(arithmetic_end.map_or(end, |outer| outer.max(end)));
-                index += prefix;
+                let operand_end = if bracket { end } else { end - 1 };
+                numeric_arithmetic(&word[index + prefix..operand_end])?;
+                index = end + 1;
                 continue;
             }
             if bracket {
@@ -132,11 +186,6 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             // subshell, so retain the ordinary executable-effects path.
         }
         if bytes.get(index..index + 2) == Some(b"$(") {
-            // Arithmetic can reinterpret command output as another expression
-            // (including executable array subscripts), even from literal cat.
-            if arithmetic_end.is_some() {
-                return Err("an unresolved arithmetic operand");
-            }
             let literal_heredoc = literal_cat_heredoc_end(&word[index..]);
             let end = match literal_heredoc {
                 Some(end) => index + end,
@@ -153,9 +202,6 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             bodies.push(&word[index + 2..end]);
             index = end + 1;
         } else if bytes[index] == b'`' {
-            if arithmetic_end.is_some() {
-                return Err("an unresolved arithmetic operand");
-            }
             let start = index + 1;
             index = start;
             while index < bytes.len() && bytes[index] != b'`' {
@@ -390,10 +436,11 @@ fn collect_script(
         return Err("a shell payload beyond the resolution limit");
     }
     let projected = shell_command_without_heredoc_bodies(script);
-    let lexed = factory_shell_lex(&projected, false, 0);
+    let mut lexed = factory_shell_lex(&projected, false, 0);
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");
     }
+    arithmetic_commands(&projected, &mut lexed)?;
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
@@ -484,6 +531,20 @@ fn collect_script(
             };
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
+            if name == Some("let") {
+                for arg in args.iter().filter(|arg| arg.as_str() != "--") {
+                    numeric_arithmetic(arg)?;
+                }
+            }
+            // Integer attributes persist into later ordinary assignments.
+            // Without modeling those attributes/namerefs, even an initially
+            // numeric declaration cannot establish inert future operands.
+            if name == Some("integer") || (matches!(name, Some("declare" | "typeset" | "local"))
+                && args.iter().any(|arg| arg.contains(['$', '`'])
+                    || (arg.starts_with('-') && !arg.contains('=') && arg.contains('i'))))
+            {
+                return Err("an unresolved arithmetic operand");
+            }
             // A cwd-changing wrapper is scoped to the invoked command. Its
             // computed directory cannot be attributed to the hook's cwd.
             let wrapper_changes_directory = words.iter().take(index.unwrap_or(0)).any(|word| {

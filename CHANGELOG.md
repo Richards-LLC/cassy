@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory guidance size
+
+- **Factory instructions leave room to grow** — Shared check, delivery and blocker
+  rules have one owner, reached when that phase starts. Workers and supervisors
+  reuse each reference within a context. Worker startup guidance reserves at
+  least 2,000 bytes below its 8,000-byte cap; supervisor guidance also leaves
+  room for the context header and Codex worker note. Tested instruction and
+  credential-request contracts stay intact.
+
 ### Fixed — Shared-file warnings
 
 - **Workers can add their own changelog entries without coordination** — Was:

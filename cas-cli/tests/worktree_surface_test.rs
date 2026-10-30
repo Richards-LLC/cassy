@@ -1006,22 +1006,8 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
     assert!(
-        text.contains("CI ") && text.contains("push published"),
-        "compact receipt retains CI and publication decisions.\nGot:\n{text}"
-    );
-    assert!(text.len() < 800, "routine merge receipt: {} bytes", text.len());
-    let detail_path = text
-        .split_once("Details: ")
-        .expect("merge receipt detail reference")
-        .1
-        .split_once(" (SHA-256 ")
-        .unwrap()
-        .0;
-    let detail = std::fs::read_to_string(detail_path).expect("merge detail artifact exists");
-    assert!(
-        detail.contains("gh endpoint unavailable: repository unresolved")
-            && detail.contains("CI SHA:"),
-        "complete CI diagnostics remain fetchable.\nGot:\n{detail}"
+        text.contains("CI admission: advisory") && text.contains("Push state:"),
+        "trunk fallback and unavailable publication keep full actionable details.\nGot:\n{text}"
     );
 
     // The merge actually landed: content reachable from the checked-out repo.

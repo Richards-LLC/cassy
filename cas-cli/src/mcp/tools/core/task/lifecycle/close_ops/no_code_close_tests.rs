@@ -1840,11 +1840,13 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         assert!(f.task("cas-8488-c").assignee.is_none());
         if park {
+            env.set("CAS_AGENT_ROLE", "supervisor");
             let returned = call(&f.supervisor, serde_json::json!({
                 "action":"request_changes", "id":first.id,
                 "reason":"Correct the returned delivery while the successor is unfinished",
             })).await;
             assert_eq!(f.task(&first.id).status, TaskStatus::Open, "{returned}");
+            env.set("CAS_AGENT_ROLE", "worker");
             let refused = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
                 "action":"start", "id":first.id,
             })).unwrap())).await.unwrap_err();

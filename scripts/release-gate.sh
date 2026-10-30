@@ -1642,7 +1642,12 @@ check_changelog_and_versions() {
         $0 == "## [Unreleased]" { in_unreleased=1; next }
         in_unreleased && /^## \[/ { exit }
         in_unreleased && /^### / {
-            area = ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security) — [^<>]+$/)
+            category = substr($0, 5)
+            sub(/ — .*/, "", category)
+            shipped = (category ~ /^(Added|Changed|Deprecated|Removed|Fixed|Security)$/)
+            # Match release_report.rs::is_non_shipped_category and the rubric.
+            non_shipped = (tolower(category) ~ /^(doc|test|known limit)/)
+            area = ((shipped || non_shipped) && $0 ~ /^### [^<>]+ — [^<>]+$/)
             next
         }
         in_unreleased && /^- / {

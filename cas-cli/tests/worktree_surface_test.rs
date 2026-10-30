@@ -7757,9 +7757,11 @@ async fn validated_epic_merge_returns_compact_receipt() {
     req.id = Some("factory/alice".into());
     req.task_id = Some(task.id);
     req.cleanup = Some(false);
-    let text = get_text(&service.coordination(Parameters(req)).await.unwrap());
+    let text = get_text(&service.factory(Parameters(req)).await.unwrap());
     eprintln!("real merge reply: {} chars\n{text}", text.chars().count());
     assert!(text.chars().count() <= 800, "{text}");
+    assert_eq!(tasks.get("compact-merge").unwrap().status, TaskStatus::Closed);
+    assert!(text.contains("next: none."), "{text}");
     let path = text.split_once("Details: ").expect("immutable detail reference").1
         .split_once(" (SHA-256 ").unwrap().0;
     let detail = std::fs::read_to_string(path).unwrap();

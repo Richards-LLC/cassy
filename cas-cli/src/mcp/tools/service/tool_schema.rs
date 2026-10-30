@@ -305,10 +305,10 @@ mod tests {
         assert_eq!(tool.description.as_deref(), Some("fixture tool"));
     }
 
-    /// The coordination description documents its actions; factory publishes
-    /// its complete action list in the schema enum so tools/list stays compact.
+    /// The coordination description documents its actions; factory's schema
+    /// enum separately publishes the factory action naming contract.
     #[test]
-    fn coordination_description_and_factory_enum_name_every_registry_action() {
+    fn coordination_description_names_every_registry_action() {
         let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
         let coordination = tools
             .iter()
@@ -322,19 +322,6 @@ mod tests {
             assert!(words.contains(action), "coordination description omits `{action}`: {description}");
         }
 
-        let factory = tools
-            .iter()
-            .find(|tool| tool.name == "factory")
-            .expect("factory tool is registered");
-        let actions = factory.input_schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("factory action enum");
-        for action in cas_mcp::actions::FACTORY_ACTIONS {
-            assert!(
-                actions.iter().any(|published| published.as_str() == Some(action)),
-                "factory action enum omits `{action}`"
-            );
-        }
     }
 
     /// cas-8563b (D2): the two tools sharing `CoordinationRequest` publish

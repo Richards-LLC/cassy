@@ -10,6 +10,99 @@ const you = (id: number, text: string, at: string) => ({ notification_id: id, ta
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
 
+test("HUB-J4 inspect images in a turn without leaving the conversation", journeyPart, async ({ page, journey }, testInfo) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const imageBytes = readFileSync("e2e/media/evidence.png");
+  await page.route("https://atlas.test/v1/sessions/*/artifacts/*/content?*", route => route.request().url().includes("gallery-missing")
+    ? route.fulfill({ status: 404 }) : route.fulfill({ contentType: "image/png", body: imageBytes }));
+  await page.context().route("https://store.test/**", route => route.fulfill({ contentType: "image/png", body: imageBytes }));
+  await journey.open(); await openConversation(page, "cas-src");
+  const images = ["First screenshot.png", "Second screenshot.png", "Missing screenshot.png"].map((name, index) => ({ ...file(["gallery-first", "gallery-second", "gallery-missing"][index]!, name), mime: "image/png" }));
+  hub.supervisorSays(PELICAN, "Compare these screenshots.", { attachments: images });
+  hub.supervisorSays(PELICAN, "This image belongs to another turn.", { attachments: [{ ...images[0], artifact_id: "gallery-other", name: "Other turn.png" }] });
+  const first = page.getByRole("log").getByRole("link", { name: /^First screenshot.png/ });
+  await expect(first.locator("img")).toBeVisible();
+  const captures = testInfo.outputPath("image-viewer"); mkdirSync(captures, { recursive: true });
+  await journey.stage("Read the image cards in the conversation", async () => {
+    for (const width of [390, 1440]) for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: 844 }); await page.emulateMedia({ colorScheme });
+      await first.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `${captures}/conversation-${width}-${colorScheme}.png` });
+    }
+  });
+  const dialog = page.getByRole("dialog", { name: "Image viewer" });
+  await journey.stage("Expand an image and keep keyboard focus inside", async () => {
+    await first.focus(); await first.press("Enter");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Close image viewer" })).toBeFocused();
+    await expect(dialog).toContainText("1 of 3");
+    await expect(dialog.locator("img")).toHaveAttribute("alt", "First screenshot.png");
+    await expect(dialog).toHaveAttribute("data-state", "ready");
+    await page.keyboard.press("Shift+Tab");
+    await expect(dialog.getByRole("button", { name: "Fit image" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByRole("button", { name: "Close image viewer" })).toBeFocused();
+    for (const width of [390, 1440]) for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: 844 }); await page.emulateMedia({ colorScheme });
+      await page.screenshot({ path: `${captures}/expanded-${width}-${colorScheme}.png` });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    for (const [name, query, media] of [
+      ["forced-colors", "(forced-colors: active)", { forcedColors: "active" }],
+      ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }],
+      ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }],
+    ] as const) {
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+      await page.emulateMedia(media);
+      expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
+      await expect(dialog).toBeVisible();
+      await page.screenshot({ path: `${captures}/a11y-${name}.png` });
+    }
+    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+  });
+  await journey.stage("Zoom and pan with keyboard, mouse and touch", async () => {
+    // At 1440 the 640 px fixture still fits at 1.5×, so it has nothing to pan.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const canvas = dialog.locator(".image-viewer-canvas");
+    await page.keyboard.press("+");
+    await expect(dialog.locator("output")).toHaveText("1.5×");
+    await page.keyboard.press("Shift+ArrowRight");
+    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toContain("translate(0px, 0px)");
+    await canvas.hover(); await page.mouse.wheel(0, -200);
+    await expect(dialog.locator("output")).not.toHaveText("1.5×");
+    const beforeDrag = await dialog.locator("img").evaluate(image => image.style.transform);
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2); await page.mouse.up();
+    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toBe(beforeDrag);
+    const beforePinch = await dialog.locator("output").textContent();
+    await canvas.evaluate(canvas => {
+      const box = canvas.getBoundingClientRect();
+      const fire = (type: string, id: number, x: number) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "touch", pointerId: id, clientX: box.left + x, clientY: box.top + box.height / 2 }));
+      fire("pointerdown", 1, 70); fire("pointerdown", 2, 170); fire("pointermove", 2, 210); fire("pointerup", 1, 70); fire("pointerup", 2, 210);
+    });
+    await expect(dialog.locator("output")).not.toHaveText(beforePinch!);
+    await dialog.getByRole("button", { name: "Fit image" }).click();
+    await expect(dialog.locator("output")).toHaveText("Fit");
+  });
+  await journey.stage("Compare the turn's images and name a load failure", async () => {
+    await page.keyboard.press("ArrowRight");
+    await expect(dialog.locator("h2")).toHaveText("Second screenshot.png");
+    await expect(dialog).toHaveAttribute("data-state", "ready");
+    await dialog.getByRole("button", { name: "Next image" }).click();
+    await expect(dialog.getByRole("status", { name: "Image load" })).toContainText("Couldn't load Missing screenshot.png");
+    await expect(dialog.getByRole("button", { name: "Try image again" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Next image" })).toBeDisabled();
+    await page.keyboard.press("ArrowLeft");
+    await expect(dialog).toHaveAttribute("data-state", "ready");
+    const reading = page.locator(".conversation-reading.thread");
+    const scroll = await reading.evaluate(node => node.scrollTop);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0); await expect(first).toBeFocused();
+    expect(await reading.evaluate(node => node.scrollTop)).toBe(scroll);
+  });
+});
+
 test("HUB-J4 prose tables keep words readable and render inline markdown", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();

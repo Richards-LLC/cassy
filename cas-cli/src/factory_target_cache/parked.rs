@@ -233,6 +233,26 @@ mod tests {
     }
 
     #[test]
+    fn cacheless_worker_does_not_create_retirement_metadata_cas_0c02() {
+        let (_temp, root) = fixture();
+        let worker = worker(&root, "cacheless");
+        fs::remove_dir_all(worker.join("target/debug")).unwrap();
+
+        park(&root, &worker, 0, None).unwrap();
+
+        assert!(
+            !root.join("worker-target-parks").exists(),
+            "a worker without regenerable output must not write retirement metadata"
+        );
+        assert!(!root.join("worker-check-slots").exists());
+        assert!(!root.join("target-cache-gc.lock").exists());
+        assert_eq!(
+            fs::read_to_string(worker.join("target/worker-check.log")).unwrap(),
+            "proof"
+        );
+    }
+
+    #[test]
     fn bounded_parked_targets_preserve_logs_sources_and_independent_lanes_cas_29b0() {
         let (_temp, root) = fixture();
         let reclaim = super::super::tests::reclamation_available();

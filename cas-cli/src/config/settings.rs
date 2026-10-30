@@ -366,6 +366,11 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_id: Option<String>,
 
+    /// Human project name for Commander (e.g. `Cassy`). When absent,
+    /// Commander shows the project's folder name, never `canonical_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
     /// Cloud-provided aliases mirrored by the project identity cache. Keeping
     /// this field in the typed config prevents a normal config save from
     /// dropping aliases written by the cloud sync path.

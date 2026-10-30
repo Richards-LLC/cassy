@@ -31,6 +31,8 @@ export type Session = {
   harness?: "claude" | "codex" | "grok" | "opencode";
   account_email?: string;
   project?: string;
+  /** The project's human name (cas-6f79); older hubs omit it. */
+  project_name?: string;
   machine_online?: boolean;
 };
 

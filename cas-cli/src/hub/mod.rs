@@ -523,6 +523,10 @@ pub struct HubSession {
     /// Canonical project identity, falling back to the main project's folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Human project name for Commander: `[project] display_name`, else the
+    /// main project's folder name; never the canonical id (cas-6f79).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     /// This machine answered the local catalog. A dormant session's daemon
     /// may be dead while its machine remains online; those are separate facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -676,6 +680,29 @@ fn cloud_project_id(cas_root: &std::path::Path) -> Option<String> {
     id
 }
 
+/// The project's human name: a non-empty `[project] display_name` in
+/// `<cas_root>/config.toml`, else the main project's folder name. The
+/// canonical id is a grouping key, never a label (cas-6f79).
+fn project_display_name(cas_root: &std::path::Path) -> Option<String> {
+    let configured = std::fs::read_to_string(cas_root.join("config.toml"))
+        .ok()
+        .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
+        .and_then(|parsed| {
+            parsed
+                .get("project")?
+                .get("display_name")?
+                .as_str()
+                .map(|name| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty());
+    configured.or_else(|| {
+        cas_root
+            .parent()?
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })
+}
+
 fn session_cas_root(session: &SessionInfo) -> Option<std::path::PathBuf> {
     let project_dir = session.metadata.project_dir.as_deref()?;
     find_cas_root_ignoring_env(std::path::Path::new(project_dir)).ok()
@@ -691,14 +718,16 @@ impl LocalSessionReadModel {
             .iter()
             .map(|session| {
                 let mut projected = hub_session(session);
-                projected.cloud_project_id = session_cas_root(session)
-                    .and_then(|cas_root| cloud_project_id(&cas_root));
+                let cas_root = session_cas_root(session);
+                projected.cloud_project_id = cas_root.as_deref().and_then(cloud_project_id);
                 projected.project = projected.cloud_project_id.clone().or_else(|| {
-                    session_cas_root(session)?
+                    cas_root
+                        .as_deref()?
                         .parent()?
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                 });
+                projected.project_name = cas_root.as_deref().and_then(project_display_name);
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
                     projected.last_activity = Some(label);
@@ -724,11 +753,13 @@ impl LocalSessionReadModel {
                 socket_exists: false,
             };
             let identity = hub_session(&recorded);
-            let project = session_cas_root(&recorded).and_then(|root| {
-                cloud_project_id(&root).or_else(|| {
+            let cas_root = session_cas_root(&recorded);
+            let project = cas_root.as_deref().and_then(|root| {
+                cloud_project_id(root).or_else(|| {
                     root.parent()?.file_name().map(|name| name.to_string_lossy().into_owned())
                 })
             });
+            let project_name = cas_root.as_deref().and_then(project_display_name);
             rows.push(HubSession {
                 name: receipt.metadata.name,
                 harness: identity.harness,
@@ -737,6 +768,7 @@ impl LocalSessionReadModel {
                 agents: identity.agents,
                 account_email: identity.account_email,
                 project,
+                project_name,
                 machine_online: Some(false),
                 project_dir: receipt.metadata.project_dir,
                 supervisor: receipt.metadata.supervisor.name,
@@ -869,6 +901,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
         agents,
         account_email,
         project: None,
+        project_name: None,
         machine_online: Some(true),
         project_dir: session.metadata.project_dir.clone(),
         supervisor: session.metadata.supervisor.name.clone(),
@@ -1129,6 +1162,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         agents: Vec::new(),
         account_email: None,
         project: None,
+        project_name: None,
         machine_online: None,
         project_dir: Some("/tmp/project".into()),
         supervisor: "supervisor".into(),

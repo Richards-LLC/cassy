@@ -1,6 +1,6 @@
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineVersionMarkup } from "./machine-version";
-import { ConversationList, machineName, type ConversationRow } from "./conversation-list";
+import { ConversationList, machineName, rowProjectName, type ConversationRow } from "./conversation-list";
 
 export interface NavigationMachine { id: string; label: string; online?: boolean; runtime?: string; latestRelease?: string }
 type Filter = "all" | "needs-you" | `machine:${string}`;
@@ -11,7 +11,7 @@ interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElem
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
-const projectName = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.supervisor;
+const projectName = (row: ConversationRow) => rowProjectName(row) || row.supervisor;
 const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.key;
 const endedSessionKey = (row: ConversationRow) => `${row.key}\u0000${row.ended?.at ?? ""}`;
 
@@ -162,7 +162,8 @@ export class ProjectNavigation {
       const label = `${name} · ${visible.length} ${visible.length === 1 ? "conversation" : "conversations"} on ${hosts.map((row) => machineName(row.host)).join(", ")}`;
       card.node.setAttribute("aria-label", label);
       if (card.heading.textContent !== label) card.heading.textContent = label;
-      const markup = `<strong class="project-card-name">${escapeHtml(name)}</strong><span class="project-card-count">${visible.length}<span class="sr-only"> ${visible.length === 1 ? "conversation" : "conversations"}</span></span><span class="project-card-chevron" aria-hidden="true">⌄</span>`;
+      const identity = members[0]!.project?.trim();
+      const markup = `<strong class="project-card-name"${identity && identity !== name ? ` title="${escapeHtml(identity)}"` : ""}>${escapeHtml(name)}</strong><span class="project-card-count">${visible.length}<span class="sr-only"> ${visible.length === 1 ? "conversation" : "conversations"}</span></span><span class="project-card-chevron" aria-hidden="true">⌄</span>`;
       if (card.toggle.innerHTML !== markup) card.toggle.innerHTML = markup;
       card.body.hidden = this.collapsed.has(key) && !options.searchActive;
       card.toggle.setAttribute("aria-expanded", String(!card.body.hidden));

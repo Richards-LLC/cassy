@@ -3783,6 +3783,7 @@ Was: reports lacked evidence. Now: reports include verification evidence.
         let config = Config {
             project: Some(crate::config::ProjectConfig {
                 canonical_id: Some("configured-project".to_string()),
+                display_name: None,
                 aliases: Vec::new(),
             }),
             ..Config::default()

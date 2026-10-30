@@ -222,7 +222,7 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
 /// Heredoc quotes are data, but escaped markers are inert. Remove shell
 /// line continuations, then pass only complete, unescaped expansions through
 /// the ordinary substitution/arithmetic checks without rewriting their source.
-fn heredoc_substitution_bodies(body: &str) -> Result<Vec<String>, &'static str> {
+fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Result<Vec<String>, &'static str> {
     let mut logical = String::new();
     let mut chars = body.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -234,6 +234,15 @@ fn heredoc_substitution_bodies(body: &str) -> Result<Vec<String>, &'static str> 
         if ch == '\\' && let Some(next) = chars.next() {
             logical.push(next);
         }
+    }
+    // A joined terminator ends the real heredoc before the line-based
+    // extractor expects. Its remaining text may be executable shell source.
+    if logical.lines().any(|line| {
+        let line = line.trim_end_matches('\r');
+        let line = if delimiter.strip_leading_tabs { line.trim_start_matches('\t') } else { line };
+        line == delimiter.value
+    }) {
+        return Err("an unresolved shell payload");
     }
     let bytes = logical.as_bytes();
     let mut bodies = Vec::new();
@@ -509,7 +518,7 @@ fn collect_script(
     // Keep the source's expansion provenance paired with the shared extractor.
     let delimiters: Vec<_> = projected.lines().flat_map(heredoc_delimiters).collect();
     let bodies = shell_heredoc_bodies(script);
-    if delimiters.iter().skip(bodies.len()).any(|delimiter| !delimiter.literal_body) {
+    if delimiters.len() != bodies.len() {
         return Err("an unresolved shell payload");
     }
     let mut heredocs = delimiters.into_iter().zip(bodies);
@@ -557,15 +566,17 @@ fn collect_script(
             // The existing script-write recognizer needs the body attached to
             // its receiving command, rather than interpreted as shell words.
             let mut expanding_bodies = Vec::new();
-            for _ in heredoc_delimiters(&command) {
-                if let Some((delimiter, body)) = heredocs.next() {
-                    command.push('\n');
-                    command.push_str(&body);
-                    command.push_str(&delimiter.value);
-                    command.push('\n');
-                    if !delimiter.literal_body {
-                        expanding_bodies.extend(heredoc_substitution_bodies(&body)?);
-                    }
+            for expected in heredoc_delimiters(&command) {
+                let (delimiter, body) = heredocs.next().ok_or("an unresolved shell payload")?;
+                if expected.value != delimiter.value || expected.strip_leading_tabs != delimiter.strip_leading_tabs {
+                    return Err("an unresolved shell payload");
+                }
+                command.push('\n');
+                command.push_str(&body);
+                command.push_str(&delimiter.value);
+                command.push('\n');
+                if !delimiter.literal_body {
+                    expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter)?);
                 }
             }
             let words: Vec<String> = statement
@@ -897,6 +908,11 @@ fn collect_script(
             }
             _ => {}
         }
+    }
+    // Even a quoted body left unclaimed proves that projection/splitting
+    // disagreed about shell syntax; it may have hidden subsequent commands.
+    if heredocs.next().is_some() {
+        return Err("an unresolved shell payload");
     }
     if !scopes.is_empty() {
         return Err("an unmatched shell scope");

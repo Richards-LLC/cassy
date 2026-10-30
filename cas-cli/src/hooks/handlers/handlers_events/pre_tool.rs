@@ -4361,37 +4361,49 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
                 while chars.get(index).is_some_and(|ch| ch.is_whitespace()) {
                     index += 1;
                 }
-                let Some(&first) = chars.get(index) else {
-                    continue;
-                };
-                let (value, next_index) = if first == '\'' || first == '"' {
-                    index += 1;
-                    let start = index;
-                    while index < chars.len() && chars[index] != first {
+                // Bash removes quoting from the entire delimiter word. Any
+                // quoted/escaped character makes the complete body literal.
+                let mut value = String::new();
+                let mut quote = None;
+                let mut literal_body = false;
+                while let Some(&ch) = chars.get(index) {
+                    if quote == Some('\'') {
+                        if ch == '\'' { quote = None; } else { value.push(ch); }
+                        index += 1;
+                    } else if quote == Some('"') {
+                        if ch == '"' {
+                            quote = None;
+                            index += 1;
+                        } else if ch == '\\' && chars.get(index + 1)
+                            .is_some_and(|next| matches!(next, '$' | '`' | '"' | '\\'))
+                        {
+                            value.push(chars[index + 1]);
+                            index += 2;
+                        } else {
+                            value.push(ch);
+                            index += 1;
+                        }
+                    } else if matches!(ch, '\'' | '"') {
+                        literal_body = true;
+                        quote = Some(ch);
+                        index += 1;
+                    } else if ch == '\\' {
+                        literal_body = true;
+                        index += 1;
+                        if let Some(&next) = chars.get(index) {
+                            value.push(next);
+                            index += 1;
+                        }
+                    } else if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                        break;
+                    } else {
+                        value.push(ch);
                         index += 1;
                     }
-                    if index >= chars.len() {
-                        continue;
-                    }
-                    (chars[start..index].iter().collect::<String>(), index + 1)
-                } else {
-                    let start = index;
-                    while index < chars.len()
-                        && !chars[index].is_whitespace()
-                        && !matches!(chars[index], ';' | '|' | '&' | '<' | '>')
-                    {
-                        index += 1;
-                    }
-                    (chars[start..index].iter().collect(), index)
-                };
-                if !value.is_empty() {
-                    delimiters.push(HeredocDelimiter {
-                        value,
-                        strip_leading_tabs,
-                        literal_body: matches!(first, '\'' | '"'),
-                    });
                 }
-                index = next_index;
+                if quote.is_none() && (!value.is_empty() || literal_body) {
+                    delimiters.push(HeredocDelimiter { value, strip_leading_tabs, literal_body });
+                }
             }
             _ => index += 1,
         }
@@ -8730,6 +8742,16 @@ EOF
 ".into(), false),
             ("mixed delimiters", "cat <<'DATA' <<RUN\n$(touch /outside/ignored)\nDATA\n$(touch /outside/cas-b8ae-must-not-execute)\nRUN\n".into(), true),
             ("effective directory", "cd /outside && cat <<EOF\n$(touch cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("comment marker desync", "echo hi # <<'X'\nX\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("missing quoted body", "echo see <<'X' # doc\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("backtick marker desync", "x=`cat <<'A'\nA\n`; cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("arithmetic marker desync", "echo $((1<<2)); cat <<EOF\n2))\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("unclaimed quoted body", "echo hi # <<'X'\ntouch /outside/cas-b8ae-must-not-execute\nX\n".into(), true),
+            ("unclaimed shift body", "echo $(( 1<<2 ))\ntouch /outside/cas-b8ae-must-not-execute\n2\n".into(), true),
+            ("joined terminator", "cat <<EOF\nEO\\\nF\ntouch /outside/cas-b8ae-must-not-execute\nEOF\n".into(), true),
+            ("escaped delimiter", "cat <<\\EOF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially single quoted delimiter", "cat <<E'O'F\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially double quoted delimiter", "cat <<\"E\"OF\n$(touch /outside/p)\nEOF\n".into(), false),
         ] {
             // These are JSON request strings only. Never execute their payloads.
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();

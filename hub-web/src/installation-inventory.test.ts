@@ -89,7 +89,7 @@ describe("recognizable browser installations (cas-2e77)", () => {
     const times = [...dialog.querySelectorAll("time")];
     expect(times.map(node => node.textContent)).toEqual(["Just now", "Just now"]);
     expect(times.map(node => node.dateTime)).toEqual([future.issued_at, future.last_used_at]);
-    expect(times[0]?.title).toBe(new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(Date.parse(future.issued_at)));
+    expect(times[0]?.title).toBe(new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", hour12: true }).format(Date.parse(future.issued_at)));
     expect(dialog.querySelector("details")?.textContent).toContain(future.last_used_at);
   });
 

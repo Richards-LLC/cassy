@@ -1,0 +1,5 @@
+title: Commander clock times read 12-hour with AM/PM in the viewer's locale and timezone, never a 24-hour clock
+found: '2026-10-30'
+tasks: [cas-73dd9]
+invariants: [HUB-J4-TWELVE-HOUR-TIMES]
+journeys: [HUB-J4, HUB-J7, HUB-J14, HUB-J15]

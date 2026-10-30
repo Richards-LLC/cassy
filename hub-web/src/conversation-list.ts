@@ -5,6 +5,7 @@ import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
+import { supervisorVersion } from "./machine-version";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
@@ -55,6 +56,8 @@ export interface ConversationRow {
   /** The project's human name; `project` stays the grouping identity (cas-6f79). */
   projectName?: string;
   machine_online?: boolean;
+  mcp_version?: string;
+  installed_version?: string;
   workerCount?: number;
   mergesPerHour?: number;
   needsYou?: boolean;
@@ -206,6 +209,7 @@ export function conversationRowSpokenName(row: ConversationRow): string {
     project ? row.supervisor : undefined,
     row.harness,
     row.account_email,
+    rowVersion(row)?.description,
     row.supervisorState === "needs-you" ? "needs you" : row.supervisorState,
     row.group?.active ? "most recent" : undefined,
     preview,
@@ -213,6 +217,11 @@ export function conversationRowSpokenName(row: ConversationRow): string {
     unread > 0 ? `${unread} unread` : undefined,
     row.attention > 0 ? (row.attention === 1 ? "waiting for you" : `${row.attention} waiting for you`) : undefined,
   ]);
+}
+
+function rowVersion(row: ConversationRow) {
+  if (row.ended || row.unreachable || row.machine_online === false || row.supervisorState === "offline") return undefined;
+  return supervisorVersion(row.mcp_version, row.installed_version);
 }
 
 /** One Pebble row: `avatar · project machine · codename · preview · time`, with
@@ -267,9 +276,11 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // cas-55a4: among one project's sessions, the most recently active one says so.
   const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
   const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
+  const version = rowVersion(row);
+  const badge = version ? `<span class="supervisor-version${version.update ? " update-available" : ""}" title="${escapeHtml(version.description)}">${escapeHtml(version.version)}${version.update ? ' <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span>' : ""}</span>` : "";
   // DESIGN.md Avatars: the model's provider mark, or the machine monogram.
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}${account}</span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${badge}${mark}</span>` : `${mark}${badge}`}${account}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${emojiMarkup(preview)}</span>`
     + marks

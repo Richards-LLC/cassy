@@ -3502,3 +3502,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .conversation-composer:has(#message-emoji) .composer-actions { justify-content: flex-end; }
 }
 .conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; font-variant-emoji: emoji; }
+
+/* The running MCP belongs to the supervisor identity, below the project. */
+.supervisor-version { display: inline-flex; align-items: baseline; gap: var(--space-1); margin-inline-start: var(--space-1); padding-inline: var(--space-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-inline); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); white-space: nowrap; }
+.supervisor-version.update-available { color: var(--state-warn); border-color: currentColor; }
+@media (forced-colors: active) { .supervisor-version { color: CanvasText; border-color: CanvasText; } }

@@ -225,7 +225,7 @@ pub(crate) fn snapshot_with_installed(
     })
 }
 
-fn installed_version() -> Option<String> {
+pub(crate) fn installed_version() -> Option<String> {
     static CACHE: OnceLock<Mutex<Option<(String, Instant, Option<String>)>>> = OnceLock::new();
     let path = std::env::var("PATH").unwrap_or_default();
     let cache = CACHE.get_or_init(|| Mutex::new(None));

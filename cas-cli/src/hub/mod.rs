@@ -505,6 +505,12 @@ pub enum DaemonLiveness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubSession {
     pub name: String,
+    /// The live supervisor's fingerprinted MCP daemon epoch, not the hub binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_version: Option<String>,
+    /// Installed CLI on this machine; may be newer than a connected MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
     /// The recorded supervisor harness, normalized to its backend name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
@@ -591,6 +597,15 @@ pub struct LocalSessionReadModel {
     /// [`LAST_ACTIVITY_TTL`] so a device's five-second catalog refresh does
     /// not query every project's queue each time.
     activity: Arc<std::sync::Mutex<HashMap<String, CachedActivity>>>,
+    versions: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, CachedVersions>>>,
+}
+
+const MCP_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone)]
+struct CachedVersions {
+    read_at: std::time::Instant,
+    snapshot: Option<crate::factory_binary_skew::Snapshot>,
 }
 
 /// How long a session's last activity is reused before it is read again.
@@ -729,6 +744,20 @@ impl LocalSessionReadModel {
                         .map(|name| name.to_string_lossy().into_owned())
                 });
                 projected.project_name = cas_root.as_deref().and_then(project_display_name);
+                if !projected.dormant && projected.liveness == DaemonLiveness::Live
+                    && let Some(snapshot) = cas_root.as_deref().and_then(|root| self.mcp_versions(root))
+                {
+                    projected.installed_version = Some(snapshot.installed.clone()).filter(|version| version != "unknown");
+                    let matches: Vec<_> = snapshot.servers.iter().filter(|server| {
+                        server.role == cas_types::AgentRole::Supervisor
+                            && server.session.as_deref() == Some(session.name.as_str())
+                            && server.name == projected.supervisor
+                    }).collect();
+                    // Reconnecting can briefly leave two live MCP processes.
+                    // Different observations are unknown, never an arbitrary version.
+                    projected.mcp_version = matches.first().and_then(|server| server.version.clone())
+                        .filter(|version| matches.iter().all(|server| server.version.as_ref() == Some(version)));
+                }
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
                     projected.last_activity = Some(label);
@@ -763,6 +792,8 @@ impl LocalSessionReadModel {
             let project_name = cas_root.as_deref().and_then(project_display_name);
             rows.push(HubSession {
                 name: receipt.metadata.name,
+                mcp_version: None,
+                installed_version: None,
                 harness: identity.harness,
                 model: identity.model,
                 effort: identity.effort,
@@ -787,6 +818,23 @@ impl LocalSessionReadModel {
             });
         }
         rows
+    }
+
+    fn mcp_versions(&self, cas_root: &std::path::Path) -> Option<crate::factory_binary_skew::Snapshot> {
+        let mut cache = self.versions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(cas_root)
+            && cached.read_at.elapsed() < MCP_VERSION_TTL
+        {
+            return cached.snapshot.clone();
+        }
+        let installed = crate::factory_binary_skew::installed_version();
+        let snapshot = crate::factory_binary_skew::snapshot_with_installed(
+            cas_root, installed.as_deref().unwrap_or("unknown"), chrono::Utc::now(),
+        ).ok();
+        cache.insert(cas_root.to_path_buf(), CachedVersions {
+            read_at: std::time::Instant::now(), snapshot: snapshot.clone(),
+        });
+        snapshot
     }
 
     fn last_activity(&self, session: &SessionInfo) -> Option<(String, String)> {
@@ -896,6 +944,8 @@ fn hub_session(session: &SessionInfo) -> HubSession {
     let effort = supervisor.and_then(|agent| agent.effort.clone());
     HubSession {
         name: session.name.clone(),
+        mcp_version: None,
+        installed_version: None,
         harness,
         model,
         effort,
@@ -1157,6 +1207,8 @@ impl SessionReadModel for RecordingReadModel {
 pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
+        mcp_version: None,
+        installed_version: None,
         harness: None,
         model: None,
         effort: None,

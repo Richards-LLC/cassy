@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Supervisor Cassy versions in Commander
+
+- **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.
+
 ### Added — Release-pinned hub and host isolation
 
 - **The hub is pinned to release builds** — Was: a live hub hotfix could run any

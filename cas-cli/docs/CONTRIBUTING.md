@@ -1289,6 +1289,13 @@ A later launch from a stale shell can recreate the old profile folder. Readable
 Claude/Codex descendants of these shells and registered agents remain checked;
 an unrelated opaque shell does not block every account mutation.
 
+The session catalog also reports optional `mcp_version` (the live supervisor's
+fingerprinted MCP daemon epoch) and `installed_version` (that machine's
+installed CLI). Both reuse the Factory MCP versions source; MCP observations
+match supervisor role, name and session. Conflicting live MCP versions remain
+unknown. A ten-second per-project cache bounds epoch/process probes. Neither
+field borrows the hub's own binary version; absent versions are omitted.
+
 The hub session catalog reports the supervisor's optional `harness`, `model`
 and `effort`. Model version is part of the reported model ID or display name
 (for example `claude-opus-5-5` or `gpt-6.1-sol`), not the CLI version. The

@@ -1518,7 +1518,7 @@ fn restore_task_proofs(
 
 /// Merge append-only task-note blocks without allowing a whole-row conflict
 /// resolution to discard one machine's timeline.
-fn merge_task_notes(local: &str, remote: &str) -> String {
+pub(crate) fn merge_task_notes(local: &str, remote: &str) -> String {
     // cas-a8e2: the remote row's provenance is rendered fresh from Cloud's
     // attested record, so it replaces the local copy. A union would keep both
     // whenever a field's formatting differs (received_at did) and leave two

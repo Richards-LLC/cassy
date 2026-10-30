@@ -20,6 +20,7 @@ trap 'rm -rf "$tmp"' EXIT
 # Pin the real ELF compiler before fixtures replace ZIG/PATH with an echo-only
 # Zig for toolchain/cache assertions. On macOS that fake otherwise succeeds
 # without producing the Ghostty object or executable that the real audits need.
+pin_fixture_compiler() {
 if ! release_portable_x86_64_linux_cc; then
     # The release resolver also finds Zig in this worktree or its main checkout.
     fixture_release_env="$(python3 "$script_dir/release_env.py" resolve --worktree "$script_dir/..")"
@@ -36,6 +37,14 @@ fi
 } >"$tmp/linux-cc"
 chmod +x "$tmp/linux-cc"
 export CC="$tmp/linux-cc"
+}
+
+# Source-only sections need no ELF compiler. Resolve compiling sections now,
+# before the fixture environment hides the operator's release profile.
+case "${1:-}" in
+    --changelog-only|--test-child-env-only) ;;
+    *) pin_fixture_compiler ;;
+esac
 
 # The gate refuses any scratch base with a .cas ancestor. Its default used to be
 # $HOME/.cache/cas-release-gate — which on a developer machine sits under the
@@ -872,10 +881,11 @@ assert_all_pass() {
 }
 
 run_scenario() {
-    local name="$1" variable="$2" repo output
+    local name="$1" variable="$2" row="$3" repo output
+    shift 3
     repo="$(new_fixture "$name")"
-    output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
-    assert_named_failure "$3" "$output"
+    output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.99.7 "$@" 2>&1 || true)"
+    assert_named_failure "$row" "$output"
 }
 
 section_release_binary_isa() {
@@ -1384,14 +1394,14 @@ grep -qF 'PASS fixture-paths' <<<"$output" && ok 'fixture-paths allows compile-t
     || bad "fixture-paths rejected a shard-safe include: $output"
 
 # 8. Ledger regeneration must be compared to the committed file.
-run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections
+run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections --only builtin-projections
 
 # 9. Changelog/version contract and clean-tree contract are independent.
 repo="$(new_fixture changelog-failure)"
 # Portable in-place edit: GNU and BSD sed disagree on -i (cas-fed5).
 grep -v 'Fixture release' "$repo/CHANGELOG.md" >"$repo/CHANGELOG.md.tmp" || true
 mv "$repo/CHANGELOG.md.tmp" "$repo/CHANGELOG.md"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only changelog-and-versions 2>&1 || true)"
 assert_named_failure changelog-and-versions "$output"
 
 # A post-cut tree has no entries in [Unreleased]. The release row validates
@@ -1419,12 +1429,12 @@ assert_named_failure changelog-and-versions "$output"
 
 repo="$(new_fixture dirty-tree)"
 printf 'untracked\n' >"$repo/untracked.txt"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only working-tree 2>&1 || true)"
 assert_named_failure working-tree "$output"
 
 repo="$(new_fixture invalid-failure-log)"
 printf '%s\n' '- 2026-09-02 — **not-a-gate-check** — Symptom: unparseable. Root cause: fixture. Release: fixture.' >>"$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only failure-log 2>&1 || true)"
 assert_named_failure failure-log "$output"
 
 # cas-8b90. A worktree that is dirty or no longer matches its claimed epic ref
@@ -1432,7 +1442,7 @@ assert_named_failure failure-log "$output"
 # can refresh the exact worktree that failed the freshness check.
 repo="$(new_fixture stale-epic-worktree)"
 printf 'stale worktree\n' >"$repo/stale.txt"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only epic-worktree-fresh 2>&1 || true)"
 assert_named_failure epic-worktree-fresh "$output"
 if grep -qF "reset command: git -C $repo reset --hard HEAD" <<<"$output"; then
     ok 'stale epic worktree receipt names the exact reset command'
@@ -1444,7 +1454,7 @@ fi
 # candidate. Remove it to prove the refusal is named and actionable.
 repo="$(new_fixture missing-epic-zig)"
 rm -f "$repo/.context/zig/zig"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only epic-worktree-zig 2>&1 || true)"
 assert_named_failure epic-worktree-zig "$output"
 if grep -qF './scripts/bootstrap-zig.sh' <<<"$output"; then
     ok 'missing epic-worktree Zig receipt names bootstrap-zig.sh'
@@ -1469,7 +1479,7 @@ output="$(cd "$epic_worktree" && \
     CARGO="$epic_worktree/scripts/cargo-stub" \
     RUSTUP="$epic_worktree/scripts/rustup-stub" \
     RELEASE_GATE_GEN_REFERENCE_HISTORY="$epic_worktree/scripts/gen-builtin-reference-history.sh" \
-    "$epic_worktree/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    "$epic_worktree/scripts/release-gate.sh" 9.99.7 --only epic-worktree-zig,workspace-tests 2>&1 || true)"
 git -C "$repo" worktree remove --force "$epic_worktree" >/dev/null
 if grep -qF 'PASS epic-worktree-zig' <<<"$output" \
     && grep -qF "ZIG=$repo/.context/zig/zig ::" "$zig_log"; then
@@ -2664,14 +2674,14 @@ run_sections() {
         fi
     done
 }
-if [[ "${1:-}" == --release-binary-isa-only ]]; then
+if [[ "${1:-}" == --changelog-only ]]; then
+    run_sections section_web_and_source_rows
+elif [[ "${1:-}" == --release-binary-isa-only ]]; then
     run_sections section_release_binary_isa
 elif [[ "${1:-}" == --concurrency-only ]]; then
     run_sections section_concurrency
 elif [[ "${1:-}" == --failure-scenarios-only ]]; then
     run_sections section_failure_scenarios
-elif [[ "${1:-}" == --changelog-only ]]; then
-    run_sections section_web_and_source_rows
 else
     run_sections section_release_binary_isa \
         section_admission_and_script_tier \

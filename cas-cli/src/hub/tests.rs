@@ -4877,6 +4877,7 @@ async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
 
     let file = fixture._temp.path().join("creds/project/STRIPE_KEY");
     assert_eq!(body["path"], file.display().to_string(), "{body}");
+    // pin: the file holds exactly the pasted value, with surrounding whitespace trimmed.
     assert_eq!(std::fs::read_to_string(&file).unwrap(), VALUE, "saved trimmed");
     assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
@@ -4923,7 +4924,7 @@ async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!fixture._temp.path().join("creds/project/NPM_TOKEN").exists());
-    assert!(fixture.queued().iter().any(|row| row.prompt.contains("Declined the secret NPM_TOKEN")));
+    assert!(queue.queued_prompt(declined).unwrap().unwrap().acked_at.is_some(), "a decline answers the request");
 }
 
 /// cas-1996: only a factory:manage device answers, only an open secret

@@ -11,6 +11,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages; what you type in the terminal still is.
 
+### Fixed — Forced colors in Commander
+
+- **Selected states read correctly in forced colors** — The selected conversation's name is readable on its highlighted row, and only the selected view tab is underlined, so Team no longer looks unselected.
+
 ### Fixed — Codex launch
 
 - **Codex workers and supervisors no longer update Codex by accident** — Was: when a newer Codex was available, launch showed an "Update now" dialog with that option selected, and the factory's first Enter accepted it, so Codex ran `npm install -g @openai/codex`, changed the machine's global npm and the session died. → Now: factory Codex panes launch with `check_for_update_on_startup=false`, so the dialog never appears and the first prompt reaches the agent.

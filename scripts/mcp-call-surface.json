@@ -106,6 +106,7 @@
         "renew_claim",
         "reply_intent",
         "restart_spawn_queue",
+        "restart_supervisor",
         "server_list",
         "server_start",
         "server_stop",

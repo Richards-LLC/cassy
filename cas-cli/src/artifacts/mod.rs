@@ -66,13 +66,24 @@ pub enum PublishDisposition {
     UploadFailed { reason: String },
 }
 
+/// Storage state without a QA warning wrapper. Renderers can match this
+/// exhaustively without assuming a recursive warning has been unwrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageDisposition<'a> {
+    Committed,
+    CommittedMetadataUnavailable { reason: &'a str },
+    StorageNotLive { reason: &'a str },
+    NotLoggedIn,
+    UploadFailed { reason: &'a str },
+}
+
 impl PublishDisposition {
     /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
         matches!(
             self.storage_disposition(),
-            PublishDisposition::Committed { .. }
-                | PublishDisposition::CommittedMetadataUnavailable { .. }
+            StorageDisposition::Committed
+                | StorageDisposition::CommittedMetadataUnavailable { .. }
         )
     }
 
@@ -92,10 +103,14 @@ impl PublishDisposition {
         }
     }
 
-    pub(crate) fn storage_disposition(&self) -> &Self {
+    pub(crate) fn storage_disposition(&self) -> StorageDisposition<'_> {
         match self {
             Self::QaBundleNotPortable { storage, .. } => storage.storage_disposition(),
-            other => other,
+            Self::Committed { .. } => StorageDisposition::Committed,
+            Self::CommittedMetadataUnavailable { reason } => StorageDisposition::CommittedMetadataUnavailable { reason },
+            Self::StorageNotLive { reason } => StorageDisposition::StorageNotLive { reason },
+            Self::NotLoggedIn => StorageDisposition::NotLoggedIn,
+            Self::UploadFailed { reason } => StorageDisposition::UploadFailed { reason },
         }
     }
 
@@ -452,11 +467,13 @@ pub fn publish(
         disposition,
         source,
     };
-    if outcome.disposition.is_committed()
-        && let Some((_temp, archive)) = closure
-    {
-        if let Err(error) = qa::record(context, &outcome, &archive) {
-            qa_error = Some(error.to_string());
+    if let Some((_temp, archive)) = closure {
+        if outcome.disposition.is_committed() {
+            if let Err(error) = qa::record(context, &outcome, &archive) {
+                qa_error = Some(error.to_string());
+            }
+        } else {
+            qa_error = Some("manifest is not stored in Cloud, so its QA archive is not portable".into());
         }
     }
     outcome.disposition = outcome.disposition.with_qa_error(qa_error);
@@ -653,7 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn producer_publication_keeps_manifest_when_closure_is_unavailable() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_string_contains, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -667,6 +684,13 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path("/blob"))
             .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/blob"))
+            .and(body_string_contains("trace.zip"))
+            .respond_with(ResponseTemplate::new(403))
+            .with_priority(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -732,6 +756,19 @@ mod tests {
                     }
                 }
             }
+            // A valid archive cannot travel either if its manifest upload fails.
+            fs::write(f.task_dir.join("trace.zip"), b"saved QA trace").unwrap();
+            fs::write(&manifest, serde_json::json!({
+                "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
+                "files": {"trace": "trace.zip"}
+            }).to_string()).unwrap();
+            let mut context = f.context();
+            context.cloud = Some(ArtifactUploadClient::new(&endpoint, "test-token"));
+            assert!(qa::prepare(&context, &manifest).unwrap().is_some());
+            let published = publish(&context, &manifest).unwrap();
+            assert_eq!(published.artifact.status, "local");
+            assert_eq!(published.disposition.metadata_state(), "qa_bundle_not_portable");
+            assert!(published.disposition.qa_portability_error().unwrap().contains("manifest"));
             assert_eq!(fs::read(private).unwrap(), private_bytes);
         })
         .await
@@ -956,8 +993,8 @@ mod tests {
                 case.is_committed(),
                 matches!(
                     case.storage_disposition(),
-                    PublishDisposition::Committed { .. }
-                        | PublishDisposition::CommittedMetadataUnavailable { .. }
+                    StorageDisposition::Committed
+                        | StorageDisposition::CommittedMetadataUnavailable { .. }
                 )
             );
         }

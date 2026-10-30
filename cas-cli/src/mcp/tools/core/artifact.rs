@@ -17,7 +17,7 @@ use cas_store::{PublishedArtifact, SqliteArtifactStore};
 use std::path::PathBuf;
 
 use crate::artifacts::{
-    PublishContext, PublishDisposition, PublishOutcome, cloud::ArtifactUploadClient,
+    PublishContext, PublishOutcome, StorageDisposition, cloud::ArtifactUploadClient,
     paths::PublishRoots, publish,
 };
 use crate::cli::render_artifact_line;
@@ -212,12 +212,12 @@ fn render_publish(outcome: &PublishOutcome) -> String {
     if let Some(url) = &artifact.cloud_url {
         out.push_str(&format!("cloud_url: {url}\n"));
     }
-    if let PublishDisposition::UploadFailed { reason } = outcome.disposition.storage_disposition() {
+    if let StorageDisposition::UploadFailed { reason } = outcome.disposition.storage_disposition() {
         out.push_str(&format!(
             "\nThe record is usable; the upload is not.\n{reason}\n"
         ));
     }
-    if let PublishDisposition::CommittedMetadataUnavailable { reason } = outcome.disposition.storage_disposition() {
+    if let StorageDisposition::CommittedMetadataUnavailable { reason } = outcome.disposition.storage_disposition() {
         out.push_str(&format!("\nCloud committed the bytes, but the task reference was not recorded.\n{reason}\n"));
     }
     out

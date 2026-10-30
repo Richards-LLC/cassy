@@ -64,6 +64,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   recycle path, Claude keeps its verified control command, and unverified
   Grok or OpenCode resets remain refused.
 
+### Fixed — QA artifact publishing
+
+- **A failed manifest upload reports its QA bundle as not portable** — Was:
+  a prepared archive could hide the portability warning when its manifest
+  upload failed. → Now: JSON and human output retain the upload failure and
+  also report that the QA archive cannot be shared.
+
 ### Fixed — Factory delivery
 
 - **Merging released main into a delivery branch no longer blocks close** — Was:

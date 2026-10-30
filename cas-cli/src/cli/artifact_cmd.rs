@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 
 use crate::artifacts::{
-    PublishContext, PublishDisposition, PublishOutcome, cloud::ArtifactUploadClient,
+    PublishContext, PublishOutcome, StorageDisposition, cloud::ArtifactUploadClient,
     paths::PublishRoots, publish,
 };
 use crate::config::Config;
@@ -164,12 +164,11 @@ fn execute_publish(args: &PublishArgs, cas_root: &Path, json: bool) -> anyhow::R
 fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
     let artifact = &outcome.artifact;
     let (storage, detail) = match outcome.disposition.storage_disposition() {
-        PublishDisposition::QaBundleNotPortable { .. } => unreachable!("storage disposition is unwrapped"),
-        PublishDisposition::Committed { .. } => ("committed", None),
-        PublishDisposition::CommittedMetadataUnavailable { reason } => ("committed", Some(reason.clone())),
-        PublishDisposition::StorageNotLive { reason } => ("not_live", Some(reason.clone())),
-        PublishDisposition::NotLoggedIn => ("not_logged_in", None),
-        PublishDisposition::UploadFailed { reason } => ("upload_failed", Some(reason.clone())),
+        StorageDisposition::Committed => ("committed", None),
+        StorageDisposition::CommittedMetadataUnavailable { reason } => ("committed", Some(reason.to_string())),
+        StorageDisposition::StorageNotLive { reason } => ("not_live", Some(reason.to_string())),
+        StorageDisposition::NotLoggedIn => ("not_logged_in", None),
+        StorageDisposition::UploadFailed { reason } => ("upload_failed", Some(reason.to_string())),
     };
     serde_json::json!({
         "artifact_id": artifact.id,
@@ -208,23 +207,22 @@ fn print_publish(outcome: &PublishOutcome) {
     }
     println!("     sha256 {}", artifact.sha256);
     match outcome.disposition.storage_disposition() {
-        PublishDisposition::QaBundleNotPortable { .. } => unreachable!("storage disposition is unwrapped"),
-        PublishDisposition::UploadFailed { reason } | PublishDisposition::CommittedMetadataUnavailable { reason } => {
+        StorageDisposition::UploadFailed { reason } | StorageDisposition::CommittedMetadataUnavailable { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.
             for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
-            if matches!(outcome.disposition.storage_disposition(), PublishDisposition::CommittedMetadataUnavailable { .. }) {
+            if matches!(outcome.disposition.storage_disposition(), StorageDisposition::CommittedMetadataUnavailable { .. }) {
                 println!("  -> cas cloud sync");
             } else {
                 println!("  -> cas artifact show {}", artifact.id);
             }
         }
-        PublishDisposition::StorageNotLive { .. } | PublishDisposition::NotLoggedIn => {
+        StorageDisposition::StorageNotLive { .. } | StorageDisposition::NotLoggedIn => {
             println!("  -> cas artifact show {}", artifact.id);
         }
-        PublishDisposition::Committed { .. } => {}
+        StorageDisposition::Committed => {}
     }
 }
 

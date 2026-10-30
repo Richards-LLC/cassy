@@ -187,6 +187,7 @@ export function workEventDetail(value: unknown): WorkEventDetail | undefined {
 
 export type DetailState =
   | { readonly state: "loading" }
+  | { readonly state: "offline" }
   | { readonly state: "ready"; readonly text: string; readonly truncated: boolean }
   | { readonly state: "gone" }
   | { readonly state: "failed"; readonly reason: string };
@@ -234,9 +235,12 @@ export class WorkEventStream {
 
   owns(requestId: string): boolean { return this.inFlight.has(requestId); }
 
-  /** Note a sent request; `undefined` (not sent) is ignored. */
+  /** Note a request; an unsent detail waits for the next connection. */
   requested(requestId: string | undefined, kind: "newest" | "older" | "gap" | { detail: string }): void {
-    if (requestId === undefined) return;
+    if (requestId === undefined) {
+      if (typeof kind === "object") { this.details.set(kind.detail, { state: "offline" }); this.version += 1; }
+      return;
+    }
     this.inFlight.set(requestId, kind);
     if (typeof kind === "object") { this.details.set(kind.detail, { state: "loading" }); this.version += 1; }
   }
@@ -311,8 +315,16 @@ export class WorkEventStream {
   /** Forget in-flight requests whose answers can no longer arrive (the socket closed). */
   abandon(): void {
     for (const [id, kind] of this.inFlight) {
-      if (typeof kind === "object") this.details.delete(kind.detail);
+      if (typeof kind === "object") this.details.set(kind.detail, { state: "offline" });
       this.inFlight.delete(id);
+    }
+    this.version += 1;
+  }
+
+  /** An offline detail can be requested once again on the new connection. */
+  reconnected(): void {
+    for (const [id, detail] of this.details) {
+      if (detail.state === "offline") this.details.delete(id);
     }
     this.version += 1;
   }

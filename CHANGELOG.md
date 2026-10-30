@@ -13,6 +13,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   checks allow quoted backtick data while still inspecting executable backtick
   substitutions for filesystem writes and operator-only commands.
 
+### Fixed — Delivery process
+
+- **Clock-only updates do not strand a ready delivery** — Was: a close-owned
+  update could change only a task's timestamp, yet parking refused the ready
+  delivery as a changed snapshot. → Now: parking refreshes the clock when every
+  non-audit field still agrees, preserving append-only notes and refusing
+  concurrent reopens, ownership changes and proof corrections.
+
+### Fixed — Work evidence offline recovery
+
+- **Source edits wait for reconnection** — Expanded source evidence names an offline machine and loads when it reconnects, without requesting again on every redraw. Closing an edit disclosure removes its saved entry.
+
 ### Fixed — Parked delivery attribution
 
 - **Upkeep excludes later work on a reused lane** — When an integration merge
@@ -702,11 +714,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Delivery process
 
-- **Clock-only updates do not strand a ready delivery** — Was: a close-owned
-  update could change only a task's timestamp, yet parking refused the ready
-  delivery as a changed snapshot. → Now: parking refreshes the clock when every
-  non-audit field still agrees, preserving append-only notes and refusing
-  concurrent reopens, ownership changes and proof corrections.
 - **Capture keeps its receipt when checkouts run out of time** — Was: if the
   capture budget ran out while Git prepared the private before/after checkouts,
   `cas deliverable capture` exited with a usage error and printed no receipt.

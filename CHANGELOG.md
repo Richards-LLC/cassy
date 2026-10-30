@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Accounts
+
+- **macOS shell visibility is explained before account changes** — Was: rename
+  and remove help did not mention that idle Apple system shells can hide account
+  selectors from the busy guard. → Now: both help pages ask users to close those
+  shells first; readable process environments and registered agents stay checked.
+
 ### Fixed — Commander
 
 - **Messages kept in two tabs all go out after an outage** — Was: with two

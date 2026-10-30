@@ -183,7 +183,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
 
       await journey.stage("The timeline follows the worker live", async () => {
-        hub.appendWork(PELICAN, event("t:w:2:0", "tool", "Bash: Run the lane tests", -1_000, { agent: WORKER }));
+        // The initial Read is 400ms before fixture creation. Stamp this
+        // append now so it is newer even without the recorder's stage delay.
+        hub.appendWork(PELICAN, event("t:w:2:0", "tool", "Bash: Run the lane tests", 0, { agent: WORKER }));
         await expect(dialog.locator(".work-row").first()).toContainText("Bash: Run the lane tests");
       });
 

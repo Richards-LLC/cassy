@@ -71,17 +71,20 @@ test("frozen screenshot settle drains evaluations before page teardown", async (
   expect(observed.pending()).toBe(0);
 });
 
-test("screenshot settle has a deadline when native paint frames stop", async ({ page }) => {
+test("screenshot settle has a deadline when the renderer is suspended", async ({ page }) => {
   await page.setContent("<h1>Product assertions passed</h1>");
   await expect(page.getByRole("heading")).toHaveText("Product assertions passed");
   const session = await page.context().newCDPSession(page);
-  // Hold Chromium's native frame source as well as page-owned callbacks.
-  // The deadline must live outside the renderer's animation clock.
-  await session.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
+  // Pause JS execution, including native paint polling and cleanup. Pausing
+  // virtual time alone can still deliver already queued native frames.
+  await session.send("Debugger.enable");
+  const paused = new Promise<void>((resolve) => { session.once("Debugger.paused", () => resolve()); });
+  await session.send("Debugger.pause");
+  await paused;
   try {
     await expect(settle(page)).rejects.toThrow(/Timeout .* exceeded/);
   } finally {
-    await session.send("Emulation.setVirtualTimePolicy", { policy: "advance" });
+    await session.send("Debugger.disable");
     await session.detach();
   }
 });

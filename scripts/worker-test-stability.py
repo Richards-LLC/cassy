@@ -5,6 +5,7 @@ Planning reads immutable Git blobs only. No compiler/test runs occur at park.
 The embedded runner supplies the same canonical lexer used by repository tools.
 """
 import argparse
+import ast
 from concurrent.futures import ThreadPoolExecutor
 import glob
 import hashlib
@@ -12,7 +13,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -113,12 +116,392 @@ def plan(root, base, head):
     base = git(root, 'merge-base', base, head).strip()
     changed = git(root, 'diff', '--name-only', '--no-renames', '--diff-filter=AM', '-z', base, head, '--').split('\0')
     tests = []
-    for path in sorted(p for p in changed if p.endswith('.rs')):
-        before = {f['function']: f['fingerprint'] for f in items(git(root, 'show', f'{base}:{path}', missing=True))[0]}
-        for test in items(git(root, 'show', f'{head}:{path}'))[0]:
+    for path in sorted(p for p in changed if p):
+        runner = ecosystem(path)
+        if runner is None:
+            continue
+        old = git(root, 'show', f'{base}:{path}', missing=True)
+        new = git(root, 'show', f'{head}:{path}')
+        before = {test['function']: test['fingerprint'] for test in source_tests(path, old, runner)}
+        for test in source_tests(path, new, runner):
             if before.get(test['function']) != test['fingerprint']:
-                tests.append({**test, 'file': path, 'id': path+'::'+test['function']})
+                tests.append({**test, 'runner': runner, 'file': path,
+                              'id': path+'::'+test['function']})
     return {'version': 1, 'base': base, 'head': head, 'tests': tests}
+
+
+def ecosystem(path):
+    suffix = Path(path).suffix.lower()
+    name = Path(path).name.lower()
+    if suffix == '.rs':
+        return 'rust'
+    if suffix in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx') and re.search(r'(?:\.test|\.spec|\.journey)\.', name):
+        return 'vitest' if '.test.' in name else 'playwright'
+    if suffix == '.py' and (name.startswith('test_') or name.endswith('_test.py')):
+        return 'pytest'
+    return None
+
+
+def source_tests(path, source, runner):
+    if not source:
+        return []
+    if runner == 'rust':
+        return items(source)[0]
+    if runner == 'pytest':
+        try:
+            tree = ast.parse(source, filename=path)
+        except SyntaxError as error:
+            raise ValueError(f'cannot resolve touched pytest tests in {path}: {error}') from error
+        found = []
+        def visit(node, scope=()):
+            for child in getattr(node, 'body', ()):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if child.name.startswith('test_') or (scope and scope[0].startswith('Test')):
+                        name = '::'.join((*scope, child.name))
+                        found.append({'function': name,
+                                      'fingerprint': hashlib.sha256(ast.dump(child, include_attributes=False).encode()).hexdigest()})
+                elif isinstance(child, ast.ClassDef):
+                    if child.name.startswith('Test'):
+                        visit(child, (*scope, child.name))
+                    elif child.name == 'pytest_generate_tests':
+                        raise ValueError(f'unresolved dynamic pytest collection in {path}')
+        visit(tree)
+        if len({test['function'] for test in found}) != len(found):
+            raise ValueError(f'ambiguous pytest test identity in {path}')
+        return found
+    return javascript_tests(path, source)
+
+
+def javascript_tests(path, source):
+    """Extract literal test()/it() calls with balanced source ranges; refuse dynamic titles."""
+    tokens, pairs = [], {}
+    i = 0
+    while i < len(source):
+        char = source[i]
+        if char.isspace():
+            i += 1
+        elif source.startswith('//', i):
+            end = source.find('\n', i + 2)
+            i = len(source) if end < 0 else end + 1
+        elif source.startswith('/*', i):
+            end = source.find('*/', i + 2)
+            if end < 0:
+                raise ValueError(f'unclosed comment in {path}')
+            i = end + 2
+        elif char in ('\"', "'"):
+            start, quote = i, char
+            i += 1
+            while i < len(source):
+                if source[i] == '\\\\':
+                    i += 2
+                elif source[i] == quote:
+                    i += 1
+                    break
+                else:
+                    i += 1
+            else:
+                raise ValueError(f'unclosed string in {path}')
+            raw = source[start:i]
+            try:
+                value = json.loads(raw) if quote == '\"' else ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                raise ValueError(f'unresolved test title string in {path}')
+            tokens.append(('string', str(value), start, i))
+        elif char == '`':
+            start = i
+            end = source.find('`', i + 1)
+            if end < 0:
+                raise ValueError(f'unclosed template string in {path}')
+            raw = source[i + 1:end]
+            if '${' in raw:
+                tokens.append(('dynamic-string', raw, start, end + 1))
+            else:
+                tokens.append(('string', raw, start, end + 1))
+            i = end + 1
+        elif char.isalpha() or char in '_$':
+            start = i
+            i += 1
+            while i < len(source) and (source[i].isalnum() or source[i] in '_$'):
+                i += 1
+            tokens.append(('id', source[start:i], start, i))
+        else:
+            tokens.append(('punct', char, i, i + 1))
+            i += 1
+    stack = []
+    for index, token in enumerate(tokens):
+        value = token[1]
+        if value in ('(', '[', '{'):
+            stack.append((value, index))
+        elif value in (')', ']', '}'):
+            if not stack or {'(': ')', '[': ']', '{': '}'}[stack[-1][0]] != value:
+                raise ValueError(f'unbalanced test source in {path}')
+            _, opening = stack.pop()
+            pairs[opening] = index
+    if stack:
+        raise ValueError(f'unbalanced test source in {path}')
+    calls = []
+    for index, token in enumerate(tokens):
+        if token[0] != 'id' or token[1] not in ('test', 'it', 'describe'):
+            continue
+        if index + 1 < len(tokens) and tokens[index + 1][1] == '.':
+            if index + 2 < len(tokens) and tokens[index + 2][1] in ('each', 'only', 'skip', 'concurrent', 'serial', 'fixme'):
+                raise ValueError(f'unresolved dynamic {token[1]}.{tokens[index+2][1]} collection in {path}')
+            continue
+        if index + 1 >= len(tokens) or tokens[index + 1][1] != '(':
+            continue
+        opening = index + 1
+        closing = pairs.get(opening)
+        if closing is None:
+            raise ValueError(f'unresolved {token[1]} call in {path}')
+        if index + 2 >= closing or tokens[index + 2][0] != 'string':
+            if token[1] in ('test', 'it'):
+                raise ValueError(f'unresolved dynamic test title in {path}')
+            continue
+        calls.append((token[1], tokens[index + 2][1], index, closing))
+    tests, suites = [], []
+    for kind, title, start, end in calls:
+        if kind == 'describe':
+            suites.append((start, end, title))
+    for kind, title, start, end in calls:
+        if kind not in ('test', 'it'):
+            continue
+        scopes = [name for suite_start, suite_end, name in suites if suite_start < start < suite_end]
+        name = '::'.join((*scopes, title))
+        if any(test['function'] == name for test in tests):
+            raise ValueError(f'ambiguous test title {name!r} in {path}')
+        body = json.dumps([(token[0], token[1]) for token in tokens[start:end+1]], ensure_ascii=False)
+        tests.append({'function': name, 'line': source.count('\n', 0, tokens[start][2]) + 1,
+                      'fingerprint': hashlib.sha256(body.encode()).hexdigest()})
+    return tests
+
+
+def adapter_args(runner, tests):
+    """Produce the narrow native selector for the touched cases in one ecosystem."""
+    if not tests or any(test['runner'] != runner for test in tests):
+        raise ValueError(f'no resolvable touched {runner} tests')
+    if runner == 'pytest':
+        return [test['file'] + '::' + test['function'] for test in tests]
+    if runner == 'playwright':
+        locations = [f"{test['file']}:{test['line']}" for test in tests]
+        if len(set(locations)) != len(locations):
+            raise ValueError('ambiguous Playwright test location')
+        return locations
+    if runner == 'vitest':
+        files = sorted({test['file'] for test in tests})
+        names = [' '.join(test['function'].split('::')) for test in tests]
+        pattern = '^(?:' + '|'.join(re.escape(name) for name in names) + ')$'
+        return ['--testNamePattern', pattern, *files]
+    raise ValueError('unsupported stability ecosystem: '+runner)
+
+
+def worker_context(root):
+    """Resolve the active task's recorded merge target for JS/Python wrappers."""
+    if os.environ.get('CAS_WORKER_STABILITY_BASE'):
+        return {'base': os.environ['CAS_WORKER_STABILITY_BASE'],
+                'head': os.environ.get('CAS_WORKER_STABILITY_HEAD') or git(root, 'rev-parse', 'HEAD').strip(),
+                'cas_root': Path(os.environ['CAS_ROOT']).resolve() if os.environ.get('CAS_ROOT') else None}
+    branch = git(root, 'branch', '--show-current').strip()
+    match = re.search(r'(?:^|-)cas-([a-z0-9]+)$', branch)
+    if not match:
+        if os.environ.get('CAS_FACTORY_MODE') == '1':
+            raise ValueError('cannot resolve active factory task from branch; no stability receipt')
+        return None
+    task_id = 'cas-' + match[1]
+    cas_root = os.environ.get('CAS_ROOT')
+    if not cas_root:
+        raise ValueError('CAS_ROOT missing for active factory task; no stability receipt')
+    database = Path(cas_root).resolve() / 'cas.db'
+    try:
+        connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+        try:
+            row = connection.execute('SELECT deliverables,status FROM tasks WHERE id=?', (task_id,)).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise ValueError(f'cannot resolve target for {task_id}: {error}; no stability receipt') from error
+    if row is None or row[1] != 'in_progress':
+        raise ValueError(f'active factory task {task_id} is missing; no stability receipt')
+    try:
+        target = json.loads(row[0])['work_target']['target_branch']
+    except (TypeError, KeyError, json.JSONDecodeError) as error:
+        raise ValueError(f'{task_id} has no recorded test target; no stability receipt') from error
+    head = git(root, 'rev-parse', 'HEAD').strip()
+    remote = 'refs/remotes/origin/' + target
+    base = git(root, 'merge-base', remote, head, missing=False).strip()
+    return {'base': base, 'head': head, 'cas_root': Path(cas_root).resolve()}
+
+
+def rust_test_receipt_path(cas_root, root, head, runner):
+    package = 'web-tests' if runner != 'pytest' else 'python-tests'
+    harness = runner
+    filter_name = 'test(worker-stability)'
+    repo_key = hashlib.sha256(os.fsencode(str(root.resolve()))).hexdigest()
+    identity = json.dumps([package, harness, filter_name], ensure_ascii=False, separators=(',', ':')).encode()
+    key = hashlib.sha256(identity).hexdigest()
+    return cas_root / 'worker-checks' / repo_key / f'{head}-test-{key}.json', package, harness, filter_name
+
+
+def report_durations(runner, report, tests):
+    data = json.loads(Path(report).read_text())
+    durations = {test['id']: [] for test in tests}
+    if runner == 'pytest':
+        import xml.etree.ElementTree as ET
+        for case in ET.parse(report).iter('testcase'):
+            name = case.attrib.get('name', '')
+            path = case.attrib.get('file', '')
+            matched = next((test for test in tests if Path(test['file']).name == Path(path).name
+                            and test['function'].endswith(name)), None)
+            if matched and 'time' in case.attrib:
+                durations[matched['id']].append(float(case.attrib['time']))
+    elif runner == 'vitest':
+        for result in data.get('testResults', []):
+            file = Path(result.get('name', '')).as_posix()
+            for case in result.get('assertionResults', []):
+                full_name = case.get('fullName') or ' '.join(case.get('ancestorTitles', []) + [case.get('title', '')])
+                matched = next((test for test in tests if file.endswith(Path(test['file']).as_posix())
+                                and ' '.join(test['function'].split('::')) == full_name), None)
+                if matched and isinstance(case.get('duration'), (int, float)):
+                    durations[matched['id']].append(float(case['duration']) / 1000)
+    else:
+        def walk(suite, parents=(), suite_file=''):
+            title = suite.get('title', '')
+            suite_file = suite.get('file') or suite_file
+            # Playwright emits a file suite whose title is the filename. Keep
+            # only describe scopes so the name matches the selected test title.
+            scope = parents + ((title,) if title and not suite.get('file') else ())
+            for spec in suite.get('specs', []):
+                name = ' '.join((*scope, spec.get('title', '')))
+                file = Path(spec.get('file') or suite_file).as_posix()
+                matched = next((test for test in tests if file.endswith(Path(test['file']).as_posix())
+                                and ' '.join(test['function'].split('::')) == name), None)
+                if matched:
+                    seconds = [float(result.get('duration', 0)) / 1000
+                               for item in spec.get('tests', []) for result in item.get('results', [])
+                               if result.get('status') == 'expected']
+                    durations[matched['id']].extend(seconds)
+            for child in suite.get('suites', []):
+                walk(child, scope, suite_file)
+        for suite in data.get('suites', []):
+            walk(suite)
+    if any(not values for values in durations.values()):
+        raise ValueError(f'{runner} report does not resolve every touched test')
+    return durations
+
+
+def run_adapter_stability(root, runner, report, initial_args=(), invoke=subprocess.run):
+    if os.environ.get('CAS_WORKER_STABILITY_TRIAL') == '1':
+        return
+    context = worker_context(root)
+    if context is None:
+        return
+    touched = plan(root, context['base'], context['head'])
+    tests = [test for test in touched['tests'] if test['runner'] == runner]
+    if not tests:
+        return
+    selectors = adapter_args(runner, tests)
+    cas_root = context['cas_root']
+    if cas_root is None:
+        raise ValueError('CAS_ROOT missing; no bound stability receipt')
+    path, package, harness, filter_name = rust_test_receipt_path(cas_root, root, context['head'], runner)
+    path.unlink(missing_ok=True)
+    (root / 'target').mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix='stability-', dir=root / 'target'))
+    if runner in ('vitest', 'playwright'):
+        executable = [sys.executable, str(Path(__file__).resolve()), '--adapter-trial', runner]
+        command = [*executable, *selectors]
+        if runner == 'playwright':
+            command.extend(['--workers=1'])
+            command.extend(option_args(initial_args, ('--config', '--project')))
+        else:
+            command.extend(['--retry=0'])
+            command.extend(option_args(initial_args, ('--config', '--project')))
+    else:
+        command = [sys.executable, str(Path(__file__).with_name('run-verified-pytest.py')),
+                   *selectors, '--override-ini=addopts=']
+        command.extend(option_args(initial_args, ('-c', '--confcutdir')))
+    ready = __import__('threading').Barrier(5)
+    def trial(number):
+        log = directory / f'run-{number}.log'
+        count = directory / f'count-{number}'
+        trial_report = directory / f'report-{number}.json'
+        env = {**os.environ, 'CAS_WORKER_STABILITY_TRIAL': '1',
+               'VERIFIED_TEST_COUNT_FILE': str(count), 'VERIFIED_TEST_REPORT_FILE': str(trial_report)}
+        start = time.monotonic()
+        with log.open('w') as stream:
+            ready.wait()
+            result = invoke(command, cwd=root, env=env, stdout=stream,
+                            stderr=subprocess.STDOUT, close_fds=False)
+        end = time.monotonic()
+        observed = int(count.read_text()) if result.returncode == 0 and count.is_file() else 0
+        return {'exit_code': result.returncode, 'count': observed, 'started': start, 'ended': end, 'log': str(log)}, trial_report
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        results = list(pool.map(trial, range(1, 6)))
+    trials = [item[0] for item in results]
+    reports = [item[1] for item in results]
+    for trial_result in trials:
+        print(f"--- touched-test stability copy: {trial_result['log']} ---", flush=True)
+        print(Path(trial_result['log']).read_text(errors='replace'), flush=True)
+    if any(trial['exit_code'] != 0 for trial in trials):
+        raise ValueError(f'{runner} stability failed; original failed copies retained, no retries; park has no receipt')
+    if max(trial['started'] for trial in trials) >= min(trial['ended'] for trial in trials):
+        raise ValueError(f'{runner} runs did not overlap; no concurrent stability receipt recorded')
+    durations = {test['id']: [] for test in tests}
+    proof_trials = []
+    for trial, report_path in zip(trials, reports):
+        run_durations = report_durations(runner, report_path, tests)
+        if sum(map(len, run_durations.values())) != trial['count']:
+            raise ValueError(f'{runner} report count does not match passed test count; no receipt')
+        for ident, values in run_durations.items():
+            durations[ident].append(max(values))
+        # A Playwright case may run once per configured project. Preserve the
+        # actual count for audit while binding the Rust gate to logical tests.
+        proof_trials.append({**trial, 'count': len(tests), 'native_count': trial['count']})
+    for ident, values in durations.items():
+        if len(values) < 5:
+            raise ValueError(f'{runner} report lacks five per-test durations for {ident}')
+    proof = {**touched, 'version': 2, 'tests': [test['id'] for test in tests],
+             'names': [test['id'] for test in tests], 'runs': 5, 'parallelism': 5, 'retries': 0,
+             'trials': proof_trials, 'cases': {test['id']: [test['id']] for test in tests},
+             'durations': durations, 'load_before': os.getloadavg() if hasattr(os, 'getloadavg') else None,
+             'load_after': os.getloadavg() if hasattr(os, 'getloadavg') else None}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {'head': context['head'], 'repo': str(root.resolve()), 'packages': [package],
+               'test': {'filter': filter_name, 'harness': harness, 'count': len(tests), 'stability': proof}}
+    temporary = path.with_name(path.name + '.tmp-' + str(os.getpid()))
+    temporary.write_text(json.dumps(receipt, separators=(',', ':')))
+    temporary.replace(path)
+    print(f"stability: PASS {context['head']} tests={len(tests)} runs=5 parallelism=5 retries=0 receipt={path}", flush=True)
+
+
+def adapter_trial(runner, args):
+    root = Path.cwd().resolve()
+    if runner in ('vitest', 'playwright'):
+        hub = root / 'hub-web'
+        script = hub / 'scripts/run-verified-tests.mjs'
+        selectors = [arg.removeprefix('hub-web/') if arg.startswith('hub-web/') else arg for arg in args]
+        command = [shutil.which('node') or 'node', str(script), runner, *selectors]
+    else:
+        command = [sys.executable, str(root / 'scripts/run-verified-pytest.py'), *args]
+    result = subprocess.run(command, cwd=(root / 'hub-web' if runner in ('vitest', 'playwright') else root),
+                            close_fds=False)
+    return result.returncode
+
+
+def option_args(args, options):
+    """Retain configuration that affects collection while preserving paired values."""
+    kept, index = [], 0
+    while index < len(args):
+        arg = args[index]
+        option = next((candidate for candidate in options
+                       if arg == candidate or arg.startswith(candidate + '=')), None)
+        if option:
+            kept.append(arg)
+            if arg == option and index + 1 < len(args):
+                kept.append(args[index + 1])
+                index += 1
+        index += 1
+    return kept
 
 
 def package_root(root, name, sources=()):
@@ -395,8 +778,11 @@ def run_requested(root, base, requested, cargo, script, count, target=None, head
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', action='store_true')
-    parser.add_argument('--base', required=True)
+    parser.add_argument('--base')
     parser.add_argument('--head')
+    parser.add_argument('--run-adapter', choices=('vitest', 'playwright', 'pytest'))
+    parser.add_argument('--adapter-trial', choices=('vitest', 'playwright', 'pytest'))
+    parser.add_argument('--report')
     parser.add_argument('--cargo')
     parser.add_argument('--verified-script')
     parser.add_argument('--count-file')
@@ -405,9 +791,20 @@ def main():
     parser.add_argument('args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     root = Path.cwd().resolve()
-    if args.plan:
+    if args.adapter_trial:
+        sys.exit(adapter_trial(args.adapter_trial, args.args[1:] if args.args[:1] == ['--'] else args.args))
+    if args.run_adapter:
+        if os.environ.get('CAS_WORKER_STABILITY_TRIAL') == '1':
+            return
+        run_adapter_stability(root, args.run_adapter, args.report,
+                              args.args[1:] if args.args[:1] == ['--'] else args.args)
+    elif args.plan:
+        if not args.base:
+            parser.error('--base is required with --plan')
         print(json.dumps(plan(root, args.base, args.head or 'HEAD')))
     else:
+        if not args.base:
+            parser.error('--base is required for Rust stability runs')
         requested = args.args[1:] if args.args[:1] == ['--'] else args.args
         run_requested(root, args.base, requested, args.cargo, args.verified_script, args.count_file,
                       json.loads(args.target_metadata) if args.target_metadata else None,

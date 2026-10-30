@@ -7,8 +7,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('worker_guards', SCRIPTS / 'worker-proof-guards.py')
@@ -18,6 +20,9 @@ sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location('worker_stability', SCRIPTS / 'worker-test-stability.py')
 STABILITY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STABILITY)
+SPEC = importlib.util.spec_from_file_location('verified_pytest', SCRIPTS / 'run-verified-pytest.py')
+VERIFIED_PYTEST = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(VERIFIED_PYTEST)
 
 
 class ChangedStrings(unittest.TestCase):
@@ -194,6 +199,123 @@ else:
                     ids, resolved = STABILITY.selected(self.repo, touched, requested, str(fake))
                     self.assertEqual(ids, [touched['tests'][0]['id']])
                     self.assertEqual(resolved, expected)
+
+    def test_plan_selects_only_changed_vitest_playwright_and_pytest_cases(self):
+        web = self.repo / 'hub-web/src/worker.test.ts'
+        web.parent.mkdir(parents=True)
+        web.write_text("import { test } from 'vitest';\ntest('stable', () => { expect(1).toBe(1); });\ntest('changed', () => { expect('before').toBe('before'); });\n")
+        browser = self.repo / 'hub-web/e2e/worker.spec.ts'
+        browser.parent.mkdir(parents=True)
+        browser.write_text("import { test, expect } from '@playwright/test';\ntest('stable', async ({ page }) => { await expect(page).toHaveTitle('stable'); });\ntest('changed', async ({ page }) => { await expect(page).toHaveTitle('before'); });\n")
+        python = self.repo / 'scripts/test_worker.py'
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("def test_stable():\n    assert 1 == 1\n\ndef test_changed():\n    assert 'before' == 'before'\n")
+        base = self.commit()
+        web.write_text(web.read_text().replace("expect('before').toBe('before')", "expect('after').toBe('after')"))
+        browser.write_text(browser.read_text().replace("toHaveTitle('before')", "toHaveTitle('after')"))
+        python.write_text(python.read_text().replace("assert 'before' == 'before'", "assert 'after' == 'after'"))
+        head = self.commit()
+
+        planned = STABILITY.plan(self.repo, base, head)
+        self.assertEqual(
+            {(test['runner'], test['id']) for test in planned['tests']},
+            {
+                ('vitest', 'hub-web/src/worker.test.ts::changed'),
+                ('playwright', 'hub-web/e2e/worker.spec.ts::changed'),
+                ('pytest', 'scripts/test_worker.py::test_changed'),
+            },
+        )
+        by_runner = {runner: [test for test in planned['tests'] if test['runner'] == runner]
+                     for runner in ('vitest', 'playwright', 'pytest')}
+        self.assertEqual(STABILITY.adapter_args('vitest', by_runner['vitest'])[:2],
+                         ['--testNamePattern', "^(?:changed)$"])
+        self.assertEqual(STABILITY.adapter_args('playwright', by_runner['playwright']),
+                         ['hub-web/e2e/worker.spec.ts:3'])
+        self.assertEqual(STABILITY.adapter_args('pytest', by_runner['pytest']),
+                         ['scripts/test_worker.py::test_changed'])
+
+        with self.assertRaisesRegex(ValueError, 'dynamic test title'):
+            STABILITY.source_tests('dynamic.test.ts', "test(`case ${value}`, () => {});", 'vitest')
+
+    def test_web_stability_receipt_is_bound_and_one_failed_copy_blocks_it(self):
+        source = self.repo / 'hub-web/src/worker.test.ts'
+        source.parent.mkdir(parents=True)
+        source.write_text("test('changed', () => { expect('old').toBe('old'); });\n")
+        base = self.commit()
+        source.write_text("test('changed', () => { expect('new').toBe('new'); });\n")
+        head = self.commit()
+        cas_root = self.repo / '.cas'
+        with patch.dict(os.environ, {
+            'CAS_WORKER_STABILITY_BASE': base,
+            'CAS_WORKER_STABILITY_HEAD': head,
+            'CAS_ROOT': str(cas_root),
+        }, clear=False):
+            for fail in (False, True):
+                barrier = threading.Barrier(5)
+                calls = []
+                call_lock = threading.Lock()
+                def invoke(command, *, cwd, env, stdout, stderr, close_fds):
+                    barrier.wait(timeout=5)
+                    with call_lock:
+                        calls.append(command)
+                        call_number = len(calls)
+                    Path(env['VERIFIED_TEST_COUNT_FILE']).write_text('1\n')
+                    Path(env['VERIFIED_TEST_REPORT_FILE']).write_text(json.dumps({
+                        'testResults': [{'name': 'hub-web/src/worker.test.ts', 'assertionResults': [
+                            {'fullName': 'changed', 'duration': 0.025},
+                        ]}],
+                    }))
+                    return subprocess.CompletedProcess(command, 1 if fail and call_number == 3 else 0)
+                with self.subTest(fail=fail):
+                    if fail:
+                        with self.assertRaisesRegex(ValueError, 'no retries; park has no receipt'):
+                            STABILITY.run_adapter_stability(self.repo, 'vitest', None, invoke=invoke)
+                        self.assertEqual(list((cas_root / 'worker-checks').rglob(f'{head}-test-*.json')), [])
+                    else:
+                        STABILITY.run_adapter_stability(self.repo, 'vitest', None, invoke=invoke)
+                        self.assertEqual(len(calls), 5)
+                        receipt_dir = cas_root / 'worker-checks'
+                        receipt, = receipt_dir.rglob(f'{head}-test-*.json')
+                        proof = json.loads(receipt.read_text())['test']['stability']
+                        self.assertEqual((proof['base'], proof['head'], proof['runs'], proof['parallelism'], proof['retries']),
+                                         (base, head, 5, 5, 0))
+
+    def test_pytest_wrapper_counts_junit_and_disables_configured_reruns(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            count = root / 'count'
+            report = root / 'evidence.xml'
+            env = {'CAS_WORKER_STABILITY_TRIAL': '1',
+                   'VERIFIED_TEST_COUNT_FILE': str(count),
+                   'VERIFIED_TEST_REPORT_FILE': str(report)}
+            def spawn(command, *, cwd, env, stdout, stderr, close_fds):
+                self.assertIn('--override-ini=addopts=', command)
+                self.assertTrue(command[-1].startswith('--junitxml='))
+                xml = Path(command[-1].split('=', 1)[1])
+                xml.write_text('<testsuite><testcase name="test_selected" time="0.02"/></testsuite>')
+                return subprocess.CompletedProcess(command, 0)
+            self.assertEqual(VERIFIED_PYTEST.run_verified(['tests/test_sample.py::test_selected'],
+                             cwd=root, env=env, spawn=spawn), 0)
+            self.assertEqual(count.read_text(), '1\n')
+            self.assertIn('test_selected', report.read_text())
+
+    def test_native_reports_resolve_exact_touched_case_durations(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            report = Path(scratch) / 'report.json'
+            vitest = [{'id': 'src/worker.test.ts::suite::changed', 'file': 'src/worker.test.ts',
+                       'function': 'suite::changed'}]
+            report.write_text(json.dumps({'testResults': [{'name': '/repo/src/worker.test.ts',
+                'assertionResults': [{'ancestorTitles': ['suite'], 'title': 'changed', 'duration': 24}]}]}))
+            self.assertEqual(STABILITY.report_durations('vitest', report, vitest),
+                             {'src/worker.test.ts::suite::changed': [0.024]})
+            playwright = [{'id': 'tests/worker.spec.ts::suite::changed', 'file': 'tests/worker.spec.ts',
+                           'function': 'suite::changed'}]
+            report.write_text(json.dumps({'suites': [{'title': 'worker.spec.ts', 'file': '/repo/tests/worker.spec.ts',
+                'specs': [{'title': 'changed', 'tests': [{'results': [{'status': 'expected', 'duration': 31}]}]}],
+                'suites': [{'title': 'suite', 'specs': [{'title': 'changed', 'tests': [
+                    {'results': [{'status': 'expected', 'duration': 45}]}]}]}]}]}))
+            self.assertEqual(STABILITY.report_durations('playwright', report, playwright),
+                             {'tests/worker.spec.ts::suite::changed': [0.045]})
 
 
 if __name__ == '__main__':

@@ -34,6 +34,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — macOS automatic release installation
 
+- **Mac install retries explain the wait** — A failed LaunchAgent load now
+  prints `retrying once` before the short wait. Plist checks also skip with a
+  message when macOS supplies a Python stub that cannot run.
+
 - **LaunchAgent reinstall tolerates shutdown delay** — Reinstalling the release
   LaunchAgent retries a failed load once after a short
   delay, allowing the previous job to finish shutting down. Persistent load errors

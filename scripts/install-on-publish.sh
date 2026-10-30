@@ -86,6 +86,7 @@ EOF
     launchctl enable "$domain/$agent_label"
     if ! launchctl bootstrap "$domain" "$plist"; then
         # bootout can return while the previous job is still shutting down.
+        log "launchctl bootstrap failed; retrying once in 1 s"
         sleep 1
         launchctl bootstrap "$domain" "$plist"
     fi

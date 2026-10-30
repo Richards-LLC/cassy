@@ -118,6 +118,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Shell syntax cannot hide operator-only commands** — Agent checks now
   recognize brace, loop, coprocess and function-body command positions,
+  inspect both possible command words in ambiguous coprocess syntax,
   remove shell line continuations,
   and decode common ANSI-C quoted words before matching policy commands.
   Unsupported ANSI-C escapes are refused; quoted data remains literal.

@@ -241,5 +241,58 @@ fn added_unreasoned_contract() {
             self.assertIn('tests/test_prompt.rs:3: exact-text pin', full.stdout)
 
 
+class SyncMergeScope(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.git('init', '-q', '-b', 'main')
+        self.git('config', 'user.email', 'fixture@example.test')
+        self.git('config', 'user.name', 'fixture')
+        (self.root / 'lib.rs').write_text('fn production() {}\n')
+        self.base = self.commit()
+        self.git('branch', 'worker')
+
+    def git(self, *args):
+        return subprocess.check_output(['git', '-C', str(self.root), *args], text=True).strip()
+
+    def commit(self):
+        self.git('add', '.')
+        self.git('commit', '-qm', 'fixture')
+        return self.git('rev-parse', 'HEAD')
+
+    def sync_upstream(self):
+        self.git('switch', '-q', 'main')
+        (self.root / 'upstream.rs').write_text('#[test] fn upstream() { assert_eq!(UPSTREAM, 3); }\n')
+        upstream = self.commit()
+        self.git('update-ref', 'refs/remotes/origin/main', upstream)
+        self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+        self.git('switch', '-q', 'worker')
+        self.git('merge', '-q', '--no-ff', 'origin/main', '-m', 'sync upstream')
+
+    def run_guard(self):
+        return subprocess.run(['python3', str(Path(shape.__file__).resolve()),
+                               '--changed-since', self.base], cwd=self.root,
+                              capture_output=True, text=True)
+
+    def test_sync_merge_does_not_lint_upstream_only_files(self):
+        self.sync_upstream()
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_sync_merge_keeps_task_changes_before_and_after_sync_in_scope(self):
+        self.git('switch', '-q', 'worker')
+        (self.root / 'own.rs').write_text('#[test] fn own() { assert_eq!(OWN, 3); }\n')
+        self.commit()
+        self.sync_upstream()
+        # A tracked working edit remains in scope alongside pre-sync commits.
+        (self.root / 'lib.rs').write_text('#[test] fn pending() { assert_eq!(PENDING, 3); }\n')
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('own.rs:1:', result.stdout)
+        self.assertIn('lib.rs:1:', result.stdout)
+        self.assertNotIn('upstream.rs:', result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

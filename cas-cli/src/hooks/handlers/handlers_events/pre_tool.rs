@@ -8868,12 +8868,15 @@ EOF
             )
         };
         // cas-9685: each independent spelling/command-position bypass must
-        // reach the real hook; collect failures so RED proves all three.
+        // reach the real hook; collect failures so RED proves every vector.
         let mut bypasses = Vec::new();
         for (vector, command) in [
             ("brace command position", "{ cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
             ("continued verb", "cas config gr\\\nant-write --task cas-1234 --path /x --reason r"),
             ("ANSI-C verb", r"cas config $'gr\x61nt-write' --task cas-1234 --path /x --reason r"),
+            ("coproc group", "coproc { cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("coproc command", "coproc cas config gr''ant-write --task cas-1234 --path /x --reason r"),
+            ("function body", "function f { cas config gr''ant-write --task cas-1234 --path /x --reason r; }; f"),
         ] {
             let (status, reason) = decision(command);
             if status != "deny" || !reason.contains("operator") {

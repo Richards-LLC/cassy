@@ -1,3 +1,4 @@
+import { appendEmojiText } from "./emoji-text";
 import { syncContextResize } from "./context-resize";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { artifactHref, attachmentSize, attachmentTypeMark } from "./attachment-sheet";
@@ -134,7 +135,7 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     jump.dataset.kind = reply.kind ?? "ask";
     jump.dataset.replyTo = String(reply.notification_id);
     const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : reply.kind === "secret" ? "Secret" : "Question";
-    const text = document.createElement("span"); text.className = "context-text"; text.textContent = entryText(reply.message);
+    const text = document.createElement("span"); text.className = "context-text"; appendEmojiText(document, text, entryText(reply.message));
     jump.append(kind, text);
     // A blocker says how it clears (journey F12); the jump alone did not.
     if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }

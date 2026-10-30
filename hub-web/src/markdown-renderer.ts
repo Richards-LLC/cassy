@@ -1,3 +1,4 @@
+import { appendEmojiText } from "./emoji-text";
 /**
  * The deliberately small Markdown dialect accepted in supervisor replies.
  *
@@ -108,7 +109,7 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
   let index = 0;
   let plainStart = 0;
   const flush = (end: number): void => {
-    if (end > plainStart) parent.append(document.createTextNode(source.slice(plainStart, end)));
+    if (end > plainStart) appendEmojiText(document, parent, source.slice(plainStart, end));
   };
   const nested = (element: HTMLElement, text: string): void => appendInline(document, element, text);
 

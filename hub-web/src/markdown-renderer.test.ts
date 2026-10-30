@@ -5,6 +5,16 @@ import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 vi.mock("pele/lazy", async (original) => ({ ...await original<typeof import("pele/lazy")>() }));
 
 describe("supervisor markdown subset", () => {
+  it("keeps complete emoji sequences colored without changing text, code or safe literal markup", () => {
+    const prose = '<script> & ☺️ 👍🏽 👩🏽‍💻 🇯🇵 1️⃣ 🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, `${prose}\n\n\`👍🏽\``));
+    expect(root.querySelector("p")?.textContent).toBe(prose);
+    expect([...root.querySelectorAll(".emoji-text")].map(node => node.textContent)).toEqual(["☺️", "👍🏽", "👩🏽‍💻", "🇯🇵", "1️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]);
+    expect(root.querySelector("script")).toBeNull();
+    expect(root.querySelector("code")?.textContent).toBe("👍🏽");
+    expect(root.querySelector("code .emoji-text")).toBeNull();
+  });
   it.each([
     {
       language: "bash",

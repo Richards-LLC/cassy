@@ -46,6 +46,8 @@ Commander labels each machine's reported Cassy version in its project chip and p
 
 The operator can paste text, screenshots or files into Commander: long text becomes a previewed text attachment, and Send stores files on the session's machine and gives the supervisor readable local paths through the existing durable message lane. Pending files remain through reconnect, with a reminder to send before closing the page. The operator's own sent files appear in their bubble as image previews and named file chips after reload and on other paired devices, without displaying host paths.
 
+The composer also offers a local, lazily loaded emoji tray beside the mic: search or choose a recent emoji, replace the current selection and continue the same draft. Messages, previews and waiting questions preserve Unicode text while selecting native color-emoji fonts.
+
 1. The operator launches `cas`, reviews the active epic and staffs workers for its ready tasks.
 2. A worker starts its lease, commits in its worktree, runs targeted tests and pushes; the supervisor merges on green, and the verifier's verdict at the merge commit closes or reopens the task.
 3. A QA reviewer runs `cas qa impact` on a delivery, scaffolds its evidence with `cas qa ledger init --task <id>`, walks the touched journeys, and runs `cas qa ledger check <path> --task <id>` before submitting the verdict. The same format check refuses malformed evidence at close before verification dispatch.

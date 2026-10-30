@@ -1,3 +1,4 @@
+import { emojiMarkup } from "./emoji-text";
 import type { SessionEndOutcome } from "./types";
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { joinSpoken } from "./spoken-names";
@@ -270,7 +271,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
     + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}${account}</span>`
     + time
-    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
+    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${emojiMarkup(preview)}</span>`
     + marks
     + spoken;
 }

@@ -77,6 +77,24 @@ function said(id: number, kind: OperatorTurnKind, message: string): OperatorRepl
   return { notification_id: id, reply_to: null, message, summary: "", device_id: "d", kind };
 }
 
+it("preserves literal emoji text in sent bubbles, list previews and waiting questions", () => {
+  const text = "Ready <script> & 👍🏽 👩🏽‍💻 🇯🇵";
+  openShell();
+  const history = new ConversationHistory();
+  history.submit("emoji", "patient-pelican-9", text, at(9, 0));
+  history.reply(said(1, "blocker", text), at(9, 1));
+  const view = new ConversationView(document, history, { supervisor: "patient-pelican-9", header: false });
+  document.body.append(view.element); view.update();
+  syncContextRail(document, { history, progress: false, attention: 0 });
+  const list = document.createElement("div");
+  new ConversationList().render(list, [{ key: "atlas:s", machineId: "atlas", session: "s", supervisor: "patient-pelican-9", host: "Atlas", freshness: "now", connection: "Live", preview: text, attention: 0, selected: false }], () => {});
+  for (const node of [view.element.querySelector('.bub'), list.querySelector('.conversation-preview'), document.querySelector('.context-text')]) {
+    expect(node?.textContent).toContain(text);
+    expect([...node!.querySelectorAll('.emoji-text')].map(span => span.textContent)).toEqual(["👍🏽", "👩🏽‍💻", "🇯🇵"]);
+    expect(node!.querySelector('script')).toBeNull();
+  }
+});
+
 describe("only real asks and blockers wait on the operator (cas-0546 condition 3)", () => {
   beforeEach(() => { document.body.replaceChildren(); });
 

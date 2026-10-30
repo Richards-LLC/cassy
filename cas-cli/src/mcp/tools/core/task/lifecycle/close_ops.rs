@@ -6785,6 +6785,16 @@ impl CasCore {
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
     ) -> Option<i64> {
+        self.sibling_lease_start(task_store, task).map(|(_, claimed)| claimed.timestamp())
+    }
+
+    // Retain the exact claim and task identity for diagnostics; second-rounded
+    // attribution cutoffs cannot distinguish two successive leases that second.
+    fn sibling_lease_start(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+    ) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
         let assignee = task.assignee.as_deref()?;
         let agent_store = self.open_agent_store().ok()?;
         let claims = |task_id: &str| -> Vec<chrono::DateTime<chrono::Utc>> {
@@ -6809,10 +6819,9 @@ impl CasCore {
                         .as_deref()
                         .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
             })
-            .flat_map(|other| claims(&other.id))
-            .filter(|claimed| own_latest.is_none_or(|own| *claimed > own))
-            .min()
-            .map(|claimed| claimed.timestamp())
+            .flat_map(|other| claims(&other.id).into_iter().map(move |claimed| (other.id.clone(), claimed)))
+            .filter(|(_, claimed)| own_latest.is_none_or(|own| *claimed > own))
+            .min_by_key(|(_, claimed)| *claimed)
     }
 
     /// Identify next-task work from the rejected boundary's introduced commits
@@ -6853,13 +6862,8 @@ impl CasCore {
         if epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS) {
             return None;
         }
-        let agents = self.open_agent_store().ok()?;
-        let owners: Vec<_> = siblings.iter().filter(|other| {
-            agents.get_lease_history(&other.id, None).unwrap_or_default().iter().any(|entry| {
-                entry.event_type == "claimed" && entry.timestamp.timestamp() == since
-            })
-        }).collect();
-        (owners.len() == 1).then(|| owners[0].id.clone())
+        let (owner, claimed) = self.sibling_lease_start(task_store, task)?;
+        (claimed.timestamp() == since).then_some(owner)
     }
 
     /// cas-00eb (cas-f1f4 regression): a recorded anchor may only move along

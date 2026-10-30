@@ -8577,6 +8577,28 @@ mod gc_report_render_tests {
     use super::*;
 
     #[test]
+    fn cleanup_summary_bounds_inventory_and_keeps_largest_items() {
+        let items = (0..1_000)
+            .map(|index| format!("  - /tmp/{}/cache-{index} bytes={index}", "long-path/".repeat(30)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let status = serde_json::json!({"dry_run": true, "caches": ["all original data"]});
+        let full = format!("Factory GC cleanup complete.\n\nStale agents marked: 0\n\nCargo target caches: mode=dry-run\n{items}\nTARGET_CACHE_STATUS_JSON={status}\n");
+        let summary = render_gc_report_response(&full, GcReportView::Summary);
+        assert!(summary.starts_with("[INFO] GC cleanup complete:"), "{summary}");
+        assert!(summary.is_ascii() && summary.lines().all(|line| line.len() <= 79));
+        assert!(summary.lines().count() < 30, "inventory must stay bounded");
+        assert!(summary.contains("1000 items"));
+        assert!(summary.contains("bytes=999") && summary.contains("bytes=998") && summary.contains("bytes=997"));
+        assert!(!summary.contains("bytes=996") && !summary.contains("TARGET_CACHE_STATUS_JSON="));
+        assert!(summary.contains("cas factory gc cleanup --full") && summary.contains("cas factory gc cleanup --json"));
+        assert_eq!(render_gc_report_response(&full, GcReportView::Full), full);
+        let json: serde_json::Value = serde_json::from_str(&render_gc_report_response(&full, GcReportView::Json)).unwrap();
+        assert_eq!(json["full_report"], full);
+        assert_eq!(json["machine_status"]["TARGET_CACHE_STATUS_JSON"], status);
+    }
+
+    #[test]
     fn summary_bounds_inventory_and_preserves_opt_in_machine_status() {
         let caches = (0..1_000)
             .map(|index| {

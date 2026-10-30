@@ -141,7 +141,7 @@ fn idle_prompt(text: &str) -> bool {
         && !lower.contains("compacting conversation") && !lower.contains("esc to cancel")
         && !text.lines().any(|line| {
             let line = line.trim_start();
-            line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '*'])
+            line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '·', '*'])
                 && (line.contains('…') || line.contains("..."))
         })
         && text.lines().rev().take(12).any(|line| {
@@ -267,6 +267,11 @@ fn hook_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, 
 }
 
 impl FactoryDaemon {
+    /// The poll loop's silence clock, plus no bytes it has not yet sampled.
+    fn output_settled(&self, pane: &cas_mux::Pane) -> bool {
+        self.last_pane_output_bytes.get(pane.id()) == Some(&pane.bytes_received())
+            && self.pane_silent_since.get(pane.id()).is_some_and(|since| since.elapsed() >= COMMAND_SETTLE)
+    }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
         let device = attribution.device_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("missing command owner"))?;
@@ -291,7 +296,7 @@ impl FactoryDaemon {
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
             let before = screen(pane);
             anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
-                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before),
+                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before) && self.output_settled(pane),
                 "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,

@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Supervisor commands during a running turn
+
+- **Commander no longer types slash commands into a running supervisor turn** —
+  Claude's `·` spinner frame now counts as busy, and the supervisor's terminal
+  must have been quiet for 2 seconds before a command is typed, so a Codex reply
+  that streams without busy text is no longer mistaken for an idle prompt.
+
 ### Fixed — Backquote command inspection
 
 - **Nested backquote commands keep workspace and operator checks** — The shell

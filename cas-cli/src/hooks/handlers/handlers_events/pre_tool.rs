@@ -5388,6 +5388,14 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
     if depth > 3 {
         return;
     }
+    let mut bodies = shell_heredoc_bodies(command).into_iter();
+    for delimiter in shell_command_without_heredoc_bodies(command).lines().flat_map(heredoc_delimiters) {
+        if let Some(body) = bodies.next()
+            && !delimiter.literal_body
+        {
+            collect_heredoc_substitutions(&body, depth, found);
+        }
+    }
     for words in shell_statement_words(command) {
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
@@ -5414,6 +5422,52 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
             _ => {}
         }
         found.push((name.to_string(), args.to_vec()));
+    }
+}
+
+/// Expanding heredoc text is data except for substitutions. Quotes in its
+/// body do not suppress expansion; escaped markers and quoted delimiters do.
+fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut Vec<(String, Vec<String>)>) {
+    // The shell removes unescaped backslash-newline pairs before expanding
+    // the body. Preserve escaped backslashes so marker escaping stays exact.
+    let mut logical = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'\n') {
+            chars.next();
+            continue;
+        }
+        logical.push(ch);
+        if ch == '\\' && let Some(next) = chars.next() {
+            logical.push(next);
+        }
+    }
+    let bytes = logical.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
+            let end = shell_effects::literal_cat_heredoc_end(&logical[index..])
+                .map(|end| index + end)
+                .or_else(|| shell_effects::substitution_end(bytes, index + 2, 0));
+            (index + 2, end)
+        } else if bytes[index] == b'`' {
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'`' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            (start, (end < bytes.len()).then_some(end))
+        } else {
+            index += 1;
+            continue;
+        };
+        let Some(end) = end else { break };
+        collect_shell_invocations(&logical[start..end], depth + 1, found);
+        index = end + 1;
     }
 }
 
@@ -8093,6 +8147,9 @@ mod workspace_contract_tests {
             // even when shell quoting hides the textual policy spelling.
             "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF | pbcopy\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "cat <<EOF\n`cas config gr''ant-write --task cas-1234 --path /x --reason r`\nEOF",
+            "cat <<EOF\n'$(cas config gr''ant-write --task cas-1234 --path /x --reason r)'\nEOF",
+            "cat <<EOF\n$\\\n(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
         ] {
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
@@ -8104,6 +8161,9 @@ mod workspace_contract_tests {
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
             "cat <<'EOF'\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",
+            "cat <<EOF\ncas config gr''ant-write --task cas-1234 --path /x --reason r\nEOF",
         ] {
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");

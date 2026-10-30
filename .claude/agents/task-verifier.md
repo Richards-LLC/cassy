@@ -39,7 +39,7 @@ The task record names the delivery: `deliverables.files_changed`, `deliverables.
 cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
 ```
 
-The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory. Its location and cleanup are in `skills/cas-qa-craft/references/verifier-evidence-gate.md`, under Scratch checkout lifetime.
+The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory. Its location and cleanup are in `skills/cas-qa-craft/references/verifier-evidence-gate.md`, under Scratch checkout lifetime. Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)

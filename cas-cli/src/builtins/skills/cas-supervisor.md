@@ -66,6 +66,7 @@ Do not preload later phases.
 | Phase or trigger | Read before acting |
 | --- | --- |
 | Create or assign a task | [Brief fields](references/workflow.md#brief-fields-no-spawn-without-them) and [risk declarations](references/reference.md#task-risk-declarations) |
+| Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
 | Plan or coordinate | [workflow](references/workflow.md) |
 | Merge, QA or assemble | [merge review](references/workflow.md#required-merge-review-discipline), [Batch QA](references/workflow.md#batch-qa) and [epic driving](references/epic-driving.md) |
 | Peer child, grant or shared epic | [peers](references/reference.md#peer-supervisors-on-the-same-repo) |

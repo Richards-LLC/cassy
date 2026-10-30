@@ -86,8 +86,9 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
       }), "no transient Retry before the peer's receipt deadline (cas-fb48)").toEqual([]);
     }
     // The receipt timeout belongs to the durable claim, including on a peer.
-    // Advance both clocks explicitly; do not wait out 15s on every repeat.
-    await Promise.all([page.clock.fastForward(15_000), peer.clock.fastForward(15_000)]);
+    // Both tabs share the BrowserContext clock. Advance it once: advancing
+    // per tab also expires the 30s catalog while its renewal is in flight.
+    await page.clock.fastForward(15_000);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toBeVisible({ timeout: 20_000 });
     }

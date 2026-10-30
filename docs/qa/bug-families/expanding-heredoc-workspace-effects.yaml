@@ -1,0 +1,4 @@
+title: Unquoted heredoc substitutions obey workspace boundaries while quoted bodies and escaped markers stay inert
+tasks: [cas-b8ae]
+invariants: []
+journeys: []

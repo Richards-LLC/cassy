@@ -6,6 +6,15 @@ import { renderWork, workSignature } from "./work-rows-view";
 
 const wire = (id: string, second: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", session: "s", at: `2026-10-27T12:00:${String(second).padStart(2, "0")}Z`, label: id, has_detail: true, ...extra });
 
+function livePicture(agent?: string) {
+  let request = 0;
+  const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: vi.fn(() => `r${++request}`), requestWorkEventDetail: () => undefined };
+  const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {} } });
+  const open = () => agent ? picture.watchTimeline({ machineId: "m", session: "s", agent }) : picture.watchThread("m", "s");
+  open();
+  return { picture, transport, open };
+}
+
 describe("work events (cas-ff22)", () => {
   it("merges pages by id and reads back from a newest page that missed the loaded events", () => {
     const stream = new WorkEventStream();
@@ -81,6 +90,60 @@ describe("work events (cas-ff22)", () => {
     expect(forA(), "coming back reads A's newest page").toBe(2);
     picture.watchThread("m", "a");
     expect(forA(), "a repaint of the same thread reads nothing").toBe(2);
+  });
+
+  it.each([undefined, "worker"])("retains coalesced live notices across newest, gap and refused reads (agent: %s)", (agent) => {
+    const { picture, transport } = livePicture(agent);
+    const page = (request: string, events: ReturnType<typeof wire>[], gap?: string) => picture.page("m", "s", workEventsPage({ request_id: request, events, has_earlier: gap !== undefined, next_before: gap })!);
+    const row = (id: string, second: number) => wire(id, second, { agent });
+    picture.appended("m", "s"); picture.appended("m", "s");
+    expect(transport.requestWorkEvents, "notices cannot start concurrent newest reads").toHaveBeenCalledTimes(1);
+    page("r1", [row("read", 1)]);
+    expect(transport.requestWorkEvents, "an old answer cannot consume newer notices").toHaveBeenCalledTimes(2);
+    page("r2", [row("read", 1), row("bash", 2)]);
+    expect(picture.stream("m", "s", agent).events.map(event => event.id)).toEqual(["read", "bash"]);
+    expect(transport.requestWorkEvents).toHaveBeenCalledTimes(2);
+
+    picture.appended("m", "s"); picture.appended("m", "s");
+    page("r3", [row("later", 5)], "gap-cursor");
+    expect(transport.requestWorkEvents).toHaveBeenCalledTimes(4);
+    expect(transport.requestWorkEvents).toHaveBeenLastCalledWith("s", { before: "gap-cursor", ...(agent ? { agent } : {}) });
+    picture.appended("m", "s"); picture.appended("m", "s");
+    expect(transport.requestWorkEvents, "gap completion comes before the coalesced refresh").toHaveBeenCalledTimes(4);
+    page("r4", [row("bash", 2), row("middle", 4)]);
+    expect(transport.requestWorkEvents).toHaveBeenCalledTimes(5);
+    picture.failed("m", "s", "r5", "temporarily unavailable");
+    expect(transport.requestWorkEvents, "a failed follow-up without another notice cannot retry forever").toHaveBeenCalledTimes(5);
+
+    picture.appended("m", "s"); picture.appended("m", "s");
+    picture.failed("m", "s", "r6", "temporarily unavailable");
+    expect(transport.requestWorkEvents, "a refusal still owes the notice received during that request").toHaveBeenCalledTimes(7);
+    picture.failed("m", "s", "r7", "temporarily unavailable");
+    expect(transport.requestWorkEvents).toHaveBeenCalledTimes(7);
+  });
+
+  it.each([undefined, "worker"])("does not refresh deferred notices after closing or disconnecting (agent: %s)", (agent) => {
+    for (const stop of ["close", "disconnect"] as const) {
+      const { picture, transport, open } = livePicture(agent);
+      if (stop === "close") {
+        picture.page("m", "s", workEventsPage({ request_id: "r1", events: [wire("old", 1, { agent })], has_earlier: false })!);
+        picture.appended("m", "s");
+      }
+      picture.appended("m", "s");
+      if (stop === "disconnect") picture.disconnected("m", "s");
+      else if (agent) picture.watchTimeline(undefined);
+      else picture.setShowWork(false);
+      const pending = stop === "close" ? 2 : 1;
+      picture.page("m", "s", workEventsPage({ request_id: `r${pending}`, events: [wire("newer", 3, { agent })], has_earlier: true, next_before: "gap-cursor" })!);
+      picture.appended("other", "s");
+      expect(transport.requestWorkEvents, "closed views do not continue a gap or deferred refresh").toHaveBeenCalledTimes(pending);
+      if (stop === "disconnect") picture.reattached("m", "s");
+      else if (agent) open();
+      else picture.setShowWork(true);
+      expect(transport.requestWorkEvents).toHaveBeenCalledTimes(pending + 1);
+      picture.page("m", "s", workEventsPage({ request_id: `r${pending + 1}`, events: [wire("fresh", 4, { agent })], has_earlier: false })!);
+      expect(transport.requestWorkEvents, "reopening does not replay an old deferred notice").toHaveBeenCalledTimes(pending + 1);
+    }
   });
 
   it("renders typed work evidence safely, lazily and without losing disclosure or focus", () => {

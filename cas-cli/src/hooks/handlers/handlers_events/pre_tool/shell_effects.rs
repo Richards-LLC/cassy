@@ -455,7 +455,7 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
 }
 
 /// Marks each token that belongs to a redirect rather than the command: its
-/// filename, and a descriptor number in front of it. Bash runs `>out touch /x` as
+/// filename, and a numbered or named descriptor in front of it. Bash runs `>out touch /x` as
 /// `touch /x`, so neither may be mistaken for the executable or an operand.
 fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
     let redirect = |token: Option<&ShellToken>| matches!(token, Some(ShellToken::Operator('<' | '>')));
@@ -464,9 +464,7 @@ fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
     while index < tokens.len() {
         if !redirect(tokens.get(index)) {
             if let ShellToken::Word(word) = &tokens[index]
-                && redirect(tokens.get(index + 1))
-                && !word.is_empty()
-                && word.bytes().all(|byte| byte.is_ascii_digit())
+                && is_redirect_descriptor(word, tokens.get(index + 1))
             {
                 marked[index] = true;
             }

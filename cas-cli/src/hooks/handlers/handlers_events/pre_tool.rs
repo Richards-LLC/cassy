@@ -4609,11 +4609,15 @@ fn skip_redirect(tokens: &[ShellToken], index: &mut usize, parens: &mut ParenPos
     }
 }
 
-/// The descriptor number in `2>out touch /x`, which is not the command either.
+/// The descriptor in `2>out touch /x` or `{fd}>out touch /x`, which is not the
+/// command either.
 fn is_redirect_descriptor(word: &str, next: Option<&ShellToken>) -> bool {
-    !word.is_empty()
-        && word.bytes().all(|byte| byte.is_ascii_digit())
-        && matches!(next, Some(ShellToken::Operator('<' | '>')))
+    let numbered = !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit());
+    let named = word
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(is_shell_variable_name);
+    (numbered || named) && matches!(next, Some(ShellToken::Operator('<' | '>')))
 }
 
 /// Identify shell words that are actual output targets, without treating every
@@ -8835,6 +8839,13 @@ mod workspace_contract_tests {
             ("redirect target substitution", "echo hi > \"$(touch /outside/p)\"\n".into(), true),
             ("redirect before a harmless command", ">out.txt echo hi\n".into(), false),
             ("descriptor duplication", ">&2 echo hi\n".into(), false),
+            // ver-94604cd718e7: bash runs the `touch` in `{fd}>/dev/null touch x`.
+            ("named descriptor before a write", "{fd}>/dev/null touch /outside/x\n".into(), true),
+            ("named descriptor before a delete", "{fd}>/dev/null rm -rf /outside/x\n".into(), true),
+            ("named descriptor before a directory change", "{fd}>/dev/null cd /outside && touch y\n".into(), true),
+            ("named descriptor redirect target named case", "({fd}>case touch in /outside/p) {fd}>esac\n".into(), true),
+            ("substituted named descriptor target named case", "echo \"$({fd}>case touch in /outside/p) {fd}>esac)\"\n".into(), true),
+            ("named descriptor before a harmless command", "{fd}>out.txt echo hi\n".into(), false),
             ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
             ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
             ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),

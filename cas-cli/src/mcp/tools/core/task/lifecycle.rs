@@ -2240,13 +2240,17 @@ impl CasCore {
         let mut worker_queue = load_worker_queue()?;
         let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
             queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
-        let _start_lock = if queued_start || !queue_enabled { None } else {
-            worker.as_ref()
-                .map(|worker| crate::worker_task_queue::worker_lock(&self.cas_root, worker, "start"))
-                .transpose()?
+        let _start_lock = if queued_start { None } else {
+            match worker.as_ref().filter(|a| a.factory_session.is_some()) {
+                Some(worker) if queue_enabled => Some(crate::worker_task_queue::worker_lock(
+                    &self.cas_root, worker, "start")?),
+                Some(worker) => Some(crate::worker_task_queue::wait_for_worker_start(
+                    &self.cas_root, worker).await?),
+                None => None,
+            }
         };
-        // Queue replacement takes the same fence. Re-read after acquiring it
-        // so a replacement between the first read and the lock is observed.
+        // Even a plain start fences first queue configuration/refill. Re-read
+        // after waiting so any queue configured before us is observed.
         if _start_lock.is_some() {
             worker_queue = load_worker_queue()?;
         }

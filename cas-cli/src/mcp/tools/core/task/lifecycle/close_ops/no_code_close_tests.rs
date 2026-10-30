@@ -1804,8 +1804,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         }
         let close = serde_json::json!({"action":"close", "id":first.id,"reason":"Delivered"});
         let closer = if park { &f.worker } else { &f.supervisor };
-        let queue_lock = Some(crate::worker_task_queue::worker_lock(
-            &f.cas_dir(), &agents.get("nocode-worker-session").unwrap(), "queue").unwrap());
+        let queue_lock = crate::worker_task_queue::worker_lock(
+            &f.cas_dir(), &agents.get("nocode-worker-session").unwrap(), "queue").unwrap();
         let response = if park {
             call(closer, close.clone()).await
         } else {

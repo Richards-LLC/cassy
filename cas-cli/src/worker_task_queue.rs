@@ -12,8 +12,7 @@ fn error(message: impl std::fmt::Display) -> McpError {
     CasCore::error(ErrorCode::INVALID_PARAMS, message.to_string())
 }
 
-/// File locks fence Git and queue mutations across separate MCP processes.
-pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Result<File, McpError> {
+fn worker_lock_file(root: &Path, worker: &Agent, operation: &str) -> Result<File, McpError> {
     let session = worker.factory_session.as_deref().unwrap_or_default();
     let key = format!("{session}-{}-{operation}", worker.name)
         .chars()
@@ -27,12 +26,17 @@ pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Resul
         .collect::<String>();
     let dir = root.join("locks");
     std::fs::create_dir_all(&dir).map_err(error)?;
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join(format!("worker-{key}.lock")))
-        .map_err(error)?;
+        .map_err(error)
+}
+
+/// File locks fence Git and queue mutations across separate MCP processes.
+pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Result<File, McpError> {
+    let file = worker_lock_file(root, worker, operation)?;
     file.try_lock_exclusive().map_err(|_| {
         error(format!(
             "Worker {} has a {operation} operation in progress; retry after it finishes",
@@ -40,6 +44,16 @@ pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Resul
         ))
     })?;
     Ok(file)
+}
+
+/// Plain starts serialize without a queue-specific contention refusal. Keep
+/// the runtime free while waiting for another process's start to finish.
+pub(crate) async fn wait_for_worker_start(root: &Path, worker: &Agent) -> Result<File, McpError> {
+    let file = worker_lock_file(root, worker, "start")?;
+    tokio::task::spawn_blocking(move || {
+        file.lock_exclusive().map_err(error)?;
+        Ok(file)
+    }).await.map_err(error)?
 }
 
 /// A queue may switch branches only inside this worker's own checkout.

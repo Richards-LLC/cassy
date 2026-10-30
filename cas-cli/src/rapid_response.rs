@@ -8,9 +8,9 @@
 //! - the evidence gate requires only journeys whose owned files the delivery
 //!   diff touched;
 //! - the batch QA receipt wait is skipped, so each fix merges as it lands;
-//! - the post-release check is an asynchronous watch, not a gate.
 //!
-//! The safety floor never reads this mode: build proofs, the touched-test
+//! The post-release check stays a full gate inside a window (its relaxation
+//! is cas-9462). The safety floor never reads this mode: build proofs, the touched-test
 //! receipt, the evidence secret check and every other close gate keep
 //! refusing. A delivery that touches a migration path never gets rapid
 //! treatment, so migrations keep their full review, and the operator states a
@@ -334,32 +334,6 @@ fn recorded_delivery(repo: &Path, task: &Task) -> Option<Delivery> {
     let base = task.deliverables.factory_branch_start.as_ref()?.base_sha.as_str();
     let head = task.deliverables.factory_branch_anchor.as_deref()?;
     diff_between(repo, &[base, head, "--"])
-}
-
-/// Whether a release of `epic` may treat its post-release check as a watch:
-/// exactly what shipped carries no migration and no secret-shaped line. What
-/// shipped is the released SHA recorded by `cas qa post-release start --sha`
-/// for this epic, diffed as `<sha>^1..<sha>`: everything the release merge
-/// brought into its target, including direct supervisor commits and every
-/// child round. Only SHAs are read. No recorded released SHA, a SHA that is
-/// not a merge commit, a Git failure or an empty range keeps the gate.
-fn epic_release_clear(cas_root: &Path, epic: &Task) -> bool {
-    let (Some(repo), Ok(Some(receipt))) = (cas_root.parent(), crate::qa_post_release::load(cas_root, &epic.id)) else {
-        return false;
-    };
-    let sha = receipt.sha.as_str();
-    let is_merge = git_text(repo, &["rev-list", "--parents", "-n", "1", sha, "--"])
-        .is_some_and(|line| line.split_whitespace().count() >= 3);
-    let first_parent = format!("{sha}^1");
-    is_merge
-        && diff_between(repo, &[first_parent.as_str(), sha, "--"])
-            .is_some_and(|shipped| !shipped.paths.is_empty() && floor_clear(&shipped, &[]))
-}
-
-/// The open window that makes `epic`'s post-release check a watch, if any.
-pub fn active_for_release(cas_root: &Path, epic: &Task, now: DateTime<Utc>) -> Option<Window> {
-    let window = active_window(cas_root, &epic.id, now)?;
-    epic_release_clear(cas_root, epic).then_some(window)
 }
 
 /// Close refusal for a migration delivery under an open window until the
@@ -692,35 +666,14 @@ mod tests {
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
-    /// A release cut in a window keeps the post-release run as a watch only
-    /// when what shipped (the recorded released merge) is clean; a direct
-    /// supervisor migration commit on the epic keeps the gate.
+    /// The post-release check stays a full gate inside a window.
     #[test]
-    fn window_makes_the_post_release_check_a_watch() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let (dir, cas, store, _delivery) = epic_fixture();
+    fn window_keeps_the_post_release_gate() {
+        let (_dir, cas, store, _delivery) = epic_fixture();
         std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
         let epic = store.get("cas-ep1c").unwrap();
         let window = open(&cas, store.as_ref());
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "no recorded release keeps the gate");
-        let release = |dir: &Path| {
-            git(dir, &["checkout", "-q", "main"]);
-            git(dir, &["merge", "-q", "--no-ff", "-m", "release", "epic/hot"]);
-            let sha = git(dir, &["rev-parse", "HEAD"]);
-            git(dir, &["checkout", "-q", "epic/hot"]);
-            crate::qa_post_release::start(&cas, "cas-ep1c", &sha).unwrap();
-        };
-        release(dir.path());
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none(), "a clean release is a watch");
-        assert_eq!(ledger(&cas, &window)[0].check, "post-release-gate");
-        std::fs::create_dir_all(dir.path().join("db/migrate")).unwrap();
-        std::fs::write(dir.path().join("db/migrate/003_add.rb"), "class Add; end\n").unwrap();
-        git(dir.path(), &["add", "db/migrate/003_add.rb"]);
-        git(dir.path(), &["commit", "-q", "-m", "supervisor: direct migration"]);
-        release(dir.path());
-        assert!(
-            crate::qa_post_release::gate(&cas, &epic, true).is_some(),
-            "a direct supervisor migration in the release keeps the gate"
-        );
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty(), "nothing is skipped");
     }
 }

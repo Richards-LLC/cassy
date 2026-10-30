@@ -9,9 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added — Release-pinned hub and host isolation
 
-- **The hub runs from a pinned release path, and hotfixes can only be release
-  builds** — Was: a live hub hotfix could run any binary, including a `cas qa
-  candidate` debug build many times slower than release, and applying the hub and
+- **The hub is pinned to release builds** — Was: a live hub hotfix could run any
+  binary, including a slow `cas qa candidate` debug build, and applying the hub and
   factory weights to a host was a manual merge. → Now: `scripts/hub-pin.sh install`
   applies the weights and the pinned path, with a `--dry-run`. `stage`, `activate`
   and `rollback` accept only a successful, audited Release Prebuild artifact and

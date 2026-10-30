@@ -11874,6 +11874,75 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
 }
 
 #[tokio::test]
+async fn test_start_rejects_commit_guard_factory_misbinding_cas_b153() {
+    let mut guard = EnvGuard::set(&[
+        ("CAS_FACTORY_MODE", "1"),
+        ("CAS_FACTORY_SESSION", "session-cas-b153"),
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-hawk-30"),
+        ("CAS_AGENT_ID", "test-agent-id"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "watchful-hawk-30";
+    let checkout = init_sync_repo(&env, worker);
+    guard._guard.set("CAS_CLONE_PATH", &checkout);
+    std::fs::write(env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-b153-fixture\"\n").unwrap();
+    let mut agent = Agent::new("test-agent-id".into(), worker.into());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = Some("session-cas-b153".into());
+    agent.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+    env.agent_store().register(&agent).unwrap();
+    let mut task = Task::new("cas-f1f5".into(), "start binding".into());
+    task.assignee = Some(worker.into());
+    let store = env.task_store();
+    store.add(&task).unwrap();
+    let start: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start", "id": task.id,
+    })).unwrap();
+    let commit_guard = || {
+        let input = serde_json::from_value(serde_json::json!({
+            "session_id": agent.id, "cwd": checkout, "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m continued"},
+        })).unwrap();
+        serde_json::to_value(cas::hooks::handle_pre_tool_use(&input, Some(&env.cas_root)).unwrap()).unwrap()
+    };
+    // Missing WorkTarget must not hide a factory identity mismatch either.
+    for (branch, declared) in [
+        ("factory/watchful-hawk-30-f1f5", false),
+        ("factory/retired-worker-cas-f1f5", true),
+    ] {
+        if declared {
+            task.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "project:cas-b153-fixture".into(),
+                target_branch: "epic/requested".into(),
+            });
+            store.update(&task).unwrap();
+        }
+        git_stdout(&checkout, &["switch", "-c", branch, "epic/requested"]);
+        let tip = git_stdout(&checkout, &["rev-parse", "HEAD"]);
+        let before = serde_json::to_value(store.get(&task.id).unwrap()).unwrap();
+        let guard = commit_guard();
+        assert_eq!(guard.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{guard}");
+        let refused = env.service.task(Parameters(start.clone())).await
+            .expect_err("task start must reject a branch the commit guard denies");
+        assert!(refused.message.contains("factory/watchful-hawk-30-cas-f1f5"), "{refused}");
+        assert_eq!(serde_json::to_value(store.get(&task.id).unwrap()).unwrap(), before);
+        assert!(env.agent_store().list_agent_leases(&agent.id).unwrap().is_empty());
+        assert_eq!(git_stdout(&checkout, &["branch", "--show-current"]), branch);
+        assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tip);
+    }
+    let own = "factory/watchful-hawk-30-cas-f1f5";
+    git_stdout(&checkout, &["switch", "-c", own, "epic/requested"]);
+    env.service.task(Parameters(start)).await.expect("canonical task branch starts");
+    let saved = store.get(&task.id).unwrap();
+    assert_eq!(saved.status, TaskStatus::InProgress);
+    assert_eq!(saved.deliverables.factory_branch_start.unwrap().branch, own);
+    let allowed = commit_guard();
+    assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{allowed}");
+}
+
+#[tokio::test]
 async fn test_start_accepts_task_recovery_suffix_after_rebind_record_cleared_cas_0fdf() {
     let home = TempDir::new().expect("home tempdir");
     let session = "session-cas-0fdf";

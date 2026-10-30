@@ -9,9 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Artifact publishing
 
-- **TypeScript sources upload as text** — Was: a `.ts` artifact could reach
-  storage as a transport-stream video and be refused. → Now: `.ts` and `.tsx`
-  sources publish as plain text; actual MPEG-TS packet data keeps its video type.
+- **TypeScript source artifacts record the text MIME type** — Was: `.ts` and
+  `.tsx` sources were recorded as unknown binary data. → Now: the CLI records
+  plain text and preserves the video type for actual MPEG-TS packet data.
+  Cloud uploads can still return 403 until the separate presign fix ships
+  ([Cloud #258](https://github.com/Richards-LLC/petra-stella-cloud/issues/258)).
 
 ### Fixed — Fleet keyboard feedback
 

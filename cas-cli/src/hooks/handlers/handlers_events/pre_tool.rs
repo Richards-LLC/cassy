@@ -3753,7 +3753,20 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
                     };
                 }
             }
-            "command" => index += 1,
+            "command" | "builtin" => {
+                let command = word == "command";
+                index += 1;
+                // Query flags print names without invoking the operand.
+                if command && words.get(index).is_some_and(|word| matches!(word.as_str(), "-v" | "-V")) {
+                    return None;
+                }
+                if command && words.get(index).is_some_and(|word| word == "-p") {
+                    index += 1;
+                }
+                if words.get(index).is_some_and(|word| word == "--") {
+                    index += 1;
+                }
+            }
             _ if word
                 .split_once('=')
                 .is_some_and(|(name, _)| is_shell_variable_name(name)) =>
@@ -8626,6 +8639,38 @@ mod workspace_contract_tests {
                 if decision != "deny" || !reason.contains("FACTORY WORKSPACE CONTRACT") {
                     failures.push(format!("{source}/{context}: {decision}: {reason}"));
                 }
+            }
+        }
+        // Ambient values and persistent integer attributes are also unknown;
+        // shell quoting does not make their secondary evaluation inert.
+        for command in [
+            "echo \"$(( ambient ))\"".to_owned(),
+            format!("declare -i y=1; y='{operand}'"),
+            format!("flag=-i; declare \"$flag\" y='{operand}'"),
+            format!("typeset -ix y='{operand}'"),
+            format!("builtin -- let 'y={operand}'"),
+            format!("command -p let 'y={operand}'"),
+            format!("op=declare; builtin \"$op\" -i y='{operand}'"),
+        ] {
+            let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            if response["hookSpecificOutput"]["permissionDecision"] != "deny" {
+                failures.push(format!("{command}: {response}"));
+            }
+        }
+        for command in [
+            "echo $(( (1+2)*3 ))",
+            "echo \"$(( (1+2)*3 ))\"",
+            "echo $((1 + (2)))",
+            "echo \"$[ (1+2)*3 ]\"",
+            "let '(1+2)*3'",
+            "(( (1+2)*3 ))",
+            "echo '$(( x ))' '$[ x ]'",
+        ] {
+            let response = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            if response["hookSpecificOutput"]["permissionDecision"] == "deny" {
+                failures.push(format!("inert {command}: {response}"));
             }
         }
         assert!(failures.is_empty(), "arithmetic re-expansion must be refused: {failures:#?}");

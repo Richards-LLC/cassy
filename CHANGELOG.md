@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Source-bound QA candidates
+
+- **QA candidates include current Commander source changes** — The isolated
+  candidate checkout now builds production web assets before compiling Cassy.
+  Its receipt records the source and served web digests, and publication fails
+  if the candidate serves different bytes. The previous candidate stays intact
+  when verification fails.
+
 ### Added — Supervisor Cassy versions in Commander
 
 - **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.

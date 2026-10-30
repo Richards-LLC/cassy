@@ -34,6 +34,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   selectors from the busy guard. → Now: both help pages ask users to close those
   shells first; readable process environments and registered agents stay checked.
 
+### Fixed — QA evidence
+
+- **Published QA bundles restore through macOS path aliases** — Was: a peer
+  could miss a published bundle cited under `/var` because publication recorded
+  `/private/var`. → Now: restore compares canonical source identities even
+  after producer files are gone, then validates the published evidence as usual.
+
 ### Fixed — Commander
 
 - **Late file layout keeps the newest turn in view** — Was: a file preview

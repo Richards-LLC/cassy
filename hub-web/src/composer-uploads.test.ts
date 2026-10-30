@@ -74,3 +74,16 @@ it("names the refused file among several attachments without prescribing a recon
   expect(document.querySelector(".upload-error")?.textContent).not.toContain("reconnect");
   expect(draft.hasFiles()).toBe(true);
 });
+
+it("restores a refused send's files as cards for Edit, without the host path in the composer", async () => {
+  const draft = new ComposerUploads();
+  document.body.innerHTML = composerMarkup("supervisor");
+  draft.bind(document.body);
+  const sent = "See this\n\nAttached file: [notes.txt](</host/project/art-one/notes.txt> \"text/plain; size=5\")";
+  expect(draft.restoreSent(sent)).toBe("See this");
+  expect(document.querySelector(".composer-file")?.textContent).toContain("notes.txt");
+  expect(document.body.textContent).not.toContain("/host/");
+  const upload = vi.fn();
+  expect(await draft.prepare("Edited", upload)).toBe(sent.replace("See this", "Edited"));
+  expect(upload).not.toHaveBeenCalled();
+});

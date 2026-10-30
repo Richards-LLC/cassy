@@ -98,6 +98,12 @@ These hold for every walk, task pass or [independent pass](references/independen
   first attempt: mint a fresh one rather than retrying in a new browser. Use locale-valid country,
   phone and address fixtures, never reserved or example ranges.
 
+## Review tiers
+
+Close records a delivery's tier, and QA follows it. Tier 0 (docs, tests and journey expectations, changelog) walks no journeys and needs no ledger row. Tier 1 walks the impacted journeys. Tier 2 (guards and hooks, CI, release and close-gate code) needs a ledger row whose cell starts `Adversarial probe:`, naming what you tried to get past and what happened.
+
+Findings stay in your verdict. A finding becomes a follow-up task only when it is a reproduced, observable defect affecting someone today.
+
 ## Close gate
 
 Close enforces fresh, commit-bound evidence (`qa.evidence_gate`). Rendered surfaces need

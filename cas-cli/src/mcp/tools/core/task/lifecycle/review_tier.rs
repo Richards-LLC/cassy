@@ -1,32 +1,34 @@
 //! How much independent review a delivery needs, from the paths it changes.
 //!
 //! Tier 0 changes nothing that runs: CI and the close's mechanical gates are its
-//! review. Tier 1 gets one verifier. Tier 2 changes what enforces the rules
-//! (guards, hooks, CI, release and close-gate code), so its verifier also probes
+//! review, with no QA journeys or ledger row. Tier 1 gets one verifier and the
+//! impacted journeys. Tier 2 changes what enforces the rules (guards, hooks, CI,
+//! release and close-gate code), so its verifier and its QA ledger also probe
 //! adversarially. The highest tier any path reaches applies to the delivery.
-//! Anything unmeasurable stays at today's path, one verifier.
-use super::*;
+//! Anything unmeasurable stays at today's path, one verifier. Verification and QA
+//! share this classifier, so a delivery has one tier however it is reviewed.
+use cas_types::{Task, TaskType};
 
 /// A supervisor's label that keeps a verifier on an otherwise Tier 0 delivery.
-pub(super) const FORCE_VERIFIER_LABEL: &str = "force-verifier";
+pub(crate) const FORCE_VERIFIER_LABEL: &str = "force-verifier";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum VerificationTier {
+pub(crate) enum VerificationTier {
     Mechanical,
     Standard,
     Adversarial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TierDecision {
-    pub(super) tier: VerificationTier,
-    pub(super) reason: String,
-    pub(super) tip: String,
+pub(crate) struct TierDecision {
+    pub(crate) tier: VerificationTier,
+    pub(crate) reason: String,
+    pub(crate) tip: String,
 }
 
 impl TierDecision {
     /// One note per delivered tip, so a retried close does not repeat it.
-    pub(super) fn note(&self) -> String {
+    pub(crate) fn note(&self) -> String {
         let (number, review) = match self.tier {
             VerificationTier::Mechanical => (0, "no independent verifier; CI and mechanical gates only"),
             VerificationTier::Standard => (1, "one independent verifier"),
@@ -66,13 +68,22 @@ fn enforces_the_rules(path: &str) -> bool {
         || path.contains("merge_queue")
         || path.starts_with("cas-cli/src/hooks/")
         || path.starts_with("cas-cli/src/mcp/tools/core/task/lifecycle/close_ops")
+        || path.ends_with("lifecycle/review_tier.rs")
         || path.ends_with("qa_evidence_gate.rs")
         || path.ends_with("verification_tools.rs")
         || path.ends_with("worktree_ops.rs")
 }
 
+/// Whether a QA ledger records an adversarial probe: a row whose cell names one.
+pub(crate) fn ledger_records_adversarial_probe(ledger: &str) -> bool {
+    ledger.lines().any(|line| {
+        line.starts_with('|')
+            && line.split('|').nth(2).is_some_and(|cell| cell.to_ascii_lowercase().contains("adversarial"))
+    })
+}
+
 /// The tier a set of changed paths reaches, or `None` when there are no paths.
-pub(super) fn tier_for_paths(paths: &[String]) -> Option<(VerificationTier, String)> {
+pub(crate) fn tier_for_paths(paths: &[String]) -> Option<(VerificationTier, String)> {
     if paths.is_empty() {
         return None;
     }
@@ -87,13 +98,20 @@ pub(super) fn tier_for_paths(paths: &[String]) -> Option<(VerificationTier, Stri
 
 /// The delivered tier, measured from the task's recorded start to its anchor.
 /// Commits merged in from the target can only raise the tier, never lower it.
-pub(super) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<TierDecision> {
+pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<TierDecision> {
     if task.task_type == TaskType::Epic {
         return None;
     }
     let tip = task.deliverables.factory_branch_anchor.as_deref()?;
     let start = task.deliverables.factory_branch_start.as_ref()?.base_sha.as_str();
-    let paths = git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", start, tip]).ok()?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["diff", "--name-only", "--no-renames", start, tip])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let paths: Vec<String> = String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect();
     let (mut tier, mut reason) = tier_for_paths(&paths)?;
     if tier == VerificationTier::Mechanical && task.labels.iter().any(|label| label == FORCE_VERIFIER_LABEL) {
         tier = VerificationTier::Standard;
@@ -140,7 +158,7 @@ mod tests {
             "cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs",
             ".github/workflows/ci.yml",
             "scripts/release-gate.sh",
-            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verification_tier.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/review_tier.rs",
             "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs",
         ] {
             assert_eq!(tier(&[path]), VerificationTier::Adversarial, "{path}");
@@ -154,6 +172,13 @@ mod tests {
             tier(&["CHANGELOG.md", "cas-cli/src/lib.rs", ".github/workflows/ci.yml"]),
             VerificationTier::Adversarial
         );
+    }
+
+    #[test]
+    fn a_ledger_probe_is_a_row_naming_one() {
+        let row = "| P1 | Adversarial probe of the guard | refused | refused | PASS | fixture | a.txt | - |";
+        assert!(ledger_records_adversarial_probe(row));
+        assert!(!ledger_records_adversarial_probe("Adversarial probes were not run.\n| M1 | Walk | ok | ok | PASS | fixture | a.txt | - |"));
     }
 
     /// Through a real diff: an unmeasurable delivery keeps today's verifier, and

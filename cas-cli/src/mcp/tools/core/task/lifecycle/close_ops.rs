@@ -19,7 +19,6 @@ mod receipt_scope;
 mod merge_queue_proof;
 mod verified_delivery;
 mod merged_verification;
-mod verification_tier;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
@@ -9559,13 +9558,13 @@ impl CasCore {
             && !skip_verification
             && !depth_light
             && close_disposition.requires_delivery_gates())
-        .then(|| verification_tier::tier_for_delivery(&task, &close_project_root))
+        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
         .flatten();
         let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
-            decision.tier == verification_tier::VerificationTier::Mechanical
+            decision.tier == super::review_tier::VerificationTier::Mechanical
         }) && no_verification_on_record;
         if let Some(decision) = verification_tier.as_ref()
-            && (decision.tier != verification_tier::VerificationTier::Mechanical || tier_skips_verifier)
+            && (decision.tier != super::review_tier::VerificationTier::Mechanical || tier_skips_verifier)
             && !task.notes.contains(&decision.note())
         {
             close_notes.record(&mut task, &decision.note());

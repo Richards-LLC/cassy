@@ -47,6 +47,22 @@ impl QaDispatchStatus {
     }
 }
 
+/// Journeys the QA impact map names. A Tier 0 delivery walks none: a changed
+/// journey file names its own journey, but nothing that runs has changed.
+fn impact_journey_reasons(changed: Option<&[String]>, impact: Option<&serde_json::Value>) -> Vec<String> {
+    let tier = changed.and_then(super::review_tier::tier_for_paths).map(|(tier, _)| tier);
+    if tier == Some(super::review_tier::VerificationTier::Mechanical) {
+        return Vec::new();
+    }
+    impact
+        .and_then(|report| report["journeys"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|journey| journey["id"].as_str())
+        .map(|id| format!("journey:{id}"))
+        .collect()
+}
+
 fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
     std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", commit, target])
@@ -737,13 +753,7 @@ impl CasCore {
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, head, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
-        if let Some(journeys) = impact.as_ref().and_then(|report| report["journeys"].as_array()) {
-            for journey in journeys {
-                if let Some(id) = journey["id"].as_str() {
-                    eligibility.reasons.push(format!("journey:{id}"));
-                }
-            }
-        }
+        eligibility.reasons.extend(impact_journey_reasons(changed.as_deref(), impact.as_ref()));
         // cas-1b4d: in an operator's rapid-response window the supervisor
         // reviews screenshots instead of a per-task round; the skip back-fills
         // when the window closes. An explicit request still dispatches.
@@ -1962,6 +1972,21 @@ pub(crate) fn unresolved_delivery_refusal(
              resolve here. If it merged into {target_branch}, close with \
              commit_receipt=<merged sha>. {remedy}."
         ),
+    }
+}
+
+#[cfg(test)]
+mod review_tier_tests {
+    use super::impact_journey_reasons;
+
+    /// A journey-only change walks no journey; adding product source walks it.
+    #[test]
+    fn tier_zero_delivery_skips_impacted_journeys() {
+        let impact = serde_json::json!({ "journeys": [{ "id": "HUB-J16" }] });
+        let journey = "hub-web/e2e/journeys/end-session.journey.ts".to_string();
+        assert!(impact_journey_reasons(Some(std::slice::from_ref(&journey)), Some(&impact)).is_empty());
+        let mixed = [journey, "hub-web/src/project-navigation.ts".to_string()];
+        assert_eq!(impact_journey_reasons(Some(&mixed), Some(&impact)).len(), 1);
     }
 }
 

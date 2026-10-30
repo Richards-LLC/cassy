@@ -15,8 +15,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   verdict unless they show a reproduced defect affecting someone today. Close
   records a tier: docs and tests have no independent verifier, most changes get
   one, and guard, CI, release and close-gate changes also get an adversarial
-  probe. `cas qa polish --epic <id>` lists an epic's warnings by file for one
-  polish task per release.
+  probe. QA follows the same tiers, including batch rounds: Tier 0 walks no
+  journeys, and Tier 2 needs an adversarial probe row in the task ledger.
+  `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
+  per release.
 
 ### Fixed — Hub pin safety
 

@@ -122,9 +122,9 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
         for lang_only in [false, true] {
             if lang_only {
-                env.remove_var("LC_ALL");
-                env.remove_var("LC_CTYPE");
-                env.set_var("LANG", "C");
+                env.remove("LC_ALL");
+                env.remove("LC_CTYPE");
+                env.set("LANG", "C");
             }
             let mut buf = Vec::new();
             Header::h1("Tasks")

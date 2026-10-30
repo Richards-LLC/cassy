@@ -4977,6 +4977,11 @@ async fn cas_1996_secret_answer_refuses_unscoped_devices_and_other_turns() {
         .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "decline": true})))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // cas-2f55: an unknown deletion choice is refused before anything is saved.
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "auto_delete": "forever"})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!destination.exists(), "nothing was written");
     // A name that already holds a file is refused, and the file is kept.
     std::fs::create_dir_all(&destination).unwrap();

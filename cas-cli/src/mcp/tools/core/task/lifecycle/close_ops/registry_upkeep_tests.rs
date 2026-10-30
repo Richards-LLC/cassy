@@ -792,3 +792,45 @@ fn registry_upkeep_catalog_drift_refuses_with_missing_journey() {
             .contains("UPKEEP OBSERVE G1")
     );
 }
+
+#[test]
+fn registry_upkeep_malformed_delivery_g1_escape_preserves_g3() {
+    let mut f = Fixture::new(YAML);
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    f.decision("registry unchanged: historical registry migration reviewed");
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "invalid: [\n");
+    write(f.repo.path(), "src/pages/signup.ts", "fixed");
+    let head = commit(f.repo.path());
+
+    let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for an unreadable delivery");
+    assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    f.decision("no case: registry migration and copy correction reviewed");
+    f.run(&head).expect("explicit G3 waiver remains separate from G1");
+}
+
+#[test]
+fn registry_upkeep_existing_catalog_drift_g1_escape_preserves_g3() {
+    let mut f = Fixture::new(&format!("selection: legacy_catalog\n{YAML}"));
+    write(
+        f.repo.path(),
+        "scripts/journeys-for-diff.py",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/journeys-for-diff.py")),
+    );
+    write(
+        f.repo.path(),
+        "docs/qa/journeys.md",
+        "## hub-web\n\n### HUB-J99 · Existing drift\n\n- **Touches:** `src/pages/signup.ts`\n",
+    );
+    f.base = commit(f.repo.path());
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    f.decision("registry unchanged: historical catalog drift reviewed");
+    write(f.repo.path(), "src/pages/signup.ts", "fixed");
+    let head = commit(f.repo.path());
+
+    let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for existing catalog drift");
+    assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    f.decision("no case: copy correction reviewed despite catalog migration");
+    f.run(&head).expect("explicit G3 waiver remains separate from G1");
+}

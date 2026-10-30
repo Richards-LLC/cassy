@@ -1192,7 +1192,7 @@ pub(crate) fn merge_landed_guidance(
     format!(
         "Merge already landed; Cassy suppressed your stale merge request.\n\n\
          Task: {task_id}\nBranch tip: {branch_tip}\nTarget: {target_branch} at {target_tip}\n\n\
-         Re-run task close for {task_id} now."
+         The merge verdict closes or reopens the task; wait for its result."
     )
 }
 
@@ -2402,7 +2402,9 @@ mod tests {
             &git(repo.path(), &["rev-parse", "main"]),
         );
         assert!(guidance.contains("Merge already landed"));
-        assert!(guidance.contains("Re-run task close for cas-test now"));
+        // pin: a suppressed landed request needs no worker close action.
+        assert!(guidance.contains("merge verdict closes or reopens the task"));
+        assert!(!guidance.contains("Re-run task close"));
     }
 
     /// GH #1022: a merge request for a branch whose parked anchor landed but

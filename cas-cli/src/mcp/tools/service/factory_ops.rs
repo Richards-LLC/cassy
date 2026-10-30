@@ -1944,8 +1944,8 @@ fn format_assigned_task_info(
             // relabel any status added to the parked set later.
             let (label, waiting) = match status {
                 cas_types::TaskStatus::AwaitingMerge if parked_merge_already_integrated => (
-                    "delivered-and-merged, awaiting worker re-close",
-                    "WAITING ON WORKER: the assigned worker must retry task close",
+                    "delivered-and-merged, awaiting merge verdict",
+                    "WAITING ON VERDICT: inspect the task's merge and verification state",
                 ),
                 cas_types::TaskStatus::AwaitingMerge => (
                     "finished, awaiting merge",
@@ -9812,7 +9812,7 @@ fn task_branch_affinity(
 /// reachable from the task's real integration target.
 ///
 /// `AwaitingMerge` normally means the supervisor still has to land the branch,
-/// but a worker can go idle after that landing and before its required re-close.
+/// but a worker can go idle after that landing while its verdict is pending.
 /// Reporting the normal merge instruction in that state sends the supervisor
 /// back to an action that is already complete. This is best-effort status
 /// evidence only: unknown Git state retains the conservative normal wording.
@@ -17677,7 +17677,7 @@ effort = "high"
             assert!(!out.contains("WAITING ON WORKER"), "{out}");
             assert!(!out.contains("re-close"), "{out}");
         }
-        // Without a live dispatch the merged delivery keeps its re-close row.
+        // Without a live dispatch the verdict still owns merged completion.
         let legacy = format_assigned_task_info(
             None,
             None,
@@ -17685,7 +17685,9 @@ effort = "high"
             true,
             None,
         );
-        assert!(legacy.contains("awaiting worker re-close"), "{legacy}");
+        // pin: merged status never tells a worker to close again.
+        assert!(legacy.contains("awaiting merge verdict"), "{legacy}");
+        assert!(!legacy.contains("retry task close"), "{legacy}");
     }
 
     /// The actionable half: quiet WITH undelivered mail means the worker was

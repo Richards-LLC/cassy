@@ -3697,10 +3697,10 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
 
 /// cas-9fd4 (GH #341): the normal AwaitingMerge advice becomes stale after a
 /// supervisor has already landed the parked factory branch. The worker still
-/// has to re-close, so status must name that real blocker instead of asking
+/// awaits the verdict, so status must name that owner instead of asking
 /// the supervisor to merge the same branch again.
 #[tokio::test]
-async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9fd4() {
+async fn test_worker_status_names_delivered_merge_awaiting_verdict_cas_9fd4() {
     use std::process::Command;
 
     let _guard = EnvGuard::set(&[]);
@@ -3745,7 +3745,7 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
 
     let task_store = env.task_store();
     let id = task_store.generate_id().expect("id");
-    let mut task = Task::new(id.clone(), "Delivered task awaiting re-close".to_string());
+    let mut task = Task::new(id.clone(), "Delivered task awaiting verdict".to_string());
     task.status = TaskStatus::AwaitingMerge;
     task.assignee = Some(worker.to_string());
     task.deliverables.parked_branch = Some(format!("factory/{worker}"));
@@ -3762,12 +3762,13 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
             .expect("status"),
     );
     assert!(
-        text.contains("delivered-and-merged, awaiting worker re-close"),
+        // pin: integrated deliveries await their verdict, not another close.
+        text.contains("delivered-and-merged, awaiting merge verdict"),
         "status must report the delivered state, not stale merge work: {text}"
     );
     assert!(
-        text.contains("WAITING ON WORKER") && text.contains("retry task close"),
-        "status must name the worker re-close as the blocker: {text}"
+        text.contains("WAITING ON VERDICT") && !text.contains("retry task close"),
+        "status must name the merge verdict as the completion owner: {text}"
     );
     assert!(
         !text.contains("merge its branch, then it can close"),

@@ -2162,6 +2162,8 @@ fn effective_worker_spec_uses_worker_specs_map() {
 /// a Claude worker's mail over PTY and labelled it `[worker:codex]`.
 #[test]
 fn cas_2567_initial_worker_harness_matches_the_spec_it_launched_from() {
+    // The launch lists the account's skills, so this reads an isolated account.
+    let _env = TestEnvGuard::temp_home();
     let fallback_claude = WorkerSpec {
         name: None,
         ..WorkerSpec::builtin_default()

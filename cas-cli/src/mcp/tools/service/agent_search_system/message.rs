@@ -1561,15 +1561,27 @@ impl CasService {
                 "receipt" => crate::ui::factory::OperatorTurnKind::Receipt,
                 "ask" => crate::ui::factory::OperatorTurnKind::Ask,
                 "blocker" => crate::ui::factory::OperatorTurnKind::Blocker,
+                "secret" => crate::ui::factory::OperatorTurnKind::Secret,
                 other => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "invalid operator kind '{other}'; expected answer, status, receipt, ask, or blocker"
+                            "invalid operator kind '{other}'; expected answer, status, receipt, ask, blocker, or secret"
                         ),
                     ));
                 }
             };
+            // cas-1996: a secret request names the credential in `summary`,
+            // which becomes its file name. Commander saves the pasted value
+            // on this machine and replies with the path only.
+            if kind == crate::ui::factory::OperatorTurnKind::Secret
+                && !crate::ui::factory::valid_secret_name(summary.trim())
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "kind=secret needs summary=<NAME>: 1-64 letters, digits, '_', '.' or '-', not starting with '.' (it becomes the file name); put what it is for and how to create it in message",
+                ));
+            }
             // cas-207e: an ask may carry a deadline (remind_delay_secs) and the
             // default action it proceeds with (remind_message). At the
             // deadline a blocker-class wake tells the supervisor to proceed.

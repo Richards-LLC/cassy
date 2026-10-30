@@ -1168,6 +1168,20 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            "secrets.destination" => {
+                let value = value.trim();
+                if !(value.is_empty()
+                    || value.starts_with('/')
+                    || value == "~"
+                    || value.starts_with("~/"))
+                {
+                    return Err(MemError::Parse(
+                        "secrets.destination must be an absolute path or start with ~/".into(),
+                    ));
+                }
+                self.secrets.get_or_insert_with(SecretsConfig::default).destination =
+                    (!value.is_empty()).then(|| value.to_string());
+            }
             // Issues section
             "issues.repo" => {
                 let issues = self.issues.get_or_insert_with(IssuesConfig::default);

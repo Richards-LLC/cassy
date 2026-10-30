@@ -299,6 +299,12 @@ impl Config {
             "issues.components.cassy" => Some(issue_repos.cassy),
             "issues.components.violet" => Some(issue_repos.violet),
             "issues.components.cloud" => Some(issue_repos.cloud),
+            "secrets.destination" => Some(
+                self.secrets
+                    .as_ref()
+                    .and_then(|secrets| secrets.destination.clone())
+                    .unwrap_or_default(),
+            ),
             // History section
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),
             // Release section

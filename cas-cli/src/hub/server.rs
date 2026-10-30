@@ -27,6 +27,8 @@ use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid
 
 #[path = "composer_upload.rs"]
 mod composer_upload;
+#[path = "secret_request.rs"]
+mod secret_request;
 #[path = "account_routes.rs"]
 mod account_routes;
 #[path = "artifact_proxy.rs"]
@@ -233,6 +235,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route(
             "/v1/sessions/{session}/uploads/{upload_id}",
             post(composer_upload::upload::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/secrets/{notification_id}",
+            post(secret_request::answer::<R>).options(preflight::<R>),
         )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route(

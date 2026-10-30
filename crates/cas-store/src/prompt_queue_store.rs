@@ -829,7 +829,7 @@ fn conversation_open_attention_sql() -> String {
          FROM prompt_queue
          WHERE factory_session = ?1
            AND ((lower(target) = 'operator'
-                 AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker'))
+                 AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker', 'secret'))
              OR (source LIKE 'commander:%' AND operator_verified = 1 AND lower(target) <> 'operator')
              OR (source = 'terminal' AND target = 'terminal-history' AND processed_at IS NOT NULL))
          ORDER BY id DESC"

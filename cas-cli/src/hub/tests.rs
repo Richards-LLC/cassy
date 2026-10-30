@@ -4809,6 +4809,160 @@ async fn cas_ab04_write_grants_refuse_unauthenticated_and_unscoped_callers() {
     );
 }
 
+/// A supervisor `kind=secret` turn, recorded the way `coordination message
+/// target=operator kind=secret` records it (cas-1996).
+fn record_secret_request(cas_dir: &std::path::Path, kind: crate::ui::factory::OperatorTurnKind, name: &str) -> i64 {
+    let payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message: "Needed to publish. Create one at the provider's API keys page.".into(),
+        summary: name.into(),
+        device_id: "*".into(),
+        operator_label: None,
+        kind,
+        attachments: Vec::new(),
+        options: Vec::new(),
+        reply_to_session: None,
+    })
+    .unwrap();
+    crate::store::open_prompt_queue_store(cas_dir)
+        .unwrap()
+        .record_operator_turn(&cas_store::OperatorTurn {
+            source: "supervisor",
+            target: "operator",
+            prompt: &payload,
+            factory_session: Some(OPS_SESSION),
+            metadata: cas_store::OperatorTurnMetadata {
+                summary: Some(name),
+                origin: Some(&cas_store::QueueOrigin::Daemon),
+                kind: Some(kind.as_str()),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+        .id()
+}
+
+/// cas-1996: the operator answers an agent's secret request from a paired
+/// device holding factory:manage. The value lands in a mode-600 file in the
+/// configured destination, the supervisor gets a reply naming the path, and
+/// the value is in no other file under the fixture (cas.db and its WAL, the
+/// hub's audit log), no log line and no response. Declining saves nothing.
+#[tokio::test]
+async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
+    use std::io::{Read, Seek};
+    use std::os::unix::fs::PermissionsExt;
+    const VALUE: &str = "sk_live_cas1996_d7f3a9c2e4b1";
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let destination = fixture._temp.path().join("creds/<project>");
+    let mut config = crate::config::Config::load(&fixture.cas_dir).unwrap();
+    config.set("secrets.destination", &destination.display().to_string()).unwrap();
+    config.save(&fixture.cas_dir).unwrap();
+    let request = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let uri = format!("/v1/sessions/{OPS_SESSION}/secrets/{request}");
+
+    let mut log = tempfile::tempfile().unwrap();
+    let capture = log.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || capture.try_clone().unwrap()).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let (status, body) = fixture.call("POST", &uri, Some(serde_json::json!({"value": format!("  {VALUE}\n")}))).await;
+    let (again, _) = fixture.call("POST", &uri, Some(serde_json::json!({"value": VALUE}))).await;
+    drop(guard);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(again, StatusCode::CONFLICT, "an answered request cannot be answered again");
+
+    let file = fixture._temp.path().join("creds/project/STRIPE_KEY");
+    assert_eq!(body["path"], file.display().to_string(), "{body}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), VALUE, "saved trimmed");
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+
+    let rows = fixture.queued();
+    let reply = rows.iter().find(|row| row.target == "supervisor").expect("a reply to the supervisor");
+    assert!(
+        reply.prompt.starts_with(&format!("[CAS reply: explicitly acknowledges notification_id={request}]\n"))
+            && reply.prompt.contains(&file.display().to_string()),
+        "{}",
+        reply.prompt
+    );
+    assert!(reply.operator.as_ref().is_some_and(|stamp| stamp.verified && stamp.device_id == fixture.device_id));
+    let queue = crate::store::open_prompt_queue_store(&fixture.cas_dir).unwrap();
+    assert!(queue.queued_prompt(request).unwrap().unwrap().acked_at.is_some(), "the request is answered");
+    let outcomes: Vec<_> = fixture.audit("secret_save").iter().map(|row| row["outcome"].as_str().unwrap().to_string()).collect();
+    assert_eq!(outcomes, ["requested", "allowed", "requested", "invalid"]);
+
+    // The value is nowhere else on disk, in the logs or in the response.
+    let mut stack = vec![fixture._temp.path().to_path_buf()];
+    let mut scanned = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path != file {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                assert!(!bytes.windows(VALUE.len()).any(|window| window == VALUE.as_bytes()), "the value leaked into {}", path.display());
+                scanned += 1;
+            }
+        }
+    }
+    assert!(scanned > 2 && fixture.cas_dir.join("cas.db").exists(), "the scan read the store");
+    log.rewind().unwrap();
+    let mut logged = String::new();
+    log.read_to_string(&mut logged).unwrap();
+    assert!(!logged.contains(VALUE), "{logged}");
+    assert!(!body.to_string().contains(VALUE));
+
+    let declined = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "NPM_TOKEN");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{declined}"), Some(serde_json::json!({"decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!fixture._temp.path().join("creds/project/NPM_TOKEN").exists());
+    assert!(fixture.queued().iter().any(|row| row.prompt.contains("Declined the secret NPM_TOKEN")));
+}
+
+/// cas-1996: only a factory:manage device answers, only an open secret
+/// request of that session, and nothing is written when refused.
+#[tokio::test]
+async fn cas_1996_secret_answer_refuses_unscoped_devices_and_other_turns() {
+    let unscoped = ops_fixture(control_scopes());
+    let request = record_secret_request(&unscoped.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let (status, body) = unscoped
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{request}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["required_scope"], "factory:manage");
+
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let destination = fixture._temp.path().join("creds");
+    let mut config = crate::config::Config::load(&fixture.cas_dir).unwrap();
+    config.set("secrets.destination", &destination.display().to_string()).unwrap();
+    config.save(&fixture.cas_dir).unwrap();
+    let ask = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Ask, "STRIPE_KEY");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{ask}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "an ask is not a secret request: {body}");
+    let secret = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let (status, _) = fixture
+        .call("POST", &format!("/v1/sessions/factory-other/secrets/{secret}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "another session cannot answer it");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!destination.exists(), "nothing was written");
+    assert!(fixture.queued().iter().all(|row| row.target == "operator"), "nothing was sent");
+}
+
 /// A retried `op_id` returns the first outcome and sends nothing twice.
 #[tokio::test]
 async fn operations_op_id_is_idempotent() {

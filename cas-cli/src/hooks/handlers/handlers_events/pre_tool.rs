@@ -3791,6 +3791,17 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
         let word = &words[index];
         match shell_word_basename(word) {
             "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
+            "coproc" => {
+                index += 1;
+                // A named coprocess uses `coproc NAME { ...; }`; a simple
+                // command directly after coproc is the executable itself.
+                if words.get(index).is_some_and(|name| is_shell_variable_name(name))
+                    && words.get(index + 1).is_some_and(|word| word == "{")
+                {
+                    index += 1;
+                }
+            }
+            "function" => index += 2, // Skip the function name to inspect its body.
             "env" => {
                 // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
                 // value; skipping only the flag made `env -u X cargo …` name

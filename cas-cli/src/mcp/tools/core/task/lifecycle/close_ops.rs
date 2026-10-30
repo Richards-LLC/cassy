@@ -24488,17 +24488,23 @@ fn parked_anchor_advance_with_target_is_attributable(
     else {
         return false;
     };
+    // cas-3d57: a sync merge of the released trunk after park is upstream,
+    // under the same rule cas-985f applies before park.
+    let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
     commits.last().is_some_and(|(parents, _, _)| {
         parents
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
     }) && commits.iter().all(|(parents, epoch, message)| {
-        let target_import = parents.len() > 1
-            && parents
+        let imports_from = |upstream: &str| {
+            parents
                 .iter()
                 .skip(1)
-                .all(|parent| git_commit_is_ancestor(repo_path, parent, target_ref));
+                .all(|parent| git_commit_is_ancestor(repo_path, parent, upstream))
+        };
+        let target_import = parents.len() > 1
+            && (imports_from(target_ref) || released.as_deref().is_some_and(imports_from));
         (target_import
             || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
             && foreign_since

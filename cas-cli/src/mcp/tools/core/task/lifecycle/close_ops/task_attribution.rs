@@ -464,22 +464,28 @@ fn merge_brings_foreign_work(
     false
 }
 
-/// cas-985f: exclusions (`^ref`) for the repository's released trunk, local
-/// and on origin. Empty when the trunk is the target itself or unresolvable,
-/// so a delivery to the trunk keeps its existing attribution.
+/// cas-985f: exclusions (`^ref`) for the repository's released trunk. Empty
+/// when the trunk is the target itself or unresolvable, so a delivery to the
+/// trunk keeps its existing attribution.
 fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
-    let Ok(trunk) = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo) else {
-        return Vec::new();
-    };
+    released_trunk_ref(repo, target)
+        .map(|reference| format!("^{reference}"))
+        .into_iter()
+        .collect()
+}
+
+/// The ref whose history counts as released upstream for a lane bound to
+/// `target`: the repository's trunk, read from local and origin, when it is not the target.
+pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
+    let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
     let target = target.strip_prefix("origin/").unwrap_or(target);
     if trunk == target || !is_safe_git_refname(&trunk) {
-        return Vec::new();
+        return None;
     }
-    [trunk.clone(), format!("origin/{trunk}")]
+    [format!("origin/{trunk}"), trunk]
         .into_iter()
-        .filter(|reference| git_ref_exists(repo, reference))
-        .map(|reference| format!("^{reference}"))
-        .collect()
+        .rev()
+        .find(|reference| git_ref_exists(repo, reference))
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {

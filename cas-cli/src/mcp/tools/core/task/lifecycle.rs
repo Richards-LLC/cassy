@@ -2238,16 +2238,18 @@ impl CasCore {
                 .map(|worker| crate::worker_task_queue::worker_lock(&self.cas_root, worker, "start"))
                 .transpose()?
         };
-        if !queued_start && let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {
-            let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.cas_root)
-                .and_then(|queues| queues.get(worker.factory_session.as_deref().unwrap_or_default(), &worker.name))
-                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-            if queue.starting {
-                if queue.current_task.as_deref() != Some(req.id.as_str()) {
-                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                        "The worker has a reserved queue task; resolve or start that task before starting another"));
-                }
+        let worker_queue = worker.as_ref().filter(|a| a.factory_session.is_some())
+            .map(|worker| cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.cas_root)
+                .and_then(|queues| queues.get(worker.factory_session.as_deref().unwrap_or_default(), &worker.name)))
+            .transpose().map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+        let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
+            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
+        if !queued_start && let Some(queue) = worker_queue.as_ref() {
+            if queue.starting && queue.current_task.as_deref() == Some(req.id.as_str()) {
                 queued_start = true;
+            } else if queue.starting && !queue.current_started {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "The worker has a reserved queue task; resolve or start that task before starting another"));
             }
         }
         if queued_start {
@@ -2257,15 +2259,27 @@ impl CasCore {
         }
         let task_store = self.open_task_store()?;
 
-        if let Some(worker) = worker.as_ref().filter(|a| a.factory_session.is_some()) {
-            if task_store.list(Some(TaskStatus::InProgress)).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
-                .iter().any(|task| task.id != req.id
+        if queue_enabled && let Some(worker) = worker.as_ref() {
+            let mut active = task_store.list(Some(TaskStatus::InProgress))
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .into_iter().filter(|task| task.id != req.id
                     && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
                     && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
-                || agents.list_active_leases().map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
-                    .iter().any(|lease| lease.agent_id == worker.id && lease.task_id != req.id) {
-                return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "Cannot start another task while this worker has active work; close or park it first"));
+                .map(|task| task.id).collect::<Vec<_>>();
+            active.extend(agents.list_active_leases()
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .into_iter().filter(|lease| lease.agent_id == worker.id && lease.task_id != req.id)
+                .map(|lease| lease.task_id));
+            active.sort();
+            active.dedup();
+            if !active.is_empty() {
+                let prefix = self.guidance_prefix();
+                let holds = active.iter().map(|id|
+                    format!("{prefix}task action=update id={id} status=blocked"))
+                    .collect::<Vec<_>>().join("\n");
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                    "Cannot start task {} while {} has active work: {}. To resume a returned delivery, checkpoint the unfinished branch and put its task on hold:\n{holds}\nThen switch to the returned task's recorded branch (see `{prefix}task action=show id={} full=true`) and retry `{prefix}task action=start id={}`. The held successor keeps its queue slot. After the returned delivery is parked, switch back, set the held task open and start it again.",
+                    req.id, worker.name, active.join(", "), req.id, req.id)));
             }
         }
 

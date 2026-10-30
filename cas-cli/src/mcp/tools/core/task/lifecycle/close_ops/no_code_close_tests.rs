@@ -1753,7 +1753,7 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
 #[tokio::test]
 async fn queued_task_starts_after_close_or_park_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
-    for park in [false, true] {
+    for (park, pending_brief) in [(false, false), (true, false), (true, true)] {
         let f = fixture(&mut env, "main");
         let config = f.cas_dir().join("config.toml");
         let mut body = std::fs::read_to_string(&config).unwrap();
@@ -1839,6 +1839,14 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let _ = call(closer, close).await;
         assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         assert!(f.task("cas-8488-c").assignee.is_none());
+        if pending_brief {
+            // A crash after enqueue but before clearing starting leaves this
+            // durable state; recovery must still preserve a held successor.
+            let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+            let mut queue = queues.get("queue-session", WORKER).unwrap();
+            queue.starting = true;
+            queues.save("queue-session", WORKER, &mut queue).unwrap();
+        }
         if park {
             env.set("CAS_AGENT_ROLE", "supervisor");
             let returned = call(&f.supervisor, serde_json::json!({
@@ -1879,6 +1887,28 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert!(agents.list_active_leases().unwrap().iter()
                 .filter(|lease| lease.agent_id == "nocode-worker-session")
                 .all(|lease| lease.task_id == first.id));
+            std::fs::write(checkout.join("correction.txt"), "returned task A correction\n").unwrap();
+            git(&checkout, &["add", "."]);
+            git(&checkout, &["commit", "-qm", "fix(cas-8488-a): correct returned delivery"]);
+            git(&checkout, &["push", "-q", "origin", LANE]);
+            let reparked = call(&f.worker, serde_json::json!({
+                "action":"close", "id":first.id, "reason":"Corrected returned delivery",
+            })).await;
+            assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{reparked}");
+            assert_eq!(f.task(&next.id).status, TaskStatus::Blocked);
+            let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
+                .unwrap().get("queue-session", WORKER).unwrap();
+            assert_eq!(queue.current_task.as_deref(), Some(next.id.as_str()));
+            assert_eq!(queue.pending, vec!["cas-8488-c"]);
+            git(&checkout, &["switch", &active_branch]);
+            let _ = call(&f.worker, serde_json::json!({
+                "action":"update", "id":next.id, "status":"open",
+            })).await;
+            let resumed = call(&f.worker, serde_json::json!({
+                "action":"start", "id":next.id,
+            })).await;
+            assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "{resumed}");
+            assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
         }
     }
 }

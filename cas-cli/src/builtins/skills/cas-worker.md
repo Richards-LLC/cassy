@@ -28,9 +28,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    message the supervisor once that you are ready, then wait.
 2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
    Successful start accepts the assignment; no prose ACK. Follow task criteria,
-   depth, execution note and project instructions. For queued successors and
-   branch reuse, follow
-   [recovery](references/recovery.md#queued-successor-and-branch-reuse).
+   depth, execution note and project instructions. For queued work and branch
+   reuse, see [recovery](references/recovery.md#queued-successor-and-branch-reuse);
+   after checkpoint, only `git rebase <target>` where allowed.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
 3. Commit scoped work; push once before parking, once per review round, unless
    `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
@@ -53,8 +53,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    once) or reopens it with findings. Don't re-close or block on it. Read [recovery.md](references/recovery.md)
    for the waiting rule and for rejection or crossed-message handling.
 
-One event gets one message. A close is the lifecycle report; never send a post-close
-summary or echo the close relay. After a merge request, wait for the supervisor's
+One event, one message. Close is the lifecycle report; never echo it after close.
+After a merge request, wait for the supervisor's
 response instead of sending a second update about the same request.
 
 Finish or hand off this task before starting another. Stay available after

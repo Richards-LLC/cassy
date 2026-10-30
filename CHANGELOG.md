@@ -40,6 +40,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   delivery anchor is selected for the waiver, while the exact pushed head is
   still required.
 
+### Fixed — Profile listing parity
+
+- **Claude and Codex profiles use the terminal width consistently** — Both
+  listings shorten long names and folders by display cells, including CJK and
+  emoji, while preserving login and active states. `--full` and `--json` retain
+  exact values; the full-value hint appears only when a value was shortened.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

@@ -197,33 +197,12 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>, full: bool) -> Result
         .with_context(|| format!("could not inspect Codex profiles under {}", home.display()))?;
     let mut output =
         String::from("Usage: cas codex <profile> [factory-args...]\n\nDetected Codex profiles:\n");
+    let mut truncated = false;
 
     for profile in with_usage(home, profiles) {
-        let login = super::account_picker::login_state_label(profile.login_state);
-        let active = if profile.active { " (active)" } else { "" };
-        let suffix = format!(" ({login}){active}");
-        let label = if profile.display_name == profile.name {
-            profile.name.clone()
-        } else {
-            format!("{} ({})", profile.display_name, profile.name)
-        };
-        // cas-e1f4: two short lines per account, so the list fits 80 columns.
-        let directory = profile
-            .directory
-            .strip_prefix(home)
-            .map(|rest| format!("~/{}", rest.display()))
-            .unwrap_or_else(|_| profile.directory.display().to_string());
-        let (label, directory) = if full {
-            (label, directory)
-        } else {
-            // Reserve the complete state suffix; only displayed identities shrink.
-            // The shared truncator uses ASCII dots and a conservative byte budget.
-            (
-                crate::ui::widgets::truncate(&label, 80 - 2 - suffix.len()),
-                crate::ui::widgets::truncate(&directory, 80 - 4),
-            )
-        };
-        output.push_str(&format!("  {label}{suffix}\n    {directory}\n"));
+        let (row, shortened) = super::account_picker::profile_listing_row(home, &profile, full);
+        output.push_str(&row);
+        truncated |= shortened;
         if let Some(usage) = &profile.usage {
             for line in usage.split("; ") {
                 output.push_str(&format!("    {}\n", line.trim_start()));
@@ -231,7 +210,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>, full: bool) -> Result
         }
     }
     output.push('\n');
-    if !full {
+    if truncated {
         output.push_str("Full profile names and folders: cas codex --list-profiles --full\n");
     }
     output.push_str(&crate::cloud::presence::wrap_line(
@@ -561,7 +540,10 @@ pub fn execute(args: &CodexArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<(
         let home =
             dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
         let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-        print!("{}", profile_listing(&home, active_dir.as_deref(), cli.full)?);
+        print!(
+            "{}",
+            profile_listing(&home, active_dir.as_deref(), cli.full || cli.json)?
+        );
         return Ok(());
     }
 

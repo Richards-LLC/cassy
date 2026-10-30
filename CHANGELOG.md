@@ -22,7 +22,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the audit records the name and path only. The folder is
   `secrets.destination` (`cas config set secrets.destination <path>`), with a
   user default in `~/.cas/config.toml` and a built-in default of
-  `~/.cas/private/creds/<project>`. Saved files are kept until you delete them.
+  `~/.cas/private/creds/<project>`; only the operator can change it. Saved
+  files are kept until you delete them.
 
 ### Fixed — Fleet keyboard feedback
 

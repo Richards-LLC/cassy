@@ -50,6 +50,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and decode common ANSI-C quoted words before matching policy commands.
   Unsupported ANSI-C escapes are refused; quoted data remains literal.
 
+### Fixed — Delivery-scoped upkeep waivers
+
+- **Upkeep decisions cover one delivery and finding** — Park now prints the
+  complete waiver command with the delivery SHA and finding ID, and rejects old
+  or mismatched decisions. Bug fixes also receive a named case-coverage refusal
+  when an untouched malformed registry prevents evaluating their regression case.
+
 ### Fixed — QA impact for test fixtures
 
 - **Test fixtures stay outside product QA impact** — Files in fixture directories

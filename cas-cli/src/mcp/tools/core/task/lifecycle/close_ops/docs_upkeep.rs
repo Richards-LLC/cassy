@@ -34,6 +34,15 @@ pub(super) fn at_park(
         Ok(snapshot) => snapshot,
         Err(message) => return warning(notes, task, message),
     };
+    let Some(delivery_head) =
+        super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+    else {
+        return warning(
+            notes,
+            task,
+            "UPKEEP WARNING: delivery head unavailable (not blocking)".into(),
+        );
+    };
     let qa = config.qa();
     let result = (|| -> anyhow::Result<_> {
         let mut changes = crate::qa_impact::io::changes_for_diff(repo, &base, Some(&head))?;
@@ -166,6 +175,8 @@ pub(super) fn at_park(
         match finish(
             notes,
             task,
+            repo,
+            &delivery_head,
             stage,
             path,
             findings,

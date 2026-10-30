@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
+- **Mac worker background jobs suppress idle alerts** — macOS now walks the
+  worker's own process tree, excluding persistent Cassy and Playwright MCP
+  sidecars with the same rules as Linux.
 - **Large deliveries resolve proof targets together** — Source and builtin
   references now share one test-tree search per kind, keeping proof-surface
   discovery within the close budget when many paths change.

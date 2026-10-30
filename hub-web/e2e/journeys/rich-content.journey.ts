@@ -161,7 +161,7 @@ for (const [index, variant] of variants.entries()) {
         await expect(frame.locator(".rich-diagram")).toBeHidden();
         await page.keyboard.press("Enter");
         await expect(frame.locator(".rich-diagram")).toBeVisible();
-        const expand = frame.getByRole("button", { name: "Expand mermaid", exact: true });
+        const expand = frame.getByRole("button", { name: /^(?:Expand|Collapse) mermaid$/ });
         await expand.focus(); await page.keyboard.press("Enter");
         await expect(expand).toHaveAttribute("aria-expanded", "true");
         await page.keyboard.press("Enter");

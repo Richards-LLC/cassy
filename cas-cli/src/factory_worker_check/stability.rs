@@ -56,8 +56,6 @@ pub(crate) struct Touched {
     pub(crate) unstable: Vec<String>,
     /// No failing run before the change (fail-first).
     pub(crate) never_red: Vec<String>,
-    /// Runner was intentionally left unsupported and must fail closed.
-    pub(crate) unsupported: Vec<String>,
     /// Over the runtime budget, with the measured median.
     pub(crate) over_budget: Vec<(String, String)>,
 }
@@ -139,8 +137,9 @@ pub(super) fn evaluate(
     let plan = plan(repo, target, head)?;
     let mut touched = Touched::default();
     for test in &plan.tests {
-        if matches!(test.runner.as_str(), "playwright" | "pytest") {
-            touched.unsupported.push(test.id.clone());
+        if !matches!(test.runner.as_str(), "rust" | "vitest" | "node-test")
+            || (!test.id.starts_with("hub-web/") && test.runner != "rust")
+        {
             continue;
         }
         let proofs = records.iter().filter_map(|(receipt_head, _, receipt)| {
@@ -216,7 +215,6 @@ mod tests {
         let touched = evaluate(repo.path(), "main", &head, evidence.records(), &[]).unwrap();
         assert!(touched.unstable.is_empty(), "{touched:?}");
         assert_eq!(touched.never_red, [rust_id]);
-        assert!(touched.unsupported.is_empty(), "{touched:?}");
     }
 
     #[test]

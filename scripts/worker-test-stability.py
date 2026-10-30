@@ -135,12 +135,10 @@ def ecosystem(path, source=''):
     name = Path(path).name.lower()
     if suffix == '.rs':
         return 'rust'
-    if suffix in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx') and re.search(r'(?:\.test|\.spec|\.journey)\.', name):
+    if path.startswith('hub-web/') and suffix in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx') and re.search(r'(?:\.test|\.spec|\.journey)\.', name):
         if re.search(r"(?:from\s*|import\s*\(|require\s*\()(['\"])node:test\1", source):
             return 'node-test'
-        return 'vitest' if '.test.' in name else 'playwright'
-    if suffix == '.py' and (name.startswith('test_') or name.endswith('_test.py')):
-        return 'pytest'
+        return 'vitest' if '.test.' in name else None
     return None
 
 
@@ -450,11 +448,11 @@ def report_durations(runner, report, tests):
 def run_adapter_stability(root, runner, report, initial_args=(), invoke=subprocess.run):
     if os.environ.get('CAS_WORKER_STABILITY_TRIAL') == '1':
         return
+    context = worker_context(root)
+    if context is None or runner == 'playwright':
+        return
     if runner not in ('vitest', 'node-test'):
         raise ValueError(f'{runner} touched-test stability receipts are not supported yet')
-    context = worker_context(root)
-    if context is None:
-        return
     touched = plan(root, context['base'], context['head'])
     tests = [test for test in touched['tests'] if test['runner'] == runner]
     if not tests:

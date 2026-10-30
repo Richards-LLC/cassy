@@ -12,7 +12,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Vitest and node:test record stable touched-test evidence** — Was: Their
   worker runs had no park-readable stability proof. → Now: The supported runners
   select changed tests and record five concurrent, zero-retry passes in the
-  existing worker evidence store. Playwright and pytest fail closed as unsupported.
+  existing worker evidence store. Playwright and pytest remain outside the receipt gate.
+
+### Fixed — Worker test receipt scope
+
+- **Playwright journeys retain their native pass status** — Was: Every passing
+  Playwright run was rejected by the unsupported stability adapter. → Now: The
+  stability adapters run only with factory context, and Playwright never invokes
+  them. Receipts are scoped to `hub-web` Vitest and node:test files; other paths
+  remain outside the gate.
 
 ### Fixed — Stability proof for nested Rust workspaces
 

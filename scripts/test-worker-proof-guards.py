@@ -25,22 +25,11 @@ SPEC.loader.exec_module(STABILITY)
 
 
 class ChangedStrings(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.dependencies = tempfile.TemporaryDirectory()
-        cls.addClassCleanup(cls.dependencies.cleanup)
-        shared = Path(__file__).parents[1] / 'hub-web/node_modules'
-        use_shared = (
-            os.environ.get('CAS_TEST_WORKER_PROOF_NO_SHARED_DEPS') != '1'
-            and (shared / 'vitest/vitest.mjs').is_file()
-            and (shared / 'typescript/lib/typescript.js').is_file()
-        )
-        if use_shared:
-            cls.node_modules = shared
-            return
-
+    def install_vitest_dependencies(self):
         fixture = Path(__file__).parents[1] / 'hub-web/test-fixtures/vitest-stability'
-        install_root = Path(cls.dependencies.name)
+        dependencies = tempfile.TemporaryDirectory()
+        self.addCleanup(dependencies.cleanup)
+        install_root = Path(dependencies.name)
         shutil.copy(fixture / 'package.json', install_root / 'package.json')
         shutil.copy(fixture / 'package-lock.json', install_root / 'package-lock.json')
         install = subprocess.run(
@@ -48,8 +37,8 @@ class ChangedStrings(unittest.TestCase):
             capture_output=True, text=True,
         )
         if install.returncode:
-            raise RuntimeError(f'could not install pinned Vitest fixture dependencies:\n{install.stdout}\n{install.stderr}')
-        cls.node_modules = install_root / 'node_modules'
+            raise AssertionError(f'could not install pinned Vitest fixture dependencies:\n{install.stdout}\n{install.stderr}')
+        (self.repo / 'hub-web/node_modules').symlink_to(install_root / 'node_modules')
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -62,7 +51,7 @@ class ChangedStrings(unittest.TestCase):
         hub = self.repo / 'hub-web'
         hub.mkdir()
         (hub / 'package.json').write_text('{}')
-        (hub / 'node_modules').symlink_to(self.node_modules)
+        (hub / '.gitignore').write_text('node_modules/\n')
         self.git('init', '-q')
 
     def git(self, *args):
@@ -230,7 +219,8 @@ else:
                     self.assertEqual(ids, [touched['tests'][0]['id']])
                     self.assertEqual(resolved, expected)
 
-    def test_plan_selects_only_changed_vitest_playwright_and_pytest_cases(self):
+    def test_plan_scopes_receipts_to_hub_web_vitest_and_node_tests(self):
+        self.install_vitest_dependencies()
         web = self.repo / 'hub-web/src/worker.test.ts'
         web.parent.mkdir(parents=True)
         web.write_text("import { test } from 'vitest';\ntest('stable', () => { expect(1).toBe(1); });\ntest('changed', () => { expect('before').toBe('before'); });\n")
@@ -249,34 +239,73 @@ else:
         planned = STABILITY.plan(self.repo, base, head)
         self.assertEqual(
             {(test['runner'], test['id']) for test in planned['tests']},
-            {
-                ('vitest', 'hub-web/src/worker.test.ts::changed'),
-                ('playwright', 'hub-web/e2e/worker.spec.ts::changed'),
-                ('pytest', 'scripts/test_worker.py::test_changed'),
-            },
+            {('vitest', 'hub-web/src/worker.test.ts::changed')},
         )
-        by_runner = {runner: [test for test in planned['tests'] if test['runner'] == runner]
-                     for runner in ('vitest', 'playwright', 'pytest')}
-        self.assertEqual(STABILITY.adapter_args('vitest', by_runner['vitest'])[:2],
+        self.assertEqual(STABILITY.adapter_args('vitest', planned['tests'])[:2],
                          ['--testNamePattern', "^(?:changed)$"])
-        self.assertEqual(len(by_runner['playwright']), 1)
-        with self.assertRaisesRegex(ValueError, 'Playwright.*not supported yet'):
-            STABILITY.adapter_args('playwright', by_runner['playwright'])
-        self.assertEqual(len(by_runner['pytest']), 1)
-        with self.assertRaisesRegex(ValueError, 'pytest.*not supported yet'):
-            STABILITY.adapter_args('pytest', by_runner['pytest'])
 
         with self.assertRaisesRegex(ValueError, 'dynamic test title'):
             STABILITY.source_tests('dynamic.test.ts', "test(`case ${value}`, () => {});", 'vitest')
+        root_calls = "import { test } from 'vitest';\ntest('actual', () => {});\nobject.test('not a test', () => {});\n/actual/.test('actual');\n"
+        self.assertEqual([case['function'] for case in STABILITY.source_tests(
+            'hub-web/src/root.test.ts', root_calls, 'vitest', self.repo)], ['actual'])
+        for unresolved in (
+            "test.each`first | second`('%s', () => {});",
+            "describe.each([['first']])('%s', () => {});",
+        ):
+            with self.subTest(unresolved=unresolved), self.assertRaisesRegex(ValueError, 'unresolved dynamic'):
+                STABILITY.source_tests('hub-web/src/each.test.ts', unresolved, 'vitest', self.repo)
 
         escaped = r'''import test from 'node:test';
 test('it\'s fine', () => assert.match("say \"hi\"", /["']/));
 test("say \"hi\"", () => {});
 test.each(['first', 'second'])('%s case', () => {});
 '''
-        self.assertEqual(STABILITY.ecosystem('checkout-ports.test.mjs', escaped), 'node-test')
-        parsed = STABILITY.source_tests('checkout-ports.test.mjs', escaped, 'node-test', self.repo)
+        self.assertEqual(STABILITY.ecosystem('hub-web/e2e/checkout-ports.test.mjs', escaped), 'node-test')
+        parsed = STABILITY.source_tests('hub-web/e2e/checkout-ports.test.mjs', escaped, 'node-test', self.repo)
         self.assertEqual([case['function'] for case in parsed], ["it's fine", 'say "hi"', 'first case', 'second case'])
+        self.assertIsNone(STABILITY.ecosystem('scripts/test_worker.py', 'def test_case(): pass'))
+        self.assertIsNone(STABILITY.ecosystem('slack-bridge/src/worker.test.ts', "test('changed', () => {});"))
+
+    def test_playwright_runner_success_skips_worker_adapter(self):
+        runner = Path(__file__).parents[1] / 'hub-web/scripts/run-verified-tests.mjs'
+        (self.repo / 'hub-web/scripts').mkdir(parents=True, exist_ok=True)
+        shutil.copy(runner, self.repo / 'hub-web/scripts/run-verified-tests.mjs')
+        script = r'''import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runVerified } from './scripts/run-verified-tests.mjs';
+const output = mkdtempSync(join(tmpdir(), 'playwright-stub-'));
+for (const [runner, args, context] of [
+  ['playwright', ['--project=journeys'], '1'],
+  ['vitest', ['src/receipt.test.ts'], '0'],
+]) {
+  const output = mkdtempSync(join(tmpdir(), `${runner}-stub-`));
+  let calls = 0;
+  const status = runVerified(runner, args, {
+    cwd: process.cwd(),
+    env: { ...process.env, CAS_FACTORY_MODE: context, CAS_WORKER_STABILITY_BASE: '', JOURNEY_OUTPUT: output },
+    spawn(_command, nativeArgs, options) {
+      calls += 1;
+      assert.equal(calls, 1, `${runner} without an adapter context must spawn only its native runner`);
+      const report = runner === 'playwright'
+        ? options.env.PLAYWRIGHT_JSON_OUTPUT_NAME
+        : nativeArgs.find(arg => arg.startsWith('--outputFile=')).slice('--outputFile='.length);
+      writeFileSync(report, JSON.stringify(runner === 'playwright'
+        ? { stats: { expected: 1 } } : { numPassedTests: 1 }));
+      return { status: 0 };
+    },
+  });
+  assert.equal(status, 0);
+  assert.equal(calls, 1);
+}
+'''
+        result = subprocess.run(
+            ['node', '--input-type=module', '-e', script],
+            cwd=self.repo / 'hub-web', capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_web_stability_receipt_is_bound_and_one_failed_copy_blocks_it(self):
         source = self.repo / 'hub-web/src/worker.test.ts'
@@ -322,6 +351,7 @@ test.each(['first', 'second'])('%s case', () => {});
                                          (base, head, 5, 5, 0))
 
     def test_real_vitest_runs_five_copies_and_writes_bound_receipt(self):
+        self.install_vitest_dependencies()
         source = self.repo / 'hub-web/src/receipt.test.ts'
         source.parent.mkdir(parents=True)
         (self.repo / 'hub-web/scripts').mkdir(parents=True)
@@ -371,6 +401,30 @@ test.each(['first', 'second'])('%s case', () => {});
         self.assertEqual((data['head'], data['test']['harness'], data['test']['stability']['runs']),
                          (head, 'node-test', 5))
 
+    def test_node_test_runner_skips_adapter_without_factory_task_context(self):
+        hub = self.repo / 'hub-web'
+        (hub / 'scripts').mkdir(parents=True, exist_ok=True)
+        (hub / 'e2e').mkdir(parents=True, exist_ok=True)
+        wrapper = Path(__file__).parents[1] / 'hub-web/scripts/run-verified-node-tests.mjs'
+        shutil.copy(wrapper, hub / 'scripts/run-verified-node-tests.mjs')
+        test_file = hub / 'e2e/no-context.test.mjs'
+        test_file.write_text("import test from 'node:test';\ntest('native runner passes', () => {});\n")
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = Path(scratch)
+            marker = scratch / 'adapter-called'
+            fake_python = scratch / 'python3'
+            fake_python.write_text(f'#!/bin/sh\nprintf called > {marker}\nexit 99\n')
+            fake_python.chmod(0o755)
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ('CAS_FACTORY_MODE', 'CAS_WORKER_STABILITY_BASE', 'CAS_WORKER_STABILITY_HEAD')}
+            env['PATH'] = f'{scratch}:{env["PATH"]}'
+            result = subprocess.run(
+                ['node', str(hub / 'scripts/run-verified-node-tests.mjs',), str(test_file)],
+                cwd=hub, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(marker.exists(), 'non-factory Node test run invoked the stability adapter')
+
     def test_native_reports_resolve_exact_touched_case_durations(self):
         with tempfile.TemporaryDirectory() as scratch:
             report = Path(scratch) / 'report.json'
@@ -392,6 +446,10 @@ test.each(['first', 'second'])('%s case', () => {});
         self.assertEqual(result.returncode, 2)
         self.assertIn('pytest', result.stderr)
         self.assertIn('not supported yet', result.stderr)
+
+    def test_stability_adapter_is_noop_without_factory_task_context(self):
+        with patch.dict(os.environ, {'CAS_FACTORY_MODE': '0'}, clear=True):
+            self.assertIsNone(STABILITY.run_adapter_stability(self.repo, 'pytest', None))
 
 
 if __name__ == '__main__':

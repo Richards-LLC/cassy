@@ -44,7 +44,8 @@ if (trial) {
   process.exit(0);
 }
 
-if (process.env.CAS_WORKER_STABILITY_TRIAL !== '1') {
+const hasFactoryTaskContext = process.env.CAS_FACTORY_MODE === '1' || Boolean(process.env.CAS_WORKER_STABILITY_BASE);
+if (hasFactoryTaskContext && process.env.CAS_WORKER_STABILITY_TRIAL !== '1') {
   let scriptRoot = repo;
   while (scriptRoot !== resolve('/') && !existsSync(resolve(scriptRoot, 'scripts/worker-test-stability.py'))) {
     scriptRoot = resolve(scriptRoot, '..');

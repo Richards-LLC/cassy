@@ -103,6 +103,13 @@ on another branch cannot substitute its older selector or catalog. Missing,
 broken or invalid committed selectors refuse proof rather than fall back to
 the checkout. Full-catalog selection uses the same revision binding.
 
+Runtime source ownership includes both existing import users and journeys whose
+browser roots or specs name a literal class or ID queried through `closest`,
+`matches`, `querySelector` or `querySelectorAll`. Both base and head contribute,
+so extracting a DOM handler into an already-shared module retains its UI's
+journey. Dynamic selectors do not supply inferred owners; existing composition
+and unknown-source fallbacks remain in effect.
+
 A release that changes a user-facing surface must carry a journey evaluation
 of exactly the UI it ships.
 

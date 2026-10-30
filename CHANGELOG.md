@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Extracted handler journey coverage
+
+- **Rich inspection stays in source-impact selection** — Literal DOM lookups
+  retain the journeys that own their UI when a handler moves into an existing
+  shared module. Existing import ownership and conservative fallbacks remain.
+
 ### Added — Commander reading frames
 
 - **Shared source frames and compact work rows** — Diagrams, diffs and code

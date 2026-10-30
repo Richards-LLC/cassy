@@ -31575,7 +31575,8 @@ esac
             git(p, &["checkout", "-q", "factory/worker-cas-test1"]);
             if octopus {
                 git(p, &["merge", "-q", "--no-ff", "--no-edit", "epic/next", "main"]);
-                assert_eq!(git(p, &["rev-list", "--parents", "-n", "1", "HEAD"]).split_whitespace().count(), 4);
+                let parents = git_stdout_lines(p, &["rev-list", "--parents", "-n", "1", "HEAD"]).unwrap();
+                assert_eq!(parents[0].split_whitespace().count(), 4);
             } else {
                 git(p, &["merge", "-q", "--no-ff", "--no-edit", merged]);
             }

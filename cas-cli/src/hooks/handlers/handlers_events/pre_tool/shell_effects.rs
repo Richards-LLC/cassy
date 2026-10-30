@@ -489,6 +489,43 @@ fn resolve_executable(
     Err("an unresolved shell executable")
 }
 
+/// The line-based extractor cannot prove Bash boundaries for these forms.
+/// Refuse them before projection can hide executable text as heredoc data.
+fn check_heredoc_boundaries(script: &str) -> Result<(), &'static str> {
+    let joined = script.replace("\\\n", "");
+    let projected = shell_command_without_heredoc_bodies(&joined);
+    let delimiters: Vec<_> = projected.split('\n').flat_map(heredoc_delimiters).collect();
+    if delimiters.iter().any(|delimiter| !delimiter.literal_body)
+        && script.chars().any(|ch| ch == '\r' || (!ch.is_ascii() && ch.is_whitespace()))
+    {
+        return Err("an unresolved shell payload");
+    }
+    // ANSI-C quoting needs escape decoding and locale quoting can translate
+    // the delimiter. Removing a leading dollar alone cannot prove either.
+    if !delimiters.is_empty() && projected.split("<<").skip(1).any(|tail| {
+        let tail = tail.strip_prefix('-').unwrap_or(tail).trim_start_matches([' ', '\t']);
+        tail.starts_with("$'") || tail.starts_with("$\"")
+    }) {
+        return Err("an unresolved shell payload");
+    }
+    let mut logical_line = String::new();
+    let mut continued = false;
+    for line in script.split_inclusive('\n') {
+        if let Some(prefix) = line.strip_suffix("\\\n") {
+            logical_line.push_str(prefix);
+            continued = true;
+            continue;
+        }
+        logical_line.push_str(line);
+        if continued && !heredoc_delimiters(&logical_line).is_empty() {
+            return Err("an unresolved shell payload");
+        }
+        logical_line.clear();
+        continued = false;
+    }
+    Ok(())
+}
+
 fn collect_script(
     script: &str,
     mut dirs: Directories,
@@ -500,6 +537,7 @@ fn collect_script(
     if depth > 8 {
         return Err("a shell payload beyond the resolution limit");
     }
+    check_heredoc_boundaries(script)?;
     let projected = shell_command_without_heredoc_bodies(script);
     let mut lexed = factory_shell_lex(&projected, false, 0);
     if lexed.unresolved_at.is_some() {

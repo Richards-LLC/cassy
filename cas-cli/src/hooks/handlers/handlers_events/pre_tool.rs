@@ -8089,6 +8089,10 @@ mod workspace_contract_tests {
             "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",
+            // cas-a809: the structural check must reach expanding bodies,
+            // even when shell quoting hides the textual policy spelling.
+            "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
+            "cat <<EOF | pbcopy\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
         ] {
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
@@ -8099,6 +8103,7 @@ mod workspace_contract_tests {
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
+            "cat <<'EOF'\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
         ] {
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");

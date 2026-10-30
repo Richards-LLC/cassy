@@ -11,6 +11,46 @@
 //! - every suggested call is one the recipient can make;
 //! - free text from the caller (a close reason) is never re-fenced.
 
+use sha2::Digest as _;
+
+/// Persist a full routine receipt under its content hash and return a compact
+/// reference. The create-only path makes the detail immutable.
+pub(crate) fn compact_receipt(
+    cas_root: &std::path::Path,
+    task_id: &str,
+    kind: &str,
+    summary: &str,
+    detail: &str,
+) -> Result<String, String> {
+    let digest = hex::encode(sha2::Sha256::digest(detail.as_bytes()));
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, None);
+    let dir = paths.task_dirs(task_id)[0].join("receipts");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("could not create receipt detail directory: {error}"))?;
+    let path = dir.join(format!("{kind}-{digest}.txt"));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(detail.as_bytes())
+                .map_err(|error| format!("could not persist receipt detail: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("could not sync receipt detail: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&path)
+                .map_err(|error| format!("could not verify existing receipt detail: {error}"))?;
+            if existing != detail.as_bytes() {
+                return Err("content-addressed receipt detail did not match its path".into());
+            }
+        }
+        Err(error) => return Err(format!("could not persist receipt detail: {error}")),
+    }
+    Ok(format!(
+        "{summary}\nDetails: {} (SHA-256 {digest})",
+        path.display()
+    ))
+}
+
 /// What the timed-out verification cycle was bound to.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum VerificationTimeout<'a> {
@@ -284,8 +324,34 @@ pub(crate) fn verifier_spawn_denial(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     const PREFIXES: [&str; 4] = ["mcp__cas__", "mcp__cs__", "cas__", "cas_"];
+
+    #[test]
+    fn close_receipt_is_compact_and_references_immutable_details() {
+        let root = tempdir().unwrap();
+        let detail = "Closed task cas-x; verification passed; full diagnostic payload.";
+        let short = compact_receipt(
+            root.path(),
+            "cas-x",
+            "close",
+            "Closed task cas-x; delivery abc123; target epic/x; next: none.",
+            detail,
+        )
+        .unwrap();
+        assert!(short.len() < 800, "{short}");
+        let (path, digest) = short
+            .split_once("Details: ")
+            .unwrap()
+            .1
+            .split_once(" (SHA-256 ")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
+        assert_eq!(digest.trim_end_matches(')'), hex::encode(sha2::Sha256::digest(detail.as_bytes())));
+        assert!(compact_receipt(root.path(), "cas-x", "close", "retry", detail).is_ok());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
+    }
 
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.

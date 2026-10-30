@@ -5689,26 +5689,13 @@ impl CasCore {
             return Ok(close_result);
         }
 
-        // Promote entries if configured
-        if wt_config.promote_entries_on_merge {
-            if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
-                if count > 0 {
-                    return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
-                        worktree.id,
-                        worktree.parent_branch,
-                        target_suffix,
-                        merge_commit.as_deref().unwrap_or("none"),
-                        cleanup_note,
-                        reconcile_note,
-                        push_note,
-                        count
-                    )));
-                }
-            }
-        }
-
-        Ok(Self::success(format!(
+        // Promote entries if configured.
+        let promoted = if wt_config.promote_entries_on_merge {
+            self.promote_branch_entries(&worktree.branch).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut detail = format!(
             "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
@@ -5717,7 +5704,45 @@ impl CasCore {
             cleanup_note,
             reconcile_note,
             push_note
-        )))
+        );
+        if promoted > 0 {
+            detail.push_str(&format!("\nPromoted {promoted} entries from branch scope."));
+        }
+        let status = task_id.and_then(|id| {
+            self.open_task_store()
+                .ok()?
+                .get(id)
+                .ok()
+                .map(|task| task.status.to_string())
+        });
+        let next = match (task_id, status.as_deref()) {
+            (_, Some("Closed")) | (None, _) => "none".to_string(),
+            (Some(id), Some(status)) => format!("review task {id} (status {status})"),
+            (Some(id), None) => format!("inspect task {id}"),
+        };
+        let summary = format!(
+            "Merged {} to {}{}; commit {}; CI {}; push {}; next: {next}.",
+            worktree.id,
+            worktree.parent_branch,
+            target_suffix,
+            merge_commit.as_deref().unwrap_or("none"),
+            ci_admission.label(),
+            if push_outcome.is_published() { "published" } else { "not published" },
+        );
+        if let Some(task_id) = task_id
+            && trunk_notice.is_empty()
+            && ci_policy_notice.is_empty()
+            && let Ok(compact) = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::compact_receipt(
+                &cas_root,
+                task_id,
+                "merge",
+                &summary,
+                &detail,
+            )
+        {
+            detail = compact;
+        }
+        Ok(Self::success(detail))
     }
 
     /// Get current worktree status

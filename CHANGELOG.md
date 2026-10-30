@@ -21,6 +21,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   authentication proofs to prevent replay after a restart. Commander retries
   on the hub's clock even when the device is only 1–4 seconds ahead.
 
+### Fixed — Reverted task receipts
+
+- **Backlog hygiene distinguishes reverted deliveries** — Was: `cas doctor`
+  and supervisor startup could suggest closing an open task with its revert
+  commit. Now: the latest explicit revert, or complete restoration of the
+  task's changed paths, appears as delivered then reverted without a close
+  receipt. Normal deliveries keep their close suggestions; unavailable tree
+  checks withhold unchecked receipts.
+
 ### Fixed — Worker recycle recipe
 
 - **A recycled Codex worker stays on Codex** — Was: a hook or `cas` command in

@@ -355,6 +355,45 @@ pub(crate) fn operator_turn_waiting_for_commander(
     !cloud_feed
 }
 
+/// cas-fc42: record a worker's typed ready message on its own task as a
+/// progress note, so the director's pre-park readiness check (which reads
+/// task notes) sees the claim. Only a message whose first line is the
+/// `status: ready` return contract counts; the reader binds its `tip:` to
+/// the pushed lane tip, accepting an unambiguous short SHA.
+fn record_worker_ready_contract(
+    cas_root: &std::path::Path,
+    sender: &cas_types::Agent,
+    task_id: &str,
+    message: &str,
+) {
+    let body = message.trim_start();
+    let body = match body.split_once('\n') {
+        Some((first, rest)) if first.starts_with("[CAS reply:") => rest.trim_start(),
+        _ => body,
+    };
+    if body.lines().next().map(str::trim_end) != Some("status: ready") {
+        return;
+    }
+    let Ok(store) = crate::store::open_task_store_local(cas_root) else {
+        return;
+    };
+    let Ok(task) = store.get(task_id) else {
+        return;
+    };
+    if !task
+        .assignee
+        .as_deref()
+        .is_some_and(|assignee| assignee == sender.name || assignee == sender.id)
+    {
+        return;
+    }
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    let note = format!("[{timestamp}] 📝 PROGRESS {}", body.trim_end());
+    if let Err(error) = store.append_note(task_id, &note) {
+        tracing::warn!(task_id, %error, "could not record the worker's ready contract");
+    }
+}
+
 #[cfg(test)]
 mod viktor_provenance_tests {
     use super::queued_message_provenance_at;
@@ -1823,6 +1862,20 @@ impl CasService {
                 })?;
             let reply_id = reply.id();
             crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
+            // cas-2f55: replying to the hub's "saved" message confirms use of
+            // a secret the operator chose to delete after use.
+            let used = match req.in_reply_to.map(|answered| {
+                crate::hub::secret_auto_delete::confirm_use(&self.inner.cas_root, factory_session, answered)
+            }) {
+                Some(Ok(removed)) if !removed.is_empty() => {
+                    format!("\nSecret deleted after use: {}", removed.join(", "))
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "cas-2f55: after-use secret deletion failed");
+                    "\nSecret deletion after use failed; tell the operator to delete the file".to_string()
+                }
+                _ => String::new(),
+            };
             let deadline = match ask_deadline {
                 Some((secs, default)) => {
                     let id =
@@ -1839,7 +1892,7 @@ impl CasService {
                 ("queued", "", "queued for")
             };
             return Ok(Self::success(format!(
-                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}",
+                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}{used}",
                 kind.as_str(),
                 req.in_reply_to
                     .map_or_else(|| "none".to_string(), |id| id.to_string())
@@ -2042,6 +2095,11 @@ impl CasService {
         } else {
             None
         };
+        // cas-fc42: the worker's own words, before the wake envelope, so a
+        // ready return contract can be recorded on its task below.
+        let ready_contract = (worker_action_kind
+            == Some(crate::prompt_revalidation::WorkerActionKind::Ready))
+        .then(|| message.clone());
         if let Some(kind) = worker_action_kind {
             message = crate::prompt_revalidation::attach_worker_action_envelope(
                 &message,
@@ -2967,6 +3025,16 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        // cas-fc42: a worker's typed ready message is its completion claim;
+        // record it on its own task, where the director reads readiness.
+        if let (false, Some(contract), Some(task_id), Some(sender)) = (
+            duplicate_suppressed,
+            ready_contract.as_deref(),
+            req.task_id.as_deref(),
+            agent_from_store.as_ref(),
+        ) {
+            record_worker_ready_contract(&self.inner.cas_root, sender, task_id, contract);
+        }
         // Only an explicit answer or a direct reply to the worker's blocker
         // owns that wait. Status pings and replies elsewhere in the thread do
         // not answer it. Automatic verdict/merge notices bypass this path.
@@ -6577,6 +6645,30 @@ mod cas_89e1_post_merge_message_type_tests {
             );
         }
 
+        // cas-fc42: a typed ready message with a short SHA is recorded on the
+        // worker's own task, and the director's readiness accepts that SHA as
+        // the pushed tip it prefixes, never another tip.
+        let tip = "abcdef1234567890abcdef1234567890abcdef12";
+        let tasks = core.open_task_store().expect("task store");
+        let mut task = Task::new("cas-fc42-test".to_string(), "ready by message".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).expect("add worker task");
+        let mut ready = message_request_to("supervisor");
+        ready.kind = Some("ready".to_string());
+        ready.task_id = Some(task.id.clone());
+        ready.message = Some(format!(
+            "status: ready\ntip: {} on factory/worker-a-cas-fc42; worktree: clean\nproof: named tests pass",
+            &tip[..9]
+        ));
+        service.message_send(ready).await.expect("ready message is queued");
+        let task = tasks.get("cas-fc42-test").expect("task");
+        assert!(crate::ui::factory::delivery_marked_ready(&task, tip), "{}", task.notes);
+        assert!(!crate::ui::factory::delivery_marked_ready(
+            &task,
+            "abcdef1299999990abcdef1234567890abcdef12"
+        ));
+
         for (kind,wake,body) in [
             ("receipt",None,"The delivery was received."),
             ("answer",Some(false),"A field report that can wait."),
@@ -7629,6 +7721,13 @@ mod cas_89e1_post_merge_message_type_tests {
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
+        // cas-2f55: a secret saved to delete after use, bound to this
+        // Commander message, is removed by the supervisor's reply to it.
+        let secret = temp.path().join("DEPLOY_KEY");
+        std::fs::write(&secret, "dk-value").unwrap();
+        let after_use = crate::hub::secret_auto_delete::AutoDelete::AfterUse;
+        crate::hub::secret_auto_delete::schedule(&cas_root, "DEPLOY_KEY", &secret, "factory-operator", commander - 1, after_use).unwrap();
+        crate::hub::secret_auto_delete::bind_reply(&cas_root, commander - 1, commander).unwrap();
         let request: AgentRequest = serde_json::from_value(serde_json::json!({
             "action": "message",
             "target": "operator",
@@ -7645,6 +7744,10 @@ mod cas_89e1_post_merge_message_type_tests {
                 .expect("supervisor reply queues successfully"),
         );
         assert!(response.contains("held for delivery to phone-7"), "{response}");
+        assert!(response.contains("Secret deleted after use: DEPLOY_KEY"), "{response}");
+        assert!(!secret.exists(), "the reply confirmed use");
+        let receipts = std::fs::read_to_string(cas_root.join("secret-receipts.jsonl")).unwrap();
+        assert!(receipts.contains("\"trigger\":\"after_use\"") && !receipts.contains("dk-value"), "{receipts}");
 
         let rows = queue
             .peek_operator_replies("factory-operator", 10)

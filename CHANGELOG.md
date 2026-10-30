@@ -13,6 +13,53 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   authentication proofs to prevent replay after a restart. Commander retries
   on the hub's clock even when the device is only 1–4 seconds ahead.
 
+### Fixed — Worker recycle recipe
+
+- **A recycled Codex worker stays on Codex** — Was: a hook or `cas` command in
+  a Codex worker's pane re-registered its session without the harness, so its
+  row lost `worker_cli`, read as Claude, and `recycle_worker` refused the
+  recipe (`cli=claude, model=gpt-6.1-sol`). Now: the Codex pane names its own
+  harness, a re-registration keeps the original spawn's harness, model,
+  effort and account when it lacks them, and a row that already lost its
+  harness relaunches on the harness its model belongs to.
+
+### Fixed — Merge readiness
+
+- **A worker's ready message counts, and the supervisor waits for it** — Was:
+  pre-park readiness came only from a task note naming the full 40-character
+  tip, so a worker's typed ready message with a short SHA never counted, and
+  supervisor guidance said to merge any pushed tip with green CI, including an
+  incomplete test-first checkpoint. Now: a typed `status: ready` message is
+  recorded on the worker's own task, a short SHA of seven or more characters
+  matches the pushed tip it prefixes, and supervisor skills and launch
+  contracts merge on READY TO MERGE, `awaiting_merge` or that ready signal,
+  never on a green push alone.
+
+### Fixed — Shared-file advisories
+
+- **Remote file holders keep the coordination hint** — Was: a named holder on
+  another machine lost the cross-session supervisor hint. Now: recorded remote
+  identities retain it; the unknown-session fallback stays unchanged.
+
+### Fixed — Factory QA
+
+- **QA waivers follow a current repark after handoff** — Was: an older passed
+  round on a retired worker's branch could override the current assignee's
+  anchored repark. Now: a validated current-worker parked lane with an active
+  delivery anchor is selected for the waiver, while the exact pushed head is
+  still required.
+
+### Fixed — Profile listing parity
+
+- **Claude and Codex profiles use the terminal width consistently** — Both
+  listings shorten long names and folders by display cells, including CJK and
+  emoji, while preserving login and active states. `--full` and `--json` retain
+  exact values; the full-value hint appears only when a value was shortened.
+
+### Added — Commander secret auto-delete
+
+- **A saved secret can delete itself** — Was: a secret saved from Commander's secret card stayed on the machine until someone deleted it. Now: the card offers to keep the file, delete it once the agent has used it, or delete it after 1 or 24 hours. The project setting `secrets.auto_delete` (default `off`) sets the default. Each deletion leaves a receipt in `.cas/secret-receipts.jsonl` that never contains the value.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

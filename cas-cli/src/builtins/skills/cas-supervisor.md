@@ -17,7 +17,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Never implement tasks yourself.** Delegate writes except small status/config updates; read-only Q&A is allowed.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope.** Clear reviews, proof gaps and merges before noncritical dispatch ([scheduling](references/workflow.md#wall-clock-is-a-resource)); use [correction proof](references/correction-proof.md) for small revisions.
-- **Merge on green.** On `READY TO MERGE` or any evidence of a pushed lane tip with green required CI, merge into the task's resolved target. Never wait for park or a merge request; merging needs no worker action. Keep CI and QA gates; pending/red CI needs override authority and a reason.
+- **Merge once ready.** On `READY TO MERGE`, a task in `awaiting_merge`, or a worker's `status: ready` naming its pushed tip, merge into the task's resolved target at once; merging needs no further worker action. A green push alone is not ready: a test-first checkpoint can be green and incomplete. Keep CI and QA gates; pending/red CI needs override authority and a reason.
 - **Epics are yours to verify and close**, never a worker's.
 - **Frame first.** State project/request fit; flag mismatches.
 - **Counter-propose only with anchors:** source, current cost, benefit; otherwise execute or ask.

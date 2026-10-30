@@ -286,7 +286,7 @@ end-of-lane, once the worker is done with that worktree.
 
 **Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. Merge on `READY TO MERGE` or any evidence that the delivery tip is pushed and required lane CI is green. Never wait for park, `awaiting_merge`, or a merge request, including when a close gate refused park. The merge needs no worker action. Drain ready merges before free-form user replies.
+1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). Drain ready merges before free-form user replies.
 2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before

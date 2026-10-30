@@ -2247,7 +2247,7 @@ mod tests {
         assert_eq!(
             second,
             crate::cloud::file_leases::FileLease::HeldBy(
-                crate::cloud::file_leases::FileHolder::UnknownSession(
+                crate::cloud::file_leases::FileHolder::OtherSession(
                     "fierce-koala-22 (task cas-ac47) on soundwave".into()
                 )
             ),
@@ -2292,17 +2292,36 @@ mod tests {
                 "error": "already_claimed", "owner_agent_id": "holder"
             })))
             .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock": {
+                "id": "file-lock", "task_id": "file-key", "agent_id": "holder", "status": "active",
+                "expires_at": (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                "renewed_at": Utc::now().to_rfc3339(), "renewal_count": 0,
+                "claim_reason": ClaimHolder::new(ClaimKind::File, "holder-worker (task cas-real-task)", "github.com/acme/widgets")
+                    .on("other-host").reason(),
+            }})))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/agents$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": [{
+                "id": "holder", "name": "holder-worker", "agent_type": "worker", "status": "active",
+                "last_heartbeat": Utc::now(), "active_tasks": 1, "machine_id": "other-host",
+                "metadata": {"canonical_id": "github.com/acme/widgets", "hostname": "other-host"},
+            }]})))
+            .mount(&server).await;
         let claims = PeerClaims {
             config: CloudConfig { endpoint: server.uri(), token: Some("sandbox-token".into()), ..Default::default() },
             project: "github.com/acme/widgets".into(), label: "this-host".into(),
             retired_local: HashMap::new(), budget: None,
         };
         tokio::task::spawn_blocking(move || {
-            for (holder_session, same_session) in [("session-a", true), ("session-b", false)] {
+            for (holder_session, same_session) in [(Some("session-a"), true), (Some("session-b"), false), (None, false)] {
                 let dir = tempfile::tempdir().unwrap();
                 let root = crate::store::init_cas_dir(dir.path()).unwrap();
                 let agents = crate::store::open_agent_store(&root).unwrap();
-                for (id, name, session) in [("reader", "reader-worker", "session-a"), ("holder", "holder-worker", holder_session)] {
+                for (id, name, session) in [("reader", "reader-worker", Some("session-a")), ("holder", "holder-worker", holder_session)] {
+                    let Some(session) = session else { continue };
                     let mut agent = crate::types::Agent::new(id.into(), name.into());
                     agent.factory_session = Some(session.into());
                     agents.register(&agent).unwrap();
@@ -2310,14 +2329,17 @@ mod tests {
                 let path = "web/DESIGN.md";
                 assert_eq!(claim_with(&claims, &root, "holder", "holder-worker", "cas-real-task", path), FileLease::Mine);
                 let FileLease::HeldBy(holder) = claim_with(&claims, &root, "reader", "reader-worker", "cas-reader", path) else {
-                    panic!("expected a contended file for {holder_session}");
+                    panic!("expected a contended file for {holder_session:?}");
                 };
                 let note = collision_note(path, &holder);
                 assert!(notify_worker_of_holder(&root, "reader", "reader-worker", Some("session-a"), path, &holder));
                 let queued = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
                 // pin: both harnesses must receive the same coordination instructions.
                 assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");
-                assert!(note.contains("holder-worker") && note.contains("cas-real-task"), "{holder_session}: {note}");
+                assert!(note.contains("holder-worker") && note.contains("cas-real-task"), "{holder_session:?}: {note}");
+                if holder_session.is_none() {
+                    assert!(note.contains("on other-host"), "{note}");
+                }
                 // pin: the advisory must distinguish local coordination from a different supervisor.
                 assert_eq!(note.contains("another worker in your session (holder-worker, task cas-real-task)"), same_session, "{note}");
                 assert_eq!(note.contains("other session's supervisor"), !same_session, "{note}");

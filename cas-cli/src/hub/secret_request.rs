@@ -9,6 +9,7 @@
 use super::*;
 use std::io::Write;
 use std::path::{Path as FsPath, PathBuf};
+use crate::hub::secret_auto_delete::{self, AutoDelete};
 
 /// One pasted credential, with JSON overhead. Bounded before parsing.
 const MAX_WIRE_BYTES: usize = 16 * 1024;
@@ -21,11 +22,15 @@ struct SecretAnswer {
     value: Option<String>,
     #[serde(default)]
     decline: bool,
+    /// cas-2f55: `keep`, `after_use` or a time such as `1h`; absent uses the
+    /// project's `secrets.auto_delete`, which defaults to keep.
+    #[serde(default)]
+    auto_delete: Option<String>,
 }
 
 /// Saving or declining, decided once the request is found open.
 enum Outcome {
-    Saved(PathBuf),
+    Saved(PathBuf, AutoDelete),
     Declined,
 }
 
@@ -95,16 +100,19 @@ pub(super) async fn answer<R: SessionReadModel>(
     };
     // serde errors can quote the input, so none reaches the response or a log.
     let answer = match serde_json::from_slice::<SecretAnswer>(&bytes) {
-        Ok(SecretAnswer { value: None, decline: true }) => None,
-        Ok(SecretAnswer { value: Some(value), decline: false }) if !value.trim().is_empty() => {
-            Some(value.trim().to_owned())
+        Ok(SecretAnswer { value: None, decline: true, auto_delete: None }) => None,
+        Ok(SecretAnswer { value: Some(value), decline: false, auto_delete })
+            if !value.trim().is_empty()
+                && auto_delete.as_deref().is_none_or(|choice| AutoDelete::parse(choice).is_some()) =>
+        {
+            Some((value.trim().to_owned(), auto_delete.as_deref().and_then(AutoDelete::parse)))
         }
         _ => {
             return with_cors(
                 launch_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_secret",
-                    "Send {\"value\": \"...\"} with the secret, or {\"decline\": true}.",
+                    "Send {\"value\": \"...\"} with the secret and an optional \"auto_delete\" of keep, after_use or a time such as 1h, or {\"decline\": true}.",
                 ),
                 &headers,
             );
@@ -127,16 +135,20 @@ pub(super) async fn answer<R: SessionReadModel>(
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let outcome = tokio::task::spawn_blocking(move || {
         tracing::dispatcher::with_default(&dispatch, || {
-            save(&project, &blocking_session, notification_id, answer.as_deref(), &attribution)
+            save(&project, &blocking_session, notification_id, answer.as_ref().map(|(value, choice)| (value.as_str(), *choice)), &attribution)
         })
     })
     .await;
     let (status, body, audit_outcome, detail) = match outcome {
-        Ok(Ok((name, Outcome::Saved(path)))) => (
+        Ok(Ok((name, Outcome::Saved(path, trigger)))) => (
             StatusCode::OK,
-            serde_json::json!({"name": name, "path": path.display().to_string(), "saved": true}),
+            serde_json::json!({"name": name, "path": path.display().to_string(), "saved": true, "auto_delete": trigger.label()}),
             "allowed",
-            format!("notification={notification_id} name={name} path={}", path.display()),
+            format!(
+                "notification={notification_id} name={name} path={} auto_delete={}",
+                path.display(),
+                trigger.label().unwrap_or_else(|| "keep".into())
+            ),
         ),
         Ok(Ok((name, Outcome::Declined))) => (
             StatusCode::OK,
@@ -192,7 +204,7 @@ fn save(
     project: &str,
     session: &str,
     notification_id: i64,
-    value: Option<&str>,
+    value: Option<(&str, Option<AutoDelete>)>,
     attribution: &MessageAttribution,
 ) -> Result<(String, Outcome), Refusal> {
     let _answering = ANSWERING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -215,7 +227,7 @@ fn save(
         return Err(Refusal::NotOpen);
     }
     let (outcome, text, summary) = match value {
-        Some(value) => {
+        Some((value, choice)) => {
             let directory = destination(&cas_dir, project).map_err(Refusal::Storage)?;
             let path = match write_secret(&directory, &name, value) {
                 Ok(path) => path,
@@ -228,12 +240,24 @@ fn save(
                 }
                 Err(error) => return Err(Refusal::Storage(error)),
             };
-            let text = format!(
+            let trigger = choice.unwrap_or_else(|| AutoDelete::project_default(&cas_dir));
+            // A secret that cannot be listed for deletion is not kept silently.
+            if let Err(error) =
+                secret_auto_delete::schedule(&cas_dir, &name, &path, session, notification_id, trigger)
+            {
+                let _ = std::fs::remove_file(&path);
+                return Err(Refusal::Storage(error));
+            }
+            let mut text = format!(
                 "Secret {name} saved to {path} (mode 600). Use it via $(cat {path}) or an env var \
                  in the command that needs it; never print it. The value is not in this message or any history.",
                 path = path.display()
             );
-            (Outcome::Saved(path), text, format!("Secret {name} saved"))
+            if let Some(sentence) = trigger.sentence() {
+                text.push(' ');
+                text.push_str(&sentence);
+            }
+            (Outcome::Saved(path, trigger), text, format!("Secret {name} saved"))
         }
         None => (
             Outcome::Declined,
@@ -245,6 +269,11 @@ fn save(
         &cas_dir, session, "supervisor", &text, Some(&summary), false, Some(notification_id), None, attribution,
     )
     .map_err(Refusal::Storage)?;
+    if let Outcome::Saved(_, AutoDelete::AfterUse) = outcome
+        && let Err(error) = secret_auto_delete::bind_reply(&cas_dir, notification_id, reply.id())
+    {
+        tracing::warn!(%error, %session, notification_id, "cas-2f55: after-use secret could not bind its reply");
+    }
     if matches!(reply, cas_store::EnqueueOutcome::Created(_)) {
         crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(&cas_dir);
     }

@@ -68,6 +68,8 @@ coordination action=message target=operator kind=secret summary=STRIPE_KEY messa
 
 `summary` is the secret's name and its file name: 1-64 letters, digits, `_`, `.` or `-`. Commander shows a card with a masked field. When the operator saves it, the hub writes the value to a mode-600 file in `secrets.destination` (default `~/.cas/private/creds/<project>/`) and you receive a reply naming that path; a decline says nothing was saved. Use it via `$(cat <path>)` or an env var in the command that needs it (for example `STRIPE_KEY="$(cat <path>)" npm test`); never print it, and never copy it into the repository, a note, a task or a message. A name that already exists is refused, so ask with a new name to replace a key. A worker that needs a secret asks its supervisor, which sends the request.
 
+The operator may choose to delete the file after saving (off by default; card choice or `secrets.auto_delete`). The reply then says so. For a timed deletion, read the file before the stated time. For deletion after use, reply to that "saved" message (`in_reply_to=<its notification id>`) once you are done with the secret; Cassy deletes the file and records a receipt without the value.
+
 ## Supervisor override
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.

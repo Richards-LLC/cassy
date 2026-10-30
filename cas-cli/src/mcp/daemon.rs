@@ -191,6 +191,23 @@ pub(crate) fn register_with_role_reconciliation(
         && prior.role == agent.role
         && let Some(prefix) = crate::agent_model::metadata_prefix(agent.role)
     {
+        // cas-9153: a re-registration from a process that lacks the launch
+        // recipe (a hook or `cas` command in the pane) keeps the original
+        // spawn's harness, model, effort and account instead of erasing them.
+        if agent.role == AgentRole::Worker {
+            for key in [
+                "worker_cli",
+                "worker_model",
+                "worker_effort",
+                "worker_account_dir",
+            ] {
+                if !agent.metadata.contains_key(key)
+                    && let Some(value) = prior.metadata.get(key)
+                {
+                    agent.metadata.insert(key.to_string(), value.clone());
+                }
+            }
+        }
         for suffix in ["model", "effort"] {
             let observed = format!("{prefix}_{suffix}_observed");
             if prior.metadata.contains_key(&observed) {

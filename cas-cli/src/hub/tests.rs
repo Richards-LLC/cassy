@@ -4930,6 +4930,9 @@ async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
 
     let file = fixture._temp.path().join("creds/project/STRIPE_KEY");
     assert_eq!(body["path"], file.display().to_string(), "{body}");
+    // cas-2f55: auto-delete is off unless chosen: nothing is listed for deletion.
+    assert!(body["auto_delete"].is_null(), "{body}");
+    assert!(!fixture.cas_dir.join("secret-auto-delete.json").exists());
     // pin: the file holds exactly the pasted value, with surrounding whitespace trimmed.
     assert_eq!(std::fs::read_to_string(&file).unwrap(), VALUE, "saved trimmed");
     assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
@@ -4978,6 +4981,20 @@ async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!fixture._temp.path().join("creds/project/NPM_TOKEN").exists());
     assert!(queue.queued_prompt(declined).unwrap().unwrap().acked_at.is_some(), "a decline answers the request");
+
+    // cas-2f55: chosen on the card, the file goes once the supervisor answers the "saved" reply.
+    let chosen = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "DEPLOY_KEY");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{chosen}"), Some(serde_json::json!({"value": "dk-value", "auto_delete": "after_use"})))
+        .await;
+    assert_eq!((status, &body["auto_delete"]), (StatusCode::OK, &serde_json::json!("after_use")), "{body}");
+    let saved = fixture._temp.path().join("creds/project/DEPLOY_KEY");
+    let reply = fixture.queued().into_iter().find(|row| row.target == "supervisor" && row.prompt.contains("DEPLOY_KEY")).unwrap();
+    // pin: the supervisor learns from this reply that its own answer deletes the file.
+    assert!(reply.prompt.contains("deleted once you confirm"), "{}", reply.prompt);
+    assert!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, chosen).unwrap().is_empty(), "the request id is not the reply");
+    assert_eq!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, reply.id).unwrap(), ["DEPLOY_KEY"]);
+    assert!(!saved.exists());
 }
 
 /// cas-1996: only a factory:manage device answers, only an open secret
@@ -5011,6 +5028,11 @@ async fn cas_1996_secret_answer_refuses_unscoped_devices_and_other_turns() {
     assert_eq!(status, StatusCode::NOT_FOUND, "another session cannot answer it");
     let (status, body) = fixture
         .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // cas-2f55: an unknown deletion choice is refused before anything is saved.
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "auto_delete": "forever"})))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!destination.exists(), "nothing was written");

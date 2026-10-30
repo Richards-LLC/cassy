@@ -17,5 +17,23 @@ the historical email-plus-alias presentation.
 
 ## Critique
 
-Pending exact-build baseline and treatment captures at 80/120 columns,
-four palettes, C locale, pipe and NO_COLOR. No terminal PASS is claimed yet.
+Baseline `9b1c55f3`: `terminal-qa: FAIL codex-list-profiles · 11 runs · 8 fail · 0 warn · 0 allowed`.
+The four 80-column palette captures each contain a 100-cell header and a
+90-cell folder line; the 120-column captures fit.
+
+Treatment `e608e09f4`: `terminal-qa: PASS codex-list-profiles · 11 runs · 0 fail · 0 warn · 0 allowed`.
+The same fixture now fits 80 columns in every palette, with complete login and
+active state. NO_COLOR, C locale and pipe remain plain. `--full` preserves
+the exact long alias and folder; the adjacent account JSON retains the alias.
+
+Captures and build receipts: `<artifacts>/cas-d2fe/terminal-baseline/`,
+`terminal-qa/`, `baseline-RECEIPT.json`, and `candidate/RECEIPT.json`.
+The 80-column HTML was visually inspected in all four palettes.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Launch syntax leads, followed by the detected profiles and their states. |
+| Fit | 4 | Each profile keeps a header and folder; only long displayed values shrink. |
+| Craft | 4 | Header states remain whole, folders stay indented, and the full-value escape is explicit. |
+| Theme safety | 5 | Four palettes, NO_COLOR, C locale and pipe pass without SGR or new colors. |
+| Machine contract | 4 | Listing remains plain text; the existing account JSON and full listing preserve exact aliases. |

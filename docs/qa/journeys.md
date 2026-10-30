@@ -796,8 +796,8 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 3. A connection loss keeps the files visibly, then reuses the upload identity
 4. Sent files show their names and an image preview after reload and on another phone
 5. A missing preview stays on its own file card
-6. A 10 MiB photo shows byte progress, then Saving, before its message is Delivered
-7. A refused file shows its reason once and remains removable
+6. A slow 10 MiB photo shows byte progress, then Saving, then Delivered
+7. A refusal names its file and keeps the hub's reason
 
 #### Expected experience
 

@@ -309,14 +309,16 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // A preview can collapse and grow again between scroll deliveries. Force
     // that real layout ordering: the browser clamps at the smaller height,
     // then queues a scroll which will see the larger content, without input.
-    const clamp = await late.evaluate(node => {
+    const clamp = await log.evaluate(node => {
       const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
-      const style = node as HTMLStyleElement;
-      const css = style.textContent;
+      const content = node as HTMLElement;
+      // Hide and restore the preview-bearing message list. The browser sees
+      // the smaller intermediate layout; both final heights are identical.
+      const display = content.style.display;
       const before = thread.scrollTop;
-      style.textContent = "";
+      content.style.display = "none";
       const clamped = thread.scrollTop; // force the collapsed layout
-      style.textContent = css;
+      content.style.display = display;
       return { before, clamped };
     });
     expect(clamp.clamped, "the collapsed layout actually clamps the scroll position").toBeLessThan(clamp.before);

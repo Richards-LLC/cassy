@@ -311,6 +311,25 @@ fn handle_pre_tool_use_inner(
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
+    // A worker or reviewer must not skip Git's pre-push hook: it enforces
+    // parked delivery anchors and every fast-row check. Keep this above the
+    // factory auto-approve path so it also runs when `cas_root` is unavailable.
+    if is_factory_agent
+        && !crate::harness_policy::is_supervisor(input)
+        && tool_name == "Bash"
+        && input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .is_some_and(git_push_bypasses_required_hooks)
+    {
+        return Ok(HookOutput::with_pre_tool_permission(
+            "deny",
+            "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push.",
+        ));
+    }
+
     // ========================================================================
     // WORKER COMMAND-SCOPE GUARDS (cas-eb39, cas-852a0)
     //
@@ -548,9 +567,6 @@ fn handle_pre_tool_use_inner(
                         "deny",
                         "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor.",
                     ));
-                }
-                if let Some(denial) = worker_pre_push_guard_tampering(cmd) {
-                    return Ok(HookOutput::with_pre_tool_permission("deny", denial));
                 }
                 if looks_like_git_write_op(cmd) {
                     // `CAS_CLONE_PATH` is the bootstrap value, but SessionStart
@@ -1985,109 +2001,299 @@ pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
     !git_write_targets(".", cmd).is_empty()
 }
 
-/// Refuse worker commands that can disable the private pre-push guard. Git's
-/// `GIT_CONFIG_*` variables are scoped to one prefixed command unless the
-/// shell explicitly exports them (or `set -a` makes later assignments
-/// exported), so a harmless `GIT_CONFIG_KEY_0=... git status` must not taint
-/// subsequent statements.
-fn worker_pre_push_guard_tampering(command: &str) -> Option<&'static str> {
-    let mut allexport = false;
-    let mut exported_git_config = false;
-    for words in shell_statement_words(command) {
-        let Some(index) = unwrapped_command_index(&words) else {
-            if allexport
-                && words.iter().any(|word| {
-                    word.split_once('=')
-                        .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
-                })
-            {
-                exported_git_config = true;
-            }
-            continue;
-        };
-        let name = shell_word_basename(&words[index]);
-        if name == "set" && index == 0 {
-            for arg in &words[1..] {
-                if let Some(flags) = arg.strip_prefix('-').filter(|flags| !flags.starts_with('-')) {
-                    if flags.contains('a') {
-                        allexport = true;
-                    }
-                } else if let Some(flags) = arg.strip_prefix('+').filter(|flags| !flags.starts_with('+'))
-                    && flags.contains('a')
-                {
-                    allexport = false;
-                } else if (arg == "-o" || arg == "+o")
-                    && words.get(2).is_some_and(|option| option == "allexport")
-                {
-                    allexport = arg == "-o";
-                }
-            }
-        }
-
-        let is_export = matches!(name, "export" | "declare" | "typeset");
-        if is_export {
-            let options = words.get(index + 1).map(String::as_str).unwrap_or("");
-            let exports = name == "export" || options.starts_with('-') && options.contains('x');
-            if exports
-                && words[index + 1..].iter().any(|word| {
-                    word.split_once('=')
-                        .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
-                })
-            {
-                exported_git_config = true;
-            }
-        }
-
-        let prefixed_git_config = words[..index].iter().any(|word| {
-            word.split_once('=')
-                .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
-        });
-        let assigned_git_config = words[..index]
+/// Return true when a worker command disables or persistently changes the
+/// factory's required pre-push hook, including shell exports and nested
+/// payloads.
+fn git_push_bypasses_required_hooks(command: &str) -> bool {
+    git_config_environment_bypass_in_shell(command, 0)
+        || shell_invocations(command)
             .iter()
-            .chain(words.get(index + 1..).unwrap_or_default().iter())
-            .any(|word| {
-                word.split_once('=')
-                    .is_some_and(|(variable, _)| variable.starts_with("GIT_CONFIG_"))
-            });
-        if allexport && assigned_git_config {
-            exported_git_config = true;
+            .any(|(name, args)| {
+                name == "git"
+                    && (git_invocation_writes_hooks_path(args)
+                        || git_invocation_bypasses_required_hooks(args))
+            })
+}
+
+fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
+    if depth > 6 {
+        return false;
+    }
+
+    let mut exported_override = false;
+    let mut auto_export = false;
+    let mut assigned_overrides = std::collections::BTreeSet::new();
+    for words in shell_statement_words(command) {
+        if let Some(payload) = env_split_string_payload(&words)
+            && git_config_environment_bypass_in_shell(&payload, depth + 1)
+        {
+            return true;
         }
 
-        if name != "git" {
-            continue;
-        }
-        let git_words = &words[index + 1..];
-        let mut operation_index = 0;
-        while let Some(word) = git_words.get(operation_index) {
-            match word.as_str() {
-                "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
-                    operation_index += 2;
+        let command_index = unwrapped_command_index(&words);
+        let assignments_end = command_index.unwrap_or(words.len());
+        for word in &words[..assignments_end] {
+            if let Some((name, value)) = word.split_once('=')
+                && name.starts_with("GIT_CONFIG_")
+            {
+                let bypasses_hooks = git_config_env_value_bypasses_hooks(name, value);
+                if bypasses_hooks {
+                    assigned_overrides.insert(name.to_string());
+                    if auto_export {
+                        exported_override = true;
+                    }
+                } else {
+                    assigned_overrides.remove(name);
                 }
-                "--" => {
-                    operation_index += 1;
-                    break;
-                }
-                _ if word.starts_with('-') => operation_index += 1,
-                _ => break,
             }
         }
-        let Some(operation) = git_words.get(operation_index).map(String::as_str) else {
+
+        let Some(command_index) = command_index else {
             continue;
         };
-        let args = &git_words[operation_index + 1..];
-        if operation == "config" {
-            let removes_core = args.windows(2).any(|pair| {
-                pair[0] == "--remove-section" && pair[1].eq_ignore_ascii_case("core")
-            });
-            if removes_core {
-                return Some("🚫 WORKER PUSH GUARD: removing the Git core section can disable the private pre-push guard. Ask the supervisor to restore the worker hooks configuration.");
+        let name = shell_word_basename(&words[command_index]);
+        let args = &words[command_index + 1..];
+
+        if name == "set" {
+            let enables_auto_export = args.iter().any(|argument| {
+                argument == "--allexport"
+                    || argument.strip_prefix('-').is_some_and(|flags| {
+                        !flags.starts_with('-') && flags.contains('a')
+                    })
+            }) || args
+                .windows(2)
+                .any(|options| options[0] == "-o" && options[1] == "allexport");
+            let disables_auto_export = args.iter().any(|argument| {
+                argument == "--no-allexport"
+                    || argument.strip_prefix('+').is_some_and(|flags| {
+                        !flags.starts_with('+') && flags.contains('a')
+                    })
+            }) || args
+                .windows(2)
+                .any(|options| options[0] == "+o" && options[1] == "allexport");
+            if enables_auto_export {
+                auto_export = true;
+            } else if disables_auto_export {
+                auto_export = false;
             }
+            continue;
         }
-        if operation == "push" && (prefixed_git_config || exported_git_config) {
-            return Some("🚫 WORKER PUSH GUARD: GIT_CONFIG_* overrides can disable the private pre-push guard. Push with the worker hooks configuration intact.");
+
+        if name == "export" {
+            exported_override |= git_config_environment_override(args)
+                || args
+                    .iter()
+                    .any(|argument| assigned_overrides.contains(argument));
+            continue;
+        }
+
+        if matches!(name, "declare" | "typeset")
+            && args.iter().any(|argument| {
+                matches!(argument.as_str(), "--export")
+                    || argument.strip_prefix('-').is_some_and(|flags| {
+                        !flags.starts_with('-') && flags.contains('x')
+                    })
+            })
+        {
+            exported_override |= git_config_environment_override(args)
+                || args.iter().any(|argument| {
+                    let variable = argument
+                        .split_once('=')
+                        .map(|(name, _)| name)
+                        .unwrap_or(argument);
+                    assigned_overrides.contains(variable)
+                });
+            continue;
+        }
+
+        if (exported_override || git_config_environment_override(&words[..command_index]))
+            && shell_command_invokes_push(&shell_words_as_command(&words[command_index..]))
+        {
+            return true;
+        }
+
+        let nested_bypass = match name {
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
+                args.iter().enumerate().any(|(position, arg)| {
+                    let flags_c = arg.starts_with('-')
+                        && !arg.starts_with("--")
+                        && arg.contains('c');
+                    (flags_c || arg == "--command")
+                        && args.get(position + 1).is_some_and(|payload| {
+                            git_config_environment_bypass_in_shell(payload, depth + 1)
+                        })
+                })
+            }
+            "eval" => git_config_environment_bypass_in_shell(&args.join(" "), depth + 1),
+            _ => false,
+        };
+        if nested_bypass {
+            return true;
         }
     }
-    None
+    false
+}
+
+fn shell_words_as_command(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| format!("'{}'", word.replace('\'', "'\"'\"'")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_command_invokes_push(command: &str) -> bool {
+    shell_invocations(command)
+        .iter()
+        .any(|(name, args)| name == "git" && git_invocation_is_push_or_alias(args))
+}
+
+fn git_config_environment_override(words: &[String]) -> bool {
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if let Some((name, value)) = word.split_once('=')
+            && git_config_env_value_bypasses_hooks(name, value)
+        {
+            return true;
+        }
+        if matches!(word.as_str(), "-u" | "--unset")
+            && words.get(index + 1).is_some_and(|name| name.starts_with("GIT_CONFIG_"))
+        {
+            return true;
+        }
+        if word.starts_with("--unset=GIT_CONFIG_")
+            || word == "-i"
+            || word == "--ignore-environment"
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn git_config_env_value_bypasses_hooks(name: &str, value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    if name == "GIT_CONFIG_PARAMETERS" {
+        return value.contains("core.hookspath") || value.contains("alias.") || value.contains('$');
+    }
+    name.strip_prefix("GIT_CONFIG_KEY_").is_some_and(|index| {
+        index.chars().all(|character| character.is_ascii_digit())
+            && (value.trim_matches(['\'', '"']) == "core.hookspath" || value.contains('$'))
+    })
+}
+
+fn git_invocation_writes_hooks_path(git_words: &[String]) -> bool {
+    let Some(operation_index) = git_subcommand_index(git_words) else {
+        return false;
+    };
+    if git_words[operation_index] != "config" {
+        return false;
+    }
+
+    let arguments = &git_words[operation_index + 1..];
+    let section_operation = arguments.iter().position(|argument| {
+        matches!(argument.as_str(), "--remove-section" | "remove-section" | "rename-section")
+    });
+    if let Some(index) = section_operation {
+        return arguments
+            .get(index + 1)
+            .is_some_and(|section| section.eq_ignore_ascii_case("core"));
+    }
+    let Some(key_index) = arguments
+        .iter()
+        .position(|argument| argument.eq_ignore_ascii_case("core.hooksPath"))
+    else {
+        return false;
+    };
+    let options = &arguments[..key_index];
+    if options.iter().any(|option| {
+        matches!(
+            option.as_str(),
+            "--get" | "--get-all" | "--get-regexp" | "--get-urlmatch" | "--list"
+        )
+    }) {
+        return false;
+    }
+
+    options
+        .iter()
+        .any(|option| matches!(option.as_str(), "--unset" | "--unset-all" | "unset"))
+        || arguments.get(key_index + 1).is_some()
+}
+
+fn git_invocation_bypasses_required_hooks(git_words: &[String]) -> bool {
+    let Some(operation_index) = git_subcommand_index(git_words) else {
+        return false;
+    };
+    let operation = git_words[operation_index].as_str();
+    if operation != "push" {
+        return git_global_alias_override(&git_words[..operation_index], operation);
+    }
+
+    if git_global_hooks_path_override(&git_words[..operation_index]) {
+        return true;
+    }
+
+    git_words[operation_index + 1..]
+        .iter()
+        .take_while(|word| word.as_str() != "--")
+        .any(|word| {
+            matches!(word.as_str(), "-n" | "--dry-run") || {
+                let option = word.split('=').next().unwrap_or(word);
+                option.len() >= "--no-v".len() && "--no-verify".starts_with(option)
+            }
+        })
+}
+
+fn git_invocation_is_push_or_alias(git_words: &[String]) -> bool {
+    let Some(operation_index) = git_subcommand_index(git_words) else {
+        return false;
+    };
+    git_words[operation_index] == "push"
+        || git_global_alias_override(&git_words[..operation_index], &git_words[operation_index])
+}
+
+fn git_global_hooks_path_override(arguments: &[String]) -> bool {
+    git_global_config_override(arguments, "core.hookspath")
+}
+
+fn git_global_alias_override(arguments: &[String], command: &str) -> bool {
+    git_global_config_override(arguments, &format!("alias.{command}"))
+}
+
+fn git_global_config_override(arguments: &[String], key: &str) -> bool {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        let config_value = if matches!(argument.as_str(), "-c" | "--config-env") {
+            arguments.get(index + 1).map(String::as_str)
+        } else if let Some(value) = argument.strip_prefix("--config-env=") {
+            Some(value)
+        } else if let Some(value) = argument.strip_prefix("-c") {
+            Some(value.trim_start_matches('='))
+        } else {
+            None
+        };
+
+        if config_value.is_some_and(|value| git_config_value_sets_key(value, key)) {
+            return true;
+        }
+
+        index += if matches!(argument.as_str(), "-c" | "--config-env") {
+            2
+        } else {
+            1
+        };
+    }
+    false
+}
+
+fn git_config_value_sets_key(value: &str, key: &str) -> bool {
+    value
+        .split_once('=')
+        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(key))
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -2247,6 +2453,20 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
 fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     // Only the subcommand can change history, never a global option's value
     // or a read command's operand (e.g. `git log --grep commit`).
+    let operation_index = git_subcommand_index(git_words)?;
+    let operation = git_words.get(operation_index)?.as_str();
+    let args = &git_words[operation_index + 1..];
+    let is_write = match operation {
+        "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
+        "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
+        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
+        "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
+        _ => false,
+    };
+    is_write.then_some(operation_index)
+}
+
+fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
     let mut operation_index = 0;
     while let Some(word) = git_words.get(operation_index) {
         match word.as_str() {
@@ -2263,16 +2483,7 @@ fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
             _ => break,
         }
     }
-    let operation = git_words.get(operation_index)?.as_str();
-    let args = &git_words[operation_index + 1..];
-    let is_write = match operation {
-        "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
-        "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
-        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
-        "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
-        _ => false,
-    };
-    is_write.then_some(operation_index)
+    git_words.get(operation_index).map(|_| operation_index)
 }
 
 /// Resolve the small subset of shell variable forms used in worker guidance
@@ -10073,6 +10284,64 @@ mod worker_commit_guard_tests {
         tmp
     }
 
+    #[cfg(unix)]
+    fn attach_failing_pre_push_probe(repo: &std::path::Path) -> tempfile::TempDir {
+        let remote = tempfile::tempdir().expect("probe remote");
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(remote.path())
+            .output()
+            .expect("initialize probe remote");
+        assert!(initialized.status.success());
+
+        let configured = std::process::Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(remote.path())
+            .current_dir(repo)
+            .output()
+            .expect("configure probe remote");
+        assert!(configured.status.success());
+
+        let hook = repo.join(".git/hooks/pre-push");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf 'probe pre-push hook rejected push\\n' >&2\nexit 1\n",
+        )
+        .expect("write failing probe hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&hook)
+                .expect("hook metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&hook, permissions).expect("make probe hook executable");
+        }
+
+        let hooks_path = repo.join(".git/hooks");
+        let configured_hooks = std::process::Command::new("git")
+            .args(["config", "core.hooksPath"])
+            .arg(&hooks_path)
+            .current_dir(repo)
+            .output()
+            .expect("configure probe hook path");
+        assert!(configured_hooks.status.success());
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/guard-test"])
+            .current_dir(repo)
+            .output()
+            .expect("probe plain push");
+        assert!(
+            !push.status.success()
+                && String::from_utf8_lossy(&push.stderr)
+                    .contains("probe pre-push hook rejected push"),
+            "probe must reject a plain push via pre-push: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+        remote
+    }
+
     // ── looks_like_git_write_op tests ─────────────────────────────────────
 
     #[test]
@@ -10911,6 +11180,149 @@ mod worker_commit_guard_tests {
         input.cwd = cwd.to_string();
         input.tool_input = Some(serde_json::json!({"command": command}));
         input
+    }
+
+    #[test]
+    fn worker_git_push_hook_bypass_is_refused_but_supervisor_is_unaffected() {
+        let repo = make_git_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let switched = std::process::Command::new("git")
+            .args(["switch", "-c", "factory/guard-test"])
+            .current_dir(repo.path())
+            .output()
+            .expect("create a worker branch");
+        assert!(switched.status.success());
+        #[cfg(unix)]
+        let _probe_remote = attach_failing_pre_push_probe(repo.path());
+
+        let variants = [
+            "git push --no-verify origin factory/guard-test".to_string(),
+            "git push --no-verif origin factory/guard-test".to_string(),
+            "git push -n origin factory/guard-test".to_string(),
+            "git push --dry-run origin factory/guard-test".to_string(),
+            "git -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test".to_string(),
+            format!(
+                "git -C '{repo_path}' -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test"
+            ),
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks git push origin factory/guard-test".to_string(),
+            "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" git push origin factory/guard-test".to_string(),
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks git push origin factory/guard-test".to_string(),
+            "git -c alias.p='push --no-verify' p origin factory/guard-test".to_string(),
+            "bash -c 'git push --no-verify origin factory/guard-test'".to_string(),
+            "eval 'git push --no-verify origin factory/guard-test'".to_string(),
+            "env -S 'git push --no-verify origin factory/guard-test'".to_string(),
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty-hooks; git push origin factory/guard-test".to_string(),
+            "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" && git push origin factory/guard-test".to_string(),
+            "git config core.hooksPath /tmp/empty-hooks && git push origin factory/guard-test".to_string(),
+            "git config --worktree core.hooksPath /tmp/empty-hooks".to_string(),
+            "git config unset core.hooksPath".to_string(),
+            "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" bash -c 'git push origin factory/guard-test'".to_string(),
+            "GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/tmp/empty-hooks; export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; git push origin factory/guard-test".to_string(),
+            "declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
+            "set -a; GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
+            "set -ae; GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "set -euax; GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "set -o allexport; GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "declare -gx GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "declare -g -x GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "git config --remove-section core".to_string(),
+            "git config --worktree --remove-section core".to_string(),
+            "git config remove-section core".to_string(),
+            "git config rename-section core oldcore".to_string(),
+        ];
+
+        let mut mismatches = Vec::new();
+        for role in ["worker", "reviewer"] {
+            let _env = TestEnvGuard::with_optional_vars(&[
+                ("CAS_AGENT_ROLE", Some(role)),
+                ("CAS_FACTORY_MODE", Some("1")),
+                ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+                ("CAS_AGENT_NAME", Some("guard-test")),
+            ]);
+            for command in &variants {
+                let mut input = hook_git_write_input(&repo_path, command);
+                input.agent_role = Some(role.to_string());
+                let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+                let value = serde_json::to_value(output).expect("serialize hook result");
+                let hook_output = &value["hookSpecificOutput"];
+                if hook_output["permissionDecision"] != "deny" {
+                    mismatches.push(format!("{role}: expected refusal: {command}: {value}"));
+                    continue;
+                }
+                let reason = hook_output["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap_or_default();
+                if !reason.contains("supervisor-approved") || !reason.contains("plain `git push`")
+                {
+                    mismatches.push(format!("{role}: unclear exception route: {command}: {reason}"));
+                }
+                if command
+                    .split_whitespace()
+                    .any(|word| matches!(word, "-n" | "--dry-run"))
+                    && (!reason.contains("`-n` is a dry-run")
+                        || !reason.contains("still runs the pre-push hook"))
+                {
+                    mismatches.push(format!("{role}: inaccurate dry-run explanation: {reason}"));
+                }
+            }
+        }
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+            ("CAS_AGENT_NAME", Some("factory-supervisor")),
+        ]);
+        let mut input = hook_git_write_input(&repo_path, "git push --no-verify origin factory/guard-test");
+        input.agent_role = Some("supervisor".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("supervisor pre-tool hook");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "supervisors retain the approved exception route: {value}"
+        );
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn plain_worker_git_push_remains_allowed() {
+        let repo = make_git_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let switched = std::process::Command::new("git")
+            .args(["switch", "-c", "factory/guard-test"])
+            .current_dir(repo.path())
+            .output()
+            .expect("create a worker branch");
+        assert!(switched.status.success());
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+            ("CAS_AGENT_NAME", Some("guard-test")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("GIT_CONFIG_GLOBAL", Some("/tmp/worker-global-config")),
+        ]);
+        let mut input = hook_git_write_input(&repo_path, "git push origin factory/guard-test");
+        input.agent_role = Some("worker".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "plain worker push remains allowed: {value}"
+        );
+
+        let mut input = hook_git_write_input(
+            &repo_path,
+            "GIT_CONFIG_KEY_0=core.hooksPath git status; git push origin factory/guard-test",
+        );
+        input.agent_role = Some("worker".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("prefixed read then push");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "one-command environment prefix must not persist: {value}"
+        );
     }
 
     #[test]

@@ -323,9 +323,9 @@ jobs:
   # push lane is the only validation those commits ever get; removing it would
   # create a merge path with no validation at all.
   # cas-eac2 (operator D1, D2): repository variable CAS_LANE_SLIM, off by
-  # default. Off, lanes run as before. 'true' drops the no-build fast rows and
-  # broad Rust tests from factory pushes, because the 3.63+ worker pre-push hook
-  # runs the rows and park reads exact-tip fast-rows and focused-test receipts.
+  # default. Off, lanes run as before. 'true' runs the no-build fast rows
+  # once in lane.yml and drops broad Rust tests from factory pushes. Park
+  # reads focused-test receipts; local fast-row receipts are only feedback.
   # PRs are unaffected, and unsetting the variable is the one-setting rollback.
   # Factory pushes under the small-delta policy use the mapped proof surface
   # only. The release train can accept this exact job, or a supervisor's

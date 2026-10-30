@@ -193,9 +193,25 @@ function rawEventTitle(kind: string, diagnostic: unknown): string {
   return sentenceCase(normalizedKind(kind));
 }
 
+/**
+ * cas-c095: a deliberate end is the session-ended receipt, not an alarm. A
+ * supervisor pane that exited with code 0, and a daemon that then exited
+ * cleanly, raise no attention item; any other exit still does.
+ */
+export function machineEventRaisesAttention(kind: string, diagnostic: unknown): boolean {
+  const normalized = normalizedKind(kind);
+  const record = asRecord(diagnostic);
+  if (normalized === "pane_exited") return !(record?.role === "supervisor" && record.exit_code === 0);
+  if (normalized === "daemon_disconnected") return asRecord(record?.cause)?.kind !== "clean_exit";
+  return true;
+}
+
 export function machineEventAttention(kind: string, diagnostic: unknown, enrichmentPending = false): AttentionContent {
   const normalized = normalizedKind(kind);
   if (normalized === "daemon_disconnected") return { ...daemonAttention(diagnostic), enrichmentPending: false };
+  if (normalized === "pane_exited" && asRecord(diagnostic)?.role === "supervisor") {
+    return { headline: "Supervisor stopped", detail: "Open the session to inspect the supervisor's terminal output.", severity: "critical", action: "view_pane", payload: diagnostic, enrichmentPending: false };
+  }
   const template = MACHINE_EVENT_TEMPLATES[normalized];
   if (template) return { ...template, payload: diagnostic, enrichmentPending: false };
   return {

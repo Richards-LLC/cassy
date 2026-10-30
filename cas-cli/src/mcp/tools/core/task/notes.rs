@@ -56,7 +56,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let task = task_store.get(&req.id).map_err(|e| McpError {
+        task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
@@ -93,14 +93,6 @@ impl CasCore {
             req.reason.as_deref(),
         )
         .map_err(|message| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(message),
-            data: None,
-        })?;
-
-        let fast_exception = super::fast_rows_exception::prepare(
-            self, &task, &req.note_type, &req.note,
-        ).map_err(|message| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(message),
             data: None,
@@ -146,10 +138,7 @@ impl CasCore {
             _ => "📝 PROGRESS",
         };
 
-        let mut formatted_note = format!("[{}] {} {}", timestamp, type_prefix, note);
-        if let Some(exception) = &fast_exception {
-            formatted_note.push_str(&format!("\nFast-row exception approved: {}", exception.audit));
-        }
+        let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, note);
 
         // prepare_note adds only committed ledger records after the caller's
         // raw note has passed the marker rejection above.
@@ -168,13 +157,6 @@ impl CasCore {
         })?;
 
         crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
-        if let Some(exception) = fast_exception {
-            exception.publish().map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Decision note recorded, but fast-row exception receipt could not be written: {error}. Retry the same decision note.")),
-                data: None,
-            })?;
-        }
         if let Err(e) = self.record_task_note_activity(
             &req.id,
             &req.note_type,

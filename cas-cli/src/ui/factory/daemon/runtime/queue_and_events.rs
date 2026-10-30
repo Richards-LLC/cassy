@@ -193,6 +193,28 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
     Some(bounded_tail_text(trimmed))
 }
 
+/// A PTY exit in plain words: the signal wins, then the code; a missing status
+/// stays explicitly unavailable rather than becoming a guessed code.
+fn pane_exit_status(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
+    match exit_signal.filter(|signal| !signal.trim().is_empty()) {
+        Some(signal) => format!("terminated by signal {signal}"),
+        None => match exit_code {
+            Some(code) => format!("exited with code {code}"),
+            None => "exit status unavailable".to_string(),
+        },
+    }
+}
+
+/// cas-c095: the supervisor's end reason is shown to the operator in the
+/// session-ended receipt, so it is plain words, never `Option` debug text.
+fn supervisor_exit_reason(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
+    let signalled = exit_signal.is_some_and(|signal| !signal.trim().is_empty());
+    if exit_code == Some(0) && !signalled {
+        return "exited normally".to_string();
+    }
+    format!("supervisor {}", pane_exit_status(exit_code, exit_signal))
+}
+
 /// Render only child-wait evidence for a genuine PTY exit. The pane tail is
 /// already bounded by `timeout_pane_tail`; keeping it alongside the status
 /// makes a crash actionable after the pane is removed and the live process
@@ -203,13 +225,7 @@ fn worker_exit_info(
     exit_signal: Option<&str>,
     pane_tail: Option<&str>,
 ) -> String {
-    let status = match exit_signal.filter(|signal| !signal.trim().is_empty()) {
-        Some(signal) => format!("terminated by signal {signal}"),
-        None => match exit_code {
-            Some(code) => format!("exited with code {code}"),
-            None => "exit status unavailable".to_string(),
-        },
-    };
+    let status = pane_exit_status(exit_code, exit_signal);
     let tail = pane_tail
         .filter(|tail| !tail.trim().is_empty())
         .map(|tail| {
@@ -1643,6 +1659,44 @@ pub(super) fn report_provision_failure(
         )
         .map(|_| ())
     });
+}
+
+/// cas-1b4d: turn each closed rapid-response window's ledger into one
+/// back-fill task under its epic and tell the supervisor.
+pub(super) fn backfill_closed_rapid_response_windows(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+) {
+    let Ok(store) = crate::store::open_task_store(cas_dir) else {
+        return;
+    };
+    let done = match crate::rapid_response::backfill_due(cas_dir, store.as_ref(), chrono::Utc::now()) {
+        Ok(done) => done,
+        Err(error) => {
+            tracing::warn!(%error, "rapid-response back-fill failed; retried next refresh");
+            return;
+        }
+    };
+    for item in done {
+        let (summary, message) = match &item.task {
+            Some(task) => (
+                format!("Rapid-response back-fill: {} skipped check(s) for {}", item.skipped, item.epic),
+                format!(
+                    "The rapid-response window for {} has closed; normal gates apply again. Back-fill task {task} lists the {} check(s) the window skipped. Dispatch it; its close reports each result.",
+                    item.epic, item.skipped
+                ),
+            ),
+            None => (
+                format!("Rapid-response window closed: {}", item.epic),
+                format!(
+                    "The rapid-response window for {} has closed with no skipped checks; normal gates apply again.",
+                    item.epic
+                ),
+            ),
+        };
+        notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, message);
+    }
 }
 
 /// Queue a director notice to the supervisor that must not be lost to a spent
@@ -4175,6 +4229,11 @@ impl FactoryDaemon {
                             );
                         }
                     }
+                    RelayOutput::WorkerTaskQueuesReconciled(result) => {
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "worker queue reconciliation failed; retrying next pass");
+                        }
+                    }
                     RelayOutput::ExternalWorkReconciled(Ok(count)) if count > 0 => {
                         tracing::debug!(count, "reconciled due external-work journal operation(s)");
                     }
@@ -5600,7 +5659,7 @@ impl FactoryDaemon {
                     if let Ok(agents) = open_agent_store(self.app.cas_dir())
                         && let Ok(rows) = agents.list(None)
                     {
-                        let reason = format!("pane_exit: code={exit_code:?}, signal={exit_signal:?}");
+                        let reason = supervisor_exit_reason(exit_code, exit_signal.as_deref());
                         for agent in rows.iter().filter(|a| a.name == pane_id && a.factory_session.as_deref() == Some(self.session_name.as_str())) {
                             if let Err(error) = crate::supervisor_continuity::record_end(self.app.cas_dir(), &agent.id, Some(&reason)) {
                                 tracing::warn!(%error, "could not retain supervisor pane-exit evidence");
@@ -6468,8 +6527,33 @@ impl FactoryDaemon {
         task_id: &str,
         request_id: Option<i64>,
     ) {
+        // Ordered spawn queues use the same selector/start/brief transaction
+        // as successors. Do not independently preassign a stale spawn head.
+        if let Some(request_id) = request_id {
+            match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                .and_then(|queues| {
+                    queues.bind_spawn(request_id, &self.session_name, worker)?;
+                    queues.get(&self.session_name, worker)
+                }) {
+                Ok(queue) if queue.revision > 0 => return, // daemon repair is durable and off-loop
+                Ok(_) => {},
+                Err(error) => {
+                    tracing::error!(%worker, %error, "spawn queue repair deferred");
+                    return;
+                }
+            }
+        }
         match ensure_worker_preassignment(self.app.cas_dir(), task_id, worker) {
             Ok(title) => {
+                if let Some(request_id) = request_id {
+                    let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                        .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, worker));
+                    if let Err(error) = bound {
+                        tracing::error!(%worker, %error, "spawn task queue binding failed; retry registration repair");
+                        return;
+                    }
+                }
+
                 tracing::info!(
                     worker = %worker,
                     task_id = %task_id,
@@ -11270,7 +11354,10 @@ impl FactoryDaemon {
                             std::slice::from_ref(warning),
                         );
                     }
-                    let task_id_for_finish = pending_task_id.clone();
+                    let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                        .and_then(|queues| queues.get(&self.session_name, &pending_name))
+                        .map(|queue| queue.revision > 0).unwrap_or(true);
+                    let task_id_for_finish = if queued_spawn { None } else { pending_task_id.clone() };
                     // cas-2a49: `finish_worker_spawn` starts the PTY and then
                     // does store and git bookkeeping, so the canary floor is
                     // taken before the call, not after it returns.
@@ -11533,12 +11620,24 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
+                        if let Some(request_id) = request_id {
+                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            if let Err(error) = bound {
+                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
+                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                return;
+                            }
+                        }
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
                         // codex+isolate async gaps cannot skip pre-assign.
                         // finish_worker_spawn confirms; failure/cancel paths
                         // release via release_preassign_if_bound.
-                        if let Some(ref tid) = task_id {
+                        let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                            .and_then(|queues| queues.get(&self.session_name, &worker_name))
+                            .map(|queue| queue.revision > 0).unwrap_or(true);
+                        if !queued_spawn && let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
                                 self.app.cas_dir(),
                                 tid,
@@ -11616,8 +11715,20 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
+                        if let Some(request_id) = request_id {
+                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            if let Err(error) = bound {
+                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
+                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                return;
+                            }
+                        }
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
-                        if let Some(ref tid) = task_id {
+                        let queued_spawn = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                            .and_then(|queues| queues.get(&self.session_name, &worker_name))
+                            .map(|queue| queue.revision > 0).unwrap_or(true);
+                        if !queued_spawn && let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
                                 self.app.cas_dir(),
                                 tid,
@@ -13748,6 +13859,7 @@ mod tests {
         spawn_provisioning_timed_out,
         spawn_queue_reset_report,
         stalled_spawn_requests,
+        supervisor_exit_reason,
         take_next_pending_spawn,
         take_spawn_cancellation,
         take_unverified_spawn_on_exit,
@@ -14768,6 +14880,23 @@ mod tests {
         let lone = closed_death_group(rest, chrono::Utc::now(), window).expect("closed");
         assert_eq!(lone.len(), 1, "a lone exit is dropped, not flagged");
         assert!(closed_death_group(&[], chrono::Utc::now(), window).is_none());
+    }
+
+    #[test]
+    fn supervisor_exit_reason_is_plain_words_without_option_debug_text() {
+        assert_eq!(supervisor_exit_reason(Some(0), None), "exited normally");
+        assert_eq!(
+            supervisor_exit_reason(Some(1), None),
+            "supervisor exited with code 1"
+        );
+        assert_eq!(
+            supervisor_exit_reason(None, Some("Killed")),
+            "supervisor terminated by signal Killed"
+        );
+        assert_eq!(
+            supervisor_exit_reason(None, None),
+            "supervisor exit status unavailable"
+        );
     }
 
     #[test]

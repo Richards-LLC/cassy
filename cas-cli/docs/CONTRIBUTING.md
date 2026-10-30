@@ -1541,6 +1541,53 @@ assignment or lease changes. The original branch is preserved as handoff
 history. Omitting `adopt_branch` keeps the existing assignment-only transfer
 behavior.
 
+### Ordered worker task queues
+
+Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
+Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
+Ordered spawns default to `isolate=true`; explicit `isolate=false` is refused.
+An existing worker also needs its own registered factory checkout for queue assignment.
+The first task controls the spawn base. Provisioning durably binds the queue
+by factory session and worker name. Registration selects its first eligible task;
+a head blocked, closed or assigned elsewhere during boot cannot strand the tail.
+
+For an existing worker, `task action=update assignee=<worker> task_ids=["cas-b","cas-c"]`
+replaces pending work. If `id` is supplied, it must name the first entry. This
+form accepts queue fields only; apply title/status/other task edits separately.
+An idle worker starts the first eligible entry immediately. Future entries
+stay unassigned until selected.
+
+Inspect with `factory action=worker_queue id=<worker>`; `worker_status` also
+shows the current task, ordered pending tasks and last queue decision. Replace
+or reorder with `factory action=worker_queue id=<worker> task_ids=["cas-c","cas-b"]`.
+Clear pending work with `task_ids=[]`. Add `expected_generation=<revision>` to
+reject a stale queue replacement. Queue edits require the worker's live owning
+supervisor in the same factory session; they preserve the current execution.
+
+A successful close or park releases the preceding lease, then starts the next
+eligible task through the normal start gates as that worker. It cuts the next
+task's branch from its own declared target and preserves the previous delivery
+ref. Repeated closes cannot consume another entry. An execution that becomes
+blocked keeps its current slot until it resumes, closes or parks. Reassigned, missing,
+terminal, blocked, foreign-leased and hard-start-gated entries are skipped with a
+durable note. A checkout/start failure retains the selected entry and records a
+deferred reason. The daemon reconciles durable cursors off its control loop,
+retrying after lock contention, restart or an unavailable brief recipient.
+Inspect and resolve the deferred cause; no repeated close is required.
+Queue dispatch never changes process identity or environment variables.
+The single-active-task start gate applies while a worker has a current,
+reserved or pending queue entry; workers without a queue retain their existing
+start API behaviour.
+
+If delivery A is returned while queued successor B is running, checkpoint B's
+unfinished changes, then run `task action=update id=B status=blocked`. This
+releases B's lease and preserves its current queue slot. Switch to A's recorded
+delivery branch (shown by `task action=show id=A full=true`), then run
+`task action=start id=A`. Correct and re-deliver A on that branch. After A closes
+or parks, switch back to B's recorded branch, run
+`task action=update id=B status=open`, then `task action=start id=B`. Pending
+work stays behind held B throughout recovery; B does not need an unfinished park.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured
@@ -1667,55 +1714,13 @@ while lacking the fast-row delegate; inspect them rather than assuming absence.
 Do not copy those guards into the main checkout. A hook-install warning during
 spawn/reuse means enforcement is not proven.
 
-At park, `receipt_scope::park_refusal` reads the exact-tip fast-row receipt and
-passing capped test receipts for every changed Rust crate. Missing fast rows
-produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
-REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
-waive these refusals or the merge queue's final-tree proof.
-
-### Approved historical draft exceptions
-
-A reason-bearing `CAS_SKIP_FAST_ROWS` push remains logged, but does not authorize
-park. When an archived Slack body must retain explicitly reviewed wording, a
-live registered supervisor in the assigned worker's factory session can add a
-`decision` task note whose body starts with `fast-rows-approved:` followed by a
-space and:
-
-```json
-{"head":"<full delivery SHA>","check":"release-notes-draft","files":["docs/release-notes/history-slack.md"],"reason":"Preserve the exact reviewed historical Slack body"}
-```
-
-Run the fast rows first. The decision requires a FAIL receipt whose only failed
-row is `release-notes-draft`, with complete file scope. The requested files must
-name every failed draft exactly. Both readers require a terminal
-`scope complete count=N` line matching the distinct failed drafts; interrupted
-rows and older receipts without that line must be regenerated.
-Cassy authenticates the caller, checks the task's current delivery branch tip,
-and records the approver, task, SHA, check, files, reason and failed-receipt digest
-in the task timeline and `<git-common-dir>/cas/fast-rows/<sha>.<task>.exception.json`.
-This uses the existing `task action=notes` MCP handler and adds no tool action.
-
-The pre-push hook and park read this contract without rewriting FAIL as PASS.
-Park also resolves the approver ID in the agent store and requires a live
-registered supervisor in the assigned worker's factory session. An unknown ID,
-worker, stale or shut-down supervisor, or another factory session is refused.
-
-A different SHA, failed result, check or file set invalidates it. Rerunning fast
-rows on the same SHA rewrites the failed receipt, including its timestamp, and
-invalidates an issued approval when those bytes change. Obtain a new supervisor
-approval after a rerun; the old exception file does not authorize the new result.
-Caller-supplied approver fields, ordinary note text and `overrides.log` cannot
-issue approval through the note handler.
-Other failed rows, missing tools, changed-crate test receipts and merge-queue
-requirements retain their existing gates. These local receipts share the trust
-boundary of the existing Git-local PASS receipts; they are not a separate Unix
-user security boundary. A forged exception that copies a live supervisor ID
-can still imitate that identity in local files; registration alone is not proof
-of issuance. Likewise a local PASS file is cooperative runner evidence, not an
-authenticated attestation. Moving it to the same user-writable task store or
-signing with a key readable by that user does not establish a new trust boundary.
-Authenticating execution requires an independently owned runner or service; the
-merge queue continues to prove the final tree in the existing gate.
+At park, `receipt_scope::park_refusal` reads passing capped test receipts for
+every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
+Park executes neither checks nor tests. Local fast-row receipts are not park
+proof because workers can write them, and park reads no fast-row exception
+file. CI runs the fast rows before merge admission; the pre-push hook provides
+early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
+to `overrides.log`.
 
 ## Project capture configuration
 
@@ -2113,15 +2118,16 @@ writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
 attempts print a retained log directory under the Git common directory's
 `cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
 Each attempt has its own directory so a later push preserves the original failure.
-With
-the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
-and no broad Rust tests for factory pushes; unset (the default) the lanes run as
-before, so the switch waits for a runtime with these guards. Park reads, and
-never runs, the exact-tip receipts: the fast-rows PASS and a capped test PASS in
-every workspace crate whose sources or tests changed. A receipt in another
-crate does not count, and a missing receipt is refused with its fix. Pull
-requests without worker receipts keep the lane fast rows and the targeted
-`ci-test-impact.py` fallback. The merge queue is the final-tree integration gate
+With the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs the
+fast rows once in `lane.yml`'s classification job, for both docs and code;
+non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
+queue does not add another fast-row run. CI is authoritative for these checks;
+local PASS receipts are reusable pre-push feedback, never a park requirement.
+Slim lanes omit broad Rust tests for factory pushes. Park reads, and never
+runs, a capped test PASS in every workspace crate whose sources or tests
+changed. A receipt in another crate does not count, and a missing test receipt
+is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
+fallback. The merge queue is the final-tree integration gate
 and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a

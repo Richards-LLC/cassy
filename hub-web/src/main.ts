@@ -1288,7 +1288,7 @@ const launchSheet = new LaunchSheet({
   currentMachineId: () => selectedMachineId,
   origin: location.origin,
   projects: (machineId, signal) => launchConnection(machineId).projects(signal),
-  profiles: (machineId, signal) => launchConnection(machineId).launchProfiles(signal),
+  profiles: (machineId, signal, target) => launchConnection(machineId).launchProfiles(signal, target),
   browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
   launch: (machineId, request) => launchConnection(machineId).launchSession(request),
   grant: async (machineId) => {

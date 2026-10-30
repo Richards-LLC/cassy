@@ -14,7 +14,7 @@ import { uploadRequest } from "./upload-transport";
 import { localNetworkAccessHelp } from "./local-network-access";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
 import { SessionLaunchGrantError } from "./launch-session";
-import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
+import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, LaunchTarget, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
   connectingAnchor,
@@ -826,9 +826,10 @@ export class HubConnectionSupervisor {
     await this.request("POST", "/v1/accounts/operations", change);
   }
 
-  /** Each launch CLI's account profiles on the machine (cas-7b52). */
-  async launchProfiles(signal?: AbortSignal): Promise<LaunchProfiles> {
-    return this.request("GET", "/v1/launch/profiles", undefined, signal);
+  /** Each launch CLI's account profiles under the selected project's policy. */
+  async launchProfiles(signal?: AbortSignal, target?: LaunchTarget): Promise<LaunchProfiles> {
+    const query = target ? `?${new URLSearchParams({ target: JSON.stringify(target) })}` : "";
+    return this.request("GET", `/v1/launch/profiles${query}`, undefined, signal);
   }
 
   /** One folder under a configured launch root. */

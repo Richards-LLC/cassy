@@ -11,6 +11,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.
 
+### Fixed — Project account recommendations
+
+- **New session follows the selected project's account policy** — Commander
+  applies that project's account selection and usage threshold when recommending
+  an account, and refreshes the recommendation whenever the project changes.
+
 ### Fixed — Merge-readiness guidance
 
 - **Merge guidance points to readiness gates** — The supervisor's merge row now

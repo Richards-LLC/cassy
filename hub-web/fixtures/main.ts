@@ -197,6 +197,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
   }
   if (view === "launch-account" || view === "launch-account-unavailable" || view === "launch-account-default-out") {
     dialog.querySelector<HTMLInputElement>('[data-launch-list="known"] input[type=radio]')!.click();
+    await settle();
     if (view === "launch-account-unavailable") dialog.querySelector<HTMLInputElement>('input[name="launch-cli"][value="codex"]')!.click();
     else dialog.querySelector<HTMLInputElement>('input[name="launch-account"][value^="customer-success"]')!.click();
     return;

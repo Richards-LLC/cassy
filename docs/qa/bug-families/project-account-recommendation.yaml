@@ -1,0 +1,4 @@
+title: New session must refresh account recommendations using the selected project's policy
+tasks: [cas-774a]
+invariants: [HUB-J13-PROJECT-ACCOUNT-POLICY]
+journeys: [HUB-J13]

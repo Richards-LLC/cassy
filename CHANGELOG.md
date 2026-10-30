@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Artifact publishing
+
+- **TypeScript sources upload as text** — Was: a `.ts` artifact could reach
+  storage as a transport-stream video and be refused. → Now: `.ts` and `.tsx`
+  sources publish as plain text; actual MPEG-TS packet data keeps its video type.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

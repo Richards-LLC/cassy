@@ -11140,7 +11140,11 @@ mod worker_commit_guard_tests {
             "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" && git push origin factory/guard-test".to_string(),
             "git config core.hooksPath /tmp/empty-hooks && git push origin factory/guard-test".to_string(),
             "git config --worktree core.hooksPath /tmp/empty-hooks".to_string(),
+            "git config unset core.hooksPath".to_string(),
             "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\" bash -c 'git push origin factory/guard-test'".to_string(),
+            "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; export GIT_CONFIG_PARAMETERS; git push origin factory/guard-test".to_string(),
+            "declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
+            "set -a; GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
         ];
 
         let mut mismatches = Vec::new();

@@ -144,7 +144,7 @@ if sys.argv[1]=='run':
             self.assertTrue(record['owner'], 'compiler target must hold bounded-cache provenance')
             self.assertFalse(target.exists(), 'candidate output must be pruned after artifact copy')
             self.assertIn(b'.supervisor-version', (destination/'cas').read_bytes())
-            self.assertEqual((repo/'hub-web/dist/app.css').read_text(),'.old {}')
+            self.assertEqual(git('diff','--','hub-web/dist'),'')
             self.assertEqual(result['version'], version)
             # pin: SHA256 is the public receipt field for the published candidate bytes.
             self.assertEqual(json.loads((destination / 'RECEIPT.json').read_text())['sha256'],

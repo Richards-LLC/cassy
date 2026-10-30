@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander
+
+- **Messages kept in two tabs all go out after an outage** — Was: with two
+  Commander tabs open, a message kept during an outage could stay "Waiting for
+  the connection" under a Live header after reconnecting, and was never sent
+  until the page was reloaded. → Now: each kept message is sent once when the
+  connection returns, whichever tab sends it.
+
 ### Fixed — Delivery process
 
 - **Capture keeps its receipt when checkouts run out of time** — Was: if the

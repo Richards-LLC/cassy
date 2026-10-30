@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Changelog category validation
+
+- **Documentation and test entries pass release validation** — Titled non-shipped
+  changelog categories follow the release report rules; unknown categories and
+  malformed entries remain refused.
+
 ### Added — Commander reading frames
 
 - **Shared source frames and compact work rows** — Diagrams, diffs and code

@@ -211,7 +211,7 @@ function startDaemon() {
     "daemon-process.log",
   );
 }
-async function reset({ messageControl = false, newSession = false } = {}) {
+async function reset({ messageControl = false, newSession = false, nativeCommander = false } = {}) {
   await cleanup();
   const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
@@ -400,7 +400,7 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
         "pair",
         ...(newSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,session-launch"] : messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
         "--origin",
-        origin,
+        nativeCommander ? hubUrl : origin,
         "--hub-url",
         hubUrl,
       ])

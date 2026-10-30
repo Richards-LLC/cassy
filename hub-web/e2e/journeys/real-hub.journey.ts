@@ -611,7 +611,7 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
   annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
 }, async ({ page }, info) => {
   try {
-    const fixture = await command("reset", { messageControl: true });
+    const fixture = await command("reset", { messageControl: true, nativeCommander: true });
     const pairing = new URL(fixture.pairUrl);
     pairing.pathname = "/commander/";
     await page.setViewportSize({ width: 390, height: 844 });

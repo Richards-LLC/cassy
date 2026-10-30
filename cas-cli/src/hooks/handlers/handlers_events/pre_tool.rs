@@ -8649,6 +8649,16 @@ EOF
 ".into(), false),
             ("mixed delimiters", "cat <<'DATA' <<RUN\n$(touch /outside/ignored)\nDATA\n$(touch /outside/cas-b8ae-must-not-execute)\nRUN\n".into(), true),
             ("effective directory", "cd /outside && cat <<EOF\n$(touch cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("comment marker desync", "echo hi # <<'X'\nX\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("missing quoted body", "echo see <<'X' # doc\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("backtick marker desync", "x=`cat <<'A'\nA\n`; cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("arithmetic marker desync", "echo $((1<<2)); cat <<EOF\n2))\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("unclaimed quoted body", "echo hi # <<'X'\ntouch /outside/cas-b8ae-must-not-execute\nX\n".into(), true),
+            ("unclaimed shift body", "echo $(( 1<<2 ))\ntouch /outside/cas-b8ae-must-not-execute\n2\n".into(), true),
+            ("joined terminator", "cat <<EOF\nEO\\\nF\ntouch /outside/cas-b8ae-must-not-execute\nEOF\n".into(), true),
+            ("escaped delimiter", "cat <<\\EOF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially single quoted delimiter", "cat <<E'O'F\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially double quoted delimiter", "cat <<\"E\"OF\n$(touch /outside/p)\nEOF\n".into(), false),
         ] {
             // These are JSON request strings only. Never execute their payloads.
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();

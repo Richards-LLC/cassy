@@ -5,6 +5,7 @@ Planning reads immutable Git blobs only. No compiler/test runs occur at park.
 The embedded runner supplies the same canonical lexer used by repository tools.
 """
 import argparse
+import ast
 from concurrent.futures import ThreadPoolExecutor
 import glob
 import hashlib
@@ -113,12 +114,162 @@ def plan(root, base, head):
     base = git(root, 'merge-base', base, head).strip()
     changed = git(root, 'diff', '--name-only', '--no-renames', '--diff-filter=AM', '-z', base, head, '--').split('\0')
     tests = []
-    for path in sorted(p for p in changed if p.endswith('.rs')):
-        before = {f['function']: f['fingerprint'] for f in items(git(root, 'show', f'{base}:{path}', missing=True))[0]}
-        for test in items(git(root, 'show', f'{head}:{path}'))[0]:
+    for path in sorted(p for p in changed if p):
+        runner = ecosystem(path)
+        if runner is None:
+            continue
+        old = git(root, 'show', f'{base}:{path}', missing=True)
+        new = git(root, 'show', f'{head}:{path}')
+        before = {test['function']: test['fingerprint'] for test in source_tests(path, old, runner)}
+        for test in source_tests(path, new, runner):
             if before.get(test['function']) != test['fingerprint']:
-                tests.append({**test, 'file': path, 'id': path+'::'+test['function']})
+                tests.append({**test, 'runner': runner, 'file': path,
+                              'id': path+'::'+test['function']})
     return {'version': 1, 'base': base, 'head': head, 'tests': tests}
+
+
+def ecosystem(path):
+    suffix = Path(path).suffix.lower()
+    name = Path(path).name.lower()
+    if suffix == '.rs':
+        return 'rust'
+    if suffix in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx') and re.search(r'(?:\.test|\.spec|\.journey)\.', name):
+        return 'vitest' if '.test.' in name else 'playwright'
+    if suffix == '.py' and (name.startswith('test_') or name.endswith('_test.py')):
+        return 'pytest'
+    return None
+
+
+def source_tests(path, source, runner):
+    if not source:
+        return []
+    if runner == 'rust':
+        return items(source)[0]
+    if runner == 'pytest':
+        try:
+            tree = ast.parse(source, filename=path)
+        except SyntaxError as error:
+            raise ValueError(f'cannot resolve touched pytest tests in {path}: {error}') from error
+        found = []
+        def visit(node, scope=()):
+            for child in getattr(node, 'body', ()):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if child.name.startswith('test_') or (scope and scope[0].startswith('Test')):
+                        name = '::'.join((*scope, child.name))
+                        found.append({'function': name,
+                                      'fingerprint': hashlib.sha256(ast.dump(child, include_attributes=False).encode()).hexdigest()})
+                elif isinstance(child, ast.ClassDef):
+                    if child.name.startswith('Test'):
+                        visit(child, (*scope, child.name))
+                    elif child.name == 'pytest_generate_tests':
+                        raise ValueError(f'unresolved dynamic pytest collection in {path}')
+        visit(tree)
+        if len({test['function'] for test in found}) != len(found):
+            raise ValueError(f'ambiguous pytest test identity in {path}')
+        return found
+    return javascript_tests(path, source)
+
+
+def javascript_tests(path, source):
+    """Extract literal test()/it() calls with balanced source ranges; refuse dynamic titles."""
+    tokens, pairs = [], {}
+    i = 0
+    while i < len(source):
+        char = source[i]
+        if char.isspace():
+            i += 1
+        elif source.startswith('//', i):
+            end = source.find('\n', i + 2)
+            i = len(source) if end < 0 else end + 1
+        elif source.startswith('/*', i):
+            end = source.find('*/', i + 2)
+            if end < 0:
+                raise ValueError(f'unclosed comment in {path}')
+            i = end + 2
+        elif char in ('\"', "'"):
+            start, quote = i, char
+            i += 1
+            while i < len(source):
+                if source[i] == '\\\\':
+                    i += 2
+                elif source[i] == quote:
+                    i += 1
+                    break
+                else:
+                    i += 1
+            else:
+                raise ValueError(f'unclosed string in {path}')
+            raw = source[start:i]
+            try:
+                value = json.loads(raw) if quote == '\"' else ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                raise ValueError(f'unresolved test title string in {path}')
+            tokens.append(('string', str(value), start, i))
+        elif char == '`':
+            start = i
+            end = source.find('`', i + 1)
+            if end < 0:
+                raise ValueError(f'unclosed template string in {path}')
+            raw = source[i + 1:end]
+            if '${' in raw:
+                tokens.append(('dynamic-string', raw, start, end + 1))
+            else:
+                tokens.append(('string', raw, start, end + 1))
+            i = end + 1
+        elif char.isalpha() or char in '_$':
+            start = i
+            i += 1
+            while i < len(source) and (source[i].isalnum() or source[i] in '_$'):
+                i += 1
+            tokens.append(('id', source[start:i], start, i))
+        else:
+            tokens.append(('punct', char, i, i + 1))
+            i += 1
+    stack = []
+    for index, token in enumerate(tokens):
+        value = token[1]
+        if value in ('(', '[', '{'):
+            stack.append((value, index))
+        elif value in (')', ']', '}'):
+            if not stack or {'(': ')', '[': ']', '{': '}'}[stack[-1][0]] != value:
+                raise ValueError(f'unbalanced test source in {path}')
+            _, opening = stack.pop()
+            pairs[opening] = index
+    if stack:
+        raise ValueError(f'unbalanced test source in {path}')
+    calls = []
+    for index, token in enumerate(tokens):
+        if token[0] != 'id' or token[1] not in ('test', 'it', 'describe'):
+            continue
+        if index + 1 < len(tokens) and tokens[index + 1][1] == '.':
+            if index + 2 < len(tokens) and tokens[index + 2][1] in ('each', 'only', 'skip', 'concurrent', 'serial', 'fixme'):
+                raise ValueError(f'unresolved dynamic {token[1]}.{tokens[index+2][1]} collection in {path}')
+            continue
+        if index + 1 >= len(tokens) or tokens[index + 1][1] != '(':
+            continue
+        opening = index + 1
+        closing = pairs.get(opening)
+        if closing is None:
+            raise ValueError(f'unresolved {token[1]} call in {path}')
+        if index + 2 >= closing or tokens[index + 2][0] != 'string':
+            if token[1] in ('test', 'it'):
+                raise ValueError(f'unresolved dynamic test title in {path}')
+            continue
+        calls.append((token[1], tokens[index + 2][1], index, closing))
+    tests, suites = [], []
+    for kind, title, start, end in calls:
+        if kind == 'describe':
+            suites.append((start, end, title))
+    for kind, title, start, end in calls:
+        if kind not in ('test', 'it'):
+            continue
+        scopes = [name for suite_start, suite_end, name in suites if suite_start < start < suite_end]
+        name = '::'.join((*scopes, title))
+        if any(test['function'] == name for test in tests):
+            raise ValueError(f'ambiguous test title {name!r} in {path}')
+        body = json.dumps([(token[0], token[1]) for token in tokens[start:end+1]], ensure_ascii=False)
+        tests.append({'function': name, 'fingerprint': hashlib.sha256(body.encode()).hexdigest()})
+    return tests
 
 
 def package_root(root, name, sources=()):

@@ -256,6 +256,7 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
             "cargo nextest run -p cas --lib -E 'test(=module::name)'",
             "cargo nextest run -p cas --test integration_factory -E 'test(worker)'",
             "cargo nextest run -p crossterm@0.25.0 --lib -E 'test(take_buffered)'",
+            "cargo nextest run -p crate-name@1.0.0-rc.1+build.5 --test harness -E 'test(worker)'",
             "cargo nextest run -p cas --lib -E 'test(one) | test(two)' > target/tests.log 2>&1 &",
             "cargo nextest run -p cas --lib -E 'test(one) & test(two)' > target/tests.log 2>&1 &",
         ].into_iter().chain(std::iter::once(isolated.as_str())) {

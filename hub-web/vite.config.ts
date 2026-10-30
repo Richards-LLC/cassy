@@ -25,6 +25,10 @@ export default defineConfig({
     renderChunk: {
       order: "post",
       handler(code, chunk) {
+        if (chunk.name === "emoji-picker") {
+          const license = readFileSync(join(root, "licenses/emojibase-MIT.txt"), "utf8");
+          return { code: `${code}\n/*! Emojibase data\n${license}\n*/\n`, map: null };
+        }
         if (chunk.name !== "rich-diagram") return null;
         // Append after minification, before hashing: legal text stays in this
         // lazy chunk and adds no legal-comment bytes to first paint.

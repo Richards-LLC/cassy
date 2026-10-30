@@ -892,6 +892,10 @@ journeys:
   - commander_runtime
   - commander_dependencies
   owners:
+  - hub-web/src/emoji-composer.ts
+  - hub-web/src/emoji-picker.ts
+  - hub-web/src/emoji-data.ts
+  - hub-web/src/emoji-text.ts
   - hub-web/src/speech-input.ts
   - hub-web/src/composer-markup.ts
   - hub-web/src/supervisor-message.ts

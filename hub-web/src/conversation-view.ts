@@ -1,3 +1,4 @@
+import { appendEmojiText } from "./emoji-text";
 import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
 import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
@@ -1082,7 +1083,7 @@ export class ConversationView {
     const bar = document.createElement("div"); bar.className = "pinned-bar";
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "pinned-expand";
     const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
-    const text = document.createElement("span"); text.className = "pinned-bar-text"; text.textContent = askLine(ask.message);
+    const text = document.createElement("span"); text.className = "pinned-bar-text"; appendEmojiText(document, text, askLine(ask.message));
     const glyph = document.createElement("template"); glyph.innerHTML = CHEVRON_UP;
     jump.append(label, " ", text, glyph.content.firstElementChild!);
     jump.title = "Go to the question";
@@ -1970,7 +1971,7 @@ function timeElement(document: Document, time: string, clockAhead: boolean | und
 
 function paragraphs(document: Document, text: string): HTMLElement[] {
   return text.split(/\n{2,}/).map((chunk) => chunk.trim()).filter(Boolean).map((chunk) => {
-    const p = document.createElement("p"); p.textContent = chunk; return p;
+    const p = document.createElement("p"); appendEmojiText(document, p, chunk); return p;
   });
 }
 

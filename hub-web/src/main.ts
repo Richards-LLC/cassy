@@ -1,3 +1,4 @@
+import { bindEmojiComposer } from "./emoji-composer";
 import { StatusRefresh } from "./status-refresh";
 import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
 import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
@@ -3294,6 +3295,8 @@ function bindSpeechComposer(): void {
   // Deferred: focus passing to Send or the mic and straight back must not flicker the question open.
   composer.onblur = () => { window.setTimeout(syncComposing, COMPOSING_BLUR_MS); };
   mic.onclick = () => speechController?.toggle();
+  const emojiTrigger = document.querySelector<HTMLButtonElement>("#message-emoji");
+  if (emojiTrigger) bindEmojiComposer(composer, emojiTrigger);
   bindSlashCommands(composer);
   syncSpeechComposer();
   if (speechDetectionStarted) return;

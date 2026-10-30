@@ -3433,3 +3433,28 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-command-receipt strong { color: var(--ink); font-family: var(--font-mono); }
 .supervisor-command-receipt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: var(--fs-xs)/var(--line-ui) var(--font-mono); }
 #conversation-commands .action-label { display: none; }
+
+/* Native color glyphs, with whole Unicode sequences kept together. */
+.emoji-text { font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", emoji, sans-serif; font-variant-emoji: emoji; font-weight: normal; font-style: normal; letter-spacing: normal; }
+#message-emoji { display: inline-flex; align-items: center; justify-content: center; width: 44px; min-width: 44px; min-height: 44px; padding: 0; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); color: var(--ink-mid); background: var(--panel); box-shadow: var(--lift); }
+#message-emoji[aria-expanded="true"] { color: var(--color-action); background: var(--accent-soft); }
+.message[data-read-only] #message-emoji { display: none; }
+.emoji-picker { position: fixed; z-index: 100; box-sizing: border-box; display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--ink); box-shadow: var(--lift-strong); overflow: auto; font: var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.emoji-picker header { display: flex; align-items: center; justify-content: space-between; flex: none; }
+.emoji-picker header button { width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font-size: 24px; }
+.emoji-picker input { flex: none; box-sizing: border-box; width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane); background: var(--bg-root); color: var(--ink); font: 16px/var(--line-ui) var(--font-ui); }
+.emoji-picker input::placeholder { color: var(--ink-mid); opacity: 1; }
+.emoji-count, .emoji-recent p { margin: 0; color: var(--ink-mid); }
+.emoji-count { flex: none; }
+.emoji-scroll { min-height: 44px; max-height: 264px; overflow: auto; overscroll-behavior: contain; }
+.emoji-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.emoji-picker .emoji-choice { min-width: 0; min-height: 44px; width: 100%; padding: 0; border: 0; border-radius: var(--radius-pane); background: var(--color-transparent); color: var(--ink); font-size: 24px; line-height: 1.5; }
+.emoji-picker .emoji-choice:hover, .emoji-picker .emoji-choice:focus-visible { background: var(--bg-hover); }
+.emoji-picker .emoji-more { width: 100%; min-height: 44px; margin-top: var(--space-2); background: var(--bg-panel); color: var(--color-action); }
+.emoji-picker button[hidden] { display: none; }
+@media (max-width: 53rem) {
+  /* Reserve a full line for the draft instead of squeezing it between four controls. */
+  .conversation-composer:has(#message-emoji) { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "field field" "clip send" "status status"; }
+  .conversation-composer:has(#message-emoji) .composer-actions { justify-content: flex-end; }
+}
+.conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; font-variant-emoji: emoji; }

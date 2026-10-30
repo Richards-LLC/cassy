@@ -113,6 +113,7 @@
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts` - shared release/task state, lazy Team and receipt trail.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - typed operation disclosures and live work pages.
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/conversation-view.ts` - fenced source, native evidence/status tables and two-format copy.
+- `hub-web/src/emoji-composer.ts`, `hub-web/src/emoji-picker.ts`, `hub-web/src/emoji-data.ts`, `hub-web/src/emoji-text.ts` - lazy local emoji search/recents, caret insertion and color glyph sequences.
 - `hub-web/src/code-frame.ts`, `hub-web/src/rich-syntax.ts` - reusable Copy/Wrap frame and bounded lazy source color.
 - `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - lazy evidence renderers.
 - `hub-web/src/accounts-panel.ts`, `hub-web/src/accounts-model.ts` - per-machine account ledger, confirmations and launch-choice invalidation.

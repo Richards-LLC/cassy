@@ -1,3 +1,4 @@
+import { bindEmojiComposer } from "../src/emoji-composer";
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { fleetControlGate } from '../src/fleet-permissions';
 import type { Scope } from '../src/types';
@@ -444,6 +445,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  bindEmojiComposer(slot.querySelector<HTMLTextAreaElement>('#message-text')!, slot.querySelector<HTMLButtonElement>('#message-emoji')!);
   applyDraftNote(slot, state === 'conversation-draft-too-long' ? 'too-long' : state === 'conversation-draft-not-saved' ? 'not-saved' : false);
   // The dismissed-messages chip sits at the top of the composer region, as main.ts places it.
   if (!view.unsent.hidden) slot.prepend(view.unsent);

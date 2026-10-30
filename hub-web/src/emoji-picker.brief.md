@@ -34,3 +34,21 @@ Capture the real before/after surface at 1280 and 390px in light/dark; retain th
 ## Critique
 
 Pending rendered implementation and strict light/dark desktop/phone evidence. No scores are claimed before rendering.
+
+## Implementation
+
+`emoji-composer` owns only the trigger, lazy import and current draft selection. `emoji-picker` owns search, in-page/persisted recents and the open tray; its local Emojibase tuples load in that same lazy chunk. `emoji-text` wraps complete sequences in sent/reply prose, previews and waiting questions without modifying source text or inline code. The phone draft gets its own line so the new 44px control does not shrink its text.
+
+The tray uses an opaque Glass panel and existing ink, focus, line and elevation tokens. It anchors above the draft and clamps to the visual viewport; search and controls stay reachable through scrolling when the keyboard reduces available space. There is no animation. Failed imports expose retry on the same trigger; blocked storage preserves the pick and in-page recents. Conversation changes cancel delayed opens and dismiss stale trays.
+
+## Critique
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | The tray stays directly above the same draft and returns its caret; conversation context stays visible. |
+| Fit | 4 | Existing Glass surfaces, violet focus and native colorful glyphs; no new palette. |
+| Hierarchy | 4 | Search, named emoji choices and optional recents precede the secondary paging action. |
+| Craft | 4 | 44px controls, bounded scrolling, whole Unicode sequences and a full-width phone draft. |
+| Accessibility | 4 | Named non-modal dialog, search/status, roving results, normal Tab escape, Escape dismissal and caret restoration. |
+
+Initial 390px dark fixture inspection found the tray overlapping the draft; its anchor now uses the field's top edge. Browser evidence and final measurements are recorded in the task ledger. Native Linux/Android font coverage requires those actual platforms; viewport emulation is not platform proof.

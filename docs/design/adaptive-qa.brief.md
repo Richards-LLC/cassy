@@ -444,10 +444,12 @@ exit code is a run error.
 - `readback` (optional) — `{journey, subject, invariants[], ok}`. One real journey read
   back end to end from the system of record. `subject` is an opaque, non-secret reference.
 
-**Start.** `cas qa post-release start --epic <id> --sha <sha>`. The cas-release-notes and
-cas-supervisor skills call it as their first step after the merge lands. A
-`branch_contained_in` reminder on the epic tip, armed at merge request, starts it
-automatically when the skill forgets. It runs as a background job owned by `cas serve`, so
+**Start.** The operator can run `cas qa post-release start --epic <id> --sha <sha>`
+from their own terminal; agents cannot record the SHA. State lives under
+`.cas/operator/post-release/`. A `branch_contained_in` reminder on the epic tip,
+armed at merge request, starts it automatically against the verified first-parent
+merge that introduced the epic on a configured origin release branch. FF, squash
+and foreign merges cannot establish that identity. It runs as a background job owned by `cas serve`, so
 no pane is blocked. Each run appends an epic note
 (`POST-RELEASE <k>/<n> <sha>: ok | ALARM <ids> | ERROR <reason>`) and updates
 `<artifacts_root>/<epic>/post-release.json`.

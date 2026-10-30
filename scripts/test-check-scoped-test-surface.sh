@@ -267,4 +267,55 @@ for exclusion in "-- --skip cli::other::tests::broken" "-E not(test(=cli::other:
     grep -qF 'SCOPED_PROOF: targets=lib:cli::hub::tests,lib:cli::hub_reverse_pairing::tests result=PASS' <<<"$skip_proof"
 done
 printf 'ok   a skipped test is an exclusion, not a module filter\n'
+
+# A close has 15 seconds for surface discovery. Give the shared CI host twice
+# that wall budget, and count Git searches so the process fan-out regression
+# fails deterministically even with a small test tree on a fast host.
+batch_repo="$tmpdir/batch-repo"
+mkdir -p "$batch_repo/cas-cli/src" "$batch_repo/cas-cli/tests" "$batch_repo/scripts"
+cp "$checker" "$batch_repo/scripts/check-scoped-test-surface.sh"
+for index in {1..58}; do
+    printf 'pub fn factory_operation_%s() {}\n' "$index" >"$batch_repo/cas-cli/src/module_$index.rs"
+    printf 'use module_%s::factory_operation_%s;\n' "$index" "$index" >>"$batch_repo/cas-cli/tests/source_consumers.rs"
+done
+# Include a large public API: repeating every qualified symbol inside one
+# alternation can exceed Git's regex compiler limit despite avoiding argv caps.
+for index in {1..300}; do
+    printf 'pub fn factory_large_api_%s() {}\n' "$index" >>"$batch_repo/cas-cli/src/module_1.rs"
+done
+for skill in first second; do
+    mkdir -p "$batch_repo/cas-cli/src/builtins/skills/$skill"
+    printf 'fixture skill\n' >"$batch_repo/cas-cli/src/builtins/skills/$skill/SKILL.md"
+done
+printf '%s\n' 'cas-cli/src/builtins/skills/first/SKILL.md' >"$batch_repo/cas-cli/tests/source_builtin.rs"
+printf '%s\n' 'skills/second/SKILL.md' >"$batch_repo/cas-cli/tests/catalog_builtin.rs"
+git -C "$batch_repo" init -q -b main
+git -C "$batch_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid add .
+git -C "$batch_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm baseline
+python3 - "$batch_repo" "$no_rg_bin" "$tmpdir/batch-git.trace" <<'PY_BATCH'
+from pathlib import Path
+import os
+import subprocess
+import sys
+import time
+
+repo, search_path, trace = map(Path, sys.argv[1:])
+paths = sorted(str(path.relative_to(repo)) for path in (repo / 'cas-cli/src').rglob('*') if path.is_file())
+assert len(paths) == 60, paths
+started = time.monotonic()
+result = subprocess.run(
+    ['bash', './scripts/check-scoped-test-surface.sh', '--resolve-targets', '--base', 'HEAD', '--paths-from-stdin', '--'],
+    cwd=repo, env=dict(os.environ, PATH=str(search_path), GIT_TRACE=str(trace)),
+    input='\n'.join(paths) + '\n', capture_output=True, text=True, timeout=60,
+)
+elapsed = time.monotonic() - started
+assert result.returncode == 0, result.stdout + result.stderr
+for target in ['source_consumers', 'source_builtin', 'catalog_builtin']:
+    assert f'--test {target}' in result.stdout, result.stdout
+searches = sum('built-in: git grep ' in line for line in trace.read_text().splitlines())
+print(f'60-path no-rg delivery: {searches} test-tree searches, {elapsed:.3f}s', flush=True)
+assert searches <= 2, f'expected one search per kind, found {searches}'
+assert elapsed < 30, f'60-path discovery took {elapsed:.3f}s (30s shared-host allowance)'
+PY_BATCH
+printf 'ok   60-path delivery batches searches within the close budget\n'
 printf 'PASS: scoped test surface backend and nested-module mapping verified.\n'

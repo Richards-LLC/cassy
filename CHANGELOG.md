@@ -17,15 +17,61 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
-- **Parked delivery anchors stay on the branch** — Worker pushes refuse
+- **Large deliveries resolve proof targets together** — Source and builtin
+  references now share one test-tree search per kind, keeping proof-surface
+  discovery within the close budget when many paths change.
+- **Idle delivery alerts follow worker activity** — Live background children
+  suppress idle alerts while the worker waits for its command. An unchanged
+  task, branch tip and CI state no longer produce another alert just because
+  time passed; an idle worker still alerts once when its state changes.
+
+### Fixed — Rapid response release checks
+
+- **Verify the release merge before deferring observation** — Rapid response
+  defers the post-release wait only for a protected recorded merge that brought
+  the epic into a configured release branch. Its full first-parent diff must
+  clear migration and secret checks; fast-forward, squash and foreign merges
+  keep the gate. Automatic observation records the release merge SHA, and
+  manual SHA recording is operator-only.
+
+## [3.91.0] - 2026-10-30
+
+### Fixed — Factory workflow
+
+- **Parked delivery anchors stay on the branch** — Was: A push could replace a
+  published delivery with rewritten history, and re-parking could refuse a
+  recovery merge that restored its recorded anchor. → Now: Worker pushes refuse
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.
-- **Worker pushes keep required hooks** — Workers and reviewers cannot skip
-  anchor and fast-row checks with `--no-verify`, exported
-  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` overrides, or persistent
-  `core.hooksPath` changes. Inherited `GIT_CONFIG_GLOBAL` and
+- **Worker pushes keep required hooks** — Was: `--no-verify`, exported
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, persistent `core.hooksPath`
+  changes, `git config --unset` and `git config --unset-all` of
+  `core.hooksPath`, `git config unset` of the same key, assignment then export,
+  `declare -x`, and `set -a` could bypass factory push checks. → Now: Workers
+  and reviewers are refused these bypasses. Inherited `GIT_CONFIG_GLOBAL` and
   `GIT_CONFIG_NOSYSTEM` settings no longer block a plain worker push;
   supervisors retain the approved exception route.
+- **Queued closes report completion before the handoff** — Was: A close could
+  finish writing Closed, then report that its status was unchanged when starting
+  the next task ran past the response deadline. → Now: The close is marked
+  committed before the handoff, so the response reflects the completed close.
+  An interrupted handoff is recovered from the durable queue.
+- **Worker starts share one checkout safely** — Was: A manual start could race
+  with the first queue assignment or a refilled queue, leaving two tasks running
+  and changing branches in the same checkout. → Now: Every factory worker start
+  holds the same start lock through its Git and lease work. Starts without a
+  queue wait for the lock; queued starts refuse a busy lock, and both re-read
+  queue state before proceeding.
+
+### Added — Factory workflow
+
+- **Workers move through an ordered task list** — Was: A worker received one
+  task at a time and could wait for another assignment after delivery. → Now:
+  Spawning and assignment accept an ordered list; closing or parking starts the
+  next eligible task on its own target branch and keeps the prior delivery ref.
+  Supervisors can inspect, reorder or clear pending work, and stale entries are
+  skipped with notes. A returned delivery can resume while unfinished successor
+  work is held, preserving that successor's place in the queue.
 
 ### Added — Delivery process
 
@@ -56,6 +102,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
+- **Quick rich-content inspections are counted** — Was: opening and closing a
+  diagram source or unified diff in quick succession could collapse into one
+  toggle event, leaving the inspection uncounted. → Now: the usage counter
+  increments when the opening summary is activated, even if the browser
+  coalesces the toggles.
 - **Messages kept in two tabs all go out after an outage** — Was: with two
   Commander tabs open, a message kept during an outage could stay "Waiting for
   the connection" under a Live header after reconnecting, and was never sent

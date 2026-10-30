@@ -1014,6 +1014,20 @@ or bearer is included in the note, output or saved record. Fetch requires the
 synced task and Cloud credentials; proof interpretation remains the verifier's
 responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
 
+### Verification tiers and the spawn threshold
+
+Close measures the delivered diff from the task's recorded start to its anchor and records the tier as a task note. `lifecycle/review_tier.rs` owns the path rules for verification and QA, and the highest tier any path reaches applies.
+
+| Tier | Paths | Verification | QA |
+| --- | --- | --- | --- |
+| 0 | `docs/**` except `docs/design`, `docs/review` and the QA catalog, Markdown outside `src/` that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
+| 1 | Everything else, including skills, agents and an unmeasurable diff | One verifier | The impacted journeys |
+| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | One verifier plus an adversarial probe | An `Adversarial probe:` row in the task ledger, in batch mode too |
+
+An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
+
+Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside

@@ -11,6 +11,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.
 
+### Fixed — Merge admission after a cancelled lane run
+
+- **A cancelled code run no longer reads as pending forever** — Was: when a docs push cancelled the code commit's lane run, `worktree_merge` refused with "CI PENDING", though that run could never finish. → Now: once the tip's run is green, the code commit's cancelled and lingering jobs are set aside. A passed code check admits the merge, and with none it needs the docs-only override, because a docs tip validates no code. A job still running in a live run stays refused.
+
+### Fixed — Browser tier guard
+
+- **Tab-stripped heredocs pass the workspace guard again** — Was: any `<<-` heredoc, even a quoted literal one, was denied as an unresolved shell payload. → Now: the guard keeps `<<-` together when it compares delimiters, so these heredocs are judged like any other.
+- **`playwright test --help` is allowed for workers and QA** — Was: the browser tier guard denied this read-only command as an unfiltered suite run. → Now: `test --help` and `test -h` pass when help is the only argument. A later `--help` is still denied, because it can be another option's value and the whole suite would run.
+
+### Changed — Verification
+
+- **Review findings stop spawning tasks, and verification follows risk** — Was:
+  every delivery got the same verifier, and its non-blocking improvements became
+  new tasks that each got another verifier. → Now: improvements stay in the
+  verdict unless they show a reproduced defect affecting someone today. Close
+  records a tier: docs and tests have no independent verifier, most changes get
+  one, and guard, CI, release and close-gate changes also get an adversarial
+  probe. QA follows the same tiers, including batch rounds: Tier 0 walks no
+  journeys, and Tier 2 needs an adversarial probe row in the task ledger.
+  `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
+  per release.
+
 ### Fixed — Hub pin safety
 
 - **The hub pin refuses agents, partial installs and a stale update** — Was: only a hook stopped a worker running `scripts/hub-pin.sh`; the installed copy could start `install` and stop partway without its drop-ins; and `cas update` could overwrite a rollback that finished just before it took the pin lock. → Now: the script refuses every factory agent role except an operator command in a supervisor pane, `install` says to run from a checkout before changing anything, and the update checks the pin again under the lock.
@@ -30,6 +52,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   heredoc bodies now receive the same filesystem-effect and numeric-only
   arithmetic checks as command arguments, including tab-stripped heredocs.
   Quoted bodies and escaped substitution markers remain literal data.
+  Ambiguous body ownership and joined terminators now fail closed; escaped
+  and partially quoted delimiters retain their literal body semantics.
 
 ### Fixed — Team tab shows the whole team
 
@@ -43,6 +67,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   flake quarantines that identity through an open issue label. Closing its fix
   issue restores the test. Persistent failures still eject, and worker/lane
   checks retain zero retries. Rust recovery adds at most 30 seconds.
+
+### Fixed — Shell policy command recognition
+
+- **Shell syntax cannot hide operator-only commands** — Agent checks now
+  recognize brace and loop command positions, remove shell line continuations,
+  and decode common ANSI-C quoted words before matching policy commands.
+  Unsupported ANSI-C escapes are refused; quoted data remains literal.
+
+### Fixed — Delivery-scoped upkeep waivers
+
+- **Upkeep decisions cover one delivery and finding** — Park now prints the
+  complete waiver command with the delivery SHA and finding ID, and rejects old
+  or mismatched decisions. Bug fixes also receive a named case-coverage refusal
+  when an untouched malformed registry prevents evaluating their regression case.
 
 ### Fixed — QA impact for test fixtures
 

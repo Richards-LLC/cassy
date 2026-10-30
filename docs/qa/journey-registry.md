@@ -437,12 +437,15 @@ projects get the one-release observe window described in
 
 Own a new file in the same delivery to resolve G2. For G3, add or extend the case
 with the invariant that would have caught the incident; an unchanged historical
-case does not cover a new fix. Pre-existing validation debt and an untouched
-malformed registry warn without refusing unrelated delivery.
+case does not cover a new fix. Pre-existing validation debt warns without refusing
+unrelated deliveries. An untouched malformed registry still refuses a bug under
+G3 when its regression-case coverage cannot be evaluated.
 
-An escape requires `task action=notes id=<task> note_type=decision notes="<token> <reason>"`.
-The token starts the decision body and the reason must be non-empty; quoting it in
-progress or warning text does not waive a gate. Retry close after recording it.
+For an escape, copy the refusal's complete `task action=notes` command, retaining
+`<token> delivery=<sha> finding=<id>` and replacing `<reason>` with a non-empty
+reason. Record it after the delivery commit, then retry close. The decision
+applies only to that delivery and finding; an older decision or a token quoted in
+progress or warning text does not waive a gate.
 Authenticated `supervisor_override=true` with a non-empty close reason also waives
 these gates and records the refusal waived.
 

@@ -46,9 +46,10 @@ registry exists. The scaffold and check own the row grammar.
 ## Escape vocabulary
 
 Upkeep gates refuse at park, before the merge request. Fix the named problem
-in the same branch, or record the escape as
-`task action=notes id=<task> note_type=decision notes="<token> <reason>"` and
-retry close. The token starts the note and the reason must be non-empty.
+in the same branch, or copy the refusal's complete `task action=notes` command.
+Keep `<token> delivery=<sha> finding=<id>`, replace `<reason>` with a non-empty
+reason, record the decision after the delivery commit, then retry close. An escape
+applies only to that delivery and finding; renew it from a new refusal after edits.
 
 | Gate | Refusal heading | Escape token |
 | --- | --- | --- |
@@ -61,7 +62,7 @@ retry close. The token starts the note and the reason must be non-empty.
 | G9 | `RELEASE NOTES BLOCKED`, `POST-RELEASE CHECK` | operator only: `POST-RELEASE OVERRIDE: <their words>` on the epic |
 
 Cassy records the outcome as notes that start `UPKEEP ESCAPE G1|G2|G3|G5|G6:
-<token> <reason>`, or `UPKEEP OBSERVE <gate>:` for a would-be refusal when the
+<token> delivery=<sha> finding=<id> <reason>`, or `UPKEEP OBSERVE <gate>:` for a would-be refusal when the
 gate's stage is `observe` (`qa.registry.enforce`, `upkeep.codemap`,
 `upkeep.product_overview`). Those notes are accounting; quoting a token there
 waives nothing. The QA task lists the delivery's escapes: an independent

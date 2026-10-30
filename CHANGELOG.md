@@ -15,6 +15,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   warning for whole-line new entries; rewrites, deletions and continuations to
   existing bullets still warn.
 
+### Fixed — Cacheless worker delivery cleanup
+
+- **Deliveries without a build cache skip background retirement** — Closing or
+  parking a worker that has no debug output no longer launches a metadata writer
+  that can outlive its temporary project and invalidate a passing test receipt.
+  Existing build caches still retire in the background and keep their proof logs.
+
 ### Fixed — Hub authentication clock correction
 
 - **Fast device clocks recover automatically** — The hub refuses future-dated

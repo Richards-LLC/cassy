@@ -6379,6 +6379,14 @@ impl CasCore {
         else {
             return;
         };
+        // A cacheless delivery has nothing to retire. Do not launch a writer
+        // that can outlive its checkout/store (including temporary fixtures).
+        if !crate::factory_scratch::worker_target_dir(&worktree)
+            .join("debug")
+            .is_dir()
+        {
+            return;
+        }
         let Ok(head) = std::process::Command::new("git")
             .arg("-C")
             .arg(&worktree)

@@ -39,14 +39,13 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
   });
   await journey.stage("One tab sends; its confirmation is visible in both tabs", async () => {
     // Assertions and recording can outlast the 15s receipt deadline on a
-    // loaded host. Hold the shared clock before reconnecting, then drive only
-    // the reconnect timers; no receipt time should elapse while we inspect it.
+    // loaded host. Hold the shared clock before reconnecting; no receipt time
+    // should elapse while we inspect it. The browser's online hint restarts
+    // reconnect immediately without advancing either tab's receipt deadline.
     await holdPageClock(page);
     await Promise.all([hub.up("atlas"), other.up("atlas")]);
-    await expect.poll(async () => {
-      await page.clock.runFor(250);
-      return hub.sends.length + other.sends.length;
-    }, { timeout: 20_000 }).toBe(1);
+    await Promise.all([page, peer].map(tab => tab.evaluate(() => window.dispatchEvent(new Event("online")))));
+    await expect.poll(() => hub.sends.length + other.sends.length, { timeout: 20_000 }).toBe(1);
     // Both tabs project the same active claim before any receipt arrives.
     // Retry here would allow the still-running send to cross the wire twice.
     for (const tab of [page, peer]) {

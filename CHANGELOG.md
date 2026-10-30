@@ -9,7 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
-- **Parked delivery anchors stay on the branch** — Worker pushes refuse
+- **Parked delivery anchors stay on the branch** — Was: A push could replace a
+  published delivery with rewritten history, and re-parking could refuse a
+  recovery merge that restored its recorded anchor. → Now: Worker pushes refuse
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.
 - **Worker pushes keep required hooks** — Workers and reviewers cannot skip
@@ -18,6 +20,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `core.hooksPath` changes. Inherited `GIT_CONFIG_GLOBAL` and
   `GIT_CONFIG_NOSYSTEM` settings no longer block a plain worker push;
   supervisors retain the approved exception route.
+- **Queued closes report completion before the handoff** — Was: A close could
+  finish writing Closed, then report that its status was unchanged when starting
+  the next task ran past the response deadline. → Now: The close is marked
+  committed before the handoff, so the response reflects the completed close.
+  An interrupted handoff is recovered from the durable queue.
+- **Worker starts share one checkout safely** — Was: A manual start could race
+  with the first queue assignment or a refilled queue, leaving two tasks running
+  and changing branches in the same checkout. → Now: Every factory worker start
+  holds the same start lock through its Git and lease work. Starts without a
+  queue wait for the lock; queued starts refuse a busy lock, and both re-read
+  queue state before proceeding.
+
+### Added — Factory workflow
+
+- **Workers move through an ordered task list** — Was: A worker received one
+  task at a time and could wait for another assignment after delivery. → Now:
+  Spawning and assignment accept an ordered list; closing or parking starts the
+  next eligible task on its own target branch and keeps the prior delivery ref.
+  Supervisors can inspect, reorder or clear pending work, and stale entries are
+  skipped with notes. A returned delivery can resume while unfinished successor
+  work is held, preserving that successor's place in the queue.
 
 ### Added — Delivery process
 

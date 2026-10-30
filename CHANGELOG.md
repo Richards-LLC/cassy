@@ -38,6 +38,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   stylesheet retains its served name, while every lazy stylesheet receives a
   hashed chunk name that the hub can serve.
 
+### Fixed — Unresolved heredoc substitutions
+
+- **Incomplete substitutions are refused** — Expanding heredoc checks preserve
+  unresolved scope errors through nested command scans and refuse the request
+  instead of accepting an uninspectable body.
+
 ### Added — Commander reading frames
 
 - **Shared source frames and compact work rows** — Diagrams, diffs and code

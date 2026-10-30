@@ -755,6 +755,19 @@ mod tests {
         // Without the guard, this cached shell policy survives env.remove below.
         env.set("NO_COLOR", "1");
         let _ = crossterm::style::Colored::ansi_color_disabled_memoized();
+        for theme in [ActiveTheme::default_dark(), ActiveTheme::default_light()] {
+            for verdict in [Verdict::Ok, Verdict::Warning, Verdict::Error, Verdict::Info] {
+                let mut buf = Vec::new();
+                Formatter::styled(&mut buf, theme.clone())
+                    .mark(verdict)
+                    .unwrap();
+                // ASCII status words are text, so use the terminal foreground.
+                assert_eq!(
+                    String::from_utf8(buf).unwrap(),
+                    format!("\x1b[1m{}\x1b[0m", verdict.label(false))
+                );
+            }
+        }
         for no_color in [None, Some("1")] {
             match no_color {
                 Some(value) => env.set("NO_COLOR", value),

@@ -48,6 +48,15 @@ and JSON document contracts apply; no new terminal PASS is claimed here.
 
 ## Rendering decisions
 
+### ASCII status words (cas-506d)
+
+The existing verdict, grouped rows and JSON shape stay intact. In a non-UTF-8
+locale the shared Formatter renders `[OK]`, `[WARN]`, `[ERROR]` and `[INFO]` in
+bold terminal foreground: these are words, requiring text contrast rather than
+the lower contrast floor for a small Unicode mark. UTF-8 status glyphs retain
+semantic color, and NO_COLOR continues to select plain output. Evidence covers
+both the normal palette matrix and LANG=C crossed with every palette.
+
 - The verdict word is the count of findings (`2 warnings`, `1 error`, `healthy`); the healthy
   count, project, and version are the detail.
 - Colour touches marks only. The old renderer painted every line in its status colour, which

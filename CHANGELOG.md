@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Secret policy configuration examples
+
+- **Secret auto-delete examples use accepted policies** — Configuration help now
+  offers `off`, `after_use` and `1h`, so registry round trips and reset contracts
+  exercise real stored policies instead of generic string values.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

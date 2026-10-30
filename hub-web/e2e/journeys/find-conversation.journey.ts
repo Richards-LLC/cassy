@@ -815,3 +815,43 @@ for (const width of [1280, 390]) {
     await expect(page.locator(".conversation-row").first()).toContainText("Ended");
   });
 }
+
+// cas-ade2: the register is alphabetical. Two supervisors of one project on
+// two machines trade recency on every update; no card or row ever moves.
+test("HUB-J3 project cards and supervisor rows keep their places while two machines stay active (cas-ade2)", journeyPart, async ({ page, journey }) => {
+  const atlas: Machine = { ...ATLAS, sessions: [
+    { ...ATLAS.sessions[0]!, name: "zesty-heron-3", supervisor: "zesty-heron-3", project_dir: "/projects/cas-src" },
+    { ...ATLAS.sessions[0]!, name: "amber-otter-5", supervisor: "amber-otter-5", project_dir: "/projects/widget" },
+  ] };
+  const studio: Machine = { ...STUDIO, sessions: [{ ...STUDIO.sessions[0]!, name: "bright-robin-2", supervisor: "bright-robin-2", project_dir: "/projects/cas-src" }] };
+  const stamp = (tick: number) => {
+    // Each update makes a different session the newest, as live work does.
+    atlas.sessions[0]!.last_activity_at = journeyStamp(tick % 2 ? -1_000 : -90_000);
+    atlas.sessions[1]!.last_activity_at = journeyStamp(-30_000 - tick * 1_000);
+    studio.sessions[0]!.last_activity_at = journeyStamp(tick % 2 ? -90_000 : -1_000);
+  };
+  stamp(0);
+  const hub = await journey.hub({ machines: [atlas, studio], paired: ["atlas", "studio"] });
+  await journey.open();
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const layout = () => list.evaluate((nav) => [...nav.querySelectorAll<HTMLElement>(".project-card")].map((card) => [
+    card.querySelector(".project-card-name")?.textContent ?? "",
+    ...[...card.querySelectorAll<HTMLElement>(".conversation-row")].map((row) => row.dataset.threadKey ?? ""),
+  ]));
+  await journey.stage("Cards sort by project name and rows by supervisor name", async () => {
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
+    expect(await layout()).toEqual([["cas-src", "studio:bright-robin-2", "atlas:zesty-heron-3"], ["widget", "atlas:amber-otter-5"]]);
+  });
+  const first = await layout();
+  // Tag each rendered row so a re-created or moved node is caught too.
+  await list.evaluate((nav) => nav.querySelectorAll<HTMLElement>(".conversation-row").forEach((row, index) => { (row as unknown as { ade2?: number }).ade2 = index; }));
+  await journey.stage("Repeated activity updates on both machines move nothing", async () => {
+    for (let tick = 1; tick <= 4; tick++) {
+      stamp(tick);
+      await hub.announceCatalog("atlas");
+      await hub.announceCatalog("studio");
+      expect(await layout(), `update ${tick}`).toEqual(first);
+      expect(await list.evaluate((nav) => [...nav.querySelectorAll(".conversation-row")].map((row) => (row as unknown as { ade2?: number }).ade2)), `update ${tick} keeps every row node in place`).toEqual([0, 1, 2]);
+    }
+  });
+});

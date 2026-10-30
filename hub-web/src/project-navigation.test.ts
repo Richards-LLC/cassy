@@ -41,6 +41,31 @@ describe("project-first navigation", () => {
     expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");
   });
 
+  it("orders cards by project name and rows by supervisor, and activity never moves either (cas-ade2)", () => {
+    const nav = setup();
+    const navigation = new ProjectNavigation();
+    const machines = [{ id: "soundwave", label: "soundwave · Linux", online: true }, { id: "prowl", label: "prowl · macOS", online: true }];
+    const rows = (tick: number): ConversationRow[] => [
+      row("zesty-otter-2", { projectDir: "/projects/widget", activityAt: tick % 2 ? 9 : 1 }),
+      row("quiet-heron-7", { project: "cas-src", projectName: "cassy", machineId: "prowl", host: "prowl · macOS", activityAt: tick % 2 ? 1 : 9 }),
+      row("bright-lynx-4", { project: "cas-src", projectName: "cassy", activityAt: tick % 2 ? 9 : 1 }),
+      row("amber-fox-1", { projectDir: "/projects/Atlas", activityAt: tick }),
+    ];
+    const layout = () => [...nav.querySelectorAll<HTMLElement>(".project-card")].map((card) => [
+      card.querySelector(".project-card-name")!.textContent,
+      ...[...card.querySelectorAll<HTMLElement>(".conversation-row")].map((node) => node.dataset.threadKey),
+    ]);
+    navigation.render(nav, rows(0), vi.fn(), undefined, { machines });
+    const first = layout();
+    expect(first).toEqual([["Atlas", "amber-fox-1"], ["cassy", "bright-lynx-4", "quiet-heron-7"], ["widget", "zesty-otter-2"]]);
+    const nodes = [...nav.querySelectorAll(".conversation-row")];
+    for (let tick = 1; tick <= 4; tick++) {
+      navigation.render(nav, tick % 2 ? [...rows(tick)].reverse() : rows(tick), vi.fn(), undefined, { machines });
+      expect(layout(), `update ${tick}`).toEqual(first);
+      expect([...nav.querySelectorAll(".conversation-row")], `update ${tick} keeps each row's node in place`).toEqual(nodes);
+    }
+  });
+
   it("names a project card by its display name, else its folder, never its identity (cas-6f79)", () => {
     const nav = setup();
     new ProjectNavigation().render(nav, [row("named", { project: "cas-src", projectName: "Cassy", projectDir: "/home/me/cassy" }), row("unnamed", { project: "github.com/acme/widget", projectDir: "/projects/widget" })], vi.fn());

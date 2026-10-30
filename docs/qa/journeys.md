@@ -772,6 +772,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Edge paths
 
+- Rust lifetimes stay plain beside colored character literals; JSX word apostrophes and unfinished single-quoted strings never consume the next line. A block that exceeds the retained-cache budget leaves earlier entries cached. Named regressions: `hub-web/src/markdown-renderer.test.ts` (cas-7457).
 - Invalid diagram syntax remains readable source.
 - Missing or local-only artifacts show Preview unavailable beside their original Open link.
 - A transient preview failure recovers after the session reconnects, without rebuilding the attachment or moving its caption.

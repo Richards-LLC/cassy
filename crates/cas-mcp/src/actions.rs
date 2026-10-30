@@ -120,6 +120,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "hold_worker",
     "release_worker",
     "worker_status",
+    "worker_queue",
     "worker_activity",
     "clear_context",
     "sync_all_workers",

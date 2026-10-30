@@ -545,6 +545,8 @@ fn factory_req(action: &str) -> FactoryRequest {
         summary: None,
         worker_names: None,
         task_id: None,
+        task_ids: None,
+        expected_generation: None,
         status: None,
         owner: None,
         delivery_mode: None,
@@ -603,6 +605,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
+        task_ids: None,
         delivery_mode: None,
         merge_request: None,
         blocker: None,
@@ -1746,9 +1749,11 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
         ))
         .expect("add follow-up task");
 
+    let second = task_store.generate_id().unwrap();
+    task_store.add(&Task::new(second.clone(), "Queued follow-up".into())).unwrap();
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
-    req.task_id = Some(task_id.clone());
+    req.task_ids = Some(vec![task_id.clone(), second.clone()]);
 
     let result = env.service.factory_request(Parameters(req)).await;
     assert!(
@@ -1759,6 +1764,15 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1, "the spawn must actually be queued");
     assert_eq!(entries[0].task_id.as_deref(), Some(task_id.as_str()));
+    assert!(entries[0].isolate, "An ordered spawn must provide an owned checkout for subsequent branches");
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&env.cas_root).unwrap();
+    queues.bind_spawn(entries[0].id, "spawn-session", "spawn-worker").unwrap();
+    let queue = queues.get("spawn-session", "spawn-worker").unwrap();
+    assert_eq!(queue.current_task.as_deref(), Some(task_id.as_str()));
+    assert_eq!(queue.pending, vec![second]);
+    queues.bind_spawn(entries[0].id, "spawn-session", "spawn-worker").unwrap();
+    assert_eq!(queues.get("spawn-session", "spawn-worker").unwrap(), queue);
+
 }
 
 /// cas-549c: the same relaxation must hold when no epic has ever existed —
@@ -8307,6 +8321,7 @@ fn coord_msg(
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
+        task_ids: None,
         delivery_mode: None,
         merge_request: None,
         blocker: None,

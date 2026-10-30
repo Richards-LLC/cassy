@@ -21,9 +21,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Posted drafts keep their historical wording** — Was: later pushes could
   re-lint release notes already posted to Slack. Now: the fast check skips
-  drafts with an unfenced `## POSTED` section containing a Slack permalink or
-  message receipt and names each skipped file. Fenced examples, empty sections
-  and placeholders still pass through their usual release or diary lint.
+  drafts with an unfenced `## POSTED` section containing a Slack permalink,
+  message receipt or root/reply timestamp and names each skipped file. Fenced
+  examples, empty sections and placeholders still pass through their usual
+  release or diary lint.
 
 ### Fixed — Worker pre-push guard
 
@@ -284,6 +285,79 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   blocked local raster thumbnails before sending. → Now: picked PNG, JPEG,
   GIF and WebP images can preview, while SVG and HTML stay named files.
 
+## [3.91.0] - 2026-10-30
+
+### Fixed — Factory workflow
+
+- **Parked delivery anchors stay on the branch** — Was: A push could replace a
+  published delivery with rewritten history, and re-parking could refuse a
+  recovery merge that restored its recorded anchor. → Now: Worker pushes refuse
+  non-fast-forward rewrites of a published factory tip, and re-parking accepts
+  the unchanged recovery merge that restores the recorded anchor.
+- **Worker pushes keep required hooks** — Was: `--no-verify`, exported
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, persistent `core.hooksPath`
+  changes, `git config --unset` and `git config --unset-all` of
+  `core.hooksPath`, `git config unset` of the same key, assignment then export,
+  `declare -x`, and `set -a` could bypass factory push checks. → Now: Workers
+  and reviewers are refused these bypasses. Inherited `GIT_CONFIG_GLOBAL` and
+  `GIT_CONFIG_NOSYSTEM` settings no longer block a plain worker push;
+  supervisors retain the approved exception route.
+- **Queued closes report completion before the handoff** — Was: A close could
+  finish writing Closed, then report that its status was unchanged when starting
+  the next task ran past the response deadline. → Now: The close is marked
+  committed before the handoff, so the response reflects the completed close.
+  An interrupted handoff is recovered from the durable queue.
+- **Worker starts share one checkout safely** — Was: A manual start could race
+  with the first queue assignment or a refilled queue, leaving two tasks running
+  and changing branches in the same checkout. → Now: Every factory worker start
+  holds the same start lock through its Git and lease work. Starts without a
+  queue wait for the lock; queued starts refuse a busy lock, and both re-read
+  queue state before proceeding.
+
+### Added — Factory workflow
+
+- **Workers move through an ordered task list** — Was: A worker received one
+  task at a time and could wait for another assignment after delivery. → Now:
+  Spawning and assignment accept an ordered list; closing or parking starts the
+  next eligible task on its own target branch and keeps the prior delivery ref.
+  Supervisors can inspect, reorder or clear pending work, and stale entries are
+  skipped with notes. A returned delivery can resume while unfinished successor
+  work is held, preserving that successor's place in the queue.
+
+### Added — Delivery process
+
+- **Rapid response mode** — Was: Every delivery ran the full QA and verification
+  gates, even during an urgent fix. → Now: The operator can open a time-boxed window
+  for one epic with `cas qa rapid-response enable <epic> --for 2h --reason ...
+  --rollback ...` (at most 12 hours; it expires on its own). While it is open,
+  per-task independent QA is skipped, close verification runs for one task in four,
+  evidence is needed only for journeys whose own files changed, fixes close without
+  waiting for a batch QA receipt; the post-release check stays a full gate.
+  Build, touched-test and evidence secret checks still refuse. A change
+  whose diff has a secret-shaped line, or whose diff cannot be read, keeps every
+  gate; a change that touches a migration keeps every gate and also waits for the
+  operator's `cas qa rapid-response review-migration`. A task with a verifier
+  verdict on record keeps that verdict. Each skipped check is recorded under
+  `.cas/operator/`, and when the window closes the factory files one back-fill task
+  under the epic and tells the supervisor.
+
+### Removed — Delivery process
+
+- **Park no longer reads local fast-row receipts or exceptions** — Was: Park
+  required a local fast-row PASS receipt or a supervisor-approved exception
+  file, both written by the same user as the worker. → Now: CI runs the fast
+  rows once per lane and is the only fast-row proof; the pre-push hook stays
+  early feedback, and the exception writer, validator and hook reader are gone.
+  This closes the 3.90 known limit that same-user PASS receipts were still
+  trusted.
+
+### Fixed — Commander
+
+- **Quick rich-content inspections are counted** — Was: opening and closing a
+  diagram source or unified diff in quick succession could collapse into one
+  toggle event, leaving the inspection uncounted. → Now: the usage counter
+  increments when the opening summary is activated, even if the browser
+  coalesces the toggles.
 - **Messages kept in two tabs all go out after an outage** — Was: with two
   Commander tabs open, a message kept during an outage could stay "Waiting for
   the connection" under a Live header after reconnecting, and was never sent

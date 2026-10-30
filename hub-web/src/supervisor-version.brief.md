@@ -24,4 +24,16 @@ LocalSessionReadModel owns a short-lived per-project snapshot from factory_binar
 Acceptance: one table-style row-rendering unit test for current/stale/unknown/offline states, one extension of HUB-J3's existing machine-version journey for Linux/Claude and macOS/Codex session observations, backend projection evidence, typecheck, affected journeys, candidate-backed before/after capture and visual critique. No new dependency or image; generated assets stay outside the commit.
 
 ## Critique
-Pending real candidate render and visual checks. Required craft floor: 4/5.
+Source e26440e4f206a081794f3a92b607d0181052dead was rendered through supervisor-built QA-only candidate 3feb3530b852c5f345e3354b0e5026189694897e, whose embedded Web receipt ab64d84d matches source. Task cas-8125's qa/critique.md, qa/bundle.json and qa/pairs/pairs.json hold the full record. Scored by fierce-heron-55 on 2026-10-30.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Mono version follows its supervisor codename inside the existing Glass project list, separate from machine identity. |
+| Fit | 5 | A warning arrow identifies the exact old process; current versions remain quiet and unknown versions remain absent. |
+| Hierarchy | 4 | Project and machine lead; version metadata steps down. Light/dark desktop and phone captures retain this order. |
+| Craft | 4 | Strict visual QA PASS across eight renders at 1280×800 and 390×844: zero findings, zero allowlisted issues, no clipping or overflow. |
+| Accessibility | 4 | Row accessible names carry version/reconnect guidance; keyboard focus and forced colors, reduced motion and increased contrast checks pass on the real candidate. |
+
+The craft floor holds. Four actual candidate before/after pairs use identical data, scheme and viewport; protocol-double inputs are disclosed. The final source passes 216 producer-selected journey parts, 1,573 web unit tests, typecheck and 190 affected Rust tests. macOS host evidence is owned by prowl and remains separate from Linux captures of a Mac-labelled protocol-double row.
+
+Compared with the task-start baseline, the final merged candidate adds 295 gzip bytes to app.js and 219 to app.css, including imported epic changes. Existing entry assets already exceed the skill's default size budgets; this change adds no dependency, media, animation or release request. LCP and INP were not measured.

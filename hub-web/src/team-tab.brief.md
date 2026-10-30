@@ -54,4 +54,4 @@ Scored on 2026-10-30 from real captures with four live workers. The worker's sco
 | Craft | 4 / 3 | 4 / 3 | 4 / 3 | Strict visual QA passes on 8 of 8 with no page overflow, with seams: rail controls stagger. |
 | Accessibility | 4 / 2 | 3 / 3 | 3 / 4 | Text and the release track pass, but the lane connector is 2.24:1 light and 2.64:1 dark. |
 
-Floor not met after three rounds: fit and hierarchy are 3 from the independent reader. No further pass without an operator decision. The open question is how a worker that needs attention stands out without reading every lane.
+Two independent reads of round three's surface disagree: 4/3/3 on real-hub captures, and 4/4/4 on fixture screenshots with mixed worker states (batch QA round 12). The factory supervisor ruled the floor met on the second. The first read's concern stands as an open question: when real workers share a state the lanes look alike, so how does a worker that needs attention stand out without reading every lane?

@@ -628,7 +628,7 @@ printf 'PASS %s fixture\n' "$row"
             return tuple(results)
 
         with tempfile.TemporaryDirectory() as directory:
-            scratch = Path(directory) / 'base'
+            scratch = Path(directory).resolve() / 'base'
             env = {'CAS_RELEASE_GATE_HOME_DIR': str(scratch), 'CARGO_TARGET_DIR': '/foreign/target'}
             with mock.patch.object(proof, 'clone_scratch', return_value=scratch), \
                     mock.patch.object(proof, 'inputs', return_value=(expected, env)), \

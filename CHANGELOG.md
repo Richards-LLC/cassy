@@ -78,6 +78,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Arithmetic workspace checks
 
+- **Shell syntax cannot hide inside arithmetic** — Arithmetic with comment
+  markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
+  keeps its existing allowance.
+
 - **Arithmetic operands cannot hide commands in array subscripts** — Factory
   checks accept numeric arithmetic and refuse variable or command-output
   operands, quoted `let` expressions and persistent integer declarations whose

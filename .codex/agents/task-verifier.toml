@@ -148,3 +148,6 @@ When `task_type=epic`, use `verification_type=epic` and check, in order:
 The close reason may come from the verification prompt, the epic's latest note, or its close-reason field.
 
 '''
+
+[skills]
+include_instructions = false

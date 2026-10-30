@@ -29,3 +29,15 @@ Performance: lazy-load the viewer on an unmodified image tap; reuse the existing
 | Accessibility | 4 | Native modal plus explicit Tab boundaries; close restores focus and scroll; named loading/failure, keyboard controls and all three accessibility media modes exercised. JavaScript is required by Commander. |
 
 Scored by ready-cardinal-28 on 2026-10-30. Four production renders and a separate strict production-component polish fixture were inspected. Protocol traffic is doubled; touch pinch uses synthetic PointerEvents rather than a physical phone. Evidence lives in the task's durable qa directory.
+
+### Failure recovery follow-up
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Retains the existing card and Glass inspection dialog without introducing another error surface. |
+| Fit to argument | 5 | Three failed opens retain one named note; a successful open clears the obsolete failure. |
+| Hierarchy | 5 | The failure is readable above the controls, and Try again remains fully visible at 390×844 in both schemes. |
+| Craft | 4 | Strict component-state inspection passed eight desktop/phone states with zero findings; native Commander captures confirm the card in context. |
+| Accessibility | 4 | One retained status node avoids stacked announcements; native journey checks preserve keyboard, focus return and three accessibility media modes. |
+
+Inspected on 2026-10-30 against da5310e1128e9a31aabbb4a191e6c8f3f0ab8f99. The strict fixture renders the actual components in isolation; its attachment card has no conversation container. Native source-bound Commander journeys supply the contextual evidence. The cropped original recording did not establish a phone layout defect: full viewport assertions passed before and after, so this follow-up changes no CSS. HUB-J22's four-worker desktop-dark thumbnail failure remains recorded separately with its passing one-worker control; batch QA round 7 owns that investigation.

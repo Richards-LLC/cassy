@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory delivery
+
+- **Merging released main into a delivery branch no longer blocks close** — Was:
+  a worker told to merge origin/main into a branch bound to an epic (without
+  rebasing) could not close or be merged. Task close and worktree_merge called
+  the already-released commits that main brought in "foreign" and refused, so
+  the supervisor had to merge by hand and override. → Now: commits already on
+  the released trunk count as upstream, and a merge that only brings in that
+  trunk is a sync merge. Another task's unreleased work is still refused.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

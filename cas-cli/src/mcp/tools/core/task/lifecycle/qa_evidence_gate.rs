@@ -523,10 +523,20 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
                 .and_then(|(from, to)| range_paths(repo, from, to)),
         }
     };
-    let journeys = changed
+    let mut journeys = changed
         .as_deref()
         .map(|paths| catalog_journeys_for(repo, Some(&head), paths))
         .unwrap_or_default();
+    // cas-1b4d: in an operator's rapid-response window only journeys whose
+    // owned files the delivery touched need evidence; the rest back-fill.
+    let rapid = crate::rapid_response::active_for_delivery(cas_root, repo, task, changed.as_deref());
+    if let Some(window) = rapid.as_ref()
+        && let Some(owned) = changed
+            .as_deref()
+            .and_then(|paths| crate::rapid_response::owned_journeys(repo, &qa, paths))
+    {
+        crate::rapid_response::narrow_journeys(cas_root, window, &task.id, &mut journeys, &owned);
+    }
     let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
     let terminal_render = changed
         .as_deref()
@@ -579,7 +589,14 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         None
     };
     if deferred && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
-        return Err(crate::qa_batch::debt_refusal(&task.id));
+        let recorded = rapid.as_ref().is_some_and(|window| {
+            crate::rapid_response::record_skip(
+                cas_root, window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt",
+            )
+        });
+        if !recorded {
+            return Err(crate::qa_batch::debt_refusal(&task.id));
+        }
     }
     // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
     let batch_defer =
@@ -938,6 +955,48 @@ mod tests {
         assert!(problem.contains(legacy.to_str().unwrap()), "{error}");
         assert!(next.contains(scoped.to_str().unwrap()), "{error}");
         assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+    }
+
+    /// cas-1b4d: a merged delivery with deferred batch evidence closes inside
+    /// an operator's rapid-response window (skip ledgered) and is refused for
+    /// its batch receipt without one.
+    #[test]
+    fn rapid_response_window_skips_the_batch_debt_refusal_cas_1b4d() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, "README.md", "base\n");
+        let head = commit_file(repo, "src/lib.rs", "pub fn fixed() {}\n");
+        let cas_root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\nevidence_gate=true\n").unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut epic = Task::new("cas-ep1c".into(), "Hotfix".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).unwrap();
+        let mut task = Task::new("cas-de11".into(), "Fix".into());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+            assignee: "worker".into(),
+            branch: "factory/worker".into(),
+            base_sha: base,
+        });
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        store.add(&task).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency::new(
+                task.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild,
+            ))
+            .unwrap();
+        cas_store::defer_qa_batch_evidence(&cas_root, &task.id, &head).unwrap();
+        let refusal = qa_evidence_close_gate(&cas_root, &task, repo, "main", Some(&head)).unwrap_err();
+        assert!(refusal.contains("waiting for batch receipt"), "{refusal}");
+        let window = crate::rapid_response::enable(
+            &cas_root, store.as_ref(), &epic.id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
+        )
+        .unwrap();
+        qa_evidence_close_gate(&cas_root, &task, repo, "main", Some(&head)).expect("the window skips the batch wait");
+        assert_eq!(crate::rapid_response::ledger(&cas_root, &window)[0].check, "batch-qa-receipt");
     }
 
     #[test]

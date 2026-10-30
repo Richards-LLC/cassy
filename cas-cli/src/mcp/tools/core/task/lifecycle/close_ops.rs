@@ -6603,6 +6603,39 @@ impl CasCore {
         if unchanged_rebase {
             return Some(candidate);
         }
+        // A recovery merge makes the old anchor reachable again as a side
+        // parent, so `equivalent_prefix(recorded, candidate, ...)` correctly
+        // rejects the whole merge range. Compare the first parent instead and
+        // advance only when the merge restores that exact anchor unchanged.
+        if let Some(rebased_tip) = resolve_branch_sha(repo_path, &format!("{candidate}^1")) {
+            let rewritten_boundary = if rebased_delivery_has_same_patches(
+                repo_path, recorded, &rebased_tip, &rebase_target, &task.id,
+            ) {
+                Some(rebased_tip.clone())
+            } else {
+                rebased_delivery::equivalent_prefix(
+                    repo_path, recorded, &rebased_tip, &rebase_target, &task.id,
+                )
+            };
+            if let Some(rebased) = rewritten_boundary {
+                let branch = task.assignee.as_deref()
+                    .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
+                let foreign_since = self.sibling_lease_boundary(task_store, task);
+                let corrections_attributable = rebased == rebased_tip
+                    || parked_anchor_advance_with_target_is_attributable(
+                        repo_path, &rebased, &rebased_tip, &task.id, foreign_since, &target,
+                    );
+                if self.tip_is_own_task_lineage(
+                    task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
+                ) && corrections_attributable
+                    && restored_anchor_merge_is_attributable(
+                        repo_path, recorded, &rebased_tip, &candidate, &task.id, foreign_since,
+                    )
+                {
+                    return Some(candidate);
+                }
+            }
+        }
         // cas-749f: a rebase may be followed by a correction before the
         // worker re-parks. Prove the entire old delivery at its rewritten
         // boundary, then apply the ordinary same-task continuation fences
@@ -6613,13 +6646,17 @@ impl CasCore {
         ) {
             let branch = task.assignee.as_deref()
                 .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
+            let foreign_since = self.sibling_lease_boundary(task_store, task);
             if self.tip_is_own_task_lineage(
                 task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
-            ) && parked_anchor_advance_with_target_is_attributable(
-                repo_path, &rebased, &candidate, &task.id,
-                self.sibling_lease_boundary(task_store, task), &target,
             ) {
-                return Some(candidate);
+                if parked_anchor_advance_with_target_is_attributable(
+                    repo_path, &rebased, &candidate, &task.id, foreign_since, &target,
+                ) || restored_anchor_merge_is_attributable(
+                    repo_path, recorded, &rebased, &candidate, &task.id, foreign_since,
+                ) {
+                    return Some(candidate);
+                }
             }
         }
         if self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &candidate, &target) {
@@ -9349,9 +9386,44 @@ impl CasCore {
         // verdict before close; light tasks skip it entirely. For `Deep`/unset
         // (`!depth_light`) the condition is unchanged, so the jail arms exactly
         // as today.
+        // cas-1b4d: a migration delivery under an open rapid-response window
+        // keeps every gate and also needs the operator's human review.
+        if close_disposition.requires_delivery_gates()
+            && let Some(refusal) = crate::rapid_response::migration_review_refusal(&self.cas_root, &task)
+        {
+            return Ok(Self::tool_error(refusal));
+        }
+        // cas-1b4d: in an operator's rapid-response window close verification
+        // is sampled: an unsampled task does not dispatch a new verifier, and
+        // the skip back-fills when the window closes. A verdict or typed
+        // dispatch already on record keeps the block below (its VERIFICATION
+        // FAILED refusal and dispatch authority). Data-state guards are
+        // unaffected.
+        let no_verification_on_record = exact_dispatch_allows_skip
+            && cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id)
+                .is_ok_and(|dispatch| dispatch.is_none())
+            && self
+                .open_verification_store()
+                .is_ok_and(|store| store.get_latest_for_task(&task.id).is_ok_and(|latest| latest.is_none()));
+        let rapid_unsampled = verification_enabled
+            && !skip_verification
+            && !depth_light
+            && no_verification_on_record
+            && task.task_type != TaskType::Epic
+            && !crate::rapid_response::verification_sampled(&task.id)
+            && crate::rapid_response::active_for_task_at(&self.cas_root, &task, None).is_some_and(|window| {
+                crate::rapid_response::record_skip(
+                    &self.cas_root,
+                    &window,
+                    &task.id,
+                    "verification",
+                    "close verification not sampled (one task in four runs it)",
+                )
+            });
         if verification_enabled
             && !skip_verification
             && !depth_light
+            && !rapid_unsampled
         {
             let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 
@@ -24528,6 +24600,74 @@ fn parked_anchor_advance_with_target_is_attributable(
     })
 }
 
+/// Accept the recovery merge used after a worker has already rebased away a
+/// parked anchor: the first parent must be the equivalent rewritten delivery,
+/// the second must restore the exact recorded anchor, and the merge must add
+/// no tree changes of its own. Callers still prove patch equivalence and task
+/// branch ownership before using this narrow exception.
+fn restored_anchor_merge_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    rebased: &str,
+    candidate: &str,
+    task_id: &str,
+    foreign_since: Option<i64>,
+) -> bool {
+    if [recorded, rebased, candidate]
+        .iter()
+        .any(|reference| !is_safe_git_refname(reference))
+    {
+        return false;
+    }
+    let Some(parents) = git_stdout_lines(
+        repo_path,
+        &["rev-list", "--parents", "-n", "1", candidate],
+    )
+    .ok()
+    .and_then(|lines| lines.into_iter().next())
+    else {
+        return false;
+    };
+    let parents = parents.split_whitespace().collect::<Vec<_>>();
+    if parents.len() != 3
+        || !commit_ids_match(parents[0], candidate)
+        || !commit_ids_match(parents[1], rebased)
+        || !commit_ids_match(parents[2], recorded)
+    {
+        return false;
+    }
+    let tree = |commit: &str| {
+        git_stdout_lines(repo_path, &["rev-parse", &format!("{commit}^{{tree}}")])
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+    };
+    let (Some(candidate_tree), Some(rebased_tree)) = (tree(candidate), tree(rebased)) else {
+        return false;
+    };
+    if candidate_tree != rebased_tree {
+        return false;
+    }
+    let Some(epoch) = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", candidate])
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .and_then(|value| value.parse::<i64>().ok())
+    else {
+        return false;
+    };
+    if foreign_since.is_some_and(|since| {
+        epoch >= since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
+    }) {
+        return false;
+    }
+    let Some(message) = git_stdout_lines(repo_path, &["show", "-s", "--format=%B", candidate])
+        .ok()
+        .map(|lines| lines.join("\n"))
+    else {
+        return false;
+    };
+    !message_claims_other_task(&message, Some(task_id))
+}
+
 /// Content-level delivery proof for one immutable commit against one exact
 /// target history (cas-b278 / GH #324).
 ///
@@ -36817,6 +36957,64 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             matches!(out, MergeStateGateOutcome::Proceed),
             "integrated post-rebase tip must clear close despite stale \
              pre-rebase anchor A (cas-5485), got {out:?}"
+        );
+    }
+
+    #[test]
+    fn awaiting_merge_repark_advances_to_pushed_merge_that_restores_recorded_anchor() {
+        use cas_store::TaskStore;
+
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let branch = "factory/worker-cas-a0a0";
+        git(p, &["branch", "-m", branch]);
+        std::fs::write(p.join("delivery.rs"), "// task delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-a0a0): original delivery"]);
+        let recorded = rev_parse_local(p, "HEAD");
+
+        let remote_dir = tempfile::tempdir().unwrap();
+        let remote = remote_dir.path().join("origin.git");
+        git_command(remote_dir.path(), &["init", "--bare", "-q", remote.to_str().unwrap()])
+            .status()
+            .expect("initialize bare origin");
+        git(p, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(p, &["push", "-q", "-u", "origin", "main"]);
+        git(p, &["push", "-q", "-u", "origin", branch]);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target.rs"), "// target update\n").unwrap();
+        git(p, &["add", "target.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-b0b0): target update"]);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        git(p, &["checkout", "-q", branch]);
+        git(p, &["rebase", "-q", "main"]);
+        let rewritten = rev_parse_local(p, "HEAD");
+        assert_ne!(recorded, rewritten, "rebasing must rewrite the original delivery SHA");
+        git(p, &["merge", "-q", "--no-ff", &recorded, "-m", "restore cas-a0a0 parked anchor"]);
+        let restored_tip = rev_parse_local(p, "HEAD");
+        assert_ne!(recorded, restored_tip);
+        git(p, &["push", "-q", "origin", branch]);
+        git(p, &["fetch", "-q", "origin"]);
+
+        let mut parked = worker_task("worker");
+        parked.id = "cas-a0a0".to_string();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.delivery_mode = cas_types::DeliveryMode::PushBranch;
+        parked.deliverables.parked_branch = Some(branch.to_string());
+        parked.deliverables.factory_branch_anchor = Some(recorded.clone());
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&restored_tip))
+            .unwrap();
+
+        assert_eq!(
+            store.get(&parked.id).unwrap().deliverables.factory_branch_anchor,
+            Some(restored_tip),
+            "the new pushed tip should replace the old anchor after restoring it as a merge parent"
         );
     }
 

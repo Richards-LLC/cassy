@@ -311,6 +311,25 @@ fn handle_pre_tool_use_inner(
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
+    // A worker or reviewer must not skip Git's pre-push hook: it enforces
+    // parked delivery anchors and every fast-row check. Keep this above the
+    // factory auto-approve path so it also runs when `cas_root` is unavailable.
+    if is_factory_agent
+        && !crate::harness_policy::is_supervisor(input)
+        && tool_name == "Bash"
+        && input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .is_some_and(git_push_bypasses_required_hooks)
+    {
+        return Ok(HookOutput::with_pre_tool_permission(
+            "deny",
+            "🚫 WORKER PUSH HOOK BYPASS: `--no-verify`, `-n`, and `core.hooksPath` skip required factory push checks. Use a plain `git push`; if an exception is needed, ask the supervisor to run the supervisor-approved push.",
+        ));
+    }
+
     // ========================================================================
     // WORKER COMMAND-SCOPE GUARDS (cas-eb39, cas-852a0)
     //
@@ -1980,6 +1999,68 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
 /// because LAYER 2 (pre-commit hook) is the hard floor.
 pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
     !git_write_targets(".", cmd).is_empty()
+}
+
+/// Return true when a Git push invocation disables the factory's required
+/// pre-push hooks, including a `core.hooksPath` configured on Git itself.
+fn git_push_bypasses_required_hooks(command: &str) -> bool {
+    shell_statement_words(command).iter().any(|words| {
+        let Some(command_index) = unwrapped_command_index(words) else {
+            return false;
+        };
+        if shell_word_basename(&words[command_index]) != "git" {
+            return false;
+        }
+
+        let git_words = &words[command_index + 1..];
+        let Some(push_index) = git_history_write_operation(git_words)
+            .filter(|index| git_words.get(*index).is_some_and(|word| word == "push"))
+        else {
+            return false;
+        };
+
+        if git_global_hooks_path_override(&git_words[..push_index]) {
+            return true;
+        }
+
+        git_words[push_index + 1..]
+            .iter()
+            .take_while(|word| word.as_str() != "--")
+            .any(|word| matches!(word.as_str(), "--no-verify" | "-n"))
+    })
+}
+
+fn git_global_hooks_path_override(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        let config_value = if matches!(argument.as_str(), "-c" | "--config-env") {
+            arguments.get(index + 1).map(String::as_str)
+        } else if let Some(value) = argument.strip_prefix("--config-env=") {
+            Some(value)
+        } else if let Some(value) = argument.strip_prefix("-c") {
+            Some(value.trim_start_matches('='))
+        } else {
+            None
+        };
+
+        if config_value.is_some_and(git_config_value_sets_hooks_path) {
+            return true;
+        }
+
+        index += if matches!(argument.as_str(), "-c" | "--config-env") {
+            2
+        } else {
+            1
+        };
+    }
+    false
+}
+
+fn git_config_value_sets_hooks_path(value: &str) -> bool {
+    value
+        .split_once('=')
+        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("core.hookspath"))
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -10803,6 +10884,96 @@ mod worker_commit_guard_tests {
         input.cwd = cwd.to_string();
         input.tool_input = Some(serde_json::json!({"command": command}));
         input
+    }
+
+    #[test]
+    fn worker_git_push_hook_bypass_is_refused_but_supervisor_is_unaffected() {
+        let repo = make_git_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let switched = std::process::Command::new("git")
+            .args(["switch", "-c", "factory/guard-test"])
+            .current_dir(repo.path())
+            .output()
+            .expect("create a worker branch");
+        assert!(switched.status.success());
+
+        let variants = [
+            "git push --no-verify origin factory/guard-test".to_string(),
+            "git push -n origin factory/guard-test".to_string(),
+            "git -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test".to_string(),
+            format!(
+                "git -C '{repo_path}' -c core.hooksPath=/tmp/empty-hooks push origin factory/guard-test"
+            ),
+        ];
+
+        for role in ["worker", "reviewer"] {
+            let _env = TestEnvGuard::with_optional_vars(&[
+                ("CAS_AGENT_ROLE", Some(role)),
+                ("CAS_FACTORY_MODE", Some("1")),
+                ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+                ("CAS_AGENT_NAME", Some("guard-test")),
+            ]);
+            for command in &variants {
+                let mut input = hook_git_write_input(&repo_path, command);
+                input.agent_role = Some(role.to_string());
+                let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+                let value = serde_json::to_value(output).expect("serialize hook result");
+                let hook_output = &value["hookSpecificOutput"];
+                assert_eq!(
+                    hook_output["permissionDecision"], "deny",
+                    "{role}: {command}: {value}"
+                );
+                let reason = hook_output["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(
+                    reason.contains("supervisor-approved") && reason.contains("plain `git push`"),
+                    "the refusal must point to the exception route: {reason}"
+                );
+            }
+        }
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+            ("CAS_AGENT_NAME", Some("factory-supervisor")),
+        ]);
+        let mut input = hook_git_write_input(&repo_path, "git push --no-verify origin factory/guard-test");
+        input.agent_role = Some("supervisor".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("supervisor pre-tool hook");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "supervisors retain the approved exception route: {value}"
+        );
+    }
+
+    #[test]
+    fn plain_worker_git_push_remains_allowed() {
+        let repo = make_git_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let switched = std::process::Command::new("git")
+            .args(["switch", "-c", "factory/guard-test"])
+            .current_dir(repo.path())
+            .output()
+            .expect("create a worker branch");
+        assert!(switched.status.success());
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(repo_path.as_str())),
+            ("CAS_AGENT_NAME", Some("guard-test")),
+        ]);
+        let mut input = hook_git_write_input(&repo_path, "git push origin factory/guard-test");
+        input.agent_role = Some("worker".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "plain worker push remains allowed: {value}"
+        );
     }
 
     #[test]

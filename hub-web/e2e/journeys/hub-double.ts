@@ -416,7 +416,14 @@ export class HubDouble {
    * pause a loaded host can outrun.
    */
   async received(notificationId: number, page = this.page): Promise<void> {
-    await page.waitForFunction((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId, { timeout: 5_000 });
+    try {
+      await page.waitForFunction((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId, { timeout: 5_000 });
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new Error(`hub double: timed out waiting for hub frame ${notificationId}`, { cause: error });
+      }
+      throw error;
+    }
   }
 
   /** Install routes; call before the first navigation. */

@@ -4,6 +4,16 @@ import { HubDouble } from "../e2e/journeys/hub-double";
 
 afterEach(() => vi.unstubAllGlobals());
 
+it("names the missing hub frame when receipt waiting times out", async () => {
+  const timeout = Object.assign(new Error("page.waitForFunction: Timeout 5000ms exceeded"), { name: "TimeoutError" });
+  const page = { waitForFunction: vi.fn().mockRejectedValue(timeout) };
+  const hub = new HubDouble(page as never, { machines: [] });
+  await expect(hub.received(4711)).rejects.toMatchObject({
+    message: expect.stringContaining("hub frame 4711"),
+    cause: timeout,
+  });
+});
+
 it("serves the current HubDouble HTTP and socket fixtures in a browser", async () => {
   const dom = new JSDOM("", { url: "https://preview.test/commander/" });
   vi.stubGlobal("window", dom.window);

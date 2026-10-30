@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Preview and journey diagnostics
+
+- **Missing hub frames are named on timeout** — Journey failures identify the
+  notification frame and retain the original timeout as their cause. Preview
+  builds substitute the browser runtime only for imports from the journey
+  fixture directory, leaving unrelated modules alone.
+
 ### Fixed — Factory delivery
 
 - **Merging released main into a delivery branch no longer blocks close** — Was:

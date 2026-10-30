@@ -1,4 +1,4 @@
-title: Multi-tab receipt deadlines advance the shared BrowserContext clock once, without expiring the live session catalog during renewal
-tasks: [cas-b417]
+title: Multi-tab receipt checks hold the shared BrowserContext clock through inspection and advance it once per intended deadline, without expiring the live session catalog during renewal
+tasks: [cas-b417, cas-2408]
 invariants: [HUB-J12-GOAL, HUB-J12-DURABLE-SEND-REF]
 journeys: [HUB-J12]

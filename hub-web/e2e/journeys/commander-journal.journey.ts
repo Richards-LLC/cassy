@@ -1,4 +1,4 @@
-import { test, expect, journeyPart } from "./journey";
+import { test, expect, journeyPart, holdPageClock } from "./journey";
 import { HubDouble } from "./hub-double";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 import { journalRows } from "./commander-journal-storage";
@@ -38,8 +38,15 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     for (const tab of [page, peer]) await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
   });
   await journey.stage("One tab sends; its confirmation is visible in both tabs", async () => {
+    // Assertions and recording can outlast the 15s receipt deadline on a
+    // loaded host. Hold the shared clock before reconnecting, then drive only
+    // the reconnect timers; no receipt time should elapse while we inspect it.
+    await holdPageClock(page);
     await Promise.all([hub.up("atlas"), other.up("atlas")]);
-    await expect.poll(() => hub.sends.length + other.sends.length, { timeout: 20_000 }).toBe(1);
+    await expect.poll(async () => {
+      await page.clock.runFor(250);
+      return hub.sends.length + other.sends.length;
+    }, { timeout: 20_000 }).toBe(1);
     // Both tabs project the same active claim before any receipt arrives.
     // Retry here would allow the still-running send to cross the wire twice.
     for (const tab of [page, peer]) {
@@ -75,6 +82,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
       observer.observe(document.querySelector('[role="log"]')!, { childList: true, subtree: true });
       Object.assign(window, { peerRetryObservation: { observed, stop: () => observer.disconnect() } });
     });
+    await holdPageClock(page);
     await send(page, "Retry this same instruction");
     await expect.poll(() => hub.sends.length + other.sends.length).toBe(1);
     for (const tab of [page, peer]) {
@@ -173,7 +181,8 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     expect(new Set(sends.map((row) => row.client_ref)).size).toBe(2);
     await Promise.all([page.reload(), second.reload()]);
     await choose(page); await choose(second);
-    await Promise.all([page.clock.fastForward(15_000), second.clock.fastForward(15_000)]);
+    // A single BrowserContext clock drives both tabs, including after reload.
+    await page.clock.fastForward(15_000);
     await expect(page.getByRole("log")).toContainText("2 messages not confirmed");
     await expect.poll(() => [...hub.sends, ...other.sends].length).toBe(2);
     expect(errors).toEqual([]);

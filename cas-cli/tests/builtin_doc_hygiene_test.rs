@@ -682,6 +682,11 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Names the journey-eval QA command and required release evidence.",
     ),
     (
+        "skills/cas-supervisor/references/workflow.md",
+        "journey",
+        "Names the registry-backed QA journeys each verification tier walks.",
+    ),
+    (
         "skills/cas-cut-release/references/failure-log.md",
         "journey",
         "Names the required journey-evaluation report and its Markdown files carried on a release branch.",

@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Team leads with what your team is doing
+
+- **The heading states a finding** — Team now opens with a sentence computed from the session, such as "3 working, 1 waiting. 1 needs you.", and says when it is showing the last reported state.
+- **The delivery trail is the lane's figure** — Each lane shows its five receipts on one track, and a segment fills only between two recorded receipts.
+- **The rail steps back beside Team** — On desktop, worker rows in the side rail become a quiet list while Team is open, and keep their controls.
+
+### Fixed — Team tab finish
+
+- **Release track contrast and shapes** — The release progress track has a stronger outline in both schemes, the Team panel and tabs have rounded corners, and state pills sit evenly in their lanes.
+
 ### Fixed — Commander conversation
 
 - **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages. Each is matched on the whole message, so a typed message that pastes such a block after your own words still reaches Commander.

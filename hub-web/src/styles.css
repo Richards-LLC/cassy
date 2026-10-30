@@ -1082,6 +1082,9 @@ main {
 .conversation-shell .skip-link { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; min-height: 0; margin: 0; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .conversation-shell .skip-link:focus-visible, .conversation-shell .skip-link:focus { position: static; width: auto; height: auto; min-height: 36px; margin-top: var(--space-2); padding: 0 var(--space-3); overflow: visible; clip: auto; clip-path: none; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) { .skip-link { display: none; } }
+/* Appended to body, past the app's full-height shell: fixed so a screen-reader
+   region cannot make the page scroll (it added 15 px to every page). */
+#fleet-ops-announcer { position: fixed; top: 0; margin: 0; }
 .sr-only {
   position: absolute;
   width: var(--line-width);
@@ -1863,7 +1866,7 @@ dialog form > *,
 .compose-fab svg { width: 20px; height: 20px; display: block; flex: none; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .conversation-tabs { display: flex; flex: none; gap: var(--space-4); padding: 0 var(--space-4); border-bottom: 1px solid var(--line-subtle); background: var(--bg-panel); color: var(--ink); }
-.conversation-tabs [role="tab"] { border: 0; border-radius: 0; border-bottom: 2px solid transparent; padding: var(--space-3) var(--space-2); background: transparent; color: var(--ink-mid); min-height: 44px; }
+.conversation-tabs [role="tab"] { border: 0; border-radius: var(--radius-control) var(--radius-control) 0 0; border-bottom: 2px solid transparent; padding: var(--space-3) var(--space-2); background: transparent; color: var(--ink-mid); min-height: 44px; }
 .conversation-tabs [aria-selected="true"] { color: var(--color-action); border-bottom-color: var(--color-action); }
 .conversation-tabs [role="tab"]:focus-visible { outline: 2px solid var(--color-action); outline-offset: -4px; }
 .conversation-main.team-open > .conversation-pane-slot, .conversation-main.team-open > #conversation-composer-slot { display: none; }
@@ -1882,6 +1885,21 @@ dialog form > *,
 .team-panel .release-progress progress, .team-panel .release-meta { grid-column: 1 / -1; }
 .team-panel .release-meta { margin: 0; font-size: 12px; }
 .conversation-main.team-open ~ .conversation-context .release-progress { display: none; }
+/* Beside Team the rail is a quiet control list: the lanes already say who is on
+   what, and these rows keep the only worker controls. Phone sheets stay full. */
+@media (min-width: 721px) {
+  .conversation-main.team-open ~ .conversation-context .status-agent { margin: 0; padding: var(--space-1) 0; border-color: transparent; background: transparent; box-shadow: none; }
+  /* The name replaces the avatar, task and state the lane already shows, so each control still says whose it is. */
+  .conversation-main.team-open ~ .conversation-context .status-agent :is(.provider-avatar, .status-chip) { display: none; }
+  .conversation-main.team-open ~ .conversation-context .status-agent .status-line > .status-identifier { display: inline; flex: 1; color: var(--ink-mid); }
+  .conversation-main.team-open ~ .conversation-context .status-agent > :is(.status-activity, .status-last-activity) { display: none; }
+  .conversation-main.team-open ~ .conversation-context .status-agent .status-timeline { border-color: transparent; background: transparent; color: var(--ink-mid); }
+  .conversation-main.team-open ~ .conversation-context .status-agent .fleet-ops-trigger { border-color: transparent; background: transparent; color: var(--ink-mid); }
+  /* Tabs and panel share one rounded surface; Glass has no square-cornered fills. */
+  .conversation-main > .conversation-tabs { margin: var(--space-2) var(--space-2) 0; border-radius: var(--radius-surface); }
+  .conversation-main.team-open > .conversation-tabs { border-radius: var(--glass-radius) var(--glass-radius) 0 0; }
+  .conversation-main > .team-panel { margin: 0 var(--space-2) var(--space-2); border-radius: 0 0 var(--glass-radius) var(--glass-radius); }
+}
 .team-needs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-block: var(--space-1); margin-block-end: var(--space-2); border-block: 1px solid var(--line-subtle); }
 .team-needs h3, .team-needs p { margin: 0; font-size: 13px; }
 .team-needs h3 { margin-right: var(--space-2); }
@@ -1891,14 +1909,19 @@ dialog form > *,
 .team-identity { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); }
 .team-identity h3 { font: 600 13px var(--font-mono); overflow-wrap: anywhere; margin: 0; }
 .team-model { color: var(--ink-mid); font: 12px var(--font-mono); overflow-wrap: anywhere; }
-.team-state { max-width: 100%; white-space: normal; }
+.team-state { max-width: 100%; min-height: 20px; white-space: normal; }
 .team-task { margin: 0; overflow-wrap: anywhere; line-height: 1.35; }
 .team-elapsed { margin: 0; font-family: var(--font-mono); white-space: nowrap; }
-.team-trail { grid-column: 1 / -1; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); padding: 0; margin: 0; color: var(--ink-mid); font-size: 12px; }
-.team-trail li { display: flex; align-items: center; gap: var(--space-1); }
-.team-trail li::before { content: ""; width: 7px; height: 7px; border: 1px solid currentColor; border-radius: var(--radius-pill); }
-.team-trail [data-reported="true"] { color: var(--state-ok); }
+/* The lane's figure: five receipts on one track. A filled mark has a recorded
+   receipt and a segment fills only between two of them, so nothing implies
+   progress the session did not report (cas-2d83). */
+.team-trail { grid-column: 1 / -1; list-style: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 0; margin: 2px 0 0; color: var(--ink-mid); font-size: 12px; }
+.team-trail li { position: relative; display: grid; justify-items: start; gap: 2px; line-height: 1.2; }
+.team-trail li::before { content: ""; position: relative; z-index: 1; box-sizing: border-box; width: 11px; height: 11px; border: 2px solid currentColor; border-radius: var(--radius-pill); background: var(--bg-raised); }
+.team-trail li:not(:last-child)::after { content: ""; position: absolute; top: 4.5px; left: 11px; right: 0; height: 2px; background: var(--line-strong); }
+.team-trail [data-reported="true"] { color: var(--state-ok); font-weight: var(--weight-semibold); }
 .team-trail [data-reported="true"]::before { background: currentColor; }
+.team-trail [data-reported="true"]:has(+ [data-reported="true"])::after { background: var(--state-ok); }
 @media (forced-colors: none) and (prefers-reduced-motion: no-preference) {
   .team-state--changed { animation: team-state-arrives 160ms ease-out; }
   @keyframes team-state-arrives { from { opacity: .55; transform: translateY(2px); } to { opacity: 1; transform: none; } }
@@ -1906,10 +1929,12 @@ dialog form > *,
 @media (max-width: 500px) {
   .team-panel { padding: var(--space-2) var(--space-3); }
   .team-panel .release-progress { margin-block: var(--space-2); }
-  .team-trail { gap: var(--space-1) var(--space-2); font-size: 11.5px; }
+  .team-trail { font-size: 11.5px; }
 }
 @media (forced-colors: active) {
   .team-trail [data-reported="true"]::before { forced-color-adjust: none; background: CanvasText; border-color: CanvasText; }
+  .team-trail li:not(:last-child)::after { forced-color-adjust: none; background: GrayText; }
+  .team-trail [data-reported="true"]:has(+ [data-reported="true"])::after { background: CanvasText; }
   /* A transparent border is painted in a system color here, so the unselected tab would out-weigh the selected one. */
   .conversation-tabs [role="tab"] { border-bottom-color: Canvas; }
   .conversation-tabs [aria-selected="true"] { color: Highlight; border-bottom-color: Highlight; }
@@ -3364,7 +3389,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .release-progress h3 { margin: 0; font: var(--weight-medium) var(--fs-lg)/1.3 var(--font-display); overflow-wrap: anywhere; }
 .release-count { margin: var(--space-3) 0 var(--space-2); font-weight: var(--weight-semibold); }
 /* A hollow, outlined track: zero reads as empty, not as one solid full bar (cas-d640). */
-.release-progress progress { display: block; box-sizing: border-box; width: 100%; height: var(--space-2); appearance: none; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); overflow: hidden; background: transparent; color: var(--color-action); }
+.release-progress progress { display: block; box-sizing: border-box; width: 100%; height: var(--space-2); appearance: none; border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-pill); overflow: hidden; background: transparent; color: var(--color-action); }
 .release-progress progress::-webkit-progress-bar { background: transparent; }
 .release-progress progress::-webkit-progress-value { background: var(--color-action); }
 .release-progress progress::-moz-progress-bar { background: var(--color-action); }

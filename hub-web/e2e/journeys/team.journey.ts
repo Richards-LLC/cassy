@@ -27,12 +27,20 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await tab.focus(); await page.keyboard.press("ArrowRight");
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeFocused();
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
-        await expect(panel.getByRole("heading", { name: "Your team, at a glance." })).toBeVisible();
+        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 2 waiting, 1 parked. 1 needs you.");
+        expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
         // The whole team fits above the fold, and the release block has one home.
         const lastLane = await panel.locator(".team-lane").last().boundingBox();
         expect(lastLane!.y + lastLane!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
         await expect(page.locator(".conversation-context .release-progress")).toBeHidden();
+        if (width === 1280) {
+          // The rail stays a working control list, and the lanes out-weigh it.
+          const card = page.locator(".conversation-context .status-agent").first();
+          await expect(card.getByText("swift-lark-3", { exact: true })).toBeVisible();
+          await expect(card.getByRole("button", { name: /timeline/ })).toBeVisible();
+          expect((await card.boundingBox())!.height).toBeLessThan(lastLane!.height);
+        }
         await expect(panel).toContainText("3 of 8 merged");
         await expect(panel).toContainText("Build the Team view");
         await expect(panel.locator('.team-lane[data-worker="swift-lark-3"] .team-model')).toHaveText("codex · gpt-6.1");

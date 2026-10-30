@@ -517,10 +517,11 @@ html[data-scheme="dark"] {
 :root .conversation-group.project-card { border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-surface); background: var(--bg-raised); }
 :root .status-row { gap: var(--card-gap); margin-block-start: var(--card-gap); padding: var(--card-padding); }
 /* One lane, three rows: who and state; task and time; delivery trail. */
-:root .team-lane { grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-1) var(--space-3); align-items: center; margin-block-end: var(--card-gap); padding: var(--space-2) var(--card-padding); }
+:root .team-lane { grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px var(--space-3); align-items: center; margin-block-end: var(--card-gap); padding: var(--space-2) var(--card-padding); }
 :root .team-lane > .provider-avatar { grid-row: 1 / span 3; align-self: start; }
 :root .team-lane > .team-task { grid-column: 2; }
 :root .team-lane > .team-elapsed { grid-column: 3; justify-self: end; }
+:root .team-lane > .team-state { justify-self: end; }
 :root .team-lane > .team-trail { grid-column: 2 / -1; }
 @media (max-width: 500px) {
   :root .team-lane { row-gap: 2px; }

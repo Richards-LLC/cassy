@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
+- **Large deliveries resolve proof targets together** — Source and builtin
+  references now share one test-tree search per kind, keeping proof-surface
+  discovery within the close budget when many paths change.
 - **Parked delivery anchors stay on the branch** — Worker pushes refuse
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.

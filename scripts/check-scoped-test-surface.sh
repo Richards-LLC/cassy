@@ -74,30 +74,31 @@ resolve_test_target_name() {
     printf '%s\n' "$wanted"
 }
 
-# GitHub-hosted runners do not guarantee ripgrep. Resolve the search backend
-# once, then keep every test-surface search on either rg or tracked git files.
-if command -v rg >/dev/null 2>&1; then
-    grep_backend=rg
-else
-    grep_backend=git
-fi
+# Proof scope comes from committed Git paths. Keep the Git-only discovery
+# contract (cas-81bc): a host rg must not stall close before its main scan.
+grep_backend=git
 tracked_rust_test_paths=('cas-cli/tests/*.rs' 'cas-cli/tests/**/*.rs')
 
 run_test_path_search() {
-    local mode="$1"
+    local mode="$1" pattern
     shift
-    case "${grep_backend}:${mode}" in
-        rg:regex)
-            rg -l --glob '*.rs' "$@" -- cas-cli/tests
+    # One alternation lets Git compile a single regex instead of evaluating
+    # hundreds of separate -e patterns. Stdin keeps large deliveries clear of
+    # argv limits; fixed literals stay on separate lines for exact OR matching.
+    {
+        if [[ "$mode" == regex ]]; then
+            printf -v pattern '%s|' "$@"
+            printf '%s\n' "${pattern%|}"
+        else
+            printf '%s\n' "$@"
+        fi
+    } |
+    case "$mode" in
+        regex)
+            git grep --no-color -l -E -f - -- "${tracked_rust_test_paths[@]}"
             ;;
-        rg:fixed)
-            rg -l -F --glob '*.rs' -- "$1" cas-cli/tests
-            ;;
-        git:regex)
-            git grep -n -E "$@" -- "${tracked_rust_test_paths[@]}"
-            ;;
-        git:fixed)
-            git grep -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
+        fixed)
+            git grep --no-color -l -F -f - -- "${tracked_rust_test_paths[@]}"
             ;;
         *)
             return 2
@@ -110,9 +111,6 @@ search_test_paths() {
     shift
     if matches="$(run_test_path_search "$mode" "$@")"; then
         [[ -n "$matches" ]] || return 0
-        if [[ "$grep_backend" == git ]]; then
-            matches="$(sed -E 's/:[0-9]+:.*$//' <<<"$matches")"
-        fi
         printf '%s\n' "$matches" | sort -u
     else
         search_status=$?
@@ -368,82 +366,17 @@ source_module_path_for() {
     printf '%s\n' "${path//\//::}"
 }
 
-source_public_symbols_for() {
-    local source_file="$1"
-    # Keep the extractor deliberately Rust-shaped and conservative. `pub`,
-    # `pub(crate)`, and `pub(super)` declarations are the public surface an
-    # integration test can exercise; private unit helpers are not consumers.
-    sed -nE \
-        -e 's/^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]+(async[[:space:]]+)?fn[[:space:]]+([[:alnum:]_]+).*/\3/p' \
-        -e 's/^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]+(struct|enum|const|type)[[:space:]]+([[:alnum:]_]+).*/\3/p' \
-        "$source_file" | sort -u
-}
-
-discover_source_integration_targets() {
-    local source_path="$1" source_file module_path test_path symbol symbol_filter
-    local matched_paths search_status
-    local -a symbol_patterns=()
-    source_file="$repo_root/$source_path"
-    [[ -f "$source_file" ]] || return 0
-    module_path="$(source_module_path_for "$source_path")"
-
-    while IFS= read -r symbol; do
-        [[ -n "$symbol" ]] || continue
-        symbol_filter="$symbol"
-        [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
-        symbol_patterns+=(
-            -e
-            "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::${symbol_filter}([^[:alnum:]_]|$)"
-        )
-    done < <(source_public_symbols_for "$source_file")
-
+collect_source_search_patterns() {
     # Integration tests normally consume a service through its public parent
     # API rather than importing the private source module. Explicit `use` /
     # path references remain useful evidence for modules that are public in a
     # crate, and source-path literals are accepted only as an anchored path
-    # reference (not as arbitrary target-name text). Search the test tree once
-    # for each evidence class; per-symbol/per-file subprocesses made a large
-    # close diff needlessly expensive.
-    if matched_paths="$(search_test_paths regex \
-        -e "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_path}([[:space:];:{]|$)" \
-        -e "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::[[:alnum:]_]" \
-        -e "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${source_path}" \
-        2>/dev/null)"; then
-        :
-    else
-        search_status=$?
-        if [[ "$search_status" -ne 1 ]]; then
-            printf 'SCOPED PROOF SURFACE: source path discovery failed for %s (%s exit %s).\n' \
-                "$source_path" "$grep_backend" "$search_status" >&2
-            exit 2
-        fi
-        matched_paths=''
-    fi
-    while IFS= read -r test_path; do
-        [[ -n "$test_path" ]] || continue
-        add_required_test_target "$(test_target_for_path "$test_path")"
-    done <<<"$matched_paths"
-
-    # Public integration tests must reference the changed module or a
-    # qualified public symbol. Bare test-name collisions are not evidence that
-    # a test exercises the source module.
-    if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
-        if matched_paths="$(search_test_paths regex "${symbol_patterns[@]}" 2>/dev/null)"; then
-            :
-        else
-            search_status=$?
-            if [[ "$search_status" -ne 1 ]]; then
-                printf 'SCOPED PROOF SURFACE: source symbol discovery failed for %s (%s exit %s).\n' \
-                    "$source_path" "$grep_backend" "$search_status" >&2
-                exit 2
-            fi
-            matched_paths=''
-        fi
-        while IFS= read -r test_path; do
-            [[ -n "$test_path" ]] || continue
-            add_required_test_target "$(test_target_for_path "$test_path")"
-        done <<<"$matched_paths"
-    fi
+    # reference (not as arbitrary target-name text). Collect all changed source
+    # paths before searching: close needs their union, not a per-path mapping.
+    # Qualified-symbol patterns are already a subset of module::identifier;
+    # repeating them only bloats the regex for modules with large public APIs.
+    source_path_patterns+=("$1")
+    source_module_patterns+=("$2")
 }
 
 builtin_catalog_path_for() {
@@ -470,17 +403,19 @@ builtin_relative_path_for() {
     printf '%s\n' "$path"
 }
 
-discover_builtin_test_targets() {
-    local literal="$1" test_paths test_path target search_status
-    if test_paths="$(search_test_paths fixed "$literal" 2>/dev/null)"; then
+discover_test_targets() {
+    local mode="$1" test_paths test_path target search_status
+    shift
+    [[ $# -gt 0 ]] || return 0
+    if test_paths="$(search_test_paths "$mode" "$@" 2>/dev/null)"; then
         :
     else
         search_status=$?
         if [[ "$search_status" -eq 1 ]]; then
             test_paths=''
         else
-            printf 'SCOPED PROOF SURFACE: builtin path discovery failed for %s (%s exit %s).\n' \
-                "$literal" "$grep_backend" "$search_status" >&2
+            printf 'SCOPED PROOF SURFACE: %s discovery failed (%s exit %s).\n' \
+                "$mode" "$grep_backend" "$search_status" >&2
             exit 2
         fi
     fi
@@ -506,6 +441,8 @@ lib_filter_covers() {
 
 required_lib_modules=()
 required_test_targets=()
+source_path_patterns=()
+source_module_patterns=()
 while IFS= read -r path; do
     case "$path" in
         cas-cli/src/*.rs|cas-cli/src/*/*.rs|cas-cli/src/*/*/*.rs|cas-cli/src/*/*/*/*.rs|cas-cli/src/*/*/*/*/*.rs)
@@ -525,7 +462,7 @@ while IFS= read -r path; do
             if ! "$found_test_module"; then
                 required_lib_modules+=("$(source_module_name_for "$path")")
             fi
-            discover_source_integration_targets "$path"
+            collect_source_search_patterns "$path" "$module_path"
             ;;
         cas-cli/tests/*/*.rs)
             nested="${path#cas-cli/tests/}"
@@ -536,6 +473,18 @@ while IFS= read -r path; do
             ;;
     esac
 done < <(printf '%s\n' "${changed_paths[@]}")
+if [[ ${#source_module_patterns[@]} -gt 0 ]]; then
+    # Factor shared anchors around the path union instead of repeating the
+    # complete expression per path. This reduces regex compiler overhead.
+    printf -v module_alternation '%s|' "${source_module_patterns[@]}"
+    printf -v path_alternation '%s|' "${source_path_patterns[@]}"
+    module_alternation="(${module_alternation%|})"
+    path_alternation="(${path_alternation%|})"
+    discover_test_targets regex \
+        "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_alternation}([[:space:];:{]|$)" \
+        "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_alternation}::[[:alnum:]_]" \
+        "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${path_alternation}"
+fi
 
 # These guardrails are file-class contracts, not optional path discoveries:
 # an integration-test source must remain readable in nextest archives, and a
@@ -558,6 +507,7 @@ done < <(printf '%s\n' "${changed_paths[@]}")
 # size/phrase tests coupled to the files they read without maintaining a
 # hand-written path-to-test table. Search both source-shaped and installed
 # catalog-shaped spellings because tests use both forms.
+builtin_search_literals=()
 while IFS= read -r path; do
     is_builtin_skill_or_agent_path "$path" || continue
     add_required_test_target builtin_flavor_drift_test
@@ -576,10 +526,11 @@ while IFS= read -r path; do
     esac
     relative="$(builtin_relative_path_for "$path")"
     catalog_path="$(builtin_catalog_path_for "$relative")"
-    discover_builtin_test_targets "$path"
+    builtin_search_literals+=("$path")
     [[ -n "$catalog_path" ]] || continue
-    discover_builtin_test_targets "$catalog_path"
+    builtin_search_literals+=("$catalog_path")
 done < <(printf '%s\n' "${changed_paths[@]}")
+discover_test_targets fixed "${builtin_search_literals[@]}"
 
 missing=()
 if [[ "$resolve_targets" == true ]]; then

@@ -10,4 +10,20 @@
 
 ## Critique
 
-Pending terminal capture against the named candidate.
+terminal-qa: PASS artifact-publish-manifest-failure · 12 runs · 0 fail · 0 warn · 0 allowed
+
+Captured candidate `14cee1d6a` against a short-lived loopback fixture returning
+403 for the manifest PUT after a valid QA archive was prepared. The real CLI
+retains local status and the upload error while naming the bundle as not
+portable. No external Cloud service or operator credentials are involved.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The first line names the QA warning; the next lines preserve the local storage verdict. |
+| Fit | 4 | Existing rows and the artifact-show remedy remain; no extra mode or flag is needed. |
+| Craft | 5 | Human captures are at most 76 cells across 80- and 120-column runs, with no split tokens. |
+| Theme safety | 5 | Four palettes, NO_COLOR and C locale pass without relying on colour. |
+| Machine contract | 5 | One JSON document preserves upload_failed and adds the portability error; original 403 detail remains. |
+
+The offline companion-error control also passes the same 12-run gate. Reports
+and command captures are retained with the task's published proof artifact.

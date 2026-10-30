@@ -617,7 +617,13 @@ impl LoginSignals {
             match receive.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(answer) => {
                     self.check()?;
-                    return Ok(answer?);
+                    let answer = answer?;
+                    if answer.is_empty() {
+                        // EOF does not echo Enter, so end the question before
+                        // the caller prints its cancellation notice.
+                        eprintln!();
+                    }
+                    return Ok(answer);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(error) => return Err(error.into()),
@@ -977,6 +983,11 @@ mod tests {
             drop(input);
             let signals = LoginSignals::enter().unwrap();
             assert_eq!(signals.answer().unwrap().trim(), "y");
+            // EOF does not echo Enter: the following cancellation must
+            // begin on a new line after the still-open question.
+            eprint!("EOF question: ");
+            assert!(signals.answer().unwrap().is_empty());
+            eprintln!("EOF cancelled");
             return;
         }
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -999,6 +1010,8 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("EOF question: \nEOF cancelled\n"),
+            "EOF must end the question line: {:?}", String::from_utf8_lossy(&output.stderr));
     }
 
     // Historical layouts from independent QA's qa_legacy_split.py. These

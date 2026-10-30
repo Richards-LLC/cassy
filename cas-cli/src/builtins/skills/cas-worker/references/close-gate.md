@@ -47,7 +47,7 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
    unread supervisor messages and re-read the task before corrective edits.
 2. Capture the current tip: `git rev-parse factory/<name>` (use your per-task
    branch if active). Check `git merge-base --is-ancestor <delivered-tip> <target-tip>`.
-   If already merged or closed, re-close or stop rather than amend stale state.
+   If already merged or closed, stop and await the verdict rather than amend stale state.
 3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
    merge with its branch and SHA. Push only with explicit supervisor authorization.
    Otherwise push the delivered branch, then send `merge_request=true` with the

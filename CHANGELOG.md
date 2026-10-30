@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merge completion guidance
+
+- **Parked workers wait for the merge verdict** — Recycle briefs, merge alerts
+  and supervisor references consistently let verification close a merged task or
+  return findings, without requesting another close from a worker or supervisor.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.

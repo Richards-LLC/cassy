@@ -313,7 +313,7 @@ end-of-lane, once the worker is done with that worktree.
    not the implementer, on the taste recipe:
    `factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
    Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
-   `git merge factory/<worker>`, and the re-close all refuse until then. A rejection sends the
+   `git merge factory/<worker>`, and task close all refuse until then. A rejection sends the
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
    `verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `verification action=qa_status task_id=<task-id>`.
@@ -395,13 +395,13 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
 
 - Workers set status to blocked and add a blocker note
 - Help resolve or reassign the task
-- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After a worker's close, verify it stayed closed before proceeding — a stale `status=blocked` update can overwrite the close. If a closed task comes back, note the race on the task and message the worker to re-close.
+- **Reopened task:** Read its current state and findings before acting; the merge verdict owns completion.
 - **Stale outbox replays:** Workers may send duplicate stale messages due to outbox replay. Before acting on a blocker notification or status change, check the task's current state with `task action=show` — the message may be outdated.
 
 **Multiple workers complete simultaneously:**
 
 - Merge each parked lane (`worktree_merge`) in one response turn
-- Message each worker to re-close its own task
+- Let each merge verdict close the task or return findings
 - Apply the closure pass before reassigning workers
 
 ### Supervisor-run fixture scripts

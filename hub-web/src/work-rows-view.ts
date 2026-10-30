@@ -75,7 +75,7 @@ function changedFiles(document: Document, event: WorkEvent, context: WorkRowsCon
   const list = document.createElement("ul"); list.className = "changed-files-list";
   list.id = `changed-files-${domId(event.id)}`; toggle.setAttribute("aria-controls", list.id);
   for (const file of facts.files) {
-    const item = document.createElement("li");
+    const item = document.createElement("li"); item.className = "changed-file";
     const fileKey = `change:${workTurnKey(event)}:${file.path}`;
     const open = context.isOpen(fileKey);
     const button = document.createElement("button"); button.type = "button"; button.className = "changed-file-toggle work-row-toggle";

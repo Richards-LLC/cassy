@@ -831,6 +831,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
 8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
 9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
+10. Inspect tool-reported edits — the latest cumulative file list appears once per turn; open a path for its recorded unified diff or exact source detail. Card and file expansion survive reload, paths wrap at 390px, and the summary makes no Git or line-count claim.
 
 #### Expected experience
 

@@ -3246,7 +3246,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .changed-files .work-row-toggle { width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-card); color: var(--ink); }
 .changed-files-note { margin: 0; padding: 0 var(--space-3) var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .changed-files-list { list-style: none; padding: 0; margin: 0; }
-.changed-files-list > li { min-width: 0; border-top: 1px solid var(--line-subtle); }
+.changed-file { min-width: 0; border-top: 1px solid var(--line-subtle); }
 .changed-file-path { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-xs); }
 .changed-file-operation { flex: none; color: var(--ink-mid); font-size: var(--fs-xs); }
 .changed-file-detail.work-detail { margin: 0 var(--space-2) var(--space-2); max-width: 100%; }

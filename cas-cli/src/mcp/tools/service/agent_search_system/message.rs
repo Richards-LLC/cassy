@@ -6649,8 +6649,8 @@ mod cas_89e1_post_merge_message_type_tests {
         ));
         service.message_send(ready).await.expect("ready message is queued");
         let task = tasks.get("cas-fc42-test").expect("task");
-        assert!(crate::ui::factory::director::delivery_marked_ready(&task, tip), "{}", task.notes);
-        assert!(!crate::ui::factory::director::delivery_marked_ready(
+        assert!(crate::ui::factory::delivery_marked_ready(&task, tip), "{}", task.notes);
+        assert!(!crate::ui::factory::delivery_marked_ready(
             &task,
             "abcdef1299999990abcdef1234567890abcdef12"
         ));

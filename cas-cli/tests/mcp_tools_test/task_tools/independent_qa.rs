@@ -1650,12 +1650,16 @@ async fn cas_81937_qa_waiver_binds_to_current_repark_after_handoff() {
     let mut task = tasks.get(&task_id).unwrap();
     task.assignee = Some(current_id);
     task.status = TaskStatus::AwaitingMerge;
-    task.deliverables.record_handoff_branch(retired_branch);
-    task.deliverables
-        .historical_factory_branch_anchors
-        .push(retired_head.clone());
-    task.deliverables.parked_branch = Some(current_branch.to_string());
-    task.deliverables.factory_branch_anchor = Some(current_head.clone());
+    task.deliverables.record_park(
+        Some(retired_branch),
+        Some(&retired_head),
+        Some("bold-sparrow-35"),
+    );
+    task.deliverables.record_park(
+        Some(current_branch),
+        Some(&current_head),
+        Some(current_name),
+    );
     tasks.update(&task).unwrap();
 
     let service = CasService::new(supervisor_core(&cas_dir), None);
@@ -1685,7 +1689,10 @@ async fn cas_81937_qa_waiver_binds_to_current_repark_after_handoff() {
     assert_eq!(waiver.bound_head, current_head);
     let after = tasks.get(&task_id).unwrap();
     assert_eq!(after.deliverables.parked_branch.as_deref(), Some(current_branch));
-    assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(current_head.as_str()));
+    assert_eq!(
+        after.deliverables.factory_branch_anchor.as_deref(),
+        Some(current_head.as_str())
+    );
     assert_eq!(after.deliverables.handoff_branches, vec![retired_branch]);
     assert_eq!(after.deliverables.historical_factory_branch_anchors, vec![retired_head]);
 }

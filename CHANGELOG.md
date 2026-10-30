@@ -12,7 +12,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Registry repairs retain ownership and regression checks** — Fixing a base
   duplicate evaluates the delivered registry and compares every old case variant.
   Registry escape notes cannot bypass the case gate; duplicates still present in
-  the delivery refuse with a named error.
+  the delivery refuse with a named error. Unavailable Git inputs retain their
+  existing nonblocking warning.
 
 ### Fixed — Parked delivery attribution
 
@@ -31,12 +32,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Multiplication stays arithmetic in shell arguments** — Workspace checks
   keep arithmetic operators out of filesystem resolution while still checking
   nested command substitutions and refusing unresolved effects.
-
-### Fixed — Duplicate baseline bug-family keys
-
-- **Malformed base registries refuse case checks** — A duplicate bug-family key
-  now names the key and file in a registry error instead of skipping the gate.
-  Unavailable Git inputs retain their existing nonblocking warning.
 
 ### Fixed — Factory cleanup feedback
 

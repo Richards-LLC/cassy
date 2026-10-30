@@ -19,7 +19,7 @@ No new status panel or release polling: reuse fingerprinted Factory MCP version 
 
 design: hub-web/DESIGN.md@97d9f6b70
 
-LocalSessionReadModel owns a short-lived per-project snapshot from factory_binary_skew. HubSession exposes optional running MCP and installed versions; the browser derives badge state without mutable duplicate state. Conversation rows own rendering and accessible naming. Existing mono-xs, ink-mid, state-warn, space-1 and inline-radius tokens style the badge. No motion or new network request. Unknown, ambiguous, dormant, ended and offline observations do not claim a version. Numeric comparison reuses machine-version's stable-release comparison.
+LocalSessionReadModel owns a short-lived per-project snapshot from factory_binary_skew. HubSession exposes optional running MCP and installed versions; the browser derives badge state without mutable duplicate state. Conversation rows own rendering and accessible naming. Existing mono-xs, ink-mid, state-warn, space-1 and radius-card tokens style the badge. No motion or new network request. Unknown, ambiguous, dormant, ended and offline observations do not claim a version. Numeric comparison reuses machine-version's stable-release comparison.
 
 Acceptance: one table-style row-rendering unit test for current/stale/unknown/offline states, one extension of HUB-J3's existing machine-version journey for Linux/Claude and macOS/Codex session observations, backend projection evidence, typecheck, affected journeys, candidate-backed before/after capture and visual critique. No new dependency or image; generated assets stay outside the commit.
 

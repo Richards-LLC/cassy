@@ -23,6 +23,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   examples use the CSP-safe `showRecordingChapter` helper. The native upload
   journey records its chapter and waits for it only when recording is enabled.
 
+### Fixed — Artifact publishing
+
+- **TypeScript source artifacts record the text MIME type** — Was: `.ts` and
+  `.tsx` sources were recorded as unknown binary data. → Now: the CLI records
+  plain text and preserves the video type for actual MPEG-TS packet data.
+  Cloud uploads can still return 403 until the separate presign fix ships
+  ([Cloud #258](https://github.com/Richards-LLC/petra-stella-cloud/issues/258)).
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

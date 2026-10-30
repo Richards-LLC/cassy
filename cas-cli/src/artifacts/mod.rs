@@ -311,8 +311,9 @@ pub fn digest_file(path: &Path) -> Result<(String, u64), PublishError> {
     Ok((format!("{:x}", hasher.finalize()), size_bytes))
 }
 
-/// Media type from the file extension. Unknown extensions get the honest
-/// `application/octet-stream` rather than a guess.
+/// Media type from the file extension. Ambiguous TypeScript extensions use
+/// text unless their bytes have MPEG-TS framing. Unknown extensions get the
+/// honest `application/octet-stream` rather than a guess.
 pub fn mime_for(path: &Path) -> String {
     let extension = path
         .extension()
@@ -324,6 +325,18 @@ pub fn mime_for(path: &Path) -> String {
         "html" | "htm" => "text/html",
         "md" | "markdown" => "text/markdown",
         "txt" | "log" => "text/plain",
+        "ts" | "tsx" => {
+            // A lone 0x47 is also ASCII G in valid TypeScript. Require two
+            // complete 188-byte transport packets with repeated sync bytes.
+            const PACKET_BYTES: usize = 188;
+            let mut prefix = [0u8; PACKET_BYTES * 2];
+            let framed = File::open(path)
+                .and_then(|mut file| file.read_exact(&mut prefix))
+                .is_ok()
+                && prefix[0] == 0x47
+                && prefix[PACKET_BYTES] == 0x47;
+            if framed { "video/mp2t" } else { "text/plain" }
+        }
         "json" => "application/json",
         "jsonl" | "ndjson" => "application/x-ndjson",
         "csv" => "text/csv",
@@ -849,6 +862,29 @@ mod tests {
             "an unknown extension must not be guessed into something renderable"
         );
         assert_eq!(mime_for(Path::new("a/noext")), "application/octet-stream");
+    }
+
+    #[test]
+    fn typescript_sources_publish_as_text_while_transport_streams_remain_video() {
+        let f = fixture();
+        let mut transport_stream = vec![0xff; 188 * 2];
+        for packet in transport_stream.chunks_exact_mut(188) {
+            // Two valid null packets: sync, null PID, payload-only header.
+            packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        }
+        for (name, bytes, expected) in [
+            ("probe.ts", b"export const probe = true;\n".as_slice(), "text/plain"),
+            ("component.TSX", b"export const View = () => <div />;\n".as_slice(), "text/plain"),
+            // ASCII G is also 0x47, but source is not a transport stream.
+            ("graph.ts", b"Graph.render();\n".as_slice(), "text/plain"),
+            ("recording.ts", transport_stream.as_slice(), "video/mp2t"),
+        ] {
+            let file = f.task_dir.join(name);
+            fs::write(&file, bytes).unwrap();
+            let outcome = publish(&f.context(), &file).unwrap();
+            assert_eq!(outcome.artifact.mime, expected, "{name}");
+            assert_eq!(f.store.get(&outcome.artifact.id).unwrap().unwrap().mime, expected, "{name}");
+        }
     }
 
     #[tokio::test]

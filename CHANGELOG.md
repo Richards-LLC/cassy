@@ -11,6 +11,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **A cancelled code run no longer reads as pending forever** — Was: when a docs push cancelled the code commit's lane run, `worktree_merge` refused with "CI PENDING", though that run could never finish. → Now: once the tip's run is green, the code commit's cancelled and lingering jobs are set aside. A passed code check admits the merge, and with none it needs the docs-only override, because a docs tip validates no code. A job still running in a live run stays refused.
 
+### Fixed — Browser tier guard
+
+- **Tab-stripped heredocs pass the workspace guard again** — Was: any `<<-` heredoc, even a quoted literal one, was denied as an unresolved shell payload. → Now: the guard keeps `<<-` together when it compares delimiters, so these heredocs are judged like any other.
+- **`playwright test --help` is allowed for workers and QA** — Was: the browser tier guard denied this read-only command as an unfiltered suite run. → Now: `test --help` and `test -h` pass when help is the only argument. A later `--help` is still denied, because it can be another option's value and the whole suite would run.
+
 ### Fixed — Hub pin safety
 
 - **The hub pin refuses agents, partial installs and a stale update** — Was: only a hook stopped a worker running `scripts/hub-pin.sh`; the installed copy could start `install` and stop partway without its drop-ins; and `cas update` could overwrite a rollback that finished just before it took the pin lock. → Now: the script refuses every factory agent role except an operator command in a supervisor pane, `install` says to run from a checkout before changing anything, and the update checks the pin again under the lock.

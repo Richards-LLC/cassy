@@ -181,7 +181,7 @@ pub(super) fn analyze(
             .iter()
             .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
             .filter(|path| {
-                journey_input(registry, path)
+                journey_input(path)
                     && !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
             })
             .collect::<Vec<_>>();

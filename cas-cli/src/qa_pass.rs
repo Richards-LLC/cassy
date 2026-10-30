@@ -68,11 +68,11 @@ pub fn is_non_surface_path(path: &str) -> bool {
 /// a checker, not a product surface: `scripts/visual-qa-fixtures/clip-box.html`
 /// matched `**/*.html` and gated cas-0d16 behind a QA bundle and an
 /// independent round. Only directory segments count, never the file name.
-fn fixture_directory(lower: &str) -> bool {
+pub(crate) fn fixture_directory(lower: &str) -> bool {
     let mut segments: Vec<&str> = lower.split('/').collect();
     segments.pop();
     segments.iter().any(|segment| {
-        matches!(*segment, "__fixtures__" | "fixture" | "__mocks__")
+        matches!(*segment, "fixtures" | "__fixtures__" | "fixture" | "__mocks__")
             || segment.ends_with("-fixtures")
             || segment.ends_with("_fixtures")
     })

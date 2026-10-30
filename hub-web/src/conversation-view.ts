@@ -511,6 +511,7 @@ export class ConversationView {
   private disposed = false;
   private updateRequest?: object;
   private resize?: ResizeObserver;
+  private contentChanges?: MutationObserver;
   private phase?: PhaseLine;
   private phaseClock?: ReturnType<typeof setInterval>;
 
@@ -589,29 +590,40 @@ export class ConversationView {
     // Browser pinning/focus recovery also emits scroll. Only a reading gesture
     // may start an older network request; explicit Load earlier works as well.
     this.element.addEventListener("wheel", event => {
-      this.earlierIntent = event.deltaY < 0;
+      this.noteEarlierIntent(event.deltaY < 0);
       if (this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)) this.scrollWindow(true);
     }, { passive: true });
-    this.element.addEventListener("keydown", event => { this.earlierIntent = ["ArrowUp", "PageUp", "Home"].includes(event.key); });
+    this.element.addEventListener("keydown", event => {
+      this.noteEarlierIntent(["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey));
+    });
+    this.element.addEventListener("pointerdown", event => {
+      // A scrollbar drag is reading intent too. Clicks on thread content
+      // keep following; only the scrollbar gutter belongs to this control.
+      const rect = this.element.getBoundingClientRect();
+      if (event.target === this.element && event.clientX >= rect.left + this.element.clientLeft + this.element.clientWidth) this.noteEarlierIntent(true);
+    });
     let touchY: number | undefined;
     this.element.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY; }, { passive: true });
     this.element.addEventListener("touchmove", event => {
       const next = event.touches[0]?.clientY;
-      if (next !== undefined && touchY !== undefined) this.earlierIntent = next > touchY;
+      if (next !== undefined && touchY !== undefined) this.noteEarlierIntent(next > touchY);
       touchY = next;
     }, { passive: true });
     this.element.addEventListener("scroll", () => {
-      // cas-6a9b: a scroll that moved the thread up and off its tail is the
-      // reader, whatever else is in flight. Layout never does that: a pin
-      // only moves down to the tail, content growing below leaves scrollTop
-      // where it was, and a box that shrank or clamped keeps the tail in
-      // view. Before this, a reader who scrolled up within the two frames
-      // after a pin was ignored and the pending re-pin took them back down,
-      // and one whose thread had grown unseen was read as layout and pinned.
+      // A preview can collapse (clamping scrollTop) and grow again before
+      // the queued scroll arrives. With changed geometry, the upward offset
+      // alone cannot identify a reader. Their input stops following before
+      // layout or a pending pin can obscure it; ordinary scrolls at stable
+      // geometry still claim the reading position (including scrollIntoView).
       this.pinDeferred = false;
       const scrollTop = this.element.scrollTop;
+      const height = this.element.clientHeight;
+      const contentHeight = this.element.scrollHeight;
+      const layoutChanged = (this.lastHeight !== undefined && height !== this.lastHeight)
+        || (this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight);
       const scrollingUp = scrollTop < this.scrolledTo;
-      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
+      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element)
+        && (!this.following || !layoutChanged);
       if (readerLeftTail) {
         this.following = false;
         this.jump.hidden = false;
@@ -628,7 +640,6 @@ export class ConversationView {
       // own scroll adjustment for that lands here before the resize observer
       // does. A scroll that comes with a height change is layout, not the
       // reader scrolling away: a thread following its tail keeps following.
-      const height = this.element.clientHeight;
       if (this.lastHeight !== undefined && height !== this.lastHeight) {
         this.lastHeight = height;
         if (this.following) { this.pin(); return; }
@@ -636,7 +647,6 @@ export class ConversationView {
       this.lastHeight = height;
       // A scroll that comes with a change of content height while following
       // is layout (content grew, the browser re-anchored), not the reader.
-      const contentHeight = this.element.scrollHeight;
       const grew = this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight;
       this.lastContentHeight = contentHeight;
       if (grew && this.following) { this.pin(); return; }
@@ -692,6 +702,13 @@ export class ConversationView {
       // scroll-anchoring nudge then read as the reader scrolling away.
       this.resize.observe(this.msgs);
     }
+    // Preview DOM changes can clamp and regrow the thread before either a
+    // scroll event or ResizeObserver delivery. Re-pin in their microtask,
+    // while explicit reading intent has already released following.
+    this.contentChanges = new MutationObserver(() => {
+      if (!this.disposed && this.following) this.pin();
+    });
+    this.contentChanges.observe(this.msgs, { childList: true, subtree: true, attributes: true, characterData: true });
   }
 
   /** Mount and session-state callbacks share one presentation before paint.
@@ -827,6 +844,14 @@ export class ConversationView {
     if (first) this.element.scrollTop += first.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
     this.scrolledTo = this.element.scrollTop;
     this.notePlace();
+  }
+
+  /** Claim an upward reading gesture before the browser delivers its scroll. */
+  private noteEarlierIntent(up: boolean): void {
+    this.earlierIntent = up;
+    // Claim the reader's place before a pending pin or resize callback can
+    // run, even when the browser has not delivered their scroll event yet.
+    if (up && this.element.scrollTop > 0) this.following = false;
   }
 
   /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
@@ -1850,12 +1875,19 @@ export class ConversationView {
       if (this.disposed) return;
       // cas-c2cb: a reader who moved focus off the tail meanwhile stopped
       // following it; the frame-late re-pin leaves them where they went.
-      if (this.following) this.element.scrollTop = this.element.scrollHeight;
+      if (this.following) {
+        this.element.scrollTop = this.element.scrollHeight;
+        // Late preview layout can shrink this pin before another resize.
+        // Its queued scroll must compare against this position, not the
+        // synchronous pin's older offset and appear to be a reader's scroll.
+        this.scrolledTo = this.element.scrollTop;
+        this.lastContentHeight = this.element.scrollHeight;
+      }
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }
 
-  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
+  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.contentChanges?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */

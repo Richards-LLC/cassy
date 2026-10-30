@@ -3243,7 +3243,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
    rows a tap deeper. No new colour, no blur, no motion. */
 .thread .work-turn { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); margin: var(--space-1) 0; max-width: 100%; }
 .changed-files { width: 100%; min-width: 0; border: 1px solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-raised); color: var(--ink); }
-.changed-files .work-row-toggle { width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-control); color: var(--ink); }
+.changed-files .work-row-toggle { width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-card); color: var(--ink); }
 .changed-files-note { margin: 0; padding: 0 var(--space-3) var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .changed-files-list { list-style: none; padding: 0; margin: 0; }
 .changed-files-list > li { min-width: 0; border-top: 1px solid var(--line-subtle); }

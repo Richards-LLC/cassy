@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Conversation image inspection
+
+- **Inspect screenshots without leaving the conversation** — Image cards open a
+  viewer with zoom, pan and a gallery limited to that turn. Touch, mouse and
+  keyboard controls keep filenames and load failures visible; closing restores
+  keyboard focus and the reading position.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.

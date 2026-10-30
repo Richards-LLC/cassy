@@ -115,6 +115,7 @@
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/conversation-view.ts` - fenced source, native evidence/status tables and two-format copy.
 - `hub-web/src/code-frame.ts`, `hub-web/src/rich-syntax.ts` - reusable Copy/Wrap frame and bounded lazy source color.
 - `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - lazy evidence renderers.
+- `hub-web/src/image-viewer.ts`, `hub-web/src/image-viewer.css` - lazy image inspection dialog, turn gallery and pointer/keyboard controls; rationale in `hub-web/src/image-viewer.brief.md`.
 - `hub-web/src/accounts-panel.ts`, `hub-web/src/accounts-model.ts` - per-machine account ledger, confirmations and launch-choice invalidation.
 - `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs` - non-secret account projection and audited typed lifecycle routes.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth cache, durable phone input and recovery audits.

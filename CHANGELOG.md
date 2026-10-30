@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Turn edit summaries
+
+- **Inspect tool-reported edits per turn** — Commander groups the recorded file
+  paths beneath Show work. Open a file for its recorded unified diff or source
+  edit detail; disclosures stay expanded on this device. The summary reports
+  successful tool calls without inventing Git state or line counts.
+
 ### Fixed — Merge-readiness guidance
 
 - **Merge guidance points to readiness gates** — The supervisor's merge row now

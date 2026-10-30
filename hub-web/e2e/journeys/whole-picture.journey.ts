@@ -3,14 +3,14 @@ import { test, expect, journeyPart, type Journey } from "./journey";
 import { journeyStamp } from "./clock";
 import type { FleetWorld, Machine, WorkEventWire, WorkWorld } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
-import type { WorkTool, WorkLifecycle } from "../../src/work-events";
+import type { WorkTool, WorkLifecycle, WorkChangedFiles } from "../../src/work-events";
 
 // cas-ff22 (hub-web/whole-picture.brief.md): Show work puts the supervisor's
 // thinking, tool calls and task events between its replies, collapsed by
 // default, and each worker's timeline is a tap away in Tasks & progress.
 
 const WORKER = "swift-lark-3";
-const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> & { tool?: WorkTool; lifecycle?: WorkLifecycle } = {}): WorkEventWire =>
+const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> & { tool?: WorkTool; lifecycle?: WorkLifecycle; changed_files?: WorkChangedFiles } = {}): WorkEventWire =>
   ({ id, kind, session: PELICAN, agent: PELICAN, at: journeyStamp(offsetMs), label, has_detail: kind !== "task", ...extra });
 
 const work = (): WorkWorld => ({
@@ -47,6 +47,57 @@ async function openConversation(page: Page, journey: Journey): Promise<void> {
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
 }
+
+test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page, journey }) => {
+  const files = ["hub-web/src/work-rows-view.ts", "hub-web/src/very/long/nested/path/that/stays/readable/on/a/phone/source.ts"];
+  const edits = files.map((path, index) => event(`edit-${index}`, "tool", "Edited file", -160_000 + index, {
+    turn: "edit-turn", tool: { name: "Edit", operation: "edit", targets: [path] },
+    lifecycle: { id: `call-${index}`, stage: "end", outcome: "success" },
+    changed_files: { files: files.slice(0, index + 1).map((path, index) => ({ path, operation: "edit", source_event_id: `edit-${index}` })), provenance: "successful_tool_calls", complete: false },
+  }));
+  const patch = `--- a/${files[0]}\n+++ b/${files[0]}\n@@ -1 +1 @@\n-old summary\n+compact edit summary`;
+  const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, work: { [PELICAN]: { supervisor: PELICAN, events: edits, details: { "edit-0": patch, "edit-1": "Exact edit input and output <b>as text</b>" } } } });
+  const card = page.getByRole("region", { name: "Tool-reported edits" });
+  // A named section without a heading is still a region with an accessible name.
+  await journey.stage("Scan tool-reported edits without opening the tool log", async () => {
+    await openConversation(page, journey);
+    await page.locator("#conversation-show-work").click();
+    await expect(card).toHaveCount(1);
+    await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "false");
+    expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(0);
+    await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
+    const file = card.getByRole("button", { name: `${files[0]} edit`, exact: true });
+    await file.focus(); await page.keyboard.press("Enter");
+    await expect(file).toBeFocused();
+    await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
+    await expect(page.locator(".work-summary")).toHaveAttribute("aria-expanded", "false");
+    expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest").map(frame => (frame.body as { event_id: string }).event_id)).toEqual(["edit-0"]);
+  });
+  await journey.stage("A source without a unified diff stays exact and selectable", async () => {
+    await card.getByRole("button", { name: `${files[1]} edit`, exact: true }).click();
+    await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
+    await expect(card.locator("b")).toHaveCount(0);
+  });
+  for (const width of [1440, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await journey.stage(`Edit evidence fits ${width}px ${colorScheme}`, async () => {
+      await page.setViewportSize({ width, height: 844 });
+      await page.emulateMedia({ colorScheme });
+      await card.scrollIntoViewIfNeeded();
+      await expect(card).toBeVisible();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+      expect(overflow, "no phone-width overflow").toBe(false);
+      await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
+    });
+  }
+  await journey.stage("Reload preserves the card and file expansion on this device", async () => {
+    await page.reload();
+    const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
+    if (!(await send.isVisible())) await page.locator(".conversation-row").filter({ hasText: "cas-src" }).click();
+    await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "true");
+    await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
+    await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
+  });
+});
 
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`whole picture ${width} ${colorScheme} cas_ff22`, () => {

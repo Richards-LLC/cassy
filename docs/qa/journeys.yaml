@@ -2174,6 +2174,7 @@ journeys:
   - New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the
     earlier reply keeps its node
   - Read typed work scope — read, search, command and edit rows name their v2 scope; failures remain explicit, exact output stays readable, and live metadata updates preserve focus and expansion
+  - Inspect tool-reported edits — one newest cumulative file list per turn; a file opens its recorded unified diff or exact source event on demand, with card and file expansion restored after reload, and no invented line counts or Git claim
   - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
     only
   - Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the
@@ -2189,6 +2190,7 @@ journeys:
   - hub-web/src/work-picture.ts
   - hub-web/src/work-rows-view.ts
   - hub-web/src/work-rows.brief.md
+  - hub-web/src/changed-files.brief.md
   - hub-web/src/worker-timeline.ts
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-view.ts

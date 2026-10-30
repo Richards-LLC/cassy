@@ -42,7 +42,7 @@ export class WorkPicture {
   private readonly streams = new Map<string, WorkEventStream>();
   /** A live notice newer than the page currently being read. */
   private readonly invalidated = new Set<WorkEventStream>();
-  private readonly open = new Set<string>();
+  private readonly open = new Map<string, boolean>();
   private show: boolean;
   private thread: Watch | undefined;
   private timeline: Watch | undefined;
@@ -130,14 +130,26 @@ export class WorkPicture {
   rows(machineId: string, session: string, agent?: string): WorkRowsContext {
     const stream = this.stream(machineId, session, agent);
     const prefix = streamKey(machineId, session, agent);
+    const savedKey = (key: string): string | undefined => key.startsWith("changes:") || key.startsWith("change:")
+      ? `commander.workDisclosure:${JSON.stringify([prefix, key])}` : undefined;
     return {
       detail: (eventId) => stream.detail(eventId),
       requestDetail: (eventId) => {
         if (stream.detail(eventId)?.state === "loading") return;
         stream.requested(this.deps.transport(machineId)?.requestWorkEventDetail(session, eventId), { detail: eventId });
       },
-      isOpen: (key) => this.open.has(`${prefix}\u0000${key}`),
-      setOpen: (key, open) => { if (open) this.open.add(`${prefix}\u0000${key}`); else this.open.delete(`${prefix}\u0000${key}`); },
+      isOpen: (key) => {
+        const current = this.open.get(`${prefix}\u0000${key}`);
+        if (current !== undefined) return current;
+        const saved = savedKey(key);
+        try { if (saved && this.deps.storage?.getItem(saved) === "1") return true; } catch { /* storage unavailable */ }
+        return false;
+      },
+      setOpen: (key, open) => {
+        this.open.set(`${prefix}\u0000${key}`, open);
+        const saved = savedKey(key);
+        try { if (saved) this.deps.storage?.setItem(saved, open ? "1" : "0"); } catch { /* this visit only */ }
+      },
     };
   }
 

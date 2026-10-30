@@ -6,8 +6,10 @@
  * Every string here that came from an agent (labels, thinking, tool input
  * and output) is set as `textContent`. Nothing is parsed as markup.
  */
-import { clockLabel, type ThreadWork } from "./thread-model";
+import { clockLabel, workTurnKey, type ThreadWork } from "./thread-model";
 import { rowText, taskChip, turnNotice, workFailed, workSummary, type DetailState, type WorkEvent } from "./work-events";
+import { unifiedDiff } from "./rich-diff";
+import "./rich-content.css";
 
 export interface WorkRowsContext {
   /** The loaded detail of one event, if it was asked for. */
@@ -31,11 +33,94 @@ export function workSignature(item: ThreadWork, context: WorkRowsContext): strin
   return JSON.stringify([
     open,
     context.isOpen(`turns:${item.key}`),
+    item.changedFiles?.map(event => [event.changed_files, context.isOpen(`changes:${workTurnKey(event)}`),
+      event.changed_files!.files.map(file => [context.isOpen(`change:${workTurnKey(event)}:${file.path}`), context.detail(file.source_event_id)])]),
     item.events.map((event) => [
       event.id, event.label, event.error, event.hasDetail, event.tool, event.lifecycle,
       open && context.isOpen(`row:${event.id}`) ? context.detail(event.id) ?? null : null,
     ]),
   ]);
+}
+
+/** Only a recorded unified section naming this file is a file diff. */
+function fileDiff(text: string, path: string): string | undefined {
+  const headers = [...text.matchAll(/^--- (.+)\r?\n\+\+\+ (.+)\r?\n(?=@@ -\d)/gm)];
+  const names = (header: string): string[] => {
+    const name = header.replace(/\r$/, "").split("\t")[0]!;
+    return [name, name.replace(/^[ab]\//, "")];
+  };
+  for (let index = 0; index < headers.length; index++) {
+    const match = headers[index]!;
+    if (![...names(match[1]!), ...names(match[2]!)].includes(path)) continue;
+    return text.slice(match.index, headers[index + 1]?.index).split("\ndiff --git ")[0];
+  }
+  return undefined;
+}
+
+/** The provenance is deliberately visible: these facts never claim Git state. */
+function changedFiles(document: Document, event: WorkEvent, context: WorkRowsContext, repaint: (key: string) => void): HTMLElement {
+  const facts = event.changed_files!;
+  const key = `changes:${workTurnKey(event)}`;
+  const card = document.createElement("section"); card.className = "changed-files";
+  card.setAttribute("aria-label", "Tool-reported edits");
+  const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "changed-files-toggle work-row-toggle";
+  toggle.dataset.focusKey = key; toggle.setAttribute("aria-expanded", String(context.isOpen(key)));
+  toggle.insertAdjacentHTML("afterbegin", CHEVRON);
+  toggle.append(`Tool-reported edits · ${facts.files.length} file${facts.files.length === 1 ? "" : "s"}`);
+  toggle.onclick = () => { context.setOpen(key, !context.isOpen(key)); repaint(key); };
+  card.append(toggle);
+  if (!context.isOpen(key)) return card;
+  const note = document.createElement("p"); note.className = "changed-files-note";
+  note.textContent = facts.provenance === "successful_tool_calls" ? "Successful edit calls. Other changes may be unreported." : `Reported by ${facts.provenance}.`;
+  const list = document.createElement("ul"); list.className = "changed-files-list";
+  list.id = `changed-files-${domId(event.id)}`; toggle.setAttribute("aria-controls", list.id);
+  for (const file of facts.files) {
+    const item = document.createElement("li");
+    const fileKey = `change:${workTurnKey(event)}:${file.path}`;
+    const open = context.isOpen(fileKey);
+    const button = document.createElement("button"); button.type = "button"; button.className = "changed-file-toggle work-row-toggle";
+    button.dataset.focusKey = fileKey; button.setAttribute("aria-expanded", String(open));
+    button.insertAdjacentHTML("afterbegin", CHEVRON);
+    const path = document.createElement("span"); path.className = "changed-file-path"; path.textContent = file.path;
+    const operation = document.createElement("span"); operation.className = "changed-file-operation"; operation.textContent = file.operation;
+    button.append(path, operation);
+    button.onclick = () => { context.setOpen(fileKey, !context.isOpen(fileKey)); repaint(fileKey); };
+    item.append(button);
+    if (open) {
+      const detail = document.createElement("div"); detail.className = "work-detail changed-file-detail";
+      detail.id = `changed-file-${domId(event.id)}-${facts.files.indexOf(file)}`; button.setAttribute("aria-controls", detail.id);
+      detail.tabIndex = 0; detail.dataset.focusKey = `detail:${fileKey}`;
+      const state = context.detail(file.source_event_id);
+      if (!state) context.requestDetail(file.source_event_id);
+      if (!state || state.state === "loading") { detail.textContent = "Loading source edit…"; detail.setAttribute("aria-busy", "true"); }
+      else if (state.state === "gone") detail.textContent = "This source edit is no longer on the machine.";
+      else if (state.state === "failed") {
+        const message = document.createElement("p"); message.textContent = `Could not load source edit: ${state.reason}`;
+        const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry source edit";
+        retry.dataset.focusKey = `retry:${fileKey}`;
+        retry.onclick = () => { context.requestDetail(file.source_event_id); repaint(retry.dataset.focusKey!); };
+        detail.append(message, retry);
+      } else {
+        const patch = fileDiff(state.text, file.path);
+        const diff = patch ? unifiedDiff(document, patch) : undefined;
+        if (diff) {
+          const disclosure = diff.querySelector("details");
+          if (disclosure) disclosure.open = true;
+          detail.append(diff);
+        }
+        else {
+          const label = document.createElement("p"); label.className = "work-detail-label"; label.textContent = "Source edit · no recorded unified diff";
+          const source = document.createElement("pre"); source.className = "work-record"; source.textContent = state.text;
+          detail.append(label, source);
+        }
+        if (state.truncated) { const cut = document.createElement("p"); cut.className = "work-detail-limit"; cut.textContent = "…source detail cut at 16 KB"; detail.append(cut); }
+      }
+      item.append(detail);
+    }
+    list.append(item);
+  }
+  card.append(note, list);
+  return card;
 }
 
 /** Typed scope comes from protocol facts; the original detail is never reparsed. */
@@ -217,6 +302,7 @@ export function renderWork(node: HTMLElement, item: ThreadWork, context: WorkRow
   const children: HTMLElement[] = [summary];
   const chipList = chips(document, item.events);
   if (chipList) children.push(chipList);
+  for (const event of item.changedFiles ?? []) children.push(changedFiles(document, event, context, repaint));
   if (open) {
     const rows = workRows(document, item.events, context, repaint, { noticesKey: `turns:${item.key}` });
     rows.id = `work-rows-${domId(item.key)}`;

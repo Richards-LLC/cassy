@@ -61,7 +61,12 @@ export interface ThreadWorking { type: "working"; key: string }
  * (cas-ff22): its thinking, tool calls and task events, oldest first.
  * Keyed by its first event, so events appended to it repaint this one node.
  */
-export interface ThreadWork { type: "work"; key: string; events: WorkEvent[] }
+export interface ThreadWork { type: "work"; key: string; events: WorkEvent[]; changedFiles?: WorkEvent[] }
+
+/** A transcript turn's identity is scoped to its session and maker. */
+export function workTurnKey(event: WorkEvent): string {
+  return JSON.stringify([event.session, event.agent ?? "", event.turn]);
+}
 
 export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking | ThreadWork;
 
@@ -321,6 +326,20 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
   });
   if (events.length > 0) flushWork(undefined);
   closeGroup();
+  // A turn can span several replies/work blocks. Its newest cumulative
+  // snapshot belongs once, beneath its latest visible block, not once per call.
+  const changes = new Map<string, { snapshot?: WorkEvent; owner: ThreadWork }>();
+  for (const item of items) {
+    if (item.type !== "work") continue;
+    item.changedFiles = [];
+    for (const event of item.events) {
+      if (!event.turn) continue;
+      const key = workTurnKey(event);
+      const snapshot = event.changed_files ? event : changes.get(key)?.snapshot;
+      changes.set(key, { snapshot, owner: item });
+    }
+  }
+  for (const { snapshot, owner } of changes.values()) if (snapshot?.changed_files?.files.length) owner.changedFiles!.push(snapshot);
   // An empty durable page owns the empty state. Do not let pagination or a
   // transient working signal turn it into a fake history marker/thread.
   if (events.length > 0) {

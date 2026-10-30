@@ -4937,6 +4937,7 @@ async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
     assert_eq!((status, &body["auto_delete"]), (StatusCode::OK, &serde_json::json!("after_use")), "{body}");
     let saved = fixture._temp.path().join("creds/project/DEPLOY_KEY");
     let reply = fixture.queued().into_iter().find(|row| row.target == "supervisor" && row.prompt.contains("DEPLOY_KEY")).unwrap();
+    // pin: the supervisor learns from this reply that its own answer deletes the file.
     assert!(reply.prompt.contains("deleted once you confirm"), "{}", reply.prompt);
     assert!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, chosen).unwrap().is_empty(), "the request id is not the reply");
     assert_eq!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, reply.id).unwrap(), ["DEPLOY_KEY"]);

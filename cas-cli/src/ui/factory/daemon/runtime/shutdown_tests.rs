@@ -1301,11 +1301,24 @@ async fn restart_supervisor_keeps_workers_and_a_plain_exit_still_stops_the_facto
         worker_cli: cas_mux::SupervisorCli::Claude,
         model: None,
         effort: None,
-        teams: None,
+        teams: Some(cas_mux::TeamsSpawnConfig {
+            team_name: SESSION.into(),
+            agent_id: format!("supervisor@{SESSION}"),
+            agent_name: "supervisor".into(),
+            agent_color: "green".into(),
+            agent_type: "team-lead".into(),
+            parent_session_id: None,
+            lead_session_id: Some("first-lead".into()),
+            settings_path: None,
+        }),
     };
     daemon.app.mux.set_supervisor_launch(launch.clone());
     assert!(daemon.app.mux.restart_supervisor(&[], None).unwrap().is_none());
     let first_pid = daemon.app.mux.pane_process_group_id(&supervisor).unwrap();
+    let team = super::teams::TeamsManager::new(SESSION);
+    team.init_team_config(&[], dir.path(), &HashMap::new(), "first-lead").unwrap();
+    let team_config = team.teams_dir().join("config.json");
+    daemon.teams = Some(team);
 
     let worker = "kept-worker";
     register_idle_worker(&cas_dir, worker);
@@ -1360,6 +1373,12 @@ async fn restart_supervisor_keeps_workers_and_a_plain_exit_still_stops_the_facto
     assert!(alive(worker_pid), "the worker's process survives the restart");
     assert_eq!(daemon.app.mux.pane_process_group_id(worker), Some(worker_pid), "same worker pane");
     assert!(!daemon.shutdown.load(Ordering::Relaxed), "a requested restart is no shutdown");
+    // Claude's --session-id cannot reuse a session, and it ignores its inbox
+    // unless the team config names the session it launched with.
+    let lead = daemon.app.mux.get(&supervisor).unwrap().harness_session_id().unwrap();
+    assert_ne!(lead, "first-lead");
+    let team_config: serde_json::Value = serde_json::from_slice(&std::fs::read(&team_config).unwrap()).unwrap();
+    assert_eq!(team_config["leadSessionId"], lead.as_str());
     let prompts = open_prompt_queue_store(&cas_dir).unwrap();
     assert!(
         wait_until(Duration::from_secs(15), || prompts.peek_all(50).unwrap().iter().any(|row| {

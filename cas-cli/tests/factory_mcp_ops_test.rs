@@ -1005,7 +1005,7 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
 
 #[tokio::test]
 async fn restart_supervisor_requests_the_daemon_only_for_a_supervisor() {
-    let _guard = EnvGuard::set(&[
+    let worker = EnvGuard::set(&[
         ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
         ("CAS_AGENT_ROLE", "worker"),
     ]);
@@ -1022,7 +1022,11 @@ async fn restart_supervisor_requests_the_daemon_only_for_a_supervisor() {
     assert!(error.message.contains("only the supervisor"), "{}", error.message);
     assert!(!path.exists());
 
-    let _supervisor = EnvGuard::set(&[("CAS_AGENT_ROLE", "supervisor")]);
+    drop(worker);
+    let _supervisor = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "supervisor"),
+    ]);
     env.service
         .factory_request(Parameters(factory_req("restart_supervisor")))
         .await

@@ -144,6 +144,10 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
+A `kind=ready` message with `task_id` whose first line is `status: ready`
+is your completion claim: Cassy records it on the task, and the supervisor
+may merge that pushed tip at once. Never send it for a red or partial tip.
+
 Coordination uses the literal string `supervisor` and both `summary` and `message`.
 Directed messages wake an idle supervisor after debounce and pair rate limits.
 Receipts, pure acknowledgements, broadcasts and `wake=false` wait in the inbox

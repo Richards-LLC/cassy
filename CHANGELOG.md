@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merge readiness
+
+- **A worker's ready message counts, and the supervisor waits for it** — Was:
+  pre-park readiness came only from a task note naming the full 40-character
+  tip, so a worker's typed ready message with a short SHA never counted, and
+  supervisor guidance said to merge any pushed tip with green CI, including an
+  incomplete test-first checkpoint. Now: a typed `status: ready` message is
+  recorded on the worker's own task, a short SHA of seven or more characters
+  matches the pushed tip it prefixes, and supervisor skills and launch
+  contracts merge on READY TO MERGE, `awaiting_merge` or that ready signal,
+  never on a green push alone.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

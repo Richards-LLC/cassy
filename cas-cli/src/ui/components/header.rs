@@ -124,10 +124,15 @@ mod tests {
             }
             let mut buf = Vec::new();
             Header::h1("Tasks")
-                .render(&mut Formatter::styled(&mut buf, ActiveTheme::default_dark()))
+                .render(&mut Formatter::styled(
+                    &mut buf,
+                    ActiveTheme::default_dark(),
+                ))
                 .unwrap();
             assert_eq!(
-                crate::ui::components::test_helpers::strip_ansi_codes(&String::from_utf8(buf).unwrap()),
+                crate::ui::components::test_helpers::strip_ansi_codes(
+                    &String::from_utf8(buf).unwrap()
+                ),
                 "=== Tasks ===\n"
             );
         }
@@ -178,7 +183,10 @@ mod tests {
                 .render(&mut Formatter::styled(&mut buf, theme))
                 .unwrap();
             // Bold only: terminal foreground stays readable on any background.
-            assert_eq!(String::from_utf8(buf).unwrap(), "\x1b[1m═══ Tasks ═══\x1b[0m\n");
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "\x1b[1m═══ Tasks ═══\x1b[0m\n"
+            );
         }
     }
 

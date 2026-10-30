@@ -1239,8 +1239,6 @@ journeys:
     follow-up
   additional_specs:
   - hub-web/e2e/journeys/real-hub.journey.ts
-  - hub-web/e2e/journeys/real-hub-home.mjs
-  - hub-web/e2e/journeys/real-hub-home.test.mjs
 - id: HUB-J12
   name: Switch networks without losing the conversation
   status: live

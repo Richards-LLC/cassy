@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
+- **Idle delivery alerts follow worker activity** — Live background children
+  suppress idle alerts while the worker waits for its command. An unchanged
+  task, branch tip and CI state no longer produce another alert just because
+  time passed; an idle worker still alerts once when its state changes.
+
 - **Parked delivery anchors stay on the branch** — Worker pushes refuse
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.

@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
-const IDLE_RELAY_BACKOFF: chrono::Duration = chrono::Duration::minutes(30);
 const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
 const SETTLED_RETRY: chrono::Duration = chrono::Duration::minutes(10);
 
@@ -177,7 +176,7 @@ pub(super) fn read_delivery(
     {
         let mut wait = previous.wait.clone();
         if let Some((worker, read)) = &mut wait {
-            read.waiting = worker_build_pending(data, &cas_dir, worker) || read.ci == "pending";
+            read.waiting = worker_work_pending(data, &cas_dir, worker) || read.ci == "pending";
         }
         return (previous.ready.clone(), wait);
     }
@@ -255,8 +254,10 @@ impl Retries {
     /// Consume only a rendered, live relay. Suppressed waits never consume it.
     pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait, now: DateTime<Utc>) -> bool {
         let signal = IdleSignal { task: read.task.clone(), tip: read.tip.clone(), ci: read.ci };
-        if let Some((previous, sent_at)) = self.idle_signals.get(worker)
-            && previous == &signal && now.signed_duration_since(*sent_at) < IDLE_RELAY_BACKOFF
+        // Elapsed time alone is not a new worker/task state. Retry probes
+        // still refresh the evidence, but cannot repeat the same idle relay.
+        if let Some((previous, _)) = self.idle_signals.get(worker)
+            && previous == &signal
         {
             return false;
         }
@@ -443,26 +444,40 @@ pub(super) fn worker_has_pending_reminder(
     })
 }
 
-fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
-    worker_work_pending_with_probe(data, cas_dir, worker, |_| false)
+fn worker_work_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
+    worker_work_pending_with_probe(data, cas_dir, worker, |agent| {
+        use crate::cli::factory::wedged;
+        // Match worker_status's harness discovery. A saved PID is only a
+        // fallback while alive and, when recorded, still the same process.
+        let pid = wedged::find_worker_pid(&wedged::RealProcessTable, &agent.name)
+            .or_else(|| agent.pid.filter(|&pid| {
+                agent.pid_starttime.map_or_else(
+                    || crate::mcp::daemon::pid_alive(pid),
+                    |start| crate::mcp::daemon::pid_matches_fingerprint(pid, start),
+                )
+            }));
+        // Unavailable trees are not positive evidence of background work.
+        pid.is_some_and(|pid| wedged::background_processes_for(pid).is_active())
+    })
 }
 
 pub(super) fn worker_work_pending_with_probe(
     data: &DirectorData, cas_dir: &Path, worker: &str,
-    _background_active: impl FnOnce(&cas_types::Agent) -> bool,
+    background_active: impl FnOnce(&cas_types::Agent) -> bool,
 ) -> bool {
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
     let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
         return false;
     };
     stored.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
-        && stored.metadata.get("clone_path").is_some_and(|clone| {
+        && (stored.metadata.get("clone_path").is_some_and(|clone| {
             crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
-        })
+        }) || background_active(&stored))
 }
 
-/// Read the current delivery, not the remembered event's task. Local build
-/// evidence comes from the registered clone's OS lane lock; CI is exact-tip.
+/// Read the current delivery, not the remembered event's task. Local work
+/// evidence comes from the registered clone's lane lock or live background
+/// children of its harness; CI is exact-tip.
 /// Runs with the existing external delivery job, never on the control lane.
 pub(super) fn read_worker_wait(
     event: &DirectorEvent,
@@ -483,9 +498,9 @@ pub(super) fn read_worker_wait(
                 assignee == worker || data.agent_id_to_name.get(assignee) == Some(worker)
             })
     })?;
-    let build_pending = worker_build_pending(data, cas_dir, worker);
-    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending };
-    if build_pending { return Some((worker.clone(), read)); }
+    let work_pending = worker_work_pending(data, cas_dir, worker);
+    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: work_pending };
+    if work_pending { return Some((worker.clone(), read)); }
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
         .or_else(|| crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")));
     let parked = crate::store::open_task_store_cached(cas_dir).ok()

@@ -828,7 +828,8 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_cas_06b3() {
     // A failed fresh read has no worker_waits row; it needs the same unknown key.
     let events = vec![f.event.clone()];
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(2));
-    assert_eq!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.len(), 1);
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(),
+        "a failed read does not change an already-reported unknown idle signal");
     assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(),
         "failed reads retain first-alert liveness without manufacturing repeated wakes");
 

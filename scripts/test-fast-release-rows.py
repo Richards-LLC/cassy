@@ -821,13 +821,35 @@ sleep 2
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS builtin-projections-src", result.stdout)
 
+    def test_posted_release_drafts_skip_lint_but_unposted_drafts_do_not(self):
+        path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
+        # This real historical body contains the now-forbidden "factory"
+        # wording. Only its posting status should change admission.
+        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().partition(
+            "\n## POSTED\n")[0]
+        for posted in (False, True):
+            with self.subTest(posted=posted):
+                receipt = "\n## POSTED\n\n- Posted at: 2026-10-14T12:00:00Z\n" if posted else ""
+                self.write(path, draft + receipt)
+                self.commit()
+                result = self.fast()
+                self.assertEqual(result.returncode, 0 if posted else 1, result.stdout + result.stderr)
+                row_log = (self.repo / ".git/gate-rows/release-notes-draft.log").read_text()
+                if posted:
+                    self.assertIn(f"release-notes-draft: skipping posted draft {path}", row_log)
+                    self.assertNotIn("forbidden user wording", row_log)
+                else:
+                    self.assertIn("FAIL release-notes-draft", result.stdout)
+                    self.assertIn("forbidden user wording: factory", row_log)
+
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
         """A cut once stopped at preflight on a draft committed hours earlier."""
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
         # The historical draft predates the User-reply wording check (cas-c5af);
-        # drop its one config-key mention so only the punch length is under test.
+        # drop its one config-key mention and posting receipt so this remains
+        # an unposted draft with only the punch length under test.
         draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
-            "factory.write_roots", "write_roots")
+            "factory.write_roots", "write_roots").partition("\n## POSTED\n")[0]
         # The Dev top-level punch: the second line of the third fenced body.
         punch = draft.split("```")[5].strip("\n").splitlines()[2]
         self.write(path, draft)

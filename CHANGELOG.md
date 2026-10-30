@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Posted release notes
+
+- **Posted drafts keep their historical wording** — Was: later pushes could
+  re-lint release notes already posted to Slack. Now: the fast check skips
+  drafts carrying a `## POSTED` block and names each skipped file; unposted
+  release and diary drafts still pass through their usual lint.
+
 ### Fixed — Generated artifact regeneration
 
 - **Current dependencies survive regeneration** — Was: every changed hub-web

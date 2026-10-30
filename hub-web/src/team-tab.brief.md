@@ -44,4 +44,14 @@ The delivery trail uses semantic ordered lists, labeled receipt marks and text; 
 
 ## Critique
 
-Pending rendered evidence and scored rubric.
+Scored on 2026-10-30 from real captures of f2162488a with four live workers. The worker's scores were recorded before the independent reader's, and that reader did not see them.
+
+| Dimension | Worker | Independent | Evidence |
+| --- | --- | --- | --- |
+| Distinctiveness | 4 | 3 | The serif heading and receipt trail are ours, but the trail is the quietest line in each lane. |
+| Fit to argument | 3 | 2 | Two of four lanes show above the fold at 1280x800 and 390x844, so "at a glance" needs a scroll. |
+| Hierarchy | 3 | 2 | The rail repeats the release title, count and bar beside the panel, and two serif headings compete above the lanes. |
+| Craft | 4 | 3 | Strict visual QA passes on 8 of 8 renders, with seams: doubled rules above Needs you and an orphaned "Verified" at 390. |
+| Accessibility | 4 | 2 | Text passes in light and dark and keyboard tabs work, but forced colors read the selected tab backwards. |
+
+Floor not met: distinctiveness, fit and hierarchy must each reach four before this surface counts as finished. The next revision needs more lanes above the fold and one home for the release block, then a re-render and re-score.

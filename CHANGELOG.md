@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander clock correction
+
+- **A refused proof cannot shift the clock by an arbitrary amount** — Commander
+  accepts clock corrections only within 60 seconds and shows clock-setting
+  guidance for larger differences, while still correcting small clock drift.
+
 ### Fixed — Extracted handler journey coverage
 
 - **Rich inspection stays in source-impact selection** — Literal DOM lookups

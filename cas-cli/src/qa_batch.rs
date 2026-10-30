@@ -335,6 +335,7 @@ pub(crate) fn prepare_receipt(
         ledger_author_id: Some(author_id),
         ledger_author_role: Some(author_role),
         author_overrides: overrides,
+        imported: false,
     })
 }
 
@@ -385,16 +386,21 @@ pub(crate) fn satisfying_receipt(
         }
         // A post-review integration receipt may be later than staging. The
         // immutable task anchor, rather than that umbrella merge, binds QA.
-        let Ok((artifact, _)) = validate_ledger(
+        let ledger_ok = match validate_ledger(
             root,
             &receipt.ledger_artifact_id,
             Path::new(&receipt.ledger_path),
-        ) else {
-            continue;
+        ) {
+            Ok((artifact, _)) => {
+                artifact.sha256 == receipt.ledger_sha256
+                    && artifact.size_bytes == receipt.ledger_size_bytes
+            }
+            // cas-6048: a peer's receipt names a ledger published on the
+            // machine that recorded it, which validated those bytes there.
+            // Without a local copy, its recorded SHA-256 and size stand.
+            Err(_) => receipt.imported,
         };
-        if artifact.sha256 == receipt.ledger_sha256
-            && artifact.size_bytes == receipt.ledger_size_bytes
-        {
+        if ledger_ok {
             return Ok(Some(receipt));
         }
     }

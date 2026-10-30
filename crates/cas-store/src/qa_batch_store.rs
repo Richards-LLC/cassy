@@ -40,6 +40,10 @@ pub struct QaBatchReceipt {
     /// Task ID to the operator's recorded words for an author-lineage override.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub author_overrides: BTreeMap<String, String>,
+    /// Set locally when the receipt arrived from a peer machine through task
+    /// sync (cas-6048); its ledger bytes were validated where it was recorded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
@@ -53,7 +57,7 @@ fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::C
     Ok(conn)
 }
 
-pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
+fn check_receipt(receipt: &QaBatchReceipt) -> Result<String> {
     if receipt.schema_version != 1
         || receipt.id.is_empty()
         || receipt.project_id.is_empty()
@@ -63,7 +67,11 @@ pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<
     {
         return Err(StoreError::Parse("incomplete QA batch receipt".into()));
     }
-    let json = serde_json::to_string(receipt).map_err(|e| StoreError::Parse(e.to_string()))?;
+    serde_json::to_string(receipt).map_err(|e| StoreError::Parse(e.to_string()))
+}
+
+pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
+    let json = check_receipt(receipt)?;
     let conn = connection(root)?;
     let guard = crate::shared_db::lock_connection(&conn)?;
     // INSERT only: corrections create a new receipt, never rewrite an attestation.
@@ -73,6 +81,42 @@ pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<
         params![receipt.id, receipt.project_id, json, receipt.recorded_at],
     )?;
     Ok(())
+}
+
+/// Store a receipt recorded on a peer machine (cas-6048). Receipts are
+/// immutable, so one already present, local or imported, is kept as is.
+pub fn import_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
+    let receipt = QaBatchReceipt {
+        imported: true,
+        ..receipt.clone()
+    };
+    let json = check_receipt(&receipt)?;
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    guard.execute(
+        "INSERT OR IGNORE INTO qa_batch_receipts (id, project_id, receipt_json, recorded_at)
+        VALUES (?1, ?2, ?3, ?4)",
+        params![receipt.id, receipt.project_id, json, receipt.recorded_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_qa_batch_receipt(root: &Path, id: &str) -> Result<Option<QaBatchReceipt>> {
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let json: Option<String> = guard
+        .query_row(
+            "SELECT receipt_json FROM qa_batch_receipts WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            error => Err(error),
+        })?;
+    json.map(|json| serde_json::from_str(&json).map_err(|e| StoreError::Parse(e.to_string())))
+        .transpose()
 }
 
 pub fn list_qa_batch_receipts(root: &Path, project: &str) -> Result<Vec<QaBatchReceipt>> {
@@ -266,6 +310,7 @@ mod tests {
             ledger_author_id: None,
             ledger_author_role: None,
             author_overrides: BTreeMap::new(),
+            imported: false,
             task_heads: tasks
                 .iter()
                 .map(|id| ((*id).into(), "c".repeat(40)))

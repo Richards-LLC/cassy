@@ -1288,3 +1288,38 @@ async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {
     let closed = fx.close("cas-bq01").await;
     assert_eq!(status("cas-bq01"), TaskStatus::Closed, "{closed}");
 }
+
+#[tokio::test]
+async fn batch_qa_receipt_synced_from_peer_satisfies_close_cas_6048() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let show = |id: String| {
+        let request: VerificationRequest =
+            serde_json::from_value(serde_json::json!({"action":"show", "id":id})).unwrap();
+        fx.supervisor.verification(Parameters(request))
+    };
+    // The recording machine publishes the receipt on each listed task row.
+    fx.record().await;
+    let id = cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap()[0].id.clone();
+    let mut pulled = tasks.get("cas-bq01").unwrap().notes;
+    let synced = cas::qa_pass::sync::take(&mut pulled, "cas-bq01");
+    assert_eq!(synced.len(), 1, "{synced:?}");
+
+    // The delivering peer has none of the recorder's receipt, artifact or ledger.
+    let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    db.execute("DELETE FROM qa_batch_receipts", []).unwrap();
+    db.execute("DELETE FROM artifacts", []).unwrap();
+    std::fs::remove_file(&fx.ledger).unwrap();
+    assert!(show(id.clone()).await.unwrap_err().message.contains("not found"));
+    let refused = fx.close("cas-bq01").await;
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{refused}");
+
+    // After task sync imports it, the peer can read it and close on it.
+    cas::qa_pass::sync::import(&root, &tasks.get("cas-bq01").unwrap(), &synced).unwrap();
+    let shown = extract_text(show(id.clone()).await.unwrap());
+    assert!(shown.contains(&id) && shown.contains("synced from a peer machine"), "{shown}");
+    let closed = fx.close("cas-bq01").await;
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{closed}");
+}

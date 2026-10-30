@@ -385,6 +385,33 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
 }
 
 #[test]
+fn registry_upkeep_duplicate_base_family_refuses_with_key_and_file() {
+    const FAMILY_PATH: &str = "docs/qa/bug-families/duplicate.yaml";
+    let family = "title: Existing case\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n";
+    let mut f = Fixture::new(&format!(
+        "{YAML}bug_families:\n  duplicate: {{title: Existing case, tasks: [cas-1234], invariants: [INV], journeys: [signup]}}\n"
+    ));
+    write(f.repo.path(), FAMILY_PATH, family);
+    f.base = commit(f.repo.path());
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    // Repair the delivered registry so only the base has a duplicate key.
+    // The unchanged case must not disable the gate for this bug delivery.
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, YAML);
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    let head = commit(f.repo.path());
+
+    let error = f.run(&head).expect_err("duplicate base keys must refuse, not warn");
+    assert!(
+        error.contains("BASE JOURNEY REGISTRY INVALID")
+            && error.contains("duplicate bug family \"duplicate\"")
+            && error.contains(FAMILY_PATH)
+            && error.contains(crate::qa_registry::DEFAULT_PATH),
+        "{error}"
+    );
+}
+
+#[test]
 fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case() {
     let yaml = format!("{YAML}bug_families:\n  unchanged: {{title: Existing case, tasks: [cas-1234], invariants: [INV], journeys: [signup]}}\n");
     let mut f = Fixture::new(&yaml);

@@ -43,6 +43,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         const [working, waiting] = [await look("swift-lark-3"), await look("brisk-wren-9")];
         expect(working[0]).not.toBe(waiting[0]);
         expect(working[1]).not.toBe(waiting[1]);
+        // The track is an outline, so a release at zero cannot read as a full bar.
+        expect(await panel.locator(".release-progress progress").evaluate(bar => { const style = getComputedStyle(bar); return [style.borderTopStyle, style.backgroundColor]; })).toEqual(["solid", "rgba(0, 0, 0, 0)"]);
         const merges = panel.locator('[data-team-action="merges"]');
         expect(await merges.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();

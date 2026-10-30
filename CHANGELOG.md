@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Release progress at zero
+
+- **An unstarted release looks empty** — The release progress bar in Team and the side rail now has a hollow, outlined track, so 0 of 4 merged no longer looks like a full bar.
+
 ### Fixed — Backquote command inspection
 
 - **Nested backquote commands keep workspace and operator checks** — The shell

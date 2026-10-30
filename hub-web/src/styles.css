@@ -3358,8 +3358,9 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .release-eyebrow { margin: 0 0 var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .release-progress h3 { margin: 0; font: var(--weight-medium) var(--fs-lg)/1.3 var(--font-display); overflow-wrap: anywhere; }
 .release-count { margin: var(--space-3) 0 var(--space-2); font-weight: var(--weight-semibold); }
-.release-progress progress { display: block; width: 100%; height: var(--space-2); appearance: none; border: 0; border-radius: var(--radius-pill); overflow: hidden; background: var(--bg-active); color: var(--color-action); }
-.release-progress progress::-webkit-progress-bar { background: var(--bg-active); }
+/* A hollow, outlined track: zero reads as empty, not as one solid full bar (cas-d640). */
+.release-progress progress { display: block; box-sizing: border-box; width: 100%; height: var(--space-2); appearance: none; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); overflow: hidden; background: transparent; color: var(--color-action); }
+.release-progress progress::-webkit-progress-bar { background: transparent; }
 .release-progress progress::-webkit-progress-value { background: var(--color-action); }
 .release-progress progress::-moz-progress-bar { background: var(--color-action); }
 .release-meta, .status-last-activity { margin: var(--space-2) 0 0; font-size: var(--fs-meta); line-height: 1.5; color: var(--ink-mid); }

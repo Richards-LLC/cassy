@@ -118,6 +118,23 @@ mod tests {
         }
         let output = String::from_utf8(buf).unwrap();
         assert_eq!(output, "=== Tasks ===\n");
+
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        for lang_only in [false, true] {
+            if lang_only {
+                env.remove_var("LC_ALL");
+                env.remove_var("LC_CTYPE");
+                env.set_var("LANG", "C");
+            }
+            let mut buf = Vec::new();
+            Header::h1("Tasks")
+                .render(&mut Formatter::styled(&mut buf, ActiveTheme::default_dark()))
+                .unwrap();
+            assert_eq!(
+                crate::ui::components::test_helpers::strip_ansi_codes(&String::from_utf8(buf).unwrap()),
+                "=== Tasks ===\n"
+            );
+        }
     }
 
     #[test]
@@ -158,15 +175,15 @@ mod tests {
 
     #[test]
     fn test_h1_styled() {
-        let theme = ActiveTheme::default_dark();
-        let mut buf = Vec::new();
-        {
-            let mut fmt = Formatter::styled(&mut buf, theme);
-            Header::h1("Tasks").render(&mut fmt).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        for theme in [ActiveTheme::default_dark(), ActiveTheme::default_light()] {
+            let mut buf = Vec::new();
+            Header::h1("Tasks")
+                .render(&mut Formatter::styled(&mut buf, theme))
+                .unwrap();
+            // Bold only: terminal foreground stays readable on any background.
+            assert_eq!(String::from_utf8(buf).unwrap(), "\x1b[1m═══ Tasks ═══\x1b[0m\n");
         }
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Tasks"));
-        assert!(output.contains("\x1b["));
     }
 
     #[test]

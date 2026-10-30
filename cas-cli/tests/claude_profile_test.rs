@@ -853,6 +853,22 @@ fn factory_flags_pass_through_with_and_without_a_profile() {
 }
 
 #[test]
+fn account_mutation_help_explains_macos_shell_visibility() {
+    let home = TempDir::new().unwrap();
+    for command in ["rename", "remove"] {
+        cas_cmd(home.path())
+            .args(["accounts", command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("macOS"))
+            .stdout(predicate::str::contains("/bin/zsh, /bin/bash and /bin/sh"))
+            .stdout(predicate::str::contains("CLAUDE_CONFIG_DIR"))
+            .stdout(predicate::str::contains("CODEX_HOME"))
+            .stdout(predicate::str::contains("Close shells"));
+    }
+}
+
+#[test]
 fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
     const HOLDER: &str = "CAS_TEST_ACCOUNT_HOLDER";
     if std::env::var_os(HOLDER).is_some() {
@@ -942,12 +958,19 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         {
             use std::io::{BufRead, Write};
             use std::process::Stdio;
-            // macOS hides Apple system-shell environments from ps. Reenter
-            // this executable so the real guard can observe the live selector.
-            let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            let test_name = "accounts_lifecycle_preserves_shared_targets_and_guards_mutations";
+            let child_test = module_path!()
+                .split_once("::")
+                .map(|(_, module)| format!("{module}::{test_name}"))
+                .unwrap_or_else(|| test_name.to_string());
+            // Keep an Apple shell alive around a readable child. Even when
+            // macOS hides the shell's env, its descendant must protect the account.
+            let mut holder = std::process::Command::new("/bin/sh")
+                .args(["-c", "\"$@\"; exit $?", "account-holder"])
+                .arg(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "claude_profile_test::accounts_lifecycle_preserves_shared_targets_and_guards_mutations",
+                    &child_test,
                     "--nocapture",
                 ])
                 .env(HOLDER, "1")

@@ -21,6 +21,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   x86_64 Linux compiler before installing a fake Zig for toolchain checks, so
   the Ghostty build output exists and the ISA audits run.
 
+### Changed — Accounts
+
+- **macOS shell visibility is explained before account changes** — Was: rename
+  and remove help did not mention that idle Apple system shells can hide account
+  selectors from the busy guard. → Now: both help pages ask users to close those
+  shells first; readable process environments and registered agents stay checked.
+
 ### Fixed — Commander
 
 - **Messages kept in two tabs all go out after an outage** — Was: with two

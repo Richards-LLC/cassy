@@ -1275,6 +1275,19 @@ override global policy; Commander uses global policy. `accounts.disabled` retain
 the absolute folder list managed by `cas accounts disable` / `enable` in
 `global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
+`cas accounts rename` and `cas accounts remove` refuse accounts held by readable
+process environments or registered agents. On macOS, idle Apple system shells
+(`/bin/zsh`, `/bin/bash`, `/bin/sh`) can hide their exported `CLAUDE_CONFIG_DIR`,
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CODEX_HOME` from process inspection. A local
+reproduction held each shell on a blocking `read`, confirmed the selector inside
+the shell, then inspected it with `ps eww` and direct `KERN_PROCARGS2` sysctl calls:
+the calls succeeded but returned arguments without the selector. Calling sysctl
+directly therefore does not recover it. This is a known macOS guard limitation;
+close shells that export the account's selector before renaming or removing it.
+A later launch from a stale shell can recreate the old profile folder. Readable
+Claude/Codex descendants of these shells and registered agents remain checked;
+an unrelated opaque shell does not block every account mutation.
+
 The hub session catalog reports the supervisor's optional `harness`, `model`
 and `effort`. Model version is part of the reported model ID or display name
 (for example `claude-opus-5-5` or `gpt-6.1-sol`), not the CLI version. The

@@ -8751,6 +8751,17 @@ mod workspace_contract_tests {
             ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), true),
             ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), true),
             ("earlier arm directory", format!("cd /outside; case x in a) cd {} ;; b) touch p ;; esac\n", project.path().display()), true),
+            // ver-e69b5575c18c: a redirect's filename is no keyword, so bash runs
+            // `touch in /outside/p` here; it must not be read as a case statement.
+            ("redirect target named case", "(>case touch in /outside/p) >esac\n".into(), true),
+            ("substituted redirect target named case", "echo \"$(>case touch in /outside/p) >esac)\"\n".into(), true),
+            ("append target named case", "(>>case touch in /outside/p) >esac\n".into(), true),
+            ("fd redirect target named case", "(>&case touch in /outside/p) >&esac\n".into(), true),
+            ("clobber target named case", "(>|case touch in /outside/p) >|esac\n".into(), true),
+            ("input target named case", "(<case touch in /outside/p) <esac\n".into(), true),
+            ("subshell after a redirect target named case", ">case x in\n(touch /outside/p)\nesac\n".into(), true),
+            ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
+            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
             ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
             ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
             ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),

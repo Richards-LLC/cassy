@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Cross-machine batch QA
+
+- **A batch QA receipt recorded on one machine now closes tasks delivered on another** — Was: a receipt existed only on the machine that recorded it, so the delivering machine's close refused with "waiting for batch receipt" and `verification show` said the receipt was not found. → Now: the receipt travels with each listed task through task sync, either machine's close accepts it, and `verification show id=qab-…` prints it. The independent-author check still applies on the closing machine.
+
 ### Fixed — Conditional operand recognition
 
 - **Function and coprocess bodies keep arithmetic checks** — Unquoted `[[ … ]]`

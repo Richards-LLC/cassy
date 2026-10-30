@@ -36,6 +36,15 @@ factory branch owners and exact Git actors on delivery anchor history also
 count as implementers after reassignment. Integration and verification alone
 do not count as implementation.
 
+QA and closes can run on different machines. Recording a receipt adds a
+reserved `QA_BATCH_RECEIPT_PROOF:` line to each listed task, and task sync
+copies it into the other machine's receipt store, so either machine's close
+gate and `verification show id=<qab-id>` accept it. The ledger file stays on
+the machine that recorded it: the peer accepts the SHA-256 and size checked
+there, and still byte-checks a ledger that is published locally. The
+independent-author check runs against the closing machine's own record of who
+implemented each task.
+
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same
 implementation lineage: a QA reviewer, a verifier, or a worker on this or

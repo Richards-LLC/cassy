@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory workflow
+
+- **Idle delivery alerts follow worker activity** — Live background children
+  suppress idle alerts while the worker waits for its command. An unchanged
+  task, branch tip and CI state no longer produce another alert just because
+  time passed; an idle worker still alerts once when its state changes.
+
 ## [3.91.0] - 2026-10-30
 
 ### Fixed — Factory workflow

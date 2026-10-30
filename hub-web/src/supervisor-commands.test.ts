@@ -77,21 +77,23 @@ describe("supervisor command receipts", () => {
     expect(document.activeElement).toBe(parent.querySelector("summary"));
   });
 
-  it("settles Exit after disconnect, timeout or late status without claiming other commands completed", async () => {
+  it("settles a recent Exit after disconnect or late status without claiming other commands completed", async () => {
     vi.useFakeTimers();
     try {
       for (const command of ["exit", "finish", "usage"] as const) {
-        for (const ordering of ["ended", "reject-ended", "ended-reject", "timeout-ended", "ended-status"] as const) {
+        for (const ordering of ["ended", "reject-ended", "ended-reject", "ended-status"] as const) {
           const send = vi.fn().mockReturnValue(true);
           const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
           await session.run(command, true);
           const ref = [...session.receipts.keys()][0];
           const disconnected = "The session is reconnecting, so the message was not sent. Retry once live.";
           if (ordering === "reject-ended") session.reject(ref, disconnected);
-          if (ordering === "timeout-ended") await vi.advanceTimersByTimeAsync(125_000);
           session.ended("prompt_input_exit");
           if (ordering === "ended-reject") session.reject(ref, disconnected);
-          if (ordering === "ended-status") session.receive({ client_ref: ref, command, phase: "submitted", detail: "Awaiting harness", output: "", interactive: false });
+          if (ordering === "ended-status") {
+            await vi.advanceTimersByTimeAsync(125_000);
+            session.receive({ client_ref: ref, command, phase: "submitted", detail: "Awaiting harness", output: "", interactive: false });
+          }
           const receipt = session.receipts.get(ref)!;
           expect(receipt.phase, `${command}/${ordering}`).toBe(command === "exit" ? "observed" : "unconfirmed");
           expect(receipt.detail).toContain("prompt_input_exit");
@@ -102,6 +104,26 @@ describe("supervisor command receipts", () => {
           expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
         }
       }
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("does not attribute an unrelated later session end to a timed-out Exit", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send: () => true, changed: () => {} });
+      await session.run("exit", true);
+      const ref = [...session.receipts.keys()][0];
+      await vi.advanceTimersByTimeAsync(96_000);
+      const timedOut = { ...session.receipts.get(ref)! };
+      expect(timedOut.phase).toBe("unconfirmed");
+      session.ended("daemon_shutdown");
+      expect(session.receipts.get(ref)).toEqual(timedOut);
+      session.receive({ ...timedOut, detail: "Late status; execution not confirmed." });
+      expect(session.receipts.get(ref)?.phase).toBe("unconfirmed");
+      expect(session.receipts.get(ref)?.detail).not.toContain("Session ended after Exit");
+      session.reject(ref, "Still unconfirmed after reconnect.");
+      expect(session.receipts.get(ref)?.phase).toBe("unconfirmed");
+      expect(session.receipts.get(ref)?.detail).toBe("Still unconfirmed after reconnect.");
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 

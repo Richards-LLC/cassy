@@ -69,6 +69,7 @@ enum BranchCiState {
 struct BranchCiLookup {
     state: BranchCiState,
     repo: Option<String>,
+    repository_lookup_attempted: bool,
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/check-runs";
@@ -164,11 +165,21 @@ fn ci_git(
 ) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command.current_dir(cwd).args(args);
+    let subcommand = args.first().copied().unwrap_or("<unknown>");
     let output =
         crate::bounded_process::run_command(&mut command, deadline, BRANCH_CI_LOOKUP_TIMEOUT)
-            .map_err(|_| "could not inspect delivery Git range".to_string())?;
+            .map_err(|error| {
+                let cause = match error {
+                    crate::bounded_process::BoundedCommandError::TimedOut => "timed out",
+                    crate::bounded_process::BoundedCommandError::Io => "could not start or complete",
+                };
+                format!("git {subcommand} {cause} while inspecting delivery Git range")
+            })?;
     if !output.status.success() {
-        return Err("could not inspect delivery Git range".to_string());
+        return Err(format!(
+            "git {subcommand} failed while inspecting delivery Git range ({})",
+            output.status
+        ));
     }
     Ok(output.stdout)
 }
@@ -398,6 +409,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     reason,
                 },
                 repo: None,
+                repository_lookup_attempted: false,
             };
         }
     };
@@ -412,6 +424,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     None => BranchCiState::Unknown { sha: tip, reason },
                 },
                 repo: None,
+                repository_lookup_attempted: true,
             };
         }
     };
@@ -438,6 +451,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     BranchCiLookup {
         state,
         repo: Some(repo),
+        repository_lookup_attempted: true,
     }
 }
 
@@ -897,6 +911,10 @@ fn describe_branch_ci_lookup(branch: &str, lookup: &BranchCiLookup) -> String {
     let receipt = describe_branch_ci_state(branch, &lookup.state);
     match lookup.repo.as_deref() {
         Some(repo) => receipt.replace("repos/<unresolved-repository>/", &format!("repos/{repo}/")),
+        None if !lookup.repository_lookup_attempted => receipt.replace(
+            "gh endpoint queried: GET",
+            "gh endpoint not queried: delivery Git inspection failed; intended GET",
+        ),
         None => receipt.replace(
             "gh endpoint queried: GET",
             "gh endpoint unavailable: repository unresolved; intended GET",

@@ -7315,6 +7315,7 @@ fn factory_workspace_contract_denial(
         | "an unresolved shell payload"
         | "an unresolved shell executable"
         | "an unresolved shell write target"
+        | "an unresolved arithmetic operand"
         | "a shell command without a resolvable payload"
         | "a shell payload beyond the resolution limit"
         | "an unmatched shell scope") {

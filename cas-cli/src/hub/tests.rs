@@ -156,7 +156,7 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
         let response = app.clone().oneshot(Request::get("/v1/sessions")
             .header("origin", "https://controller.example")
             .header("authorization", format!("DPoP {}", credential.credential))
-            .header("dpop", sign_dpop(signing, &credential.credential, "GET", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .header("dpop", sign_dpop(signing, &credential.credential, "GET", "/v1/sessions", Utc::now(), &uuid::Uuid::from_u128(index as u128 + 1).to_string()))
             .body(Body::empty()).unwrap()).await.unwrap();
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -212,11 +212,16 @@ async fn installation_revoke_sse(drain_replay: bool) {
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
-    let request = |path: &str| Request::get(path)
-        .header("origin", "https://controller.example")
-        .header("authorization", format!("DPoP {}", credential.credential))
-        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", path, Utc::now(), &uuid::Uuid::new_v4().to_string()))
-        .body(Body::empty()).unwrap();
+    let next_proof_id = std::cell::Cell::new(6u128);
+    let request = |path: &str| {
+        let proof_id = next_proof_id.get();
+        next_proof_id.set(proof_id + 1);
+        Request::get(path)
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", credential.credential))
+            .header("dpop", sign_dpop(&signing, &credential.credential, "GET", path, Utc::now(), &uuid::Uuid::from_u128(proof_id).to_string()))
+            .body(Body::empty()).unwrap()
+    };
     let inventory = app.clone().oneshot(request("/v1/auth/devices")).await.unwrap();
     assert_eq!(inventory.status(), StatusCode::OK);
     let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
@@ -316,7 +321,11 @@ async fn account_enrollment_routes_need_a_session_and_an_enrolled_hub() {
         if signed {
             request = request
                 .header("authorization", format!("DPoP {}", credential.credential))
-                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", path, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", path, Utc::now(), &uuid::Uuid::from_u128(match path {
+                    "/v1/auth/account/challenge" => 3,
+                    "/v1/auth/account/enrollment" => 4,
+                    _ => 5,
+                }).to_string()));
         }
         request.body(Body::from(body.to_owned())).unwrap()
     };
@@ -334,7 +343,7 @@ async fn account_enrollment_routes_need_a_session_and_an_enrolled_hub() {
     let inventory = app.oneshot(Request::get("/v1/auth/devices")
         .header("origin", "https://controller.example")
         .header("authorization", format!("DPoP {}", credential.credential))
-        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", "/v1/auth/devices", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", "/v1/auth/devices", Utc::now(), &uuid::Uuid::from_u128(5).to_string()))
         .body(Body::empty()).unwrap()).await.unwrap();
     let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(devices[0]["account_enrollment"]["state"], "unenrolled");
@@ -1108,14 +1117,17 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         "https://hub.petrastella.io"
     );
     assert_eq!(health_preflight.headers()["vary"], "Origin");
+    let next_proof_id = std::cell::Cell::new(1u128);
     let proof = |method: &str, uri: &str| {
+        let proof_id = next_proof_id.get();
+        next_proof_id.set(proof_id + 1);
         sign_dpop(
             &signing,
             &credential.credential,
             method,
             uri,
             now,
-            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::from_u128(proof_id).to_string(),
         )
     };
 
@@ -5607,14 +5619,17 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
-    let id = uuid::Uuid::new_v4();
+    let id = uuid::Uuid::from_u128(1);
+    let next_dpop_id = std::cell::Cell::new(100u128);
     let send = |session: &str, upload_id: uuid::Uuid, name: &str, data: &[u8], access: u8| {
         let uri = format!("/v1/sessions/{session}/uploads/{upload_id}");
         let mut request = Request::post(&uri).header("origin", "https://controller.example").header("content-type", "application/json");
         if access > 0 {
             let (signing, token) = if access == 1 { (&signing, &credential.credential) } else { (&read_signing, &read_credential.credential) };
+            let proof_id = next_dpop_id.get();
+            next_dpop_id.set(proof_id + 1);
             request = request.header("authorization", format!("DPoP {token}"))
-                .header("dpop", sign_dpop(signing, token, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+                .header("dpop", sign_dpop(signing, token, "POST", &uri, Utc::now(), &uuid::Uuid::from_u128(proof_id).to_string()));
         }
         request.body(Body::from(serde_json::json!({"name":name,"data":base64::engine::general_purpose::STANDARD.encode(data)}).to_string())).unwrap()
     };
@@ -5641,7 +5656,7 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     }
     // A misleading extension never controls MIME: this is a real PNG named .txt.
     let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0l8AAAAASUVORK5CYII=").unwrap();
-    let image = app.clone().oneshot(send("factory-a", uuid::Uuid::new_v4(), "photo.txt", &png, 1)).await.unwrap();
+    let image = app.clone().oneshot(send("factory-a", uuid::Uuid::from_u128(2), "photo.txt", &png, 1)).await.unwrap();
     assert_eq!(image.status(), StatusCode::OK);
     let image: serde_json::Value = serde_json::from_slice(&to_bytes(image.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(image["mime"], "image/png");
@@ -5651,9 +5666,11 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let image_id = image["artifact_id"].as_str().unwrap();
     let ticket_request = |session: &str| {
         let uri = format!("/v1/sessions/{session}/artifacts/{image_id}/ticket");
+        let proof_id = next_dpop_id.get();
+        next_dpop_id.set(proof_id + 1);
         Request::post(&uri).header("origin", "https://controller.example")
             .header("authorization", format!("DPoP {}", read_credential.credential))
-            .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::from_u128(proof_id).to_string()))
             .body(Body::empty()).unwrap()
     };
     assert_eq!(app.clone().oneshot(ticket_request("factory-b")).await.unwrap().status(), StatusCode::NOT_FOUND);
@@ -5694,17 +5711,17 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         std::fs::rename(moved, original).unwrap();
     }
     // ISO-BMFF major and compatible brands, not the filename, identify phone media.
-    for (brands, mime) in [
+    for (index, (brands, mime)) in [
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),
         (&b"mif1\0\0\0\0heic"[..], "image/heic"),
         (&b"avif\0\0\0\0mif1"[..], "image/avif"),
         (&b"qt  \0\0\0\0"[..], "video/quicktime"),
         (&b"isom\0\0\0\0mp42"[..], "video/mp4"),
-    ] {
+    ].into_iter().enumerate() {
         let mut bytes = ((8 + brands.len()) as u32).to_be_bytes().to_vec();
         bytes.extend_from_slice(b"ftyp");
         bytes.extend_from_slice(brands);
-        let response = app.clone().oneshot(send("factory-a", uuid::Uuid::new_v4(), "misleading.txt", &bytes, 1)).await.unwrap();
+        let response = app.clone().oneshot(send("factory-a", uuid::Uuid::from_u128(10 + index as u128), "misleading.txt", &bytes, 1)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(body["mime"], mime);
@@ -6162,7 +6179,7 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     use crate::ui::factory::create_metadata;
     use cas_types::{Agent, AgentRole};
     let mut env = crate::test_support::TestEnvGuard::temp_home();
-    env.remove("CLAUDE_EFFORT");
+    env.set("CLAUDE_EFFORT", "high");
     let project = env.home().join("model-project");
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);

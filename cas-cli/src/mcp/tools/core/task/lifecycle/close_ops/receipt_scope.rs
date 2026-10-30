@@ -951,6 +951,97 @@ mod tests {
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn nested_workspace_capped_stability_is_accepted_at_park() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/nested");
+        std::fs::create_dir_all(repo.join("src-tauri/widget")).unwrap();
+        let git = |args: &[&str]| {
+            let output = crate::test_env_guard::git_fixture(&repo).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(repo.join("src-tauri/Cargo.toml"), "[workspace]\nmembers=[\"widget\"]\n").unwrap();
+        std::fs::write(repo.join("src-tauri/widget/Cargo.toml"), "[package]\nname=\"nested\"\nversion=\"0.1.0\"\n[[test]]\nname=\"fixture\"\npath=\"checks.rs\"\n").unwrap();
+        let source = repo.join("src-tauri/widget/checks.rs");
+        std::fs::write(&source, "fn fixed() -> bool { false }\n").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]); git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nepic_base_branch=\"main\"\n").unwrap();
+        git(&["switch", "-qc", "factory/nested"]);
+        std::fs::write(&source, "fn fixed() -> bool { false }\n#[test] fn nested_test() { assert!(fixed()); }\n").unwrap();
+        git(&["add", "."]); git(&["commit", "-qm", "test"]);
+        let cargo = dir.path().join("cargo-fixture");
+        // Mock only the external Cargo boundary. Five trial children rendezvous;
+        // real admission, selection, receipt storage and park validation run.
+        std::fs::write(&cargo, r#"#!/usr/bin/env python3
+import fcntl,json,os,sys,time
+from pathlib import Path
+args=sys.argv[1:]
+assert '--manifest-path' in args, args
+manifest=Path(args[args.index('--manifest-path')+1])
+assert manifest.resolve()==Path('src-tauri/widget/Cargo.toml').resolve(),manifest
+if args[:2]==['nextest','list']:
+ print(json.dumps({'rust-suites':{'fixture':{'testcases':{'nested_test':{'ignored':False}}}}}))
+ sys.exit(0)
+failed='false' in Path('src-tauri/widget/checks.rs').read_text()
+if '--retries' in args:
+ state=Path('target/rendezvous')
+ with state.open('a+') as file:
+  fcntl.flock(file,fcntl.LOCK_EX)
+  file.write('ready\n');file.flush()
+ deadline=time.monotonic()+10
+ while len(state.read_text().splitlines())<5:
+  assert time.monotonic()<deadline,'trial children did not rendezvous'
+  time.sleep(.001)
+print(f'        {"FAIL" if failed else "PASS"} [   0.010s] (1/1) nested::fixture nested_test')
+print('     Summary [ 0.01s] 1 test run: '+('0 passed, 1 failed' if failed else '1 passed, 0 skipped'))
+sys.exit(100 if failed else 0)
+"#).unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = ["nextest", "run", "-p", "nested", "--test", "fixture", "-E", "test(nested_test)"]
+            .map(str::to_owned);
+        let red = crate::factory_worker_check::execute_at(&root, &args, &repo, &cargo);
+        assert!(red.is_err(), "the unfixed fixture must fail");
+        std::fs::write(&source, "fn fixed() -> bool { true }\n#[test] fn nested_test() { assert!(fixed()); }\n").unwrap();
+        git(&["add", "."]); git(&["commit", "-qm", "fix"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        crate::factory_worker_check::execute_at(&root, &args, &repo, &cargo)
+            .expect("a subdirectory-only workspace must produce a capped stability receipt");
+        let mut task = blast_radius_task(&[]);
+        task.risk = vec![TaskRisk::None];
+        task.notes = "[2026-10-29 13:00] DECISION no changelog: test-only fixture".into();
+        let refusal = park_refusal(&root, &repo, &task, &["src-tauri/widget/checks.rs".into()], &head, "main");
+        assert!(refusal.is_none(), "capped evidence must park without an override: {refusal:?}");
+
+        // Reuse this fixture to exercise the standalone Python fallback without
+        // runtime target metadata; it must discover the same nearest manifest.
+        std::fs::remove_file(repo.join("target/rendezvous")).unwrap();
+        let output = std::process::Command::new("python3")
+            .args(["-I", "-B", "-c"])
+            .arg(concat!(
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/rust_test_source.py")), "\n",
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/worker-test-stability.py")),
+            ))
+            .args(["--base", &base, "--cargo"]).arg(&cargo)
+            .arg("--verified-script").arg(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/run-verified-tests.sh")))
+            .arg("--count-file").arg(repo.join("target/python-count"))
+            .arg("--").args(&args).current_dir(&repo)
+            .env_remove("CAS_WORKER_STABILITY_TARGET")
+            .env("VERIFIED_TEST_REPO_ROOT", &repo).output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let proof: serde_json::Value = serde_json::from_slice(&std::fs::read(repo.join("target/python-count.stability.json")).unwrap()).unwrap();
+        assert_eq!(proof["tests"], serde_json::json!(["src-tauri/widget/checks.rs::nested_test"]));
+    }
+
     fn changelog_fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {

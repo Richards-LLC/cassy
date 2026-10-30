@@ -62,7 +62,7 @@ const INTEGRATION_BUDGET: f64 = 10.0;
 /// Resolve Cargo's target with the runtime's TOML parser. The embedded Python
 /// path therefore keeps supporting hosts whose system Python predates 3.11.
 pub(super) fn target_metadata(repo: &Path, test: &TargetedTest) -> Result<Option<String>> {
-    if !repo.join("Cargo.toml").is_file() { return Ok(None); }
+    if super::manifest_roots(repo).is_empty() { return Ok(None); }
     let (manifest, value) = super::package_manifest(repo, &test.package)?;
     let relative = match &test.harness {
         None => value.get("lib").and_then(|v| v.get("path"))
@@ -74,6 +74,7 @@ pub(super) fn target_metadata(repo: &Path, test: &TargetedTest) -> Result<Option
     };
     Ok(Some(serde_json::to_string(&serde_json::json!({
         "package": test.package, "harness": test.harness,
+        "manifest": manifest,
         "entry": manifest.parent().context("package directory")?.join(relative),
     }))?))
 }

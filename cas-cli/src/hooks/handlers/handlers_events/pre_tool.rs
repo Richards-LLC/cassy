@@ -269,40 +269,98 @@ fn apply_changelog_string_edit(text: &str, edit: &serde_json::Value) -> Option<S
 fn changelog_diff_adds_whole_lines(old: &str, new: &str) -> bool {
     use similar::{ChangeTag, TextDiff};
     let mut inserted = false;
-    let mut insertion = String::new();
-    let is_new_entry = |block: &str| {
-        block.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with("# ")
-                || line.starts_with("## ")
-                || line.starts_with("### ")
-                || line.starts_with("#### ")
-                || line.starts_with("##### ")
-                || line.starts_with("###### ")
-                || line.starts_with("- ")
-                || line.starts_with("* ")
-                || line.starts_with("1. ")
-        })
-    };
-    for change in TextDiff::from_lines(old, new).iter_all_changes() {
-        match change.tag() {
+    let diff = TextDiff::from_lines(old, new);
+    let changes: Vec<_> = diff.iter_all_changes().collect();
+    let mut previous_equal: Option<&str> = None;
+    let mut index = 0;
+    while index < changes.len() {
+        match changes[index].tag() {
             ChangeTag::Delete => return false,
-            ChangeTag::Insert => {
-                inserted = true;
-                if !change.value().ends_with('\n') {
-                    return false;
-                }
-                insertion.push_str(change.value());
-            }
             ChangeTag::Equal => {
-                if !insertion.is_empty() && !is_new_entry(&insertion) {
+                previous_equal = Some(changes[index].value());
+                index += 1;
+            }
+            ChangeTag::Insert => {
+                let start = index;
+                while index < changes.len() && changes[index].tag() == ChangeTag::Insert {
+                    if !changes[index].value().ends_with('\n') {
+                        return false;
+                    }
+                    index += 1;
+                }
+                let block = changes[start..index]
+                    .iter()
+                    .map(|change| change.value())
+                    .collect::<String>();
+                let next_nonblank_equal = changes[index..]
+                    .iter()
+                    .find(|change| {
+                        change.tag() == ChangeTag::Equal && !change.value().trim().is_empty()
+                    })
+                    .map(|change| change.value());
+                if !is_changelog_entry_block(&block)
+                    || !is_changelog_entry_boundary(previous_equal, next_nonblank_equal)
+                {
                     return false;
                 }
-                insertion.clear();
+                inserted = true;
             }
         }
     }
-    inserted && (insertion.is_empty() || is_new_entry(&insertion))
+    inserted
+}
+
+fn is_changelog_entry_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    if !is_changelog_heading(first) && !is_changelog_bullet(first) {
+        return false;
+    }
+
+    let mut follows_inserted_bullet = is_changelog_bullet(first);
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            if !follows_inserted_bullet {
+                return false;
+            }
+            continue;
+        }
+        if is_changelog_heading(line) {
+            follows_inserted_bullet = false;
+        } else if is_changelog_bullet(line) {
+            follows_inserted_bullet = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_changelog_entry_boundary(previous: Option<&str>, next: Option<&str>) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    if previous.trim().is_empty() || is_changelog_heading(previous) {
+        return true;
+    }
+    // A following indented line is still part of the preceding wrapped entry.
+    // Ignore blank separators when deciding whether the insertion split it.
+    let next_nonblank = next.filter(|line| !line.trim().is_empty());
+    !next_nonblank.is_some_and(|line| line.starts_with([' ', '\t']))
+}
+
+fn is_changelog_heading(line: &str) -> bool {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&hashes) && line[hashes..].starts_with(' ')
+}
+
+fn is_changelog_bullet(line: &str) -> bool {
+    line.starts_with("- ") || line.starts_with("* ") || line.starts_with("1. ")
 }
 
 fn apply_changelog_patch(text: &str, patch: &str) -> Option<String> {
@@ -7240,11 +7298,11 @@ mod workspace_contract_tests {
     fn changelog_new_bullet_is_append_only() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("CHANGELOG.md");
-        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n  Wrapped detail.\n").unwrap();
         let input = tool_input(
             "apply_patch",
             serde_json::json!({
-                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n+  Wrapped detail.\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
             }),
             root.path(),
         );

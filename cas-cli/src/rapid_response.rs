@@ -9,8 +9,8 @@
 //!   diff touched;
 //! - the batch QA receipt wait is skipped, so each fix merges as it lands;
 //!
-//! The post-release check stays a full gate inside a window (its relaxation
-//! is cas-9462). The safety floor never reads this mode: build proofs, the touched-test
+//! The post-release gate scales down only for a protected, verified release
+//! merge whose first-parent diff clears the safety floor. Build proofs, the touched-test
 //! receipt, the evidence secret check and every other close gate keep
 //! refusing. A delivery that touches a migration path never gets rapid
 //! treatment, so migrations keep their full review, and the operator states a
@@ -308,6 +308,16 @@ pub fn active_for_delivery(
     let window = window_for_task(cas_root, task)?;
     let delivery = recorded_delivery(repo, task)?;
     floor_clear(&delivery, changed.unwrap_or(&[])).then_some(window)
+}
+
+/// A post-release window applies only to an operator/Cassy-recorded release
+/// merge containing this epic, after scanning the entire release change.
+pub(crate) fn active_for_release(cas_root: &Path, epic: &Task, sha: &str) -> Option<Window> {
+    let window = window_for_task(cas_root, epic)?;
+    crate::qa_post_release::verified_release_merge(cas_root, epic, sha)?;
+    let base = format!("{sha}^1");
+    let delivery = diff_between(cas_root.parent()?, &[&base, sha, "--"])?;
+    floor_clear(&delivery, &[]).then_some(window)
 }
 
 fn git_text(repo: &Path, args: &[&str]) -> Option<String> {
@@ -666,14 +676,114 @@ mod tests {
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
-    /// The post-release check stays a full gate inside a window.
-    #[test]
-    fn window_keeps_the_post_release_gate() {
-        let (_dir, cas, store, _delivery) = epic_fixture();
-        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\n").unwrap();
+    fn post_release_fixture() -> (tempfile::TempDir, PathBuf, std::sync::Arc<dyn cas_store::TaskStore>, Task, Window) {
+        let (dir, cas, store, _) = epic_fixture();
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\nrelease_branches = [\"main\"]\n").unwrap();
+        git(dir.path(), &["remote", "add", "origin", "."]);
         let epic = store.get("cas-ep1c").unwrap();
         let window = open(&cas, store.as_ref());
+        (dir, cas, store, epic, window)
+    }
+
+    fn publish_main(dir: &Path) -> String {
+        let sha = git(dir, &["rev-parse", "main"]);
+        git(dir, &["update-ref", "refs/remotes/origin/main", &sha]);
+        sha
+    }
+
+    #[test]
+    fn window_relaxes_only_for_automatic_release_merge() {
+        // A merge resolution can add risk absent from the epic delivery.
+        // Scan the release's first parent, including those resolution edits.
+        let secret = format!("gh{}_{}", "p", "a".repeat(24));
+        for (extra, body, allowed, via_reminder) in [
+            (None, "", true, true),
+            (None, "", true, false),
+            (Some("db/migrate/001.sql"), "ALTER TABLE users;", false, false),
+            (Some("src/token.rs"), secret.as_str(), false, true),
+        ] {
+            let (dir, cas, store, epic, window) = post_release_fixture();
+            let tip = git(dir.path(), &["rev-parse", "epic/hot"]);
+            assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+            crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+            git(dir.path(), &["checkout", "-q", "main"]);
+            git(dir.path(), &["merge", "-q", "--no-ff", "--no-commit", "epic/hot"]);
+            if let Some(path) = extra {
+                std::fs::create_dir_all(dir.path().join(path).parent().unwrap()).unwrap();
+                std::fs::write(dir.path().join(path), body).unwrap();
+                git(dir.path(), &["add", path]);
+            }
+            git(dir.path(), &["commit", "-q", "-m", "release"]);
+            let release = publish_main(dir.path());
+            if via_reminder {
+                let reminders = crate::store::open_reminder_store(&cas).unwrap().list_all_pending().unwrap();
+                crate::qa_post_release::start_from_reminder(&cas, &reminders[0]).unwrap();
+            } else {
+                crate::qa_post_release::tick(&cas).unwrap();
+            }
+            let receipt = crate::qa_post_release::load(&cas, &epic.id).unwrap().unwrap();
+            assert_ne!(release, tip);
+            assert_eq!(receipt.sha, release, "observe the introducing release merge");
+            assert!(cas.join("operator/post-release").join(format!("{}.json", epic.id)).exists(), "release identity is protected from agent writes");
+            assert_eq!(crate::qa_post_release::gate(&cas, &epic, true).is_none(), allowed, "{extra:?}");
+            let skips = ledger(&cas, &window);
+            if allowed {
+                assert_eq!(skips[0].check, "post-release");
+                assert!(crate::qa_post_release::gate(&cas, &epic, false).is_none());
+                assert_eq!(ledger(&cas, &window).len(), 1, "release notes and close share a skip");
+                disable(&cas, store.as_ref(), &epic.id, Utc::now()).unwrap();
+                assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "expiry/disable restores the gate");
+            } else {
+                assert!(skips.is_empty(), "unsafe release cannot record a skip");
+            }
+        }
+    }
+
+    #[test]
+    fn fast_forward_release_keeps_the_post_release_gate() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        // Even a merge at the epic tip is not a release-branch merge.
+        git(dir.path(), &["checkout", "-q", "-b", "fix"]);
+        std::fs::write(dir.path().join("fix.txt"), "fix\n").unwrap();
+        git(dir.path(), &["add", "fix.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix"]);
+        git(dir.path(), &["checkout", "-q", "epic/hot"]);
+        git(dir.path(), &["merge", "-q", "--no-ff", "fix", "-m", "epic delivery"]);
+        crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "-q", "--ff-only", "epic/hot"]);
+        let release = publish_main(dir.path());
+        crate::qa_post_release::tick(&cas).unwrap();
+        assert!(crate::qa_post_release::load(&cas, &epic.id).unwrap().is_none(), "FF has no introducing release merge");
+        crate::qa_post_release::start(&cas, &epic.id, &release).unwrap();
         assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
-        assert!(ledger(&cas, &window).is_empty(), "nothing is skipped");
+        assert!(ledger(&cas, &window).is_empty());
+    }
+
+    #[test]
+    fn foreign_merge_keeps_the_post_release_gate() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        publish_main(dir.path());
+        git(dir.path(), &["checkout", "-q", "-b", "foreign", "main"]);
+        git(dir.path(), &["merge", "-q", "--no-ff", "epic/hot", "-m", "foreign merge"]);
+        let sha = git(dir.path(), &["rev-parse", "HEAD"]);
+        crate::qa_post_release::start(&cas, &epic.id, &sha).unwrap();
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty());
+    }
+
+    #[test]
+    fn squash_release_keeps_the_post_release_gate() {
+        let (dir, cas, _store, epic, window) = post_release_fixture();
+        crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "-q", "--squash", "epic/hot"]);
+        git(dir.path(), &["commit", "-q", "-m", "squash release"]);
+        let release = publish_main(dir.path());
+        crate::qa_post_release::tick(&cas).unwrap();
+        assert!(crate::qa_post_release::load(&cas, &epic.id).unwrap().is_none());
+        crate::qa_post_release::start(&cas, &epic.id, &release).unwrap();
+        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+        assert!(ledger(&cas, &window).is_empty());
     }
 }

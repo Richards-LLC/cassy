@@ -758,6 +758,10 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
             _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
         },
+        Commands::Qa(crate::cli::qa::QaCommand::PostRelease(args)) => match args.command {
+            crate::cli::qa_post_release::PostReleaseCommand::Start { .. } => Some("Recording a post-release SHA (`cas qa post-release start`)"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1103,6 +1107,7 @@ mod tests {
             "--verbose factory -w 2",
             "qa rapid-response enable cas-ep1c --for 2h --reason outage --rollback revert",
             "qa rapid-response disable cas-ep1c",
+            "qa post-release start --epic cas-ep1c --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "qa rapid-response review-migration cas-de11 --note checked",
         ] {
             assert!(
@@ -1117,6 +1122,7 @@ mod tests {
             "hub",
             "config get factory.write_roots",
             "qa rapid-response status",
+            "qa post-release status --epic cas-ep1c",
         ] {
             assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
         }

@@ -14,6 +14,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   task, branch tip and CI state no longer produce another alert just because
   time passed; an idle worker still alerts once when its state changes.
 
+### Fixed — Rapid response release checks
+
+- **Verify the release merge before deferring observation** — Rapid response
+  defers the post-release wait only for a protected recorded merge that brought
+  the epic into a configured release branch. Its full first-parent diff must
+  clear migration and secret checks; fast-forward, squash and foreign merges
+  keep the gate. Automatic observation records the release merge SHA, and
+  manual SHA recording is operator-only.
+
 ## [3.91.0] - 2026-10-30
 
 ### Fixed — Factory workflow

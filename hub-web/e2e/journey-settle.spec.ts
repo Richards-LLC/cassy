@@ -79,12 +79,15 @@ test("screenshot settle has a deadline when the renderer is suspended", async ({
   // virtual time alone can still deliver already queued native frames.
   await session.send("Debugger.enable");
   const paused = new Promise<void>((resolve) => { session.once("Debugger.paused", () => resolve()); });
-  await session.send("Debugger.pause");
+  // Debugger.pause only requests a pause at the next JS task; an idle page
+  // may never acknowledge it. Execute a breakpoint and drain it on resume.
+  const breakpoint = session.send("Runtime.evaluate", { expression: "debugger;" });
   await paused;
   try {
     await expect(settle(page)).rejects.toThrow(/Timeout .* exceeded/);
   } finally {
     await session.send("Debugger.disable");
+    await breakpoint;
     await session.detach();
   }
 });

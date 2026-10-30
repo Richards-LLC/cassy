@@ -107,7 +107,7 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
     await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "true");
     await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
     await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
-    for (const file of files) await card.getByRole("button", { name: `${file} edit`, exact: true }).click();
+    for (const toggle of await card.locator(".changed-file-toggle").all()) await toggle.click();
     await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
     expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("commander.workDisclosure:")))).toEqual([]);
   });

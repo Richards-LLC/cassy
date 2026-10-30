@@ -5543,6 +5543,10 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             // lane at its tip; start must inspect the inherited commit history.
             branch_transfer_git(root, &["branch", "factory/other-worker", &tip]);
             branch_transfer_git(root, &["switch", "factory/other-worker"]);
+        } else if caller != worker.name {
+            // Keep this row focused on assignment authorization: a caller on
+            // the old worker's factory branch now fails binding first.
+            branch_transfer_git(root, &["switch", "-c", "factory/other-worker-cas-8ca7", &tip]);
         }
         let result = if caller == worker.name {
             service.task(Parameters(start())).await

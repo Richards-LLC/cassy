@@ -262,15 +262,52 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
-For Commander chapters, import `showRecordingChapter` from
-`hub-web/e2e/journeys/receipt-directory.mjs` (adjust the relative path for the
-spec). It uses constructed stylesheets compatible with native `style-src 'self'`.
+The worked example below is self-contained for other projects. Its chapter
+helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
+styles to the target project's DESIGN.md.
+
+Commander-only, in the Cassy source checkout: replace the inline helper with
+this import (adjust the relative path for the spec). Other projects do not ship
+this repository file:
+
+```ts
+// Commander-only; not a dependency of the generic example below.
+import { showRecordingChapter } from '../hub-web/e2e/journeys/receipt-directory.mjs';
+```
 
 ```ts
 // tests/qa-evidence.spec.ts
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { showRecordingChapter } from '../hub-web/e2e/journeys/receipt-directory.mjs';
+
+async function showRecordingChapter(page: Page, title: string, { duration = 1000 } = {}) {
+  const id = `qa-chapter-${randomUUID()}`;
+  await page.evaluate(({ id, title }) => {
+    const host = document.createElement('div');
+    host.id = id;
+    host.setAttribute('aria-hidden', 'true');
+    const root = host.attachShadow({ mode: 'open' });
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(`
+      :host { position: fixed; inset: 0; display: grid; place-items: center;
+        z-index: 2147483647; pointer-events: none; }
+      span { max-width: calc(100vw - 2em); padding: 1em; overflow-wrap: anywhere;
+        background: Canvas; color: CanvasText; font: inherit; }
+    `);
+    root.adoptedStyleSheets = [sheet];
+    const caption = document.createElement('span');
+    caption.textContent = title;
+    root.append(caption);
+    document.body.append(host);
+  }, { id, title });
+  try {
+    // Node time also works when the page clock is paused.
+    await new Promise(resolve => setTimeout(resolve, duration));
+  } finally {
+    if (!page.isClosed()) await page.evaluate(id => document.getElementById(id)?.remove(), id);
+  }
+}
 
 const QA = process.env.QA_ARTIFACTS!;
 const visualChange = true; // match bundle.json visual_change for this delivery

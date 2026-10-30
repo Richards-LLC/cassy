@@ -12,6 +12,8 @@ Boundary: image-viewer.ts owns only ephemeral image loading and inspection inter
 
 State: loading → ready or named failure with Try again; changing images resets zoom and ignores stale loads; close invalidates pending work, releases pointer state and restores focus and ancestor scroll positions. Local state is index, zoom and pan; names and gallery position derive from the selected artifact.
 
+Failure recovery: a card has one unavailable note across repeated attempts, and opening the viewer clears its obsolete failure. At 390×844 the named image failure and Try again must remain visible without scrolling in both schemes; measure the viewport directly because a fixed-size recording can crop a taller phone page.
+
 Inputs: touch pinch and drag, mouse wheel/drag, +/− zoom, 0 fit, left/right gallery, Shift+arrows pan, Escape close. All actions also have labeled controls. Focus begins at Close, Tab cycles within the dialog, and the canvas has a keyboard help description.
 
 Performance: lazy-load the viewer on an unmodified image tap; reuse the existing short-lived preview ticket API. No new dependency or eager media bytes. Measure production chunks at delivery.

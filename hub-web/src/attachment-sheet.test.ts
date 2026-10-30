@@ -298,6 +298,19 @@ it("inspects only the turn's images with zoom, pan, gallery, failure and restore
     expect(document.querySelector(".image-viewer")).toBeNull();
     expect(document.activeElement).toBe(sheet);
     expect(root.scrollTop).toBe(120);
+    const viewer = await import("./image-viewer");
+    const unavailable = vi.spyOn(viewer, "openImageViewer").mockImplementation(() => { throw new Error("viewer unavailable"); });
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        sheet.click();
+        await vi.waitFor(() => expect(unavailable).toHaveBeenCalledTimes(attempt));
+        await vi.waitFor(() => expect(sheet.querySelectorAll(".preview-note")).toHaveLength(1));
+      }
+    } finally { unavailable.mockRestore(); }
+    sheet.click();
+    await vi.waitFor(() => expect(document.querySelector(".image-viewer[open]")).not.toBeNull());
+    expect(sheet.querySelectorAll(".preview-note")).toHaveLength(0);
+    document.querySelector<HTMLDialogElement>(".image-viewer")!.close();
   } finally {
     document.querySelector(".image-viewer")?.remove(); root.remove();
     for (const [name, descriptor] of [["showModal", show], ["close", close]] as const) {

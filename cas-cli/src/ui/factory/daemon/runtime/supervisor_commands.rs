@@ -23,6 +23,9 @@ struct PendingRestart { killed_at: Instant, exited: bool }
 /// Replace the pane this long after the kill even if no exit was reported: a
 /// descendant holding the PTY open must not leave the factory without a supervisor.
 const RESTART_EXIT_DEADLINE: Duration = Duration::from_secs(10);
+/// PTY silence required before a command is typed. Codex hides its busy text
+/// while it streams a reply, so an idle-looking screen alone is insufficient.
+const COMMAND_SETTLE: Duration = Duration::from_secs(2);
 impl CommandState {
     /// Drop finished receipts past the replay window. An in-flight command or
     /// open chooser is never evicted, and nothing inside the window is, so a
@@ -380,6 +383,12 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The daemon's poll loop samples PTY silence; these fixtures do not run it.
+    fn quiet_for(daemon: &mut FactoryDaemon, name: &str, quiet: Duration) {
+        let bytes = daemon.app.mux.pane_bytes_received(name).unwrap();
+        daemon.last_pane_output_bytes.insert(name.into(), bytes);
+        daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
@@ -389,6 +398,7 @@ mod tests {
         let name = daemon.app.supervisor_name().to_owned();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let request = Request::Run { command: Command::Model, confirmed: false };
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H✢ Flambéing… (7s · ↓ 633 tokens)\r\n❯".as_bytes()).unwrap();
         assert!(daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), owner.clone()).await.is_err());
         assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
@@ -430,6 +440,12 @@ mod tests {
         let name = codex.app.supervisor_name().to_owned();
         codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        // Codex streams under an idle-looking prompt with no busy text (cas-1a93).
+        quiet_for(&mut codex, &name, Duration::ZERO);
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert!(codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-streaming".into(), owner.clone()).await.is_err());
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input, "a streaming turn must receive no command");
+        quiet_for(&mut codex, &name, COMMAND_SETTLE);
         let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
         let mut agent = store.get("single-sup").unwrap();
         agent.metadata.insert("supervisor_model".into(), "old-model".into());
@@ -474,6 +490,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture().await;
         let name = daemon.app.supervisor_name().to_owned();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let usage = Request::Run { command: Command::Usage, confirmed: false };
@@ -541,6 +558,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = daemon.app.supervisor_name().to_owned();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1HREADY\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let submitted = daemon.dispatch_supervisor_command(
@@ -563,6 +581,7 @@ mod tests {
         assert!(idle_prompt("❯ Try \"fix lint errors\"\n? for shortcuts"));
         assert!(!idle_prompt("✽ Compacting conversation… (14s · ↓ 975 tokens)\n❯"));
         assert!(!idle_prompt("✢ Flambéing… (7s · ↓ 633 tokens)\n❯"));
+        assert!(!idle_prompt("· Flambéing… (8s · ↓ 640 tokens)\n❯"), "Claude's `·` spinner frame is busy (cas-1a93)");
         assert!(idle_prompt("✻ Cooked for 20s · done 11:21 PM\n❯"));
         assert!(!idle_prompt("Working · esc to interrupt\n❯"));
         assert!(!idle_prompt("Select model\n❯"));

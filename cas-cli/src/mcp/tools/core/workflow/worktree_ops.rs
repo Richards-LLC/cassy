@@ -6054,9 +6054,9 @@ mod tests {
         let cancelled = job("Scoped Validation (factory/PR)", "completed", Some("cancelled"));
         for (jobs, workflow_conclusion, expected) in [
             // The incident: one job passed; GitHub still lists another as running.
-            (vec![validated.clone(), lingering.clone()], "cancelled", "green"),
-            (vec![cancelled], "cancelled", "unvalidated"),
-            (vec![lingering.clone()], "cancelled", "unvalidated"),
+            (vec![validated.clone(), lingering.clone()], "\"cancelled\"", "green"),
+            (vec![cancelled], "\"cancelled\"", "unvalidated"),
+            (vec![lingering.clone()], "\"cancelled\"", "unvalidated"),
             // That job's own run is still going, so this is genuinely pending.
             (vec![validated, lingering], "null", "pending"),
         ] {

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Release checks
+
+- **Release ISA fixtures work on macOS** — The fixture harness selects its real
+  x86_64 Linux compiler before installing a fake Zig for toolchain checks, so
+  the Ghostty build output exists and the ISA audits run.
+
 ### Fixed — Commander
 
 - **Messages kept in two tabs all go out after an outage** — Was: with two

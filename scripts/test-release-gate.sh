@@ -17,6 +17,26 @@ gate="${RELEASE_GATE_TEST_GATE:-$script_dir/release-gate.sh}"
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Pin the real ELF compiler before fixtures replace ZIG/PATH with an echo-only
+# Zig for toolchain/cache assertions. On macOS that fake otherwise succeeds
+# without producing the Ghostty object or executable that the real audits need.
+if ! release_portable_x86_64_linux_cc; then
+    # The release resolver also finds Zig in this worktree or its main checkout.
+    fixture_release_env="$(python3 "$script_dir/release_env.py" resolve --worktree "$script_dir/..")"
+    eval "$fixture_release_env"
+    if ! ZIG="$RELEASE_ENV_ZIG" release_portable_x86_64_linux_cc; then
+        echo 'error: no compiler for x86_64 Linux ELF fixtures: set CC, or install Zig' >&2
+        exit 2
+    fi
+fi
+{
+    printf '#!/usr/bin/env bash\nexec'
+    printf ' %q' "${RELEASE_PORTABLE_X86_64_CC[@]}"
+    printf ' "$@"\n'
+} >"$tmp/linux-cc"
+chmod +x "$tmp/linux-cc"
+export CC="$tmp/linux-cc"
+
 # The gate refuses any scratch base with a .cas ancestor. Its default used to be
 # $HOME/.cache/cas-release-gate — which on a developer machine sits under the
 # user-level ~/.cas — so unset, this self-test died mid-run on the two rows that
@@ -896,8 +916,10 @@ for control in GATE_FIXTURE_GHOSTTY_EVEX:libghostty_vt.a GATE_FIXTURE_BLAKE3_AVX
 done
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
 if grep -qF 'PASS release-binary-isa' <<<"$output" \
-    && grep -qF 'RELEASE GATE PASSED' <<<"$output"; then
-    ok 'release-binary-isa accepts a baseline executable with locked zigbuild and release flags'
+    && grep -qF 'RELEASE GATE PASSED' <<<"$output" \
+    && file -Lb "$repo/.cas/release-binary/target/x86_64-unknown-linux-gnu/release/build/ghostty_vt_sys-fixture/out/zig-out/lib/libghostty_vt.a" \
+        | grep -q 'ELF 64-bit.*x86-64'; then
+    ok 'release-binary-isa audits real x86_64 ELF build outputs with locked zigbuild and release flags'
 else
     bad "release-binary-isa rejected the baseline final ELF: $output"
 fi

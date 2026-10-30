@@ -3488,9 +3488,11 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .emoji-picker .emoji-choice:hover, .emoji-picker .emoji-choice:focus-visible { background: var(--bg-hover); }
 .emoji-picker .emoji-more { width: 100%; min-height: 44px; margin-top: var(--space-2); background: var(--bg-panel); color: var(--color-action); }
 .emoji-picker button[hidden] { display: none; }
-@media (max-width: 53rem) {
-  /* Reserve a full line for the draft instead of squeezing it between four controls. */
+#conversation-composer-slot { container: emoji-composer / inline-size; }
+@container emoji-composer (max-width: 44rem) {
+  /* Reserve the draft's full line when its controls and project placeholder cannot fit together. */
   .conversation-composer:has(#message-emoji) { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "field field" "clip send" "status status"; }
+  .conversation-composer:has(#message-emoji):has(.composer-uploads:not([hidden])) { grid-template-areas: "uploads uploads" "field field" "clip send" "status status"; }
   .conversation-composer:has(#message-emoji) .composer-actions { justify-content: flex-end; }
 }
 .conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; font-variant-emoji: emoji; }

@@ -1150,6 +1150,56 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     );
 }
 
+fn contains_fixture_home(text: &str, home: &Path) -> bool {
+    text.contains(home.to_string_lossy().as_ref())
+}
+
+fn portable_close_detail(close_text: &str, home: &Path) -> Result<String, String> {
+    let (summary, reference) = close_text
+        .split_once("\nDetails: ")
+        .ok_or("compact close receipt references its full detail")?;
+    let (detail_path, _digest) = reference
+        .split_once(" (SHA-256 ")
+        .ok_or("detail reference carries its integrity receipt")?;
+    let detail = std::fs::read_to_string(detail_path).map_err(|error| error.to_string())?;
+    for text in [summary, detail.as_str()] {
+        if contains_fixture_home(text, home) {
+            return Err(format!("fixture HOME leaked in receipt: {text}"));
+        }
+    }
+    Ok(detail)
+}
+
+#[cfg(unix)]
+#[test]
+fn close_binding_check_rejects_canonical_home() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home-link");
+    let actual = root.path().join("actual-home");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &home).unwrap();
+    let canonical = std::fs::canonicalize(&home).unwrap();
+    let detail = root.path().join("detail.txt");
+    std::fs::write(&detail, "Closed task: fixture").unwrap();
+    let receipt = format!(
+        "Closed task: fixture; binding {}\nDetails: {} (SHA-256 {})",
+        canonical.display(), detail.display(), "0".repeat(64),
+    );
+    assert!(portable_close_detail(&receipt, &home).is_err(), "canonical HOME leak accepted: {receipt}");
+}
+
+#[test]
+fn close_binding_check_rejects_home_after_details_digest() {
+    let home = TempDir::new().unwrap();
+    let detail = home.path().join("detail.txt");
+    std::fs::write(&detail, "Closed task: fixture").unwrap();
+    let receipt = format!(
+        "Closed task: fixture\nDetails: {} (SHA-256 {})\n{}",
+        detail.display(), "0".repeat(64), home.path().display(),
+    );
+    assert!(portable_close_detail(&receipt, home.path()).is_err(), "digest suffix leak accepted: {receipt}");
+}
+
 #[tokio::test]
 async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
     let mut env = test_env();
@@ -1239,21 +1289,12 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
     );
     assert!(!close_text.contains("AMBIGUOUS WORK TARGET"));
     // The local Details artifact may live under HOME; the binding itself must not.
-    let (summary, reference) = close_text
-        .split_once("\nDetails: ")
-        .expect("compact close receipt references its full detail");
-    assert!(!summary.contains(home.path().to_string_lossy().as_ref()), "{summary}");
-    let detail_path = reference
-        .split_once(" (SHA-256 ")
-        .expect("detail reference carries its integrity receipt")
-        .0;
-    let detail = std::fs::read_to_string(detail_path).expect("close detail artifact exists");
+    let detail = portable_close_detail(&close_text, home.path()).expect("portable close receipt");
     assert!(detail.contains(&format!("Closed task: {task_id} - Bound lifecycle updated")), "{detail}");
-    assert!(!detail.contains(home.path().to_string_lossy().as_ref()), "{detail}");
 
     let persisted = task_store.get(&task_id).unwrap();
     let portable = serde_json::to_string(&persisted.deliverables).unwrap();
-    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&portable, home.path()), "{portable}");
     assert!(!portable.contains("repo_root"));
     assert!(!portable.contains("git_common_dir"));
 }
@@ -1486,7 +1527,7 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
         "rejection created delivery state"
     );
     let portable = serde_json::to_string(&task_store.get(&task.id).unwrap().deliverables).unwrap();
-    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&portable, home.path()), "{portable}");
     assert!(!portable.contains("repo_root"));
     assert!(!portable.contains("git_common_dir"));
 }
@@ -1604,7 +1645,7 @@ async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_aft
     );
     assert_eq!(evidence.task_tip.as_deref(), Some(own_tip.as_str()));
     let json = serde_json::to_string(&persisted.deliverables).unwrap();
-    assert!(!json.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&json, home.path()), "{json}");
     assert!(!json.contains(unrelated_path.to_string_lossy().as_ref()));
 }
 

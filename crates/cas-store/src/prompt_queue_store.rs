@@ -1917,8 +1917,15 @@ impl SqlitePromptQueueStore {
                 {
                     let age_secs = (now - prompt.created_at).num_seconds().max(0);
                     if age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
+                        let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
+                        let cause = holding.as_deref().map(|detail| {
+                            let text = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let mut bounded = text.chars().take(160).collect::<String>();
+                            if text.chars().count() > 160 { bounded.push('…'); }
+                            format!("held: {bounded}")
+                        }).unwrap_or_else(|| "cause unrecorded".into());
                         let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
-                        summary.push_str(&format!(" [delayed {}m]", age_secs / 60));
+                        summary.push_str(&format!(" [delayed {}m; {cause}]", age_secs / 60));
                     }
                 }
                 current.push(prompt);
@@ -2356,6 +2363,10 @@ pub struct MessageDeliveryReport {
     pub pending_reason: Option<PendingReason>,
     /// Human-readable detail for the pending reason (error text, …).
     pub pending_detail: Option<String>,
+    /// Last recorded delivery hold, retained independently of the current
+    /// pending state and hook/ack receipts. Not a complete delay history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holding_detail: Option<String>,
     /// Broadcast recipient counts when applicable (`all_workers`).
     pub broadcast_attempted: Option<u32>,
     pub broadcast_succeeded: Option<u32>,
@@ -2416,6 +2427,9 @@ ALTER TABLE prompt_queue ADD COLUMN last_pending_reason TEXT;
 "#;
 const PROMPT_QUEUE_PENDING_DETAIL_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN last_pending_detail TEXT;
+"#;
+const PROMPT_QUEUE_HOLDING_DETAIL_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN holding_detail TEXT;
 "#;
 const PROMPT_QUEUE_TRANSPORT_DELIVERED_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN transport_delivered_at TEXT;
@@ -4063,6 +4077,17 @@ impl SqlitePromptQueueStore {
         None
     }
 
+    fn holding_detail_on_conn(conn: &Connection, id: i64) -> Result<Option<String>> {
+        // Read-only diagnostics may inspect a queue last opened by an older
+        // runtime. Absence is unknown cause, never a reason to migrate here.
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('prompt_queue') WHERE name = 'holding_detail')",
+            [], |row| row.get(0),
+        )?;
+        if !present { return Ok(None); }
+        Ok(conn.query_row("SELECT holding_detail FROM prompt_queue WHERE id = ?", params![id], |row| row.get(0))?)
+    }
+
     fn prompt_from_row(row: &rusqlite::Row) -> rusqlite::Result<QueuedPrompt> {
         let processed_at_str: Option<String> = row.get(5)?;
         let processed_at = processed_at_str.and_then(|s| Self::parse_datetime(&s));
@@ -4437,6 +4462,12 @@ impl SqlitePromptQueueStore {
             || stamp_transport
             || next.is_terminal_non_delivery()
             || next == DeliveryStage::PartiallyDelivered;
+        let holding_detail = opts.detail.filter(|detail| {
+            !detail.trim().is_empty()
+                && current != DeliveryStage::Confirmed
+                && !current.is_terminal_non_delivery()
+                && matches!(opts.reason, Some(PendingReason::GatedNotReady | PendingReason::AwaitingBusyRecipient))
+        });
 
         // reason=None clears pending reason fields (Delivered success path).
         // No follow-up UPDATE — keeps the atomic contract intact.
@@ -4454,6 +4485,7 @@ impl SqlitePromptQueueStore {
                 END,
                 last_pending_reason = ?,
                 last_pending_detail = ?,
+                holding_detail = COALESCE(?, holding_detail),
                 broadcast_attempted = COALESCE(?, broadcast_attempted),
                 broadcast_succeeded = COALESCE(?, broadcast_succeeded),
                 broadcast_failed = COALESCE(?, broadcast_failed)
@@ -4467,6 +4499,7 @@ impl SqlitePromptQueueStore {
                 now,
                 opts.reason.map(|r| r.as_str()),
                 opts.detail,
+                holding_detail,
                 opts.broadcast_attempted.map(|n| n as i64),
                 opts.broadcast_succeeded.map(|n| n as i64),
                 opts.broadcast_failed.map(|n| n as i64),
@@ -6056,9 +6089,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  SET wake_gate_declines = COALESCE(wake_gate_declines, 0) + 1,
                      wake_attempt = 'nudge_not_attempted',
                      wake_attempt_at = ?,
-                     wake_attempt_detail = ?
+                     wake_attempt_detail = ?,
+                     holding_detail = COALESCE(?, holding_detail)
                  WHERE id = ? AND acked_at IS NULL AND processed_at IS NULL",
-                params![Utc::now().to_rfc3339(), detail, prompt_id],
+                params![Utc::now().to_rfc3339(), detail, (!detail.trim().is_empty()).then_some(detail), prompt_id],
             )?;
             let declines: Option<i64> = conn
                 .query_row(
@@ -8872,6 +8906,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             ),
             pending_reason,
             pending_detail,
+            holding_detail: Self::holding_detail_on_conn(&conn, id)?,
             broadcast_attempted: bc_attempted.map(|n| n as u32),
             broadcast_succeeded: bc_succeeded.map(|n| n as u32),
             broadcast_failed: bc_failed.map(|n| n as u32),
@@ -10869,34 +10904,64 @@ mod tests {
 
     #[test]
     fn delayed_current_lifecycle_digest_keeps_its_queue_age_for_visible_label() {
-        let (temp, store) = create_test_store();
-        use crate::AgentStore;
-        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
-        agents.init().unwrap();
-        let mut supervisor = cas_types::Agent::new_with_role(
-            "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
-        );
-        supervisor.factory_session = Some("session".into());
-        agents.register(&supervisor).unwrap();
-        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
-        tasks.init().unwrap();
-        let mut task = Task::new("cas-current-digest".into(), "relay target".into());
-        task.status = TaskStatus::InProgress;
-        tasks.add(&task).unwrap();
-        let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, task.updated_at.to_rfc3339());
-        let result = store.enqueue_idempotent("lifecycle:13952", "supervisor", &body, Some("session"), Some("task_started: cas-current-digest"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
-        let EnqueueIdempotentResult::Created(id) = result else { panic!("new relay") };
-        let queued_at = Utc::now() - chrono::Duration::minutes(29);
-        store.conn.lock().unwrap().execute(
-            "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
-            params![queued_at.to_rfc3339(), id],
-        ).unwrap();
-        let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
-        assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
-        assert_eq!(surfaced[0].id, id);
-        assert_eq!(surfaced[0].created_at, queued_at);
-        assert!(surfaced[0].summary.as_deref().is_some_and(|summary| summary.contains("[delayed 29m]")), "{:?}", surfaced[0].summary);
-        assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+        for (detail, busy) in [
+            (Some("recipient pane busy"), true),
+            (Some("directed supervisor message burst debounce"), false),
+            (Some("directed supervisor message pair rate limit"), false),
+            (None, false),
+        ] {
+            let (temp, store) = create_test_store();
+            use crate::AgentStore;
+            let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("session".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-current-digest".into(), "relay target".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, task.updated_at.to_rfc3339());
+            let result = store.enqueue_idempotent("lifecycle:13952", "supervisor", &body, Some("session"), Some("task_started: cas-current-digest"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
+            let EnqueueIdempotentResult::Created(id) = result else { panic!("new relay") };
+            let queued_at = Utc::now() - chrono::Duration::minutes(29);
+            store.conn.lock().unwrap().execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                params![queued_at.to_rfc3339(), id],
+            ).unwrap();
+            if let Some(detail) = detail {
+                if busy {
+                    store.record_wake_gate_decline(id, detail).unwrap();
+                } else {
+                    store.record_pending_reason(id, PendingReason::GatedNotReady, Some("pane not ready for injection")).unwrap();
+                    assert_eq!(store.message_delivery_report(id).unwrap().unwrap().holding_detail.as_deref(), Some("pane not ready for injection"));
+                    store.park_for_busy_recipient(id, Some(detail), Utc::now() + chrono::Duration::minutes(1)).unwrap();
+                }
+            }
+            let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+            assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
+            assert_eq!(surfaced[0].id, id);
+            assert_eq!(surfaced[0].created_at, queued_at);
+            assert!(surfaced[0].summary.as_deref().is_some_and(|summary| summary.contains("delayed 29m")), "{:?}", surfaced[0].summary);
+            assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+            store.record_wake_gate_decline(id, "late busy observation").unwrap();
+            let summary = surfaced[0].summary.as_deref().unwrap();
+            match detail {
+                Some(detail) => assert!(summary.contains(&format!("held: {detail}")), "{summary}"),
+                None => assert!(summary.contains("cause unrecorded"), "{summary}"),
+            }
+            // A separate read-only connection observes the committed receipt:
+            // hook acknowledgement must not erase the earlier holding cause.
+            let readonly = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+            let report = readonly.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.confirmation_source, ConfirmationSource::HookSurfaced);
+            assert!(report.pending_reason.is_none(), "confirmed is not still pending");
+            let json = serde_json::to_value(report).unwrap();
+            assert_eq!(json["holding_detail"], serde_json::json!(detail));
+        }
     }
 
     #[test]
@@ -11696,7 +11761,12 @@ mod tests {
             .unwrap();
         writer.mark_processed(id).unwrap();
         writer.ack(id).unwrap();
+        // An older queue has no retained-hold column. Read-only diagnosis
+        // must still work without adding it or inventing a historical cause.
+        writer.conn.lock().unwrap().execute_batch("ALTER TABLE prompt_queue DROP COLUMN holding_detail").unwrap();
         let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+        assert!(reader.message_delivery_report(id).unwrap().unwrap().holding_detail.is_none());
+        assert!(!crate::shared_db::column_exists(&reader.conn.lock().unwrap(), "prompt_queue", "holding_detail"));
         let history = reader
             .received_supervisor_messages_since("worker", "resume-session", since, 10)
             .unwrap();
@@ -11709,6 +11779,8 @@ mod tests {
         assert_eq!(reader.pending_count().unwrap(), 1);
         assert!(reader.enqueue("supervisor", "worker", "forbidden").is_err());
         assert_eq!(writer.pending_count().unwrap(), 1);
+        writer.init().unwrap();
+        assert!(crate::shared_db::column_exists(&writer.conn.lock().unwrap(), "prompt_queue", "holding_detail"));
     }
 
     /// cas-d1e0: the received-message history scan holds the connection

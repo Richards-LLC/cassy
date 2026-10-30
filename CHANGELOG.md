@@ -17,6 +17,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   effort and account when it lacks them, and a row that already lost its
   harness relaunches on the harness its model belongs to.
 
+### Fixed — Delayed lifecycle holding causes
+
+- **Delayed notices keep their last recorded hold** — Lifecycle delay markers
+  name busy-pane, debounce or rate-limit holds when recorded, and say when the
+  cause is unrecorded. Message status retains the cause after hook acknowledgment
+  without changing delivery or confirmation receipts.
+
 ### Fixed — Merge readiness
 
 - **A worker's ready message counts, and the supervisor waits for it** — Was:

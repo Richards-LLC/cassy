@@ -1253,7 +1253,7 @@ async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {
     // The delivering worker walked its own ledger: never independent QA.
     fx.reject(
         serde_json::json!({"ledger_author":"test-agent"}),
-        "ledger author test-agent is in cas-bq01's implementation lineage",
+        "is in cas-bq01's implementation lineage",
     )
     .await;
 

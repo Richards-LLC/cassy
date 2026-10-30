@@ -107,6 +107,17 @@ function changedFiles(document: Document, event: WorkEvent, context: WorkRowsCon
     const path = document.createElement("span"); path.className = "changed-file-path"; path.textContent = file.path;
     const operation = document.createElement("span"); operation.className = "changed-file-operation"; operation.textContent = file.operation;
     button.append(path, operation);
+    if (file.line_counts) {
+      const { added, removed } = file.line_counts;
+      const counts = document.createElement("span"); counts.className = "changed-file-counts";
+      counts.title = "Lines from the latest successful edit, not cumulative or Git totals.";
+      const label = document.createElement("span"); label.className = "changed-file-count-label sr-only";
+      label.textContent = `${added} ${added === 1 ? "line" : "lines"} added, ${removed} ${removed === 1 ? "line" : "lines"} removed in the latest successful edit`;
+      const visual = document.createElement("span"); visual.className = "changed-file-count-visual"; visual.setAttribute("aria-hidden", "true");
+      const additions = document.createElement("span"); additions.className = "changed-file-count-added"; additions.textContent = `+${added}`;
+      const removals = document.createElement("span"); removals.className = "changed-file-count-removed"; removals.textContent = `−${removed}`;
+      visual.append(additions, "/", removals); counts.append(label, visual); button.append(counts);
+    }
     button.onclick = () => { context.setOpen(fileKey, !context.isOpen(fileKey)); repaint(fileKey); };
     item.append(button);
     if (open) {

@@ -3,15 +3,18 @@ import { ATLAS, PELICAN } from "./world";
 import { HubDouble } from "./hub-double";
 import { journeyNow, journeyStamp, JOURNEY_TIMEZONE } from "./clock";
 import { readFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer } from "node:https";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { once } from "node:events";
 
 const PNG = readFileSync(new URL("../media/evidence.png", import.meta.url)).toString("base64");
 for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "dark"], [390, 844, "light"], [390, 844, "dark"]] as const) {
   test.describe(`composer paste ${width} ${colorScheme}`, () => {
-    test.use({ viewport: { width, height }, colorScheme });
+    test.use({ viewport: { width, height }, colorScheme, ignoreHTTPSErrors: true });
     const run: Parameters<typeof test>[2] = async ({ page, journey, browser, baseURL }) => {
-      test.setTimeout(120_000);
       const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
       const uploads = new Map<string, { name: string; data: string; path: string }>();
       let interrupted = false;
@@ -164,7 +167,9 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         let releaseSaving!: () => void;
         const saving = new Promise<void>(resolve => { releaseSaving = resolve; });
         let receivedBytes = 0;
-        const server = createServer(async (request, response) => {
+        const tls = mkdtempSync(join(tmpdir(), "commander-upload-"));
+        execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1", "-keyout", join(tls, "key.pem"), "-out", join(tls, "cert.pem")], { stdio: "ignore" });
+        const server = createServer({ key: readFileSync(join(tls, "key.pem")), cert: readFileSync(join(tls, "cert.pem")) }, async (request, response) => {
           response.setHeader("access-control-allow-origin", "*");
           response.setHeader("access-control-allow-headers", "*");
           if (request.method === "OPTIONS") { response.end(); return; }
@@ -182,7 +187,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         const pattern = "https://*.test/v1/sessions/*/uploads/*";
         const forward = async (route: import("@playwright/test").Route) => {
           if (route.request().postDataJSON()?.name !== "slow-photo.png") return route.fallback();
-          return route.continue({ url: `http://127.0.0.1:${port}/upload` });
+          return route.continue({ url: `https://127.0.0.1:${port}/upload` });
         };
         const cdp = await page.context().newCDPSession(page);
         try {
@@ -213,9 +218,10 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         } finally {
           releaseSaving();
-          await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
-          await cdp.detach(); await page.unroute(pattern, forward);
+          await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(() => {});
+          await cdp.detach().catch(() => {}); await page.unroute(pattern, forward);
           server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+          rmSync(tls, { recursive: true, force: true });
         }
       });
       await journey.stage("A refusal names its file and keeps the hub's reason", async () => {
@@ -239,6 +245,18 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         await expect(page.locator("#message-status")).toBeHidden();
         await expect(page.locator(".upload-error")).toContainText("Your files are kept here.");
         await expect(page.getByRole("button", { name: "Remove orphan.png", exact: true })).toBeVisible();
+        if (width === 390 && colorScheme === "light") {
+          for (const [name, media] of [
+            ["forced-colors", { forcedColors: "active" }],
+            ["reduced-motion", { reducedMotion: "reduce" }],
+            ["contrast-more", { contrast: "more" }],
+          ] as const) {
+            await page.emulateMedia(media);
+            await expect(page.locator(".upload-error")).toBeVisible();
+            await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/a11y-${name}.png` });
+            await page.emulateMedia({ forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" });
+          }
+        }
       });
     };
     if (width === 1440 && colorScheme === "light") test("HUB-J24 paste content into the composer", run);

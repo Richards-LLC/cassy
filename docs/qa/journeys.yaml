@@ -427,8 +427,8 @@ invariants:
     check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history. The sender's own notes.txt opens as sandboxed UTF-8 plain text, never HTML, and Edit on a refused send restores its file cards with no host path in the composer (composer-uploads.test.ts); hub::server::composer_upload::tests::open_preview_hashes_each_upload_once_per_change proves one hash per upload change.
     bug: {task: cas-195a}
   HUB-J24-PHONE-UPLOAD:
-    statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
-    check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
+    statement: A supported phone attachment up to 10 MiB has at least 25% transfer deadline margin at 512 kbit/s, shows byte progress then Saving before Delivered, retains its sniffed media type, and shows a refused file and hub reason once.
+    check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 throttled loopback upload and single-refusal stages at 1440/390px in light/dark, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
   HUB-J3-LIST-SCROLL-BOUNDS:
     statement: Project-list accessibility labels remain inside the scrolling navigation and never extend the viewport-sized conversation shell.
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
@@ -2137,6 +2137,7 @@ journeys:
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/composer-uploads.ts
+  - hub-web/src/upload-transport.ts
   - hub-web/src/sent-attachments.ts
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
@@ -2149,7 +2150,7 @@ journeys:
   - A 4 or 10 MiB phone file reaches the hub over 512 kbit/s transport without the ordinary 10 second request timeout.
   - A refused file is named among multiple attachments; unsupported types do not prescribe reconnecting.
   - A missing session shows the hub refusal text and keeps the files for recovery.
-  - HEIC, AVIF and MOV bytes retain their media types in host artifact storage.
+  - HEIC, generic HEIF, AVIF and MOV bytes retain their media types in host artifact storage.
   invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD, HUB-J24-SENT-ATTACHMENT]
   traffic:
     share_pct: null

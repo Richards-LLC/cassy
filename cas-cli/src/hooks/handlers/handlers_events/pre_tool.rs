@@ -212,8 +212,67 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
 }
 
 fn changelog_append_only_edit(input: &HookInput, relative: &str, file: &Path) -> bool {
-    let _ = (input, relative, file);
-    false
+    if relative != "CHANGELOG.md" {
+        return false;
+    }
+    let Some(tool_input) = input.tool_input.as_ref() else {
+        return false;
+    };
+    let insertion = |edit: &serde_json::Value| {
+        let Some(old) = edit.get("old_string").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(new) = edit.get("new_string").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        !old.is_empty() && new.len() > old.len() && new.contains(old)
+    };
+    match input.tool_name.as_deref() {
+        Some("Edit") => insertion(tool_input),
+        Some("MultiEdit") => tool_input
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|edits| !edits.is_empty() && edits.iter().all(insertion)),
+        Some("Write") => {
+            let Some(new) = tool_input.get("content").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            std::fs::read_to_string(file)
+                .ok()
+                .is_some_and(|old| !old.is_empty() && new.len() > old.len() && new.contains(&old))
+        }
+        Some("apply_patch") => {
+            let Some(patch) = tool_input.get("command").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let mut in_changelog = false;
+            let mut changed_changelog = false;
+            let mut added = false;
+            for line in patch.lines() {
+                if let Some(path) = line.strip_prefix("*** Update File: ") {
+                    in_changelog = path.trim().trim_start_matches("./") == "CHANGELOG.md";
+                    changed_changelog |= in_changelog;
+                    continue;
+                }
+                if line.starts_with("*** Add File: ")
+                    || line.starts_with("*** Delete File: ")
+                    || line.starts_with("*** Move to: ")
+                {
+                    in_changelog = false;
+                    continue;
+                }
+                if !in_changelog {
+                    continue;
+                }
+                if line.starts_with('-') {
+                    return false;
+                }
+                added |= line.starts_with('+') && !line.starts_with("+++");
+            }
+            changed_changelog && added
+        }
+        _ => false,
+    }
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.
@@ -7068,11 +7127,9 @@ mod workspace_contract_tests {
     #[test]
     fn changelog_new_bullet_is_append_only() {
         let input = tool_input(
-            "Edit",
+            "apply_patch",
             serde_json::json!({
-                "file_path": "/repo/CHANGELOG.md",
-                "old_string": "## [Unreleased]",
-                "new_string": "## [Unreleased]\n\n### Fixed — Factory QA\n- Added this task's entry.",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
             }),
             Path::new("/repo"),
         );
@@ -7086,11 +7143,9 @@ mod workspace_contract_tests {
     #[test]
     fn changelog_existing_bullet_edit_is_not_append_only() {
         let input = tool_input(
-            "Edit",
+            "apply_patch",
             serde_json::json!({
-                "file_path": "/repo/CHANGELOG.md",
-                "old_string": "- Existing delivery entry.",
-                "new_string": "- Reworded existing delivery entry.",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n-- Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
             }),
             Path::new("/repo"),
         );

@@ -1542,6 +1542,18 @@ deferred reason. The daemon reconciles durable cursors off its control loop,
 retrying after lock contention, restart or an unavailable brief recipient.
 Inspect and resolve the deferred cause; no repeated close is required.
 Queue dispatch never changes process identity or environment variables.
+The single-active-task start gate applies while a worker has a current,
+reserved or pending queue entry; workers without a queue retain their existing
+start API behaviour.
+
+If delivery A is returned while queued successor B is running, checkpoint B's
+unfinished changes, then run `task action=update id=B status=blocked`. This
+releases B's lease and preserves its current queue slot. Switch to A's recorded
+delivery branch (shown by `task action=show id=A full=true`), then run
+`task action=start id=A`. Correct and re-deliver A on that branch. After A closes
+or parks, switch back to B's recorded branch, run
+`task action=update id=B status=open`, then `task action=start id=B`. Pending
+work stays behind held B throughout recovery; B does not need an unfinished park.
 
 ### MCP mutation timeout receipts
 

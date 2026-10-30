@@ -115,6 +115,9 @@ reuse and failure controls.
 
 ## Conditional references
 
+- Returned delivery while a queued successor is running:
+  [recovery](references/recovery.md#returned-delivery-with-a-queued-successor)
+  names the hold, branch switch and resume steps.
 - Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)
   for the push-first table and cleanup contract.
 - Human-facing output (report, page, chart, notes, UI, CLI, drawing, image):

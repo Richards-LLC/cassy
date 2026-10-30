@@ -302,6 +302,21 @@ impl CasCore {
         let retrying = queue.starting && queue.dispatch_from.as_deref() == predecessor;
         let tasks = self.open_task_store()?;
         let agents = self.open_agent_store()?;
+        // A returned predecessor can close again while its successor is held.
+        // Even an interrupted brief dispatch must keep that execution's slot.
+        if queue.current_started
+            && queue.current_task.as_deref().is_some_and(|id| {
+                tasks.get(id).is_ok_and(|task| {
+                    task.status == TaskStatus::Blocked
+                        && task
+                            .assignee
+                            .as_deref()
+                            .is_some_and(|a| a == worker.name || a == worker.id)
+                })
+            })
+        {
+            return Ok(None);
+        }
         let completed_cursor = queue.current_task.as_deref().is_some_and(|id| {
             tasks.get(id).ok().is_some_and(|task| {
                 matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)

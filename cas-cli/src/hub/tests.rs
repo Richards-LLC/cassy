@@ -851,6 +851,7 @@ async fn launch_profiles_follow_the_resolved_projects_account_policy() {
     let project = repos.path().join("project");
     std::fs::create_dir_all(project.join(".cas")).unwrap();
     assert!(Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
+    crate::store::known_repos::ensure_host_schema().unwrap();
     crate::store::known_repos::register_repo_strict(&project).unwrap();
     let target = super::projects::list_projects(&[]).unwrap().pop().unwrap().target;
     std::fs::write(home.join(".cas/config.toml"), format!("[hub]\nlaunch_roots = [{}]\n", serde_json::to_string(repos.path()).unwrap())).unwrap();

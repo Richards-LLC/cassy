@@ -596,7 +596,9 @@ fn v2_changed_files_are_per_turn_successful_edit_provenance() {
                 {"type":"tool_use","id":"b","name":"Write","input":{"file_path":"b.rs"}}
             ]}}),
             json!({"type":"user","timestamp":at(3),"message":{"content":[
-                {"type":"tool_result","tool_use_id":"a","content":"done"},
+                {"type":"tool_result","tool_use_id":"a","content":"done"}
+            ]},"toolUseResult":{"filePath":"a.rs","structuredPatch":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":3,"lines":[" context","-old","+new","+extra"]}]}}),
+            json!({"type":"user","timestamp":at(3),"message":{"content":[
                 {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"refused"}
             ]}}),
         ],
@@ -610,7 +612,7 @@ fn v2_changed_files_are_per_turn_successful_edit_provenance() {
     let wire = serde_json::to_value(&events).unwrap();
     assert_eq!(
         wire[0]["changed_files"]["files"],
-        json!([{"path":"a.rs","operation":"edit","source_event_id":events[0].id}])
+        json!([{"path":"a.rs","operation":"edit","source_event_id":events[0].id,"line_counts":{"added":2,"removed":1}}])
     );
     assert_eq!(
         wire[0]["changed_files"]["provenance"],
@@ -636,4 +638,33 @@ fn v2_changed_files_are_per_turn_successful_edit_provenance() {
     let wire = serde_json::to_value(events).unwrap();
     assert_eq!(wire[3]["changed_files"]["files"].as_array().unwrap().len(), 3, "the newest snapshot includes earlier calls settling later");
     assert_eq!(wire[4]["changed_files"]["files"].as_array().unwrap().len(), 1, "a new turn starts its own provenance");
+}
+
+#[test]
+fn v2_patch_counts_are_per_file_and_unknown_counts_replace_old_ones() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("codex.jsonl");
+    let patch = "*** Begin Patch\n*** Update File: a.rs\n@@\n-old\n+new\n+extra\n context\n*** Add File: b.rs\n+one\n+two\n*** Delete File: c.rs\n*** Update File: d.rs\n*** Move to: e.rs\n@@\n-old\n+new\n*** End Patch";
+    write_lines(&path, &[
+        json!({"timestamp":at(1),"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
+        json!({"timestamp":at(2),"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":patch,"call_id":"p1"}}),
+        json!({"timestamp":at(3),"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"p1","output":"Success. Updated the following files:\nM a.rs\nA b.rs\nD c.rs\nR d.rs -> e.rs"}}),
+    ]);
+    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Codex), WorkEventStores::default(), WorkEventIndex::default());
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&events).unwrap();
+    let files = wire[1]["changed_files"]["files"].as_array().unwrap();
+    assert_eq!(files[0]["line_counts"], json!({"added":2,"removed":1}));
+    assert_eq!(files[1]["line_counts"], json!({"added":2,"removed":0}));
+    assert!(files[2..].iter().all(|file| file.get("line_counts").is_none()), "deletions and moves lack a known per-path line diff");
+    assert!(wire[1]["tool"].get("patch").is_none(), "patch contents are not exposed with counts");
+    write_lines(&path, &[
+        json!({"timestamp":at(4),"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.rs\n@@\n-old\n+new", "call_id":"p2"}}),
+        json!({"timestamp":at(5),"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"p2","output":"Success. Updated the following files:\nM a.rs"}}),
+    ]);
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&events).unwrap();
+    let file = &wire[2]["changed_files"]["files"][0];
+    assert_eq!(file["source_event_id"], events[2].id);
+    assert!(file.get("line_counts").is_none(), "the latest edit clears earlier counts when its patch is incomplete");
 }

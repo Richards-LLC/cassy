@@ -38,7 +38,7 @@ describe("work events (cas-ff22)", () => {
       tool: { name: "Read", operation: "read", targets: ["a.ts"], counts: { files: 1 } },
       lifecycle: { id: "call-1", stage: "end", outcome: "success" },
       reasoning: { summary: "Published", source: "codex_summary" },
-      changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "a" }], provenance: "successful_tool_calls", complete: false },
+      changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "a", line_counts: { added: 3, removed: 0 } }], provenance: "successful_tool_calls", complete: false },
     };
     const page = workEventsPage({ request_id: "v2", schema_version: 2, events: [
       wire("a", 1, extensions), wire("legacy", 2),
@@ -49,6 +49,14 @@ describe("work events (cas-ff22)", () => {
     expect(page.events.map((event) => event.label)).toEqual(["a", "legacy", "bad", "future"]);
     expect(page.events[2]).not.toHaveProperty("tool");
     expect(page.events[3]).toMatchObject({ tool: { operation: "teleport" }, lifecycle: { stage: "future" } });
+    // A bad optional extension cannot discard the file's existing provenance.
+    for (const line_counts of [undefined, null, {}, { added: 1 }, { added: -1, removed: 0 }, { added: 0.5, removed: 0 }, { added: 0, removed: "1" }, { added: Number.MAX_SAFE_INTEGER + 1, removed: 0 }]) {
+      const file = { path: "a.ts", operation: "edit", source_event_id: "a" };
+      const decoded = workEventsPage({ request_id: "counts", events: [wire("a", 1, {
+        changed_files: { files: [{ ...file, line_counts }], provenance: "successful_tool_calls", complete: false },
+      })] })!.events[0]!.changed_files!.files[0];
+      expect(decoded).toEqual(file);
+    }
   });
 
   it("reads nothing while Show work is off, polls only a daemon without change notices, and re-reads on a notice", () => {

@@ -385,6 +385,32 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
 }
 
 #[test]
+fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case() {
+    let yaml = format!("{YAML}bug_families:\n  unchanged: {{title: Existing case, tasks: [cas-1234], invariants: [INV], journeys: [signup]}}\n");
+    let mut f = Fixture::new(&yaml);
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    // Different blobs, identical case: the delivered registry remains readable.
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &format!("# delivery\n{yaml}"));
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    let head = commit(f.repo.path());
+    let blob = git(f.repo.path(), &["rev-parse", &format!("{}:{}", f.base, crate::qa_registry::DEFAULT_PATH)]);
+    let object = f.repo.path().join(".git/objects").join(&blob[..2]).join(&blob[2..]);
+    let bytes = std::fs::read(&object).unwrap();
+    std::fs::remove_file(&object).unwrap();
+    let result = check(
+        &mut CloseNoteTracker::new(&f.store, &f.task),
+        &mut f.task, f.repo.path(), &f.qa, &f.base, &head, &head, None, None,
+    );
+    // Restore the isolated fixture before asserting the normal case gate too.
+    std::fs::write(&object, bytes).unwrap();
+    let warnings = result.unwrap();
+    assert!(warnings.iter().any(|text| text.contains("registry inputs unavailable")), "{warnings:?}");
+    assert!(f.store.get(&f.task.id).unwrap().notes.contains("registry inputs unavailable"));
+    assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
+}
+
+#[test]
 fn registry_upkeep_bug_requires_changed_case_for_task() {
     let mut f = Fixture::new(YAML);
     f.task.task_type = TaskType::Bug;

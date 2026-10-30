@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Delayed lifecycle holding causes
+
+- **Delayed notices keep their last recorded hold** — Lifecycle delay markers
+  name busy-pane, debounce or rate-limit holds when recorded, and say when the
+  cause is unrecorded. Message status retains the cause after hook acknowledgment
+  without changing delivery or confirmation receipts.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

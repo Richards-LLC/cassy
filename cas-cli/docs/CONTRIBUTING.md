@@ -280,7 +280,7 @@ database at a guessed path. Writable prompt-queue opens remove a regular empty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
 
-Lifecycle latency diagnosis must separate quiet `lifecycle:` progress notices
+Lifecycle latency diagnosis must separate supervisor-bound quiet `lifecycle:` progress notices
 from wake-eligible `lifecycle-wake:` action events. Quiet notices wait for the
 recipient's next hook or inbox poll; that policy is not a directed-message
 latency guarantee. For either class, measure enqueue-to-transport and
@@ -288,15 +288,16 @@ enqueue-to-recipient-surfacing separately. A `hook_surfaced` receipt proves
 injection into recipient context, not that the model read or acted on the event.
 Do not drain another recipient's queue to measure delivery.
 
-The lifecycle `[delayed Nm]` summary appears at recipient drain after nine
-minutes. It reports queue age, not the holding cause or compliance with the
-directed-message probe's 2 s p95 / 10 s normal-transport maximum. Inspect
-`message_status` while the row is held for its pending reason/detail and wake
-evidence. After surfacing, the latest detail can instead describe the hook
-acknowledgment; it is not a history of busy-pane, debounce or rate-limit holds.
-An absent gate stamp means the earlier holding cause is unverified, not that
-none occurred. Preserve a bounded read-only metadata capture before retention
-removes the evidence, and state unknown causes explicitly.
+The lifecycle `[delayed Nm; held: cause]` summary appears at recipient drain
+after nine minutes. It reports queue age and the last recorded hold, such as
+a busy pane, debounce or rate limit. `message_status` retains that cause in
+`holding_detail` after transport and hook acknowledgment; its current pending
+reason/detail and confirmation receipts keep their separate meanings. The
+marker says `cause unrecorded` when no hold was recorded, including historical
+rows. This is not a history of holds or their durations, and does not prove
+compliance with the directed-message probe's 2 s p95 / 10 s normal-transport
+maximum. Preserve a bounded read-only metadata capture before retention removes
+the evidence, and state unknown causes explicitly.
 
 The GH #1393 follow-up captured five real rows on October 29, 2026 with
 `cas 3.88.0 (b0bff67)`: two wake-eligible lifecycle transports took 2.608 s and

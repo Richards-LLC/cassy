@@ -7401,6 +7401,7 @@ echo SMOKE_DONE
             OPENCODE_WORKER_INSTRUCTIONS,
         ] {
             for required in [
+                "merge verdict closes or reopens the task",
                 "authoritative assignment acceptance",
                 "no prose ACK is required",
                 "inbox on the next turn",
@@ -7437,6 +7438,9 @@ echo SMOKE_DONE
         ];
         for (harness, role) in shapes {
             let surface = rendered_contract_surface(harness, role);
+            // pin: every launch must delegate merged completion to the verdict.
+            assert!(surface.contains("merge verdict closes or reopens the task"), "{harness}/{role:?}: {surface}");
+            assert!(!surface.contains("re-close after"), "{harness}/{role:?}: {surface}");
             let missing = missing_contract_elements(&surface, role);
             assert!(
                 missing.is_empty(),

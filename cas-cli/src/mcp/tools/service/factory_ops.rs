@@ -17677,7 +17677,7 @@ effort = "high"
             assert!(!out.contains("WAITING ON WORKER"), "{out}");
             assert!(!out.contains("re-close"), "{out}");
         }
-        // Without a live dispatch the merged delivery keeps its re-close row.
+        // Without a live dispatch the verdict still owns merged completion.
         let legacy = format_assigned_task_info(
             None,
             None,
@@ -17685,7 +17685,9 @@ effort = "high"
             true,
             None,
         );
-        assert!(legacy.contains("awaiting worker re-close"), "{legacy}");
+        // pin: merged status never tells a worker to close again.
+        assert!(legacy.contains("awaiting merge verdict"), "{legacy}");
+        assert!(!legacy.contains("retry task close"), "{legacy}");
     }
 
     /// The actionable half: quiet WITH undelivered mail means the worker was

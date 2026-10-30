@@ -2402,7 +2402,9 @@ mod tests {
             &git(repo.path(), &["rev-parse", "main"]),
         );
         assert!(guidance.contains("Merge already landed"));
-        assert!(guidance.contains("Re-run task close for cas-test now"));
+        // pin: a suppressed landed request needs no worker close action.
+        assert!(guidance.contains("merge verdict closes or reopens the task"));
+        assert!(!guidance.contains("Re-run task close"));
     }
 
     /// GH #1022: a merge request for a branch whose parked anchor landed but

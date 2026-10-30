@@ -492,8 +492,17 @@ mod tests {
 
     #[test]
     fn attachment_is_capped_to_five_issues() {
-        let text = (1..=8).map(|n| format!("GH #{n}")).collect::<Vec<_>>().join(" ");
-        assert_eq!(parse_issue_refs(&text, Some("o/r")).len(), MAX_ATTACHED_ISSUES);
+        let text = format!(
+            "docs/session-2026-05-15-orchestration-issues.md#1 issue/violet_ps#18 {}",
+            (1..=8).map(|n| format!("GH #{n}")).collect::<Vec<_>>().join(" ")
+        );
+        let refs = parse_issue_refs(&text, Some("o/r"));
+        assert_eq!(refs.len(), MAX_ATTACHED_ISSUES);
+        assert_eq!(
+            refs.iter().map(IssueRef::display).collect::<Vec<_>>(),
+            ["o/r#1", "o/r#2", "o/r#3", "o/r#4", "o/r#5"],
+            "file paths and issue prose must not consume the attachment/lookup budget"
+        );
     }
 
     #[test]

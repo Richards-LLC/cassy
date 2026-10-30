@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Portable QA guidance
+
+- **QA examples work outside the Cassy repository** — The generic evidence
+  example includes its own CSP-safe chapter helper. The Commander helper import
+  is labeled for Cassy's source checkout only.
+
 ### Fixed — Factory delivery
 
 - **Merging released main into a delivery branch no longer blocks close** — Was:

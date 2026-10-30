@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory workflow
 
+- **Large deliveries resolve proof targets together** — Source and builtin
+  references now share one test-tree search per kind, keeping proof-surface
+  discovery within the close budget when many paths change.
 - **Idle delivery alerts follow worker activity** — Live background children
   suppress idle alerts while the worker waits for its command. An unchanged
   task, branch tip and CI state no longer produce another alert just because

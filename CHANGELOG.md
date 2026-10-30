@@ -19,6 +19,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Source edits wait for reconnection** — Expanded source evidence names an offline machine and loads when it reconnects, without requesting again on every redraw. Closing an edit disclosure removes its saved entry.
 
+### Fixed — Refused delivery advances
+
+- **Re-parking names work it cannot attribute** — When a pushed branch advances
+  beyond its parked delivery through unowned work, close reports the kept anchor,
+  ignored tip and offending commit instead of returning an ordinary merge request.
+
+### Fixed — Case checks after registry repairs
+
+- **Registry repairs retain ownership and regression checks** — Fixing a base
+  duplicate evaluates the delivered registry and compares every old case variant.
+  Registry escape notes cannot bypass the case gate; duplicates still present in
+  the delivery refuse with a named error. Unavailable Git inputs retain their
+  existing nonblocking warning.
+
 ### Fixed — Parked delivery attribution
 
 - **Upkeep excludes later work on a reused lane** — When an integration merge
@@ -45,12 +59,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Multiplication stays arithmetic in shell arguments** — Workspace checks
   keep arithmetic operators out of filesystem resolution while still checking
   nested command substitutions and refusing unresolved effects.
-
-### Fixed — Duplicate baseline bug-family keys
-
-- **Malformed base registries refuse case checks** — A duplicate bug-family key
-  now names the key and file in a registry error instead of skipping the gate.
-  Unavailable Git inputs retain their existing nonblocking warning.
 
 ### Fixed — Factory cleanup feedback
 

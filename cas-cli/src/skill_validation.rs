@@ -40,10 +40,10 @@ enum BubblewrapCapability {
 /// Run a skill's optional validation script before it is persisted.
 ///
 /// The probe runs from a fresh temporary directory with a scrubbed environment
-/// (only PATH is retained for executable lookup). On Linux, bubblewrap adds a
-/// network namespace with no routes. Hosts without bubblewrap use a plain-shell
-/// fallback by default and receive an explicit warning; `require_sandbox` can
-/// fail closed instead. This keeps relative writes out of the project and
+/// (only PATH is retained for executable lookup). On Linux, usable bubblewrap
+/// adds a network namespace with no routes. Hosts without usable bubblewrap use
+/// a plain-shell fallback by default and receive an explicit warning;
+/// `require_sandbox` can fail closed instead. This keeps relative writes out of the project and
 /// avoids leaking CAS credentials. Validation scripts must be local,
 /// deterministic availability checks that do not require network access.
 pub(crate) fn validate_skill(skill: &Skill) -> Result<ValidationReport, String> {

@@ -218,61 +218,173 @@ fn changelog_append_only_edit(input: &HookInput, relative: &str, file: &Path) ->
     let Some(tool_input) = input.tool_input.as_ref() else {
         return false;
     };
-    let insertion = |edit: &serde_json::Value| {
-        let Some(old) = edit.get("old_string").and_then(serde_json::Value::as_str) else {
-            return false;
-        };
-        let Some(new) = edit.get("new_string").and_then(serde_json::Value::as_str) else {
-            return false;
-        };
-        !old.is_empty() && new.len() > old.len() && new.contains(old)
+    let Ok(old_text) = std::fs::read_to_string(file) else {
+        return false;
     };
-    match input.tool_name.as_deref() {
-        Some("Edit") => insertion(tool_input),
+    let new_text = match input.tool_name.as_deref() {
+        Some("Edit") => apply_changelog_string_edit(&old_text, tool_input),
         Some("MultiEdit") => tool_input
             .get("edits")
             .and_then(serde_json::Value::as_array)
-            .is_some_and(|edits| !edits.is_empty() && edits.iter().all(insertion)),
-        Some("Write") => {
-            let Some(new) = tool_input.get("content").and_then(serde_json::Value::as_str) else {
-                return false;
-            };
-            std::fs::read_to_string(file)
-                .ok()
-                .is_some_and(|old| !old.is_empty() && new.len() > old.len() && new.contains(&old))
-        }
-        Some("apply_patch") => {
-            let Some(patch) = tool_input.get("command").and_then(serde_json::Value::as_str) else {
-                return false;
-            };
-            let mut in_changelog = false;
-            let mut changed_changelog = false;
-            let mut added = false;
-            for line in patch.lines() {
-                if let Some(path) = line.strip_prefix("*** Update File: ") {
-                    in_changelog = path.trim().trim_start_matches("./") == "CHANGELOG.md";
-                    changed_changelog |= in_changelog;
-                    continue;
-                }
-                if line.starts_with("*** Add File: ")
-                    || line.starts_with("*** Delete File: ")
-                    || line.starts_with("*** Move to: ")
-                {
-                    in_changelog = false;
-                    continue;
-                }
-                if !in_changelog {
-                    continue;
-                }
-                if line.starts_with('-') {
+            .filter(|edits| !edits.is_empty())
+            .and_then(|edits| {
+                edits.iter().try_fold(old_text.clone(), |text, edit| {
+                    apply_changelog_string_edit(&text, edit)
+                })
+            }),
+        Some("Write") => tool_input
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        Some("apply_patch") => tool_input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|patch| apply_changelog_patch(&old_text, patch)),
+        _ => None,
+    };
+    new_text.is_some_and(|new| changelog_diff_adds_whole_lines(&old_text, &new))
+}
+
+fn apply_changelog_string_edit(text: &str, edit: &serde_json::Value) -> Option<String> {
+    let old = edit.get("old_string")?.as_str()?;
+    let new = edit.get("new_string")?.as_str()?;
+    if old.is_empty() {
+        return None;
+    }
+    let count = text.matches(old).count();
+    let replace_all = edit
+        .get("replace_all")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if count == 0 || (count != 1 && !replace_all) {
+        return None;
+    }
+    Some(if replace_all {
+        text.replace(old, new)
+    } else {
+        text.replacen(old, new, 1)
+    })
+}
+
+fn changelog_diff_adds_whole_lines(old: &str, new: &str) -> bool {
+    use similar::{ChangeTag, TextDiff};
+    let mut inserted = false;
+    let mut insertion = String::new();
+    let is_new_entry = |block: &str| {
+        block.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("# ")
+                || line.starts_with("## ")
+                || line.starts_with("### ")
+                || line.starts_with("#### ")
+                || line.starts_with("##### ")
+                || line.starts_with("###### ")
+                || line.starts_with("- ")
+                || line.starts_with("* ")
+                || line.starts_with("1. ")
+        })
+    };
+    for change in TextDiff::from_lines(old, new).iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Delete => return false,
+            ChangeTag::Insert => {
+                inserted = true;
+                if !change.value().ends_with('\n') {
                     return false;
                 }
-                added |= line.starts_with('+') && !line.starts_with("+++");
+                insertion.push_str(change.value());
             }
-            changed_changelog && added
+            ChangeTag::Equal => {
+                if !insertion.is_empty() && !is_new_entry(&insertion) {
+                    return false;
+                }
+                insertion.clear();
+            }
         }
-        _ => false,
     }
+    inserted && (insertion.is_empty() || is_new_entry(&insertion))
+}
+
+fn apply_changelog_patch(text: &str, patch: &str) -> Option<String> {
+    let mut current = text.to_owned();
+    let mut in_changelog = false;
+    let mut hunk: Vec<(char, String)> = Vec::new();
+    let mut changed = false;
+    for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            if in_changelog && !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+                return None;
+            }
+            in_changelog = path.trim().trim_start_matches("./") == "CHANGELOG.md";
+            changed |= in_changelog;
+            continue;
+        }
+        if line.starts_with("*** Add File: ")
+            || line.starts_with("*** Delete File: ")
+            || line.starts_with("*** Move to: ")
+            || line == "*** End Patch"
+        {
+            if in_changelog && !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+                return None;
+            }
+            in_changelog = false;
+            continue;
+        }
+        if !in_changelog {
+            continue;
+        }
+        if line.starts_with("@@") {
+            if !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+                return None;
+            }
+            continue;
+        }
+        let mut chars = line.chars();
+        if let Some(tag @ (' ' | '+' | '-')) = chars.next() {
+            hunk.push((tag, chars.as_str().to_owned()));
+        }
+    }
+    if in_changelog && !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+        return None;
+    }
+    changed.then_some(current)
+}
+
+fn apply_changelog_patch_hunk(text: &mut String, hunk: &mut Vec<(char, String)>) -> bool {
+    if hunk.is_empty() {
+        return true;
+    }
+    let rows = std::mem::take(hunk);
+    let old: Vec<&str> = rows
+        .iter()
+        .filter(|(tag, _)| *tag != '+')
+        .map(|(_, row)| row.as_str())
+        .collect();
+    let new: Vec<&str> = rows
+        .iter()
+        .filter(|(tag, _)| *tag != '-')
+        .map(|(_, row)| row.as_str())
+        .collect();
+    if old.is_empty() {
+        return false;
+    }
+    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
+    let matches = lines
+        .windows(old.len())
+        .enumerate()
+        .filter_map(|(at, window)| {
+            window
+                .iter()
+                .zip(&old)
+                .all(|(line, expected)| line.trim_end_matches(['\r', '\n']) == *expected)
+                .then_some(at)
+        })
+        .collect::<Vec<_>>();
+    let [at] = matches.as_slice() else { return false; };
+    let inserted = new.into_iter().map(|line| format!("{line}\n")).collect::<Vec<_>>();
+    lines.splice(*at..*at + old.len(), inserted);
+    *text = lines.concat();
+    true
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.
@@ -7126,34 +7238,120 @@ mod workspace_contract_tests {
 
     #[test]
     fn changelog_new_bullet_is_append_only() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
         let input = tool_input(
             "apply_patch",
             serde_json::json!({
-                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
             }),
-            Path::new("/repo"),
+            root.path(),
         );
         assert!(changelog_append_only_edit(
             &input,
             "CHANGELOG.md",
-            Path::new("/repo/CHANGELOG.md")
+            &file
         ));
     }
 
     #[test]
     fn changelog_existing_bullet_edit_is_not_append_only() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
         let input = tool_input(
             "apply_patch",
             serde_json::json!({
-                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n-- Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n - Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
             }),
-            Path::new("/repo"),
+            root.path(),
         );
         assert!(!changelog_append_only_edit(
             &input,
             "CHANGELOG.md",
-            Path::new("/repo/CHANGELOG.md")
+            &file
         ));
+    }
+
+    #[test]
+    fn changelog_patch_continuation_of_existing_bullet_warns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n - Existing delivery entry.\n+  Added continuation to another delivery's bullet.\n*** End Patch"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
+    fn changelog_edit_rewrite_plus_add_warns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        let old = "the unknown-session fallback stays unchanged.";
+        std::fs::write(&file, format!("{old}\n")).unwrap();
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "old_string": old,
+                "new_string": "the unknown-session fallback stays unchanged. (Superseded by 3.92.)\n\n- **New entry** — mine.\n"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
+    fn worker_file_lease_notes_checks_changelog_edit_before_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project)
+            .status()
+            .unwrap();
+        let file = project.join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&cas_root, "github.com/acme/lease-test").unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: "http://127.0.0.1:9".into(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&cas_root)
+        .unwrap();
+        let mut task = cas_types::Task::new("cas-lease-changelog".into(), "Lease test".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("lease-test-session".into());
+        crate::store::open_task_store(&cas_root).unwrap().add(&task).unwrap();
+        let project_path = project.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_AGENT_NAME", Some("lease-test-worker")),
+            ("CAS_SESSION_ID", Some("lease-test-session")),
+            ("CAS_CLONE_PATH", Some(&project_path)),
+            ("CAS_USER_CLOUD_JSON", None),
+        ]);
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "file_path": file,
+                "old_string": "- Existing delivery entry.",
+                "new_string": "- Existing delivery entry. (edited)\n\n- New entry.\n"
+            }),
+            &project,
+        );
+        assert!(worker_file_lease_notes(&input, &cas_root, false).is_empty());
+        assert!(cas_root.join("file-leases/lease-test-session.json").exists(),
+            "a rewrite-plus-add must not bypass the file-lease check");
     }
 
     fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {

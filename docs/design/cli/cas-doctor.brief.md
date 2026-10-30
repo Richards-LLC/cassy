@@ -109,7 +109,8 @@ so subsequent backlog sections stay in the JSON diagnostic message.
 Exact-build comparison: `d8d1b862` → `1d7e501a4`, against identical isolated
 Git/task inputs. The historical main snapshot reproduces the unsafe
 `e696570f0` receipt before, then shows the task as reverted without that receipt
-after. The source task is now cancelled; only the disposable snapshot's
+after. Committed captures redact local artifact paths; raw captures remain
+with the task evidence. The source task is now cancelled; only the disposable snapshot's
 lifecycle was restored to open for this historical reproduction. No candidate
 accessed the live main store.
 

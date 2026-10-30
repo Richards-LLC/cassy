@@ -2025,6 +2025,42 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     assert_eq!(pane.kind, MachineEventKind::PaneAdded);
     assert_eq!(pane.pane_id.as_deref(), Some("worker-1"));
 
+    // cas-c095: a pane exit carries its code, and names the supervisor's, so
+    // a device can tell a deliberate supervisor exit from a worker crash.
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::PaneAdded {
+            pane: PaneInfo {
+                id: "noble-cheetah-84".into(),
+                kind: PaneKind::Supervisor,
+                focused: true,
+                title: "Supervisor".into(),
+                exited: false,
+            },
+        },
+    );
+    receiver.recv().await.unwrap();
+    for (pane_id, exit_code, payload) in [
+        ("worker-1", Some(1), serde_json::json!({ "exit_code": 1 })),
+        (
+            "noble-cheetah-84",
+            Some(0),
+            serde_json::json!({ "exit_code": 0, "role": "supervisor" }),
+        ),
+    ] {
+        events.observe_daemon(
+            "factory-a",
+            &DaemonMessage::PaneExited {
+                pane_id: pane_id.into(),
+                exit_code,
+            },
+        );
+        let exited = receiver.recv().await.unwrap();
+        assert_eq!(exited.kind, MachineEventKind::PaneExited);
+        assert_eq!(exited.pane_id.as_deref(), Some(pane_id));
+        assert_eq!(exited.payload, Some(payload));
+    }
+
     events.reconcile_sessions(std::iter::empty::<&str>()).await;
     let removed = receiver.recv().await.unwrap();
     assert_eq!(removed.kind, MachineEventKind::SessionRemoved);

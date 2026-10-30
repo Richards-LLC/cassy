@@ -96,6 +96,9 @@ pub struct MachineEventBus {
     sequence: Arc<AtomicU64>,
     sessions: Arc<Mutex<HashSet<String>>>,
     session_contexts: Arc<StdMutex<HashMap<String, SessionAttentionContext>>>,
+    /// Each session's supervisor pane, read from its daemon's panes, so a
+    /// pane exit says whose it was (cas-c095).
+    supervisor_panes: Arc<StdMutex<HashMap<String, String>>>,
     history: Arc<StdMutex<VecDeque<MachineEvent>>>,
     history_capacity: usize,
     persistence_path: Option<Arc<PathBuf>>,
@@ -154,6 +157,7 @@ impl MachineEventBus {
             sequence: Arc::new(AtomicU64::new(next_sequence)),
             sessions: Arc::new(Mutex::new(HashSet::new())),
             session_contexts: Arc::new(StdMutex::new(HashMap::new())),
+            supervisor_panes: Arc::new(StdMutex::new(HashMap::new())),
             history: Arc::new(StdMutex::new(history)),
             history_capacity: capacity,
             persistence_path: persistence_path.map(Arc::new),
@@ -262,12 +266,45 @@ impl MachineEventBus {
             );
             return;
         }
+        let panes = match message {
+            DaemonMessage::Welcome { state, .. } | DaemonMessage::StateUpdate { state } => {
+                Some(state.panes.as_slice())
+            }
+            DaemonMessage::PaneAdded { pane } => Some(std::slice::from_ref(pane)),
+            _ => None,
+        };
+        if let Some(supervisor) = panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.kind == crate::ui::factory::PaneKind::Supervisor)
+        {
+            self.supervisor_panes
+                .lock()
+                .expect("supervisor pane lock poisoned")
+                .insert(session.to_owned(), supervisor.id.clone());
+        }
         let (kind, pane_id, payload) = match message {
             DaemonMessage::PaneAdded { pane } => {
                 (MachineEventKind::PaneAdded, Some(pane.id.clone()), None)
             }
-            DaemonMessage::PaneExited { pane_id, .. } => {
-                (MachineEventKind::PaneExited, Some(pane_id.clone()), None)
+            DaemonMessage::PaneExited { pane_id, exit_code } => {
+                // cas-c095: the exit code and the supervisor role let a
+                // device tell a deliberate supervisor exit from a crash.
+                let supervisor = self
+                    .supervisor_panes
+                    .lock()
+                    .expect("supervisor pane lock poisoned")
+                    .get(session)
+                    .is_some_and(|supervisor| supervisor == pane_id);
+                let mut payload = serde_json::json!({ "exit_code": exit_code });
+                if supervisor {
+                    payload["role"] = "supervisor".into();
+                }
+                (
+                    MachineEventKind::PaneExited,
+                    Some(pane_id.clone()),
+                    Some(payload),
+                )
             }
             DaemonMessage::PaneRemoved { pane_id } => {
                 (MachineEventKind::PaneRemoved, Some(pane_id.clone()), None)

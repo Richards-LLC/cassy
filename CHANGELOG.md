@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Deliberate supervisor exit
+
+- **A deliberate /exit ends quietly** — Was: exiting a supervisor raised
+  "Daemon connection lost" and "Worker stopped" attention items, even with no
+  workers, and the session-ended receipt read `pane_exit: code=Some(0),
+  signal=None`. Now: a supervisor exit with code 0 and the clean daemon exit
+  after it raise no attention item, the receipt says "exited normally", and a
+  supervisor crash still alerts as "Supervisor stopped".
+
 ### Fixed — Generated artifact regeneration
 
 - **Current dependencies survive regeneration** — Was: every changed hub-web

@@ -170,6 +170,7 @@ class AdmissionTests(unittest.TestCase):
             (['node', 'scripts/build-cassy-tokens.mjs'], 1),
             (['node', 'scripts/build-cassy-tokens.mjs', '--check'], 1),
             (['node', '--test', 'scripts/operator-inbox-live-safety.test.mjs'], 1),
+            (['node', 'scripts/run-verified-node-tests.mjs', 'e2e/checkout-ports.test.mjs'], 2),
             (worker.constrained(['npx', 'vitest', 'run']), 2),
             (['sh', '-c', 'tsc --noEmit && tsc --noEmit -p e2e'], 1),
             (['bash', '-c', 'cd hub-web && npm run typecheck > /tmp/log 2>&1'], 1),

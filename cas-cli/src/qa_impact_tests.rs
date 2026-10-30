@@ -40,6 +40,71 @@ fn commit(repo: &Path) -> String {
     git(repo, &["rev-parse", "HEAD"])
 }
 
+fn commander_delivery_impact(paths: &[&str]) -> (Impact, crate::qa_pass::QaEligibility) {
+    let temp = repo();
+    let repo = temp.path();
+    write(
+        repo,
+        "scripts/journeys-for-diff.py",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/journeys-for-diff.py")),
+    );
+    write(
+        repo,
+        "docs/qa/journeys.md",
+        "## hub-web\n\n### HUB-J1 · Reply\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/reply.ts`\n- **Suite:** `hub-web/e2e/reply.journey.ts`\n",
+    );
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-30'\nselection: legacy_catalog\nsurfaces: ['hub-web/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: HUB-J1\n    status: live\n    entry: {url: /commander/, trigger: Open}\n    steps: [Arrive]\n    owners: ['hub-web/src/reply.ts']\n    invariants: [INV]\n",
+    );
+    write(repo, "hub-web/src/reply.ts", "export const reply = true;");
+    write(repo, "hub-web/e2e/reply.journey.ts", "test('HUB-J1 reply', () => {});");
+    for path in paths {
+        write(repo, path, "{}");
+    }
+    let head = commit(repo);
+    let qa = QaConfig::default();
+    let report = analyze(
+        repo,
+        &qa,
+        &paths.iter().map(|path| Change::modified(*path)).collect::<Vec<_>>(),
+        None,
+        Some(&head),
+    ).unwrap();
+    assert!(report.registry.valid, "{:?}", report.warnings);
+    let files = paths.iter().map(|path| (*path).to_owned()).collect::<Vec<_>>();
+    let journeys = report.journeys.iter().map(|journey| journey.id.clone()).collect::<Vec<_>>();
+    let eligibility = crate::qa_pass::user_facing_reasons(
+        &crate::types::Task::new("cas-fixture".into(), "Delivery".into()),
+        &qa,
+        Some(&files),
+        &journeys,
+    );
+    (report, eligibility)
+}
+
+#[test]
+fn qa_impact_test_only_delivery_is_not_user_facing_cas_63e9() {
+    let (report, eligibility) = commander_delivery_impact(&[
+        "hub-web/test-fixtures/vitest-stability/package.json",
+        "hub-web/test-fixtures/vitest-stability/package-lock.json",
+        "hub-web/src/reply.test.mjs",
+        "hub-web/e2e/fixtures/reply.json",
+    ]);
+    assert!(report.journeys.is_empty(), "{:?}", report.journeys);
+    assert!(report.unowned.iter().all(|file| !file.surface), "{:?}", report.unowned);
+    assert!(!eligibility.is_eligible(), "{eligibility:?}");
+}
+
+#[test]
+fn qa_impact_product_source_delivery_is_user_facing_cas_63e9() {
+    let (report, eligibility) = commander_delivery_impact(&["hub-web/src/new-view.ts"]);
+    assert_eq!(report.journeys.iter().map(|journey| journey.id.as_str()).collect::<Vec<_>>(), ["HUB-J1"]);
+    assert!(report.unowned.iter().any(|file| file.surface));
+    assert!(eligibility.is_eligible(), "{eligibility:?}");
+}
+
 #[test]
 fn qa_impact_orders_status_share_id_and_ignores_paths() {
     use clap::Parser;

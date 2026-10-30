@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Live work
+
+- **Live work catches up after a pending read** — A new work notice received
+  while a thread or worker timeline is loading now triggers one follow-up
+  read after that page finishes. Repeated notices coalesce, and hidden or
+  disconnected views do not keep fetching.
+
 ### Fixed — Factory delivery
 
 - **Merging released main into a delivery branch no longer blocks close** — Was:

@@ -125,19 +125,24 @@ describe("work events (cas-ff22)", () => {
   it.each([undefined, "worker"])("does not refresh deferred notices after closing or disconnecting (agent: %s)", (agent) => {
     for (const stop of ["close", "disconnect"] as const) {
       const { picture, transport, open } = livePicture(agent);
+      if (stop === "close") {
+        picture.page("m", "s", workEventsPage({ request_id: "r1", events: [wire("old", 1, { agent })], has_earlier: false })!);
+        picture.appended("m", "s");
+      }
       picture.appended("m", "s");
       if (stop === "disconnect") picture.disconnected("m", "s");
       else if (agent) picture.watchTimeline(undefined);
       else picture.setShowWork(false);
-      picture.page("m", "s", workEventsPage({ request_id: "r1", events: [wire("old", 1, { agent })], has_earlier: false })!);
+      const pending = stop === "close" ? 2 : 1;
+      picture.page("m", "s", workEventsPage({ request_id: `r${pending}`, events: [wire("newer", 3, { agent })], has_earlier: true, next_before: "gap-cursor" })!);
       picture.appended("other", "s");
-      expect(transport.requestWorkEvents, stop).toHaveBeenCalledTimes(1);
+      expect(transport.requestWorkEvents, "closed views do not continue a gap or deferred refresh").toHaveBeenCalledTimes(pending);
       if (stop === "disconnect") picture.reattached("m", "s");
       else if (agent) open();
       else picture.setShowWork(true);
-      expect(transport.requestWorkEvents).toHaveBeenCalledTimes(2);
-      picture.page("m", "s", workEventsPage({ request_id: "r2", events: [wire("fresh", 2, { agent })], has_earlier: false })!);
-      expect(transport.requestWorkEvents, "reopening does not replay an old deferred notice").toHaveBeenCalledTimes(2);
+      expect(transport.requestWorkEvents).toHaveBeenCalledTimes(pending + 1);
+      picture.page("m", "s", workEventsPage({ request_id: `r${pending + 1}`, events: [wire("fresh", 4, { agent })], has_earlier: false })!);
+      expect(transport.requestWorkEvents, "reopening does not replay an old deferred notice").toHaveBeenCalledTimes(pending + 1);
     }
   });
 

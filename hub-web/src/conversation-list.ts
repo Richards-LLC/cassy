@@ -51,6 +51,8 @@ export interface ConversationRow {
   harness?: "claude" | "codex" | "grok" | "opencode";
   account_email?: string;
   project?: string;
+  /** The project's human name; `project` stays the grouping identity (cas-6f79). */
+  projectName?: string;
   machine_online?: boolean;
   workerCount?: number;
   mergesPerHour?: number;
@@ -92,7 +94,7 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     const rank = (member: T): number => (anyActivity ? member.activityAt : member.startedAt) ?? -Infinity;
     const ordered = [...group].sort((a, b) => rank(b) - rank(a));
     // cas-5d2c: the same noun as the footer's "3 conversations".
-    const label = `${projectTitle(row.projectDir) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
+    const label = `${rowProjectName(row) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
     ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && rank(member) !== -Infinity } }));
   }
   return out;
@@ -169,13 +171,19 @@ export function machineName(host: string): string {
   return name || host.trim();
 }
 
-/** The words a list search matches: project, machine and supervisor codename. */
-export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "project" | "host" | "supervisor">): string {
-  return `${row.project || projectTitle(row.projectDir) || ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
+/** The project's human name: its display name, else its folder, and only for
+ * an older hub that sends neither, its identity (cas-6f79). */
+export function rowProjectName(row: Pick<ConversationRow, "projectDir" | "project" | "projectName">): string | undefined {
+  return row.projectName?.trim() || projectTitle(row.projectDir) || row.project?.trim() || undefined;
+}
+
+/** The words a list search matches: project name and identity, machine and supervisor codename. */
+export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "project" | "projectName" | "host" | "supervisor">): string {
+  return `${rowProjectName(row) ?? ""} ${row.project ?? ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
 }
 
 /** Rows whose project, machine or supervisor contains every word of the query (case-insensitive). */
-export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "project" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
+export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "project" | "projectName" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
   const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return [...rows];
   return rows.filter((row) => { const text = conversationSearchText(row); return words.every((word) => text.includes(word)); });
@@ -188,7 +196,7 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
  * time in words, unread and waiting.
  */
 export function conversationRowSpokenName(row: ConversationRow): string {
-  const project = row.project || projectTitle(row.projectDir);
+  const project = rowProjectName(row);
   const fallback = row.group ? row.activityLine || row.connection : row.connection;
   const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
   const unread = row.unread ?? 0;
@@ -247,7 +255,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
-  const project = row.project || projectTitle(row.projectDir);
+  const project = rowProjectName(row);
   // The title is "project · machine": the project leads, never a dot (P13);
   // the one separator rides with the machine, so a dot never dangles at a
   // line end when a long project pushes the machine to the next line. The

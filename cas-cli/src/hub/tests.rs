@@ -5518,6 +5518,21 @@ fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
     );
 }
 
+/// cas-6f79: Commander titled a project card with its canonical id ("cas-src").
+/// The session's human name is the configured display name, else the main
+/// project's folder, and never the canonical id.
+#[test]
+fn project_name_is_the_display_name_or_folder_never_the_canonical_id_cas_6f79() {
+    let parent = tempfile::tempdir().unwrap();
+    let cas_root = parent.path().join("widget").join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let config = cas_root.join("config.toml");
+    std::fs::write(&config, "[project]\ncanonical_id = \"cas-src\"\ndisplay_name = \" Cassy \"\n").unwrap();
+    assert_eq!(project_display_name(&cas_root).as_deref(), Some("Cassy"));
+    std::fs::write(&config, "[project]\ncanonical_id = \"cas-src\"\ndisplay_name = \"\"\n").unwrap();
+    assert_eq!(project_display_name(&cas_root).as_deref(), Some("widget"));
+}
+
 /// cas-2c559: `/v1/projects` needs only machine:read, but a live session's
 /// project (cas-0273) is session data. A pairing that can only see machines
 /// must not learn the folder of a running session in an unregistered project;

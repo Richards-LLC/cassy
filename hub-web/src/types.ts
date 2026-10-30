@@ -70,6 +70,9 @@ export interface HubSession {
   effort?: string;
   account_email?: string;
   project?: string;
+  /** The project's human name (cas-6f79): its configured display name, else its
+   * folder; never the canonical id. Older hubs omit it. */
+  project_name?: string;
   machine_online?: boolean;
 }
 

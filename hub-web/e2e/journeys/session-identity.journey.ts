@@ -326,21 +326,24 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const at = journeyStamp(offset);
     return { name, supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
   };
-  machine.sessions = [{ ...machine.sessions[1]!, project: "studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
+  machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
     name: "golden-jaguar-44", supervisor: "golden-jaguar-44", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
   }, ended("watchful-heron-16", -3_600_000), ended("solid-parrot-40", -2 * 3_600_000), ended("patient-heron-27", -3 * 3_600_000)];
-  const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "studio", harness: "claude", machine_online: true }] };
+  const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "github.com/acme/studio", project_name: "Studio", harness: "claude", machine_online: true }] };
   const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
     [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
   } });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const filters = page.locator("#conversation-filters");
-  const studio = () => list.getByRole("group", { name: /^studio ·/ });
+  const studio = () => list.getByRole("group", { name: /^Studio ·/ });
   const back = async () => { if (await page.locator("#conversation-back").isVisible()) await page.locator("#conversation-back").click(); };
 
   await journey.stage("A project contains supervisors on both machines and pins its decision", async () => {
     await journey.open();
     await expect(studio().locator(".conversation-row")).toHaveCount(2);
+    // cas-6f79: the card reads the project's display name; its identity stays a detail.
+    await expect(studio().locator(".project-card-name")).toHaveText("Studio");
+    await expect(studio().locator(".project-card-name")).toHaveAttribute("title", "github.com/acme/studio");
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();
     await expect(studio().getByRole("button", { name: "Filter conversations on Borealis, online", exact: true })).toBeVisible();
     await expect(studio().locator(".conversation-account")).toHaveText("operator@example.test");

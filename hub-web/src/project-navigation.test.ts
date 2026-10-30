@@ -41,6 +41,14 @@ describe("project-first navigation", () => {
     expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");
   });
 
+  it("names a project card by its display name, else its folder, never its identity (cas-6f79)", () => {
+    const nav = setup();
+    new ProjectNavigation().render(nav, [row("named", { project: "cas-src", projectName: "Cassy", projectDir: "/home/me/cassy" }), row("unnamed", { project: "github.com/acme/widget", projectDir: "/projects/widget" })], vi.fn());
+    const names = [...nav.querySelectorAll<HTMLElement>(".project-card-name")];
+    expect(names.map((name) => name.textContent)).toEqual(["Cassy", "widget"]);
+    expect(names.map((name) => name.title)).toEqual(["cas-src", "github.com/acme/widget"]);
+  });
+
   it("keeps a collapsed project on this device and retains focused controls through a catalog tick and search", () => {
     const nav = setup(); const list = new ProjectNavigation(); const rows = [row("one")];
     list.render(nav, rows, vi.fn());

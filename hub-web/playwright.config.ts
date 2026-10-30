@@ -15,11 +15,17 @@ import { JOURNEY_TIMEZONE } from "./e2e/journeys/clock";
 // 20000–32767 per concurrent run), else this checkout's own pair from its
 // path. Servers are never reused, so a run always serves this checkout's
 // fixtures and dist; a port someone else holds fails the run loudly.
+//
+// Readiness is the launched server's own "listening" line, never a probe of the
+// URL: a URL probe cannot tell this run's server from a concurrent caller's on
+// the same port, so a run whose own server lost the bind could attach to the
+// winner's before its server's exit was seen (cas-9e97).
 const defaults = checkoutPorts(fileURLToPath(new URL(".", import.meta.url)));
 const port = Number(process.env.HUB_E2E_PORT ?? defaults.fixtures);
 const origin = `http://127.0.0.1:${port}`;
 const journeyPort = Number(process.env.HUB_JOURNEY_PORT ?? defaults.journeys);
 const journeyOrigin = `http://127.0.0.1:${journeyPort}`;
+const listeningOn = (url: string) => new RegExp(url.replaceAll(".", "\\."));
 
 export default defineConfig({
   testDir: "./e2e",
@@ -69,12 +75,12 @@ export default defineConfig({
   webServer: [
     {
       command: `npx vite fixtures --base / --port ${port} --strictPort --host 127.0.0.1`,
-      url: `${origin}/`,
+      wait: { stdout: listeningOn(`Local:\\s+${origin}/`) },
       reuseExistingServer: false,
     },
     {
       command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
-      url: `${journeyOrigin}/commander/`,
+      wait: { stdout: listeningOn(`at ${journeyOrigin}/commander/`) },
       reuseExistingServer: false,
     },
   ],

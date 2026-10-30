@@ -19,6 +19,10 @@ test('production journey servers keep the fail-closed listener contract', async 
   assert.equal([...config.matchAll(/reuseExistingServer:\s*false/g)].length, 2);
   assert.match(config, /vite fixtures .*--strictPort/);
   assert.match(distServer, /\.listen\(port,\s*'127\.0\.0\.1'/);
+  // A URL probe is answered by whichever caller's server holds the port, so
+  // readiness must come from each launched server's own output.
+  assert.equal([...config.matchAll(/wait:\s*\{\s*stdout:/g)].length, 2);
+  assert.doesNotMatch(config, /^\s*url:/m);
 });
 
 function shellQuote(value) {
@@ -118,15 +122,16 @@ async function writeConfig(root, ports, token) {
   const state = join(root, token);
   await mkdir(state);
   const servers = [
-    { role: 'fixtures', port: ports.fixtures, urlPath: '/' },
-    { role: 'journeys', port: ports.journeys, urlPath: '/commander/' },
+    { role: 'fixtures', port: ports.fixtures },
+    { role: 'journeys', port: ports.journeys },
   ];
-  const webServer = servers.map(({ role, port, urlPath }) => {
+  const webServer = servers.map(({ role, port }) => {
     const ready = join(state, `${role}.ready.json`);
     const command = [process.execPath, serverScript, port, ready, gateFile, token, role]
       .map(shellQuote)
       .join(' ');
-    return `{ command: ${JSON.stringify(command)}, url: ${JSON.stringify(`http://127.0.0.1:${port}${urlPath}`)}, reuseExistingServer: false, timeout: ${STARTUP_TIMEOUT_MS} }`;
+    const listening = `listener-ready:${token}:${role}`;
+    return `{ command: ${JSON.stringify(command)}, wait: { stdout: new RegExp(${JSON.stringify(listening)}) }, reuseExistingServer: false, timeout: ${STARTUP_TIMEOUT_MS} }`;
   }).join(',\n');
   const config = join(state, 'playwright.config.mjs');
   await writeFile(config, `
@@ -241,8 +246,12 @@ async function runCollisionScenario(root, dirs, ports, name) {
         await waitFor(`${name}: ${config.token}/${role} process-death receipt`, async () => !processIsAlive(ready.pid));
       }
     }
-    assert.match(children[loserIndex].output, /already used|EADDRINUSE|not able to start/i,
-      `${name}: failed caller should report port ownership conflict\n${children[loserIndex].output}`);
+    // Exit 71 is the fixture's EADDRINUSE exit: the loser failed on its own
+    // server's bind, never attaching to the winner's listener to run tests.
+    assert.match(children[loserIndex].output, /config\.webServer was not able to start\. Exit code: 71/,
+      `${name}: failed caller should report its own server's port conflict\n${children[loserIndex].output}`);
+    assert.doesNotMatch(children[loserIndex].output, /Running \d+ test/,
+      `${name}: the rejected caller must not run tests against another caller's server\n${children[loserIndex].output}`);
   } finally {
     await Promise.all(children.map(async (child) => {
       if (child.exitCode === null && child.signalCode === null) {

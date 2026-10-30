@@ -13,8 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   non-fast-forward rewrites of a published factory tip, and re-parking accepts
   the unchanged recovery merge that restores the recorded anchor.
 - **Worker pushes keep required hooks** — Workers and reviewers cannot skip
-  anchor and fast-row checks with `--no-verify`, Git config environment values,
-  or `core.hooksPath` overrides. Worker pushes require a plain `git push`;
+  anchor and fast-row checks with `--no-verify`, exported
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` overrides, or persistent
+  `core.hooksPath` changes. Inherited `GIT_CONFIG_GLOBAL` and
+  `GIT_CONFIG_NOSYSTEM` settings no longer block a plain worker push;
   supervisors retain the approved exception route.
 
 ### Added — Delivery process

@@ -2001,14 +2001,18 @@ pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
     !git_write_targets(".", cmd).is_empty()
 }
 
-/// Return true when a Git push invocation disables the factory's required
-/// pre-push hooks, including config from shell prefixes, Git aliases, and
-/// nested shell payloads.
+/// Return true when a worker command disables or persistently changes the
+/// factory's required pre-push hook, including shell exports and nested
+/// payloads.
 fn git_push_bypasses_required_hooks(command: &str) -> bool {
     git_config_environment_bypass_in_shell(command, 0)
         || shell_invocations(command)
             .iter()
-            .any(|(name, args)| name == "git" && git_invocation_bypasses_required_hooks(args))
+            .any(|(name, args)| {
+                name == "git"
+                    && (git_invocation_writes_hooks_path(args)
+                        || git_invocation_bypasses_required_hooks(args))
+            })
 }
 
 fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
@@ -2016,30 +2020,32 @@ fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
         return false;
     }
 
-    shell_statement_words(command).iter().any(|words| {
-        if let Some(payload) = env_split_string_payload(words)
+    let mut exported_override = false;
+    for words in shell_statement_words(command) {
+        if let Some(payload) = env_split_string_payload(&words)
             && git_config_environment_bypass_in_shell(&payload, depth + 1)
         {
             return true;
         }
 
-        let Some(command_index) = unwrapped_command_index(words) else {
-            return false;
+        let Some(command_index) = unwrapped_command_index(&words) else {
+            continue;
         };
         let name = shell_word_basename(&words[command_index]);
         let args = &words[command_index + 1..];
 
-        if git_config_environment_override(&words[..command_index])
-            && shell_invocations(&words[command_index..].join(" "))
-                .iter()
-                .any(|(name, args)| {
-                    name == "git" && git_invocation_is_push_or_alias(args)
-                })
+        if name == "export" {
+            exported_override |= git_config_environment_override(args);
+            continue;
+        }
+
+        if (exported_override || git_config_environment_override(&words[..command_index]))
+            && shell_command_invokes_push(&shell_words_as_command(&words[command_index..]))
         {
             return true;
         }
 
-        match name {
+        let nested_bypass = match name {
             "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
                 args.iter().enumerate().any(|(position, arg)| {
                     let flags_c = arg.starts_with('-')
@@ -2053,19 +2059,29 @@ fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
             }
             "eval" => git_config_environment_bypass_in_shell(&args.join(" "), depth + 1),
             _ => false,
+        };
+        if nested_bypass {
+            return true;
         }
-    })
+    }
+    false
+}
+
+fn shell_words_as_command(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| format!("'{}'", word.replace('\'', "'\"'\"'")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_command_invokes_push(command: &str) -> bool {
+    shell_invocations(command)
+        .iter()
+        .any(|(name, args)| name == "git" && git_invocation_is_push_or_alias(args))
 }
 
 fn git_config_environment_override(words: &[String]) -> bool {
-    if std::env::vars_os().any(|(name, value)| {
-        name.to_str().is_some_and(|name| {
-            value.to_str().is_some_and(|value| git_config_env_value_bypasses_hooks(name, value))
-        })
-    }) {
-        return true;
-    }
-
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
@@ -2091,12 +2107,6 @@ fn git_config_environment_override(words: &[String]) -> bool {
 }
 
 fn git_config_env_value_bypasses_hooks(name: &str, value: &str) -> bool {
-    if matches!(
-        name,
-        "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
-    ) {
-        return true;
-    }
     let value = value.to_ascii_lowercase();
     if name == "GIT_CONFIG_PARAMETERS" {
         return value.contains("core.hookspath") || value.contains("alias.") || value.contains('$');
@@ -2105,6 +2115,37 @@ fn git_config_env_value_bypasses_hooks(name: &str, value: &str) -> bool {
         index.chars().all(|character| character.is_ascii_digit())
             && (value.trim_matches(['\'', '"']) == "core.hookspath" || value.contains('$'))
     })
+}
+
+fn git_invocation_writes_hooks_path(git_words: &[String]) -> bool {
+    let Some(operation_index) = git_subcommand_index(git_words) else {
+        return false;
+    };
+    if git_words[operation_index] != "config" {
+        return false;
+    }
+
+    let arguments = &git_words[operation_index + 1..];
+    let Some(key_index) = arguments
+        .iter()
+        .position(|argument| argument.eq_ignore_ascii_case("core.hooksPath"))
+    else {
+        return false;
+    };
+    let options = &arguments[..key_index];
+    if options.iter().any(|option| {
+        matches!(
+            option.as_str(),
+            "--get" | "--get-all" | "--get-regexp" | "--get-urlmatch" | "--list"
+        )
+    }) {
+        return false;
+    }
+
+    options
+        .iter()
+        .any(|option| matches!(option.as_str(), "--unset" | "--unset-all"))
+        || arguments.get(key_index + 1).is_some()
 }
 
 fn git_invocation_bypasses_required_hooks(git_words: &[String]) -> bool {

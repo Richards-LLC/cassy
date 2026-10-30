@@ -12113,7 +12113,7 @@ impl CasCore {
                 .or(delivery_receipt)
                 .unwrap_or("none");
             let summary = format!(
-                "Closed task {}; delivery {delivery}; target {resolved_parent_branch}; next: none.",
+                "Closed task: {}; delivery {delivery}; target {resolved_parent_branch}; next: none.",
                 task.id,
             );
             if let Ok(compact) = gate_text::compact_receipt(

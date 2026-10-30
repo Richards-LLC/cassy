@@ -2498,6 +2498,16 @@ fn parallel_lanes_merge_generated_output_without_conflict_and_regenerate_it_cas_
         "the regeneration is its own commit on the epic"
     );
     assert_eq!(run(&["config", "--get", "merge.cas-generated.driver"]), "true");
+    run(&["checkout", "-q", "-b", "factory/failed", "epic/ui"]);
+    write("scripts/regenerate-generated-artifacts.sh", "#!/usr/bin/env bash\necho fixture-build-failed >&2\nexit 3\n");
+    run(&["commit", "-q", "-am", "failing regeneration fixture"]);
+    run(&["checkout", "-q", "epic/ui"]);
+    git_ops.merge_branch("epic/ui", "factory/failed", true)
+        .expect("regeneration failure retains the completed merge");
+    let notes = git_ops.take_stale_checkout_notes().join("\n");
+    assert!(notes.contains("fixture-build-failed"), "{notes}");
+    // pin: manual recovery must install merged dependencies before building.
+    assert!(notes.contains("cd hub-web && npm ci && npm run build"), "{notes}");
 }
 
 /// cas-7aa5: worktree_merge of two lanes that each add a `###` section under

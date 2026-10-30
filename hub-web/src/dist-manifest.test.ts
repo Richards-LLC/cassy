@@ -23,6 +23,7 @@ describe("production dist", () => {
     ] as const) expect(chunkName.test(name), name).toBe(accepted);
     const built = readdirSync(dist).filter((name) => !name.startsWith("."));
     expect(built.filter((name) => !chunkName.test(name)).toSorted()).toEqual([...new Set(embedded)].toSorted());
+    // pin: The embedded hub serves the entry stylesheet only at /commander/app.css.
     expect(readFileSync(new URL("index.html", dist), "utf8")).toContain('href="/commander/app.css"');
     const globalStyles = readFileSync(new URL("app.css", dist), "utf8");
     expect(globalStyles).toContain("body{");

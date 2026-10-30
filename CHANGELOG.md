@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA impact for test fixtures
+
+- **Test fixtures stay outside product QA impact** — Changes confined to tests
+  and fixtures no longer select every Commander journey or appear as unowned
+  product surfaces. Product source changes retain their journey and QA checks.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

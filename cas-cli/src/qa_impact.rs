@@ -315,7 +315,8 @@ fn impact_for_selected_changes(
         }
         report.unowned.push(Unowned {
             file: file.into(),
-            surface: matches_path(surfaces.iter().copied(), file),
+            surface: !crate::qa_pass::is_non_surface_path(file)
+                && matches_path(surfaces.iter().copied(), file),
             codemap: label,
         });
     }

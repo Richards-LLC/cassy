@@ -1570,7 +1570,8 @@ fn worker_cleanup_staging_lock(root: &std::path::Path) -> std::io::Result<std::f
 fn worker_cleanup_occurrence(agent: &cas_types::Agent, path: &str) -> String {
     use sha2::Digest;
     // Stable custom UUID: tuple encoding avoids ID/path separator ambiguity.
-    let key = serde_json::to_vec(&("dead-worker-cleanup-v1", &agent.id, path)).unwrap();
+    let key = serde_json::to_vec(&("dead-worker-cleanup-v1", &agent.id, path))
+        .expect("serializing a cleanup identity tuple cannot fail");
     let digest = sha2::Sha256::digest(key);
     let mut bytes = [0; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -1588,9 +1589,30 @@ struct DeferredWorkerCleanup {
     additional_agents: Vec<cas_types::Agent>,
     tasks: Vec<cas_types::Task>,
     worktree: Option<(cas_types::Worktree, PathBuf)>,
+    /// None identifies an older incoming intent that still needs one registry
+    /// check. New intents record readiness here, away from the control loop DB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staging_complete: Option<bool>,
 }
 
 impl DeferredWorkerCleanup {
+    fn registrations(&self) -> impl Iterator<Item = &cas_types::Agent> {
+        std::iter::once(&self.agent).chain(self.additional_agents.iter())
+    }
+
+    fn staging_committed(&self, store: &dyn cas_store::AgentStore) -> std::io::Result<bool> {
+        // Old writers committed each primary registration separately. New
+        // batches commit all owners of the checkout before admitting its file.
+        for agent in self.registrations().take(if self.staging_complete.is_none() { 1 } else { usize::MAX }) {
+            match store.get(&agent.id) {
+                Ok(current) if !current.metadata.contains_key(WORKER_CLEANUP_STAGED) => return Ok(false),
+                Ok(_) | Err(cas_store::StoreError::NotFound(_)) => {}
+                Err(error) => return Err(std::io::Error::other(error)),
+            }
+        }
+        Ok(true)
+    }
+
     fn path(&self, root: &std::path::Path) -> PathBuf {
         root.join("worker-cleanups").join(format!("{}.json", self.occurrence))
     }
@@ -2772,31 +2794,75 @@ impl FactoryApp {
         let lock = worker_cleanup_staging_lock(root)?;
         lock.lock_exclusive()?;
         let store = open_agent_store(root).map_err(std::io::Error::other)?;
-        let mut pending = Vec::new();
+        let mut pending = std::collections::BTreeMap::<Option<String>, Vec<_>>::new();
         for agent in agents {
             let current = store.get(&agent.id).map_err(std::io::Error::other)?;
-            if !current.metadata.contains_key(WORKER_CLEANUP_STAGED) { pending.push((agent, current)); }
+            if !current.metadata.contains_key(WORKER_CLEANUP_STAGED) {
+                pending.entry(agent.metadata.get("clone_path").cloned()).or_default().push((agent, current));
+            }
         }
-        if pending.is_empty() { return Ok(()); }
-        let tasks = crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?;
-        for (agent, mut current) in pending {
-            if let Some(path) = agent.metadata.get("clone_path") {
-                let request = DeferredWorkerCleanup {
-                    occurrence: worker_cleanup_occurrence(agent, path), agent: agent.clone(),
-                    additional_agents: agents.iter().filter(|other| other.id != agent.id).cloned().collect(),
-                    tasks: tasks.clone(), worktree: None,
-                };
-                let incoming = root.join("worker-cleanups/incoming").join(format!("{}.json", request.occurrence));
-                // Under the shared staging/adoption lock, either location is
-                // the original immutable request. Never replace its task facts.
-                if !request.path(root).try_exists()? && !incoming.try_exists()? {
-                    request.persist_at(&incoming).map_err(std::io::Error::other)?;
+        let incoming = root.join("worker-cleanups/incoming");
+        let mut intents = Vec::<(PathBuf, DeferredWorkerCleanup)>::new();
+        // Reuse legacy/random IDs and partial batches without replacing their
+        // frozen task facts. Inspect both locations under the adoption lock.
+        for directory in [root.join("worker-cleanups"), incoming.clone()] {
+            match std::fs::symlink_metadata(&directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+                Ok(metadata) if !metadata.file_type().is_dir() => return Err(std::io::Error::other("cleanup intent directory is not a real directory")),
+                Ok(_) => {}
+            }
+            for entry in std::fs::read_dir(&directory)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() || entry.path().extension().is_none_or(|ext| ext != "json") { continue; }
+                if let Ok(request) = serde_json::from_slice::<DeferredWorkerCleanup>(&std::fs::read(entry.path())?) {
+                    if uuid::Uuid::parse_str(&request.occurrence).is_ok()
+                        && entry.path() == directory.join(format!("{}.json", request.occurrence)) {
+                        intents.push((entry.path(), request));
+                    }
                 }
             }
-            // Commit progress per registration, not after the whole batch. A
-            // later failure can retry without restaging a completed prefix.
-            current.metadata.insert(WORKER_CLEANUP_STAGED.into(), "true".into());
-            store.update(&current).map_err(std::io::Error::other)?;
+        }
+        let tasks = if pending.is_empty() { Vec::new() } else {
+            crate::factory_target_cache::retirement::snapshot_workers_tasks(root, agents)?
+        };
+        for (path, group) in pending {
+            if let Some(path) = path {
+                let exists = intents.iter().any(|(_, request)| {
+                    request.agent.metadata.get("clone_path") == Some(&path)
+                        && group.iter().all(|(agent, _)| request.registrations().any(|owner| owner.id == agent.id))
+                });
+                if !exists {
+                    let agent = group[0].0;
+                    let request = DeferredWorkerCleanup {
+                        occurrence: worker_cleanup_occurrence(agent, &path), agent: agent.clone(),
+                        additional_agents: agents.iter().filter(|other| other.id != agent.id
+                            && other.metadata.get("clone_path") == Some(&path)).cloned().collect(),
+                        tasks: tasks.clone(), worktree: None, staging_complete: Some(false),
+                    };
+                    let file = incoming.join(format!("{}.json", request.occurrence));
+                    if file.try_exists()? || request.path(root).try_exists()? {
+                        return Err(std::io::Error::other("existing cleanup intent could not be read; output retained"));
+                    }
+                    request.persist_at(&file).map_err(std::io::Error::other)?;
+                    intents.push((file, request));
+                }
+            }
+            // Keep prefix progress if a later registration fails. The file
+            // remains pending until the entire captured group is committed.
+            for (_, mut current) in group {
+                current.metadata.insert(WORKER_CLEANUP_STAGED.into(), "true".into());
+                store.update(&current).map_err(std::io::Error::other)?;
+            }
+        }
+        // A previous call may have committed its DB marks but failed its final
+        // file write. Retry that transition even when no registration is pending.
+        for (path, mut request) in intents {
+            if path.parent() == Some(incoming.as_path()) && request.staging_complete != Some(true)
+                && request.staging_committed(store.as_ref())? {
+                request.staging_complete = Some(true);
+                request.persist_at(&path).map_err(std::io::Error::other)?;
+            }
         }
         Ok(())
     }
@@ -3519,6 +3585,7 @@ impl FactoryApp {
         self.start_worker_cleanup(DeferredWorkerCleanup {
             occurrence: uuid::Uuid::new_v4().to_string(), agent, additional_agents: agents, tasks,
             worktree: plan.map(|plan| (plan.worktree, plan.repo_root)),
+            staging_complete: None,
         });
     }
 
@@ -3585,7 +3652,7 @@ impl FactoryApp {
             { continue; }
             let request = std::fs::read(entry.path()).ok()
                 .and_then(|bytes| serde_json::from_slice::<DeferredWorkerCleanup>(&bytes).ok());
-            let Some(request) = request else {
+            let Some(mut request) = request else {
                 tracing::warn!(path = %entry.path().display(), "invalid deferred cleanup intent retained");
                 continue;
             };
@@ -3596,15 +3663,25 @@ impl FactoryApp {
                 || self.crash_cleanup_pending(&request.agent.name)
             { continue; }
             if incoming {
-                let Ok(store) = open_agent_store(self.cas_dir()) else { continue; };
-                match store.get(&request.agent.id) {
-                    Ok(agent) if !agent.metadata.contains_key(WORKER_CLEANUP_STAGED) => continue,
-                    Ok(_) | Err(cas_store::StoreError::NotFound(_)) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "could not confirm staged cleanup ownership");
+                if request.staging_complete.is_none() {
+                    // Upgrade an old intent once. Persist a negative result as
+                    // well, so abandoned unmarked files never reopen the DB
+                    // on every control tick. Staging retries commit this file.
+                    let Ok(store) = open_agent_store(self.cas_dir()) else { continue; };
+                    let ready = match request.staging_committed(store.as_ref()) {
+                        Ok(ready) => ready,
+                        Err(error) => {
+                            tracing::warn!(%error, "could not confirm staged cleanup ownership");
+                            continue;
+                        }
+                    };
+                    request.staging_complete = Some(ready);
+                    if let Err(error) = request.persist_at(&entry.path()) {
+                        tracing::warn!(%error, "could not record staged cleanup readiness");
                         continue;
                     }
                 }
+                if request.staging_complete != Some(true) { continue; }
             }
             if incoming {
                 // Move the queue entry before launch. A crash still leaves a
@@ -6965,6 +7042,7 @@ mod tests {
             }
             let request = DeferredWorkerCleanup {
                 occurrence: uuid::Uuid::new_v4().to_string(), agent, additional_agents: Vec::new(), tasks,
+                staging_complete: None,
                 worktree: Some((plan.worktree, if disposition == "error" {
                     // A missing repository makes worktree removal return an I/O error.
                     repo.join("missing-repository")

@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory cleanup
+
+- **Staged cleanup keeps the control loop free of repeated registry reads** —
+  Was: an incomplete cleanup intent reread the agent database every tick, and
+  registrations sharing a checkout queued duplicate cleanup work. → Now: file
+  readiness records staging progress, retries reuse legacy snapshots, one batch
+  stages one intent per checkout, and a spawn tick polls cleanup once.
+
 ### Fixed — Factory workflow
 
 - **Parked delivery anchors stay on the branch** — Worker pushes refuse

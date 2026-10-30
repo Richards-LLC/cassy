@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Live factory test evidence
+
+- **Explicit headful tests fail when Claude is unavailable** — Was: an opted-in test could pass without launching Claude, and the fixture discarded the selected Claude account. Now: dependency and authentication failures are explicit, live fixtures retain Claude credentials, and documented capped operator runs preserve host PATH and show live success evidence.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

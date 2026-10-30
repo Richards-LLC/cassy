@@ -615,6 +615,29 @@ fn executable(path: &Path) -> bool {
 }
 
 const HOST_PATH_OPT_OUT: &str = "CAS_WORKER_TEST_ALLOW_HOST_PATH";
+const HEADFUL_FILTER: &str = "test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)";
+
+/// Compose the existing explicit opt-ins rather than weakening default test isolation.
+fn live_headful_mode(test: Option<&TargetedTest>, isolated_test_env: Option<&Path>, host_reason: Option<&str>) -> Result<bool> {
+    if std::env::var_os("CAS_HEADFUL_E2E").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Ok(false);
+    }
+    if !test.is_some_and(|test| test.package == "cas"
+        && test.harness.as_deref() == Some("e2e_test") && test.filter == HEADFUL_FILTER)
+    {
+        bail!("Live headful requires the exact headful e2e_test selection documented in CONTRIBUTING");
+    }
+    if host_reason.is_none() {
+        bail!("Live headful requires CAS_WORKER_TEST_ALLOW_HOST_PATH with a single-line reason; run from the operator's own terminal");
+    }
+    if isolated_test_env.is_some() {
+        bail!("Live headful cannot use the credential-free isolated-test-env profile; retain the selected Claude account environment");
+    }
+    if !cfg!(target_os = "macos") {
+        bail!("Live headful requires macOS with Terminal.app; no live test was executed");
+    }
+    Ok(true)
+}
 
 fn host_path_opt_out() -> Result<Option<String>> {
     let Some(reason) = std::env::var_os(HOST_PATH_OPT_OUT) else {
@@ -1791,6 +1814,15 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
+    let live_headful = live_headful_mode(test.as_ref(), isolated_test_env, host_path_opt_out.as_deref())?;
+    if live_headful {
+        println!("Live headful: enabled; host PATH and Claude credentials inherited");
+        println!("Factory launch remains operator-only; normal build caps apply");
+    } else if test.as_ref().is_some_and(|test| test.harness.as_deref() == Some("e2e_test")
+        && test.filter.contains("factory_tui_headful")) {
+        println!("Live headful: NOT EXERCISED (CAS_HEADFUL_E2E=1 not set)");
+    }
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -1859,7 +1891,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
     if let Some(reason) = &host_path_opt_out {
         println!("Worker test PATH: host opt-out: {reason}");
     }
@@ -1920,6 +1951,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         command.env("PATH", path);
     }
     let mut cargo_args = args.to_vec();
+    if live_headful {
+        cargo_args.extend(["--success-output".into(), "immediate".into()]);
+    }
     // An omitted harness means library tests; do not build every test binary.
     if test.as_ref().is_some_and(|test| test.harness.is_none())
         && cargo_args.get(4).is_some_and(|arg| arg == "-E")

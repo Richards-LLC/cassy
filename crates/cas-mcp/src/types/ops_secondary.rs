@@ -654,12 +654,12 @@ pub struct FactoryRequest {
     pub action: String,
 
     /// Return complete GC inventory as one JSON document.
-    #[schemars(description = "gc_report: one JSON document with report_text, full_report and complete machine_status")]
+    #[schemars(description = "gc_report/gc_cleanup: one JSON document with report_text, full_report and complete machine_status")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
     /// Return the original unabridged GC report.
-    #[schemars(description = "gc_report: original full report including raw status; incompatible with limit/offset")]
+    #[schemars(description = "gc_report/gc_cleanup: original full report including raw status; incompatible with limit/offset")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub full: Option<bool>,
 
@@ -1021,12 +1021,12 @@ pub struct CoordinationRequest {
     pub peer: Option<String>,
 
     /// Machine-readable peer or GC report with untruncated values.
-    #[schemars(description = "peers/gc_report: one JSON document, untruncated")]
+    #[schemars(description = "peers/gc_report/gc_cleanup: one JSON document, untruncated")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
     /// Original GC report including complete machine-status lines.
-    #[schemars(description = "gc_report: unabridged; not with limit/offset")]
+    #[schemars(description = "gc_report/gc_cleanup: unabridged; not with limit/offset")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub full: Option<bool>,
 

@@ -14,6 +14,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Registry escape notes cannot bypass the case gate; duplicates still present in
   the delivery refuse with a named error.
 
+### Fixed — Parked delivery attribution
+
+- **Upkeep excludes later work on a reused lane** — When an integration merge
+  brings in a tip beyond the parked delivery, close checks use the task's own
+  changes and record an integration-parent mismatch diagnostic.
+
 ### Fixed — Image viewer recovery
 
 - **Repeated image failures leave one clear note** — Unavailable previews and
@@ -31,6 +37,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Malformed base registries refuse case checks** — A duplicate bug-family key
   now names the key and file in a registry error instead of skipping the gate.
   Unavailable Git inputs retain their existing nonblocking warning.
+
+### Fixed — Factory cleanup feedback
+
+- **Cleanup stays readable while large inventories run** — Factory GC shows
+  bounded counts and the largest items, with complete details under `--full`
+  or `--json`. Human cleanup reports progress on stderr; JSON stays silent
+  until its single result. Existing deletion consent gates are unchanged.
 
 ### Added — Emoji in Commander conversations
 

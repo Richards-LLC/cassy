@@ -104,6 +104,64 @@ impl Fixture {
 }
 
 #[test]
+fn registry_upkeep_mismatched_merge_parent_uses_task_only_delta() {
+    let mut f = Fixture::new(YAML);
+    let repo = f.repo.path();
+    git(repo, &["checkout", "-qb", "factory/worker"]);
+    write(repo, "src/pages/signup.ts", "repaired signup");
+    let parked = commit(repo);
+    // A successor on the reused lane must not become this delivery's upkeep.
+    write(repo, "src/pages/foreign.ts", "next task's unowned surface");
+    let successor = commit(repo);
+    git(repo, &["checkout", "main"]);
+    write(repo, "README.md", "target work");
+    commit(repo);
+    git(repo, &["merge", "--no-ff", "factory/worker", "-m", "integrate stacked lane"]);
+    let published = git(repo, &["rev-parse", "HEAD"]);
+    assert_eq!(git(repo, &["rev-parse", "HEAD^2"]), successor);
+    f.task.status = TaskStatus::AwaitingMerge;
+    f.task.deliverables.factory_branch_anchor = Some(parked.clone());
+    f.task.deliverables.green_merge_commit = Some(published);
+    let window = TaskCommitReceiptWindow {
+        supervisor_override_reason: None,
+        not_before: chrono::DateTime::UNIX_EPOCH,
+        task_floor: chrono::DateTime::UNIX_EPOCH,
+        basis: "fixture",
+        identity: TaskCommitIdentity {
+            start_base: Some(f.base.clone()),
+            task_id: Some(f.task.id.clone()),
+            known_commits: vec![parked.clone()],
+        },
+    };
+    let mut log = tempfile::tempfile().unwrap();
+    let capture = log.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || capture.try_clone().unwrap()).finish();
+    let (base, head, paths) = tracing::subscriber::with_default(subscriber, || {
+        delivery_snapshot(&f.task, repo, "main", Some(&window), Some(&parked)).unwrap()
+    });
+    assert_eq!(head, parked, "a mismatched merge cannot replace the parked delivery");
+    assert_eq!(base, f.base);
+    assert_eq!(paths, Some(vec!["src/pages/signup.ts".into()]));
+    use std::io::{Read, Seek};
+    log.rewind().unwrap();
+    let mut diagnostic = String::new();
+    log.read_to_string(&mut diagnostic).unwrap();
+    // pin: operators can identify the nonblocking attribution fallback by name.
+    assert!(diagnostic.contains("UPKEEP INTEGRATION PARENT MISMATCH"), "{diagnostic}");
+    f.qa.registry.enforce = RegistryEnforcement::Enforce;
+    let mut config = crate::config::Config::default();
+    config.qa = Some(f.qa.clone());
+    config.save(f._db.path()).unwrap();
+    let result = at_park(
+        &mut CloseNoteTracker::new(&f.store, &f.task),
+        &mut f.task, f._db.path(), repo, "main", Some(&window), Some(&parked), None,
+    );
+    assert!(result.is_ok(), "foreign successor files must not refuse close: {result:?}");
+}
+
+#[test]
 fn registry_upkeep_receipt_uses_target_ownership_for_delivery_files() {
     for owner_added in [false, true] {
         let mut f = Fixture::new(YAML);

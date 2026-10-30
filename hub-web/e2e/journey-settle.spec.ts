@@ -84,12 +84,27 @@ test("screenshot settle has a deadline when the renderer is suspended", async ({
   const breakpoint = session.send("Runtime.evaluate", { expression: "debugger;" });
   await paused;
   try {
-    await expect(settle(page)).rejects.toThrow(/Timeout .* exceeded/);
+    await expect(settle(page)).resolves.toBeUndefined();
   } finally {
     await session.send("Debugger.disable");
     await breakpoint;
     await session.detach();
   }
+});
+
+test("screenshot settle tolerates a 400ms renderer task after product assertions", async ({ page }) => {
+  await page.setContent("<h1>Product assertions passed</h1>");
+  await expect(page.getByRole("heading")).toHaveText("Product assertions passed");
+  await page.evaluate(() => {
+    setTimeout(() => {
+      const started = performance.now();
+      while (performance.now() - started < 400) { /* a long renderer task */ }
+      document.querySelector("h1")!.textContent = "Renderer recovered";
+    }, 0);
+  });
+  await settle(page);
+  expect((await page.screenshot()).subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  await expect(page.getByRole("heading")).toHaveText("Renderer recovered");
 });
 
 test("running screenshot settle waits for both animation frames", async ({ page }) => {

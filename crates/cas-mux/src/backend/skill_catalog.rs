@@ -303,20 +303,21 @@ mod tests {
         }
         let project = repo.join(GROK_PROJECT_SKILLS);
         std::fs::create_dir_all(project.join("customized")).unwrap();
-        std::fs::write(project.join("customized/SKILL.md"), "---\nname: customized\n---\nMINE\n").unwrap();
+        let customization = "---\nname: customized\n---\nMINE\n";
+        std::fs::write(project.join("customized/SKILL.md"), customization).unwrap();
         std::fs::create_dir_all(project.join("tracked")).unwrap();
         std::fs::write(project.join("tracked/SKILL.md"), "tracked\n").unwrap();
         git(&repo, &["add", ".grok/skills/tracked/SKILL.md"]);
-        git(&repo, &["add", ".grok/skills/customized/SKILL.md"]);
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"]);
 
         assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 1);
         let copy = std::fs::read_to_string(project.join("cas-tdd/SKILL.md")).unwrap();
         assert!(copy.contains("\ndisable-model-invocation: true\n---\nBODY"), "{copy}");
-        assert_eq!(std::fs::read_to_string(project.join("cas-tdd/references/a.md")).unwrap(), "A");
+        let read = |path: PathBuf| std::fs::read_to_string(path).unwrap();
+        assert_eq!(read(project.join("cas-tdd/references/a.md")), read(home.join("skills/cas-tdd/references/a.md")));
         assert!(!project.join("cas-worker").exists() && !project.join("own-skill").exists());
-        assert!(std::fs::read_to_string(project.join("customized/SKILL.md")).unwrap().contains("MINE"));
-        assert_eq!(std::fs::read_to_string(project.join("tracked/SKILL.md")).unwrap(), "tracked\n");
+        assert_eq!(read(project.join("customized/SKILL.md")), customization);
+        // Clean status: the tracked copy is untouched and the rest is excluded.
         assert!(git_lines(&repo, &["status", "--porcelain"]).is_empty());
         // A later launch refreshes in place rather than stacking frontmatter.
         assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 1);

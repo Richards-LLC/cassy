@@ -5904,6 +5904,23 @@ mod tests {
 
     #[cfg(unix)]
     fn delivery_ci_fixture(code: bool, conclusion: Option<&str>) -> (TempDir, String, String) {
+        let code_response = serde_json::json!({"check_runs": [{
+            "name": "Scoped Validation (factory/PR)",
+            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
+            "conclusion": conclusion,
+            "html_url": "https://github.com/acme/cas/actions/runs/100"
+        }]})
+        .to_string();
+        delivery_ci_fixture_with(code, &code_response, "")
+    }
+
+    /// `extra_cases` adds shell `case` arms to the fake gh, before its refusal.
+    #[cfg(unix)]
+    fn delivery_ci_fixture_with(
+        code: bool,
+        code_response: &str,
+        extra_cases: &str,
+    ) -> (TempDir, String, String) {
         let temp = TempDir::new().unwrap();
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
@@ -5937,19 +5954,60 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-qm", "docs tip"]);
         let tip = git(&["rev-parse", "HEAD"]);
-        let code_response = serde_json::json!({"check_runs": [{
-            "name": "Scoped Validation (factory/PR)",
-            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
-            "conclusion": conclusion,
-            "html_url": "https://github.com/acme/cas/actions/runs/100"
-        }]})
-        .to_string();
         let docs_response = r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
         let fake_gh = temp.path().join("gh-fixture");
         crate::test_paths::warm_stub(&fake_gh, &format!(
-            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n*) exit 97 ;;\nesac\n"
+            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n{extra_cases}*) exit 97 ;;\nesac\n"
         ));
         (temp, code_sha, tip)
+    }
+
+    /// cas-c59e: a newer push cancels the code commit's lane run, and the docs tip
+    /// runs Docs Lint only. Nothing can finish at that commit any more, so it is not
+    /// pending. What the cancelled run did prove decides; the docs tip proves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_code_run_under_a_green_docs_tip_is_not_pending_cas_c59e() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let job = |name: &str, status: &str, conclusion: Option<&str>| serde_json::json!({
+            "name": name, "status": status, "conclusion": conclusion,
+            "html_url": "https://github.com/acme/cas/actions/runs/100/job/1"
+        });
+        let validated = job("Scoped Validation (factory/PR)", "completed", Some("success"));
+        let lingering = job("Scoped Validation (fast)", "in_progress", None);
+        let cancelled = job("Scoped Validation (factory/PR)", "completed", Some("cancelled"));
+        for (jobs, workflow_conclusion, expected) in [
+            // The incident: one job passed; GitHub still lists another as running.
+            (vec![validated.clone(), lingering.clone()], "cancelled", "green"),
+            (vec![cancelled], "cancelled", "unvalidated"),
+            (vec![lingering.clone()], "cancelled", "unvalidated"),
+            // That job's own run is still going, so this is genuinely pending.
+            (vec![validated, lingering], "null", "pending"),
+        ] {
+            let (repo, code_sha, _tip) = delivery_ci_fixture_with(
+                true,
+                &serde_json::json!({"check_runs": jobs}).to_string(),
+                &format!("*/actions/runs/100) printf '%s\\n' '{{\"conclusion\":{workflow_conclusion}}}' ;;\n"),
+            );
+            env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            match expected {
+                "green" => {
+                    assert!(matches!(&state, BranchCiState::Green { sha, .. } if *sha == code_sha), "{state:?}");
+                    assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                }
+                "unvalidated" => {
+                    let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+                    assert!(refusal.starts_with("CODE CI REQUIRED"), "{refusal}");
+                    assert_eq!(admit_branch_ci(&state, true, Some("reviewed")), Ok(true));
+                }
+                _ => {
+                    let refusal = admit_branch_ci(&state, true, Some("ship it")).unwrap_err();
+                    assert!(refusal.starts_with("CI PENDING"), "{refusal}");
+                }
+            }
+        }
     }
 
     #[cfg(unix)]

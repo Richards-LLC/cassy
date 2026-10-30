@@ -27,6 +27,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   read after that page finishes. Repeated notices coalesce, and hidden or
   disconnected views do not keep fetching.
 
+### Fixed — Factory delivery attribution
+
+- **A parked delivery can merge released main and re-park** — Was: a task that
+  had already parked and then merged a newer origin/main kept its old parked
+  commit, so the merge never reached review. → Now: a merge after park that
+  brings in only released trunk commits moves the parked commit forward.
+- **Only origin's trunk counts as released** — Was: a local `main` that was
+  ahead of origin, or moved by hand, could make unreleased commits look
+  released. → Now: when `origin/main` exists, only its history counts as
+  released.
+
 ### Fixed — Factory delivery
 
 - **Merging released main into a delivery branch no longer blocks close** — Was:

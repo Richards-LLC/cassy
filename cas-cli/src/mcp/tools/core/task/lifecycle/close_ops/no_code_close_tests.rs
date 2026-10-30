@@ -1872,3 +1872,56 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
         assert_eq!(closed.notes.matches(note).count(), 1, "persisted upkeep must appear once: {}", closed.notes);
     }
 }
+
+/// cas-3d57 (cas-985f follow-ups), through the close handler: a worker on an
+/// epic-bound lane merges released origin/main (no rebase) and parks; after
+/// park it merges a newer origin/main and re-parks, both without override.
+/// A local `main` ahead of origin is not released: merging it is refused.
+#[tokio::test]
+async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released_cas_3d57() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "epic/next");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    let id = "cas-3d57";
+    let lane = format!("{LANE}-{id}");
+    git(&worker_path, &["checkout", "-q", "-b", &lane, "origin/epic/next"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let mut task = assigned(id, TaskType::Bug, "epic/next");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+    assert!(f.task(id).deliverables.factory_branch_start.is_some(), "{started}");
+    std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&worker_path, &["add", "own.rs"]);
+    git(&worker_path, &["commit", "-q", "-m", "fix(hub): own delivery"]);
+    let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivery ready"});
+    // Another task's work, released on main and merged in as instructed.
+    let merge_main = |file: &str, subject: &str, push: bool| {
+        std::fs::write(repo.join(file), "pub fn released() {}\n").unwrap();
+        git(repo, &["add", file]);
+        git(repo, &["commit", "-q", "-m", subject]);
+        if push { git(repo, &["push", "-q", "origin", "main"]); }
+        git(&worker_path, &["fetch", "-q", "origin"]);
+        git(&worker_path, &["merge", "-q", "--no-ff", "--no-edit", if push { "origin/main" } else { "main" }]);
+        git(&worker_path, &["push", "-q", "origin", &lane]);
+        git(&worker_path, &["rev-parse", "HEAD"])
+    };
+    for (round, (file, subject)) in [("one.rs", "fix(cas-a0b1): released before park"),
+        ("two.rs", "fix(cas-a0b2): released after park")].into_iter().enumerate() {
+        let tip = merge_main(file, subject, true);
+        let response = call(&f.worker, close.clone()).await;
+        let parked = f.task(id);
+        assert!(response.contains("MERGE REQUIRED"), "round {round}: {response}");
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "round {round}: {response}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "round {round}");
+    }
+    let parked_anchor = f.task(id).deliverables.factory_branch_anchor;
+    merge_main("three.rs", "fix(cas-0e2b): unreleased, only on local main", false);
+    let refused = call(&f.worker, close).await;
+    assert_eq!(f.task(id).deliverables.factory_branch_anchor, parked_anchor,
+        "a local main ahead of origin is not released, so the anchor must not advance: {refused}");
+}

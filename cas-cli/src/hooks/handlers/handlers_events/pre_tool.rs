@@ -8591,6 +8591,46 @@ mod workspace_contract_tests {
         }
     }
 
+    #[test]
+    fn cas_3147_arithmetic_subscript_sources_are_denied() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let operand = "a[$(touch /outside/cas-a3ac-must-not-execute)]";
+        let output = format!("$(cat <<'A3AC'\n{operand}\nA3AC\n)");
+        let mut failures = Vec::new();
+        for (source, prefix, value, expanding) in [
+            ("literal", String::new(), operand.to_owned(), false),
+            ("variable", format!("x='{operand}'; "), "x".to_owned(), false),
+            ("substitution", String::new(), output, true),
+        ] {
+            let quoted = if expanding { format!("\"{value}\"") } else { format!("'{value}'") };
+            let let_operand = if expanding { format!("\"y={value}\"") } else { format!("'y={value}'") };
+            for (context, command) in [
+                ("expansion", format!("echo \"$(( {value} ))\"")),
+                ("bracket", format!("echo \"$[ {value} ]\"")),
+                ("let", format!("let {let_operand}")),
+                ("command", format!("(( y={value} ))")),
+                ("integer", format!("declare -i y={quoted}")),
+            ] {
+                // Request data only: the hook parses these strings; no payload is executed.
+                let request = bash_input(&format!("{prefix}{command}"), project.path());
+                let response = handle_pre_tool_use(&request, Some(&root)).unwrap();
+                let response = serde_json::to_value(response).unwrap();
+                let decision = &response["hookSpecificOutput"]["permissionDecision"];
+                let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str().unwrap_or("");
+                if decision != "deny" || !reason.contains("FACTORY WORKSPACE CONTRACT") {
+                    failures.push(format!("{source}/{context}: {decision}: {reason}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "arithmetic re-expansion must be refused: {failures:#?}");
+    }
+
     /// cas-3147: an agent shell cannot run the operator-only commands,
     /// however the command is wrapped.
     #[test]

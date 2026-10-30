@@ -165,10 +165,15 @@ export function countUsage(action: UsageAction): void {
 
 /** Count explicit rich-content inspection independently of asynchronous paints. */
 export function bindRichInspectionUsage(root: HTMLElement, counter: Pick<UsageCounter, "count"> = usage): void {
-  root.addEventListener("toggle", event => {
-    const detail = event.target;
-    if (detail instanceof HTMLDetailsElement && detail.open && detail.closest(".rich-diagram, .rich-diff")) counter.count("rich-content.inspect");
-  }, true);
+  // Native toggle tasks coalesce: a quick open/close can report only closed.
+  // Summary activation (including keyboard) sees the state before the default
+  // action, so each opening counts once even if no open toggle is delivered.
+  root.addEventListener("click", event => {
+    if (event.defaultPrevented) return;
+    const summary = event.target instanceof Element ? event.target.closest("summary") : null;
+    const detail = summary?.parentElement;
+    if (detail instanceof HTMLDetailsElement && !detail.open && detail.closest(".rich-diagram, .rich-diff")) counter.count("rich-content.inspect");
+  });
 }
 
 /** Count a delivered notice being retired, once for the still-open group. */

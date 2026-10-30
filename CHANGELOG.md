@@ -102,6 +102,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
+- **Quick rich-content inspections are counted** — Opening and closing a
+  diagram source or unified diff quickly now records the inspection even
+  when the browser combines the open and close toggle events.
+
 - **Late file layout keeps the newest turn in view** — Was: a file preview
   could shrink and grow before its scroll event arrived, leaving the thread
   above the latest reply. → Now: layout keeps following the tail, while an

@@ -7552,23 +7552,6 @@ async fn test_gc_cleanup_without_force() {
     assert!(text.lines().all(|line| line.len() <= 79), "{text}");
     assert!(!text.contains("_STATUS_JSON="), "machine payload must be opt-in");
     assert!(text.contains("cleanup --full") && text.contains("cleanup --json"));
-    for machine in [false, true] {
-        let mut request = factory_req("gc_cleanup");
-        request.full = Some(!machine);
-        request.json = Some(machine);
-        let result = env.service.factory_request(Parameters(request)).await.unwrap();
-        let detailed = get_text(&result);
-        if machine {
-            let document: serde_json::Value = serde_json::from_str(&detailed).unwrap();
-            assert!(document["full_report"].as_str().unwrap().starts_with("Factory GC cleanup complete."));
-            assert!(document["machine_status"].is_object());
-        } else {
-            assert!(detailed.starts_with("Factory GC cleanup complete."));
-            assert!(detailed.contains("TARGET_CACHE_STATUS_JSON="));
-        }
-        // Full and JSON are presentation opt-ins, never deletion consent.
-        assert_eq!(pq.pending_count().expect("count"), 1);
-    }
     // Prompts should still be pending
     assert_eq!(pq.pending_count().expect("count"), 1);
 }

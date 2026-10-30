@@ -1953,6 +1953,14 @@ attempt does not remove unmanaged scratch directories or run full factory GC.
 Worker shutdown and replacement also retire safe terminal or parked-and-pushed
 targets, copying proof logs to durable artifacts before removal. In-progress,
 unpushed or unverifiable work keeps its target and checkout.
+QA candidate builds first install locked web dependencies and invoke the same
+source-bound production snapshot builder as journeys, in the isolated checkout.
+Only that disposable checkout receives the generated dist before Cargo embeds
+it. A private loopback hub then serves every expected asset under a disposable
+HOME and CAS_ROOT: publication refuses a source/served digest mismatch and
+preserves the previous candidate. RECEIPT.json records `web.source_sha`,
+`web.dist_sha256` and `web.served_dist_sha256`.
+
 QA candidate builds use a private bounded target inside their owned release
 scratch directory. Candidate artifacts are copied out before that directory is
 removed; existing shared supervisor targets remain review-only. Interrupted

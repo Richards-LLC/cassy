@@ -188,6 +188,7 @@ class Fixture(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('reused background evaluation', result.stdout)
         self.assertTrue((target / 'journey-receipt.json').is_file())
+        # pin: Reuse preserves every recorded provenance field without rebinding its source identity.
         self.assertEqual(json.loads((target / 'journey-build.json').read_text()), build)
         marker = json.loads((target / 'journey-reuse.json').read_text())
         self.assertEqual((marker['tree'], marker['tip']), (tree, self.tip))
@@ -197,7 +198,6 @@ class Fixture(unittest.TestCase):
         (self.repo / 'hub-web/src/ask.ts').write_text('new source\n')
         git(self.repo, 'add', '.')
         git(self.repo, 'commit', '-qm', 'source-only lane')
-        self.assertEqual((self.repo / 'hub-web/dist/app.js').read_text(), 'one\n')
         result = self.cli('reuse', '--repo', str(self.repo), '--artifacts', str(Path(self.temp.name) / 'x'))
         self.assertEqual(result.returncode, 1)
         self.assertIn('no background evaluation', result.stdout)

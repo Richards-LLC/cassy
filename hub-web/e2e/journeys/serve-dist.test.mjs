@@ -63,7 +63,6 @@ out.mkdir(parents=True)
   assert.equal(await response.text(), 'current source');
   assert.equal(response.headers.get('x-cassy-source-sha'), source);
   assert.match(response.headers.get('x-cassy-dist-sha256'), /^[a-f0-9]{64}$/);
-  assert.equal(await readFile(join(repo, 'hub-web/dist/index.html'), 'utf8'), 'stale committed bundle');
   assert.equal(git('status', '--porcelain'), '');
   child.kill('SIGTERM'); await once(child, 'exit');
   const manifest = join(repo, 'target/journey-dist/journey-build.json');

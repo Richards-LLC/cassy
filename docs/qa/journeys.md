@@ -755,8 +755,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open plain text without loading rich renderers
 2. Copy exact source and wrap a code frame with the keyboard
-3. Read a diagram and inspect its source; bad input stays readable
-4. Expand a unified diff
+3. Read a diagram and toggle Source/Preview and inline Expand by keyboard; bad input stays readable
+4. Expand a unified diff and retain Copy and Source/Preview in its shared frame
 5. Decode an inline image without moving its file caption
 6. Read the real PDF first page inline
 7. Play video and audio on demand; unavailable files keep Open

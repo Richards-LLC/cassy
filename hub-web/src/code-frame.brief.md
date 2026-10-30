@@ -22,7 +22,7 @@ No Run action, hover-only controls or command inference: this frame owns reading
 
 ## Implementation boundary
 
-`createCodeFrame(document, { source, language, filename })` owns only local Copy state and Wrap state. It exposes its content container and pre node so rich renderers can replace content while the header and original copy source survive. No global storage or remote state. Tokens come from `hub-web/DESIGN.md`, `tokens.css` and `glass.css`.
+`createCodeFrame(document, { source, language, filename })` owns local Copy, Wrap, Source/Preview and inline Expand state. It exposes its content container and pre node; setCodeFramePreview attaches a rich renderer while retaining the literal pre for selectable source and exact Copy. See object-frame.brief.md for the shared diagram/diff frame and updated critique. No global storage or remote state. Tokens come from `hub-web/DESIGN.md`, `tokens.css` and `glass.css`.
 
 ## Critique
 

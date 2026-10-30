@@ -154,7 +154,7 @@ for (const [index, variant] of variants.entries()) {
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {
         hub.supervisorSays(PELICAN, "# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```mermaid\ninvalid diagram source\n```");
         await expect(log.getByRole("img", { name: "Mermaid diagram", exact: true })).toBeVisible();
-        const frame = log.locator(".code-frame").filter({ has: log.locator(".rich-diagram") });
+        const frame = log.locator(".code-frame").filter({ has: page.locator(".rich-diagram") });
         const source = frame.getByRole("button", { name: "Show source from mermaid" });
         await source.focus(); await page.keyboard.press("Enter");
         await expect(frame.locator("pre.markdown-code")).toBeVisible();

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Codex profile listing width
+
+- **Long profile names fit the terminal** — `cas codex --list-profiles` shortens
+  displayed names and folders to fit 80 columns while keeping login and active
+  states readable. Use `--full` to see exact names and folders.
+
 ### Fixed — Posted release notes
 
 - **Posted drafts keep their historical wording** — Was: later pushes could

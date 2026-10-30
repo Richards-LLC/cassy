@@ -138,8 +138,8 @@ export interface LaunchHost {
   currentMachineId(): string | undefined;
   origin: string;
   projects(machineId: string, signal: AbortSignal): Promise<ProjectCatalog>;
-  /** Each CLI's account profiles on the machine. */
-  profiles(machineId: string, signal: AbortSignal): Promise<LaunchProfiles>;
+  /** Each CLI's account profiles, recommended using the selected project's policy. */
+  profiles(machineId: string, signal: AbortSignal, target?: LaunchTarget): Promise<LaunchProfiles>;
   browse(machineId: string, rootId: string, path: string, signal: AbortSignal): Promise<BrowseListing>;
   launch(machineId: string, request: LaunchRequest): Promise<LaunchResult>;
   grant(machineId: string): Promise<void>;
@@ -528,13 +528,15 @@ export class LaunchSheet {
     if (this.dialog?.open && this.machineId === machineId) void this.loadProfiles(machineId);
   }
 
-  private async loadProfiles(machineId: string): Promise<void> {
+  private async loadProfiles(machineId: string, resetAccount = false): Promise<void> {
     const generation = ++this.profilesGeneration;
     const signal = this.loads.signal;
+    if (resetAccount) this.account = undefined;
     this.profiles = { status: "loading" };
     this.renderAccounts();
+    this.syncActions();
     try {
-      const data = await this.host.profiles(machineId, signal);
+      const data = await this.host.profiles(machineId, signal, this.selection?.target);
       if (signal.aborted || this.machineId !== machineId || generation !== this.profilesGeneration) return;
       this.profiles = { status: "ready", data };
     } catch {
@@ -643,6 +645,7 @@ export class LaunchSheet {
     const target = JSON.parse(input.dataset.launchTarget ?? "null") as LaunchTarget | null;
     if (!target) return;
     this.selection = { target, name: input.dataset.launchName ?? input.value, path: input.dataset.launchPath ?? "" };
+    if (this.machineId) void this.loadProfiles(this.machineId, true);
     this.syncChecked();
     this.$(".launch-invalid").hidden = true;
     this.syncActions();

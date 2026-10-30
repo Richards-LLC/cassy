@@ -86,7 +86,8 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     }
     std::fs::write(claude.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"claude@example.test"}}"#).unwrap();
     std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"default-claude@example.test"}}"#).unwrap();
-    let project = home.join("project");
+    let repos = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let project = repos.path().join("project");
     let cas_root = init_cas_dir(&project).unwrap();
     std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"catalog-project\"\n").unwrap();
     let unrelated = init_cas_dir(&home.join("unrelated")).unwrap();
@@ -852,6 +853,11 @@ async fn launch_profiles_follow_the_resolved_projects_account_policy() {
     assert!(Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
     crate::store::known_repos::register_repo_strict(&project).unwrap();
     let target = super::projects::list_projects(&[]).unwrap().pop().unwrap().target;
+    std::fs::write(home.join(".cas/config.toml"), format!("[hub]\nlaunch_roots = [{}]\n", serde_json::to_string(repos.path()).unwrap())).unwrap();
+    let browse = super::projects::LaunchTarget::Browse {
+        root_id: super::projects::configured_launch_roots().unwrap()[0].id.clone(),
+        path: "project".into(),
+    };
     let events = MachineEventBus::new(16);
     let app = router(HubState::new(
         SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
@@ -865,6 +871,7 @@ async fn launch_profiles_follow_the_resolved_projects_account_policy() {
         (None, "[accounts]\nthreshold = 50\n", "soon"),
         (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
         (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'most-headroom'\n", "spare"),
+        (Some(serde_json::to_string(&browse).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
     ] {
         std::fs::write(project.join(".cas/config.toml"), config).unwrap();
         let query = query_target.map(|target| url::form_urlencoded::Serializer::new(String::new()).append_pair("target", &target).finish());

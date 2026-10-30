@@ -464,6 +464,7 @@ describe("accounts (cas-9666)", () => {
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="old@petrastella.io"]')!.disabled).toBe(true);
     expect(step.querySelector(".launch-account-out code")!.textContent).toBe("cas claude login old@petrastella.io");
     pick(dialog(), 'input[name="launch-project"]');
+    await flush();
     pick(dialog(), 'input[name="launch-account"][value="support@petrastella.io"]');
     expect(dialog().querySelector(".launch-summary")!.textContent).toBe("Start cas-src with Claude (support@petrastella.io) on Atlas.");
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
@@ -484,6 +485,7 @@ describe("accounts (cas-9666)", () => {
     expect(recommended.closest("label")!.textContent).toContain("weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)");
     expect(calls.launches).toHaveLength(0);
     pick(dialog(), 'input[name="launch-project"]');
+    await flush();
     pick(dialog(), 'input[name="launch-account"][value="main"]');
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
     await vi.waitFor(() => expect(calls.launches[0]?.request.profile).toBe("main"));
@@ -494,6 +496,7 @@ describe("accounts (cas-9666)", () => {
     s.open();
     await flush();
     pick(dialog(), 'input[name="launch-project"]');
+    await flush();
     pick(dialog(), 'input[name="launch-cli"][value="codex"]');
     expect(dialog().querySelector(".launch-account")!.textContent).toContain("couldn't check Codex's accounts");
     expect(dialog().querySelector('[data-launch-action="retry-accounts"]')).not.toBeNull();

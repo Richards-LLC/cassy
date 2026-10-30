@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Shared-file warnings
+
+- **Workers can add their own changelog entries without coordination** — Was:
+  append-only detection accepted edits that rewrote another entry while adding
+  a new bullet. Now: the hook applies edits to current text and only skips the
+  warning for whole-line new entries; rewrites, deletions and continuations to
+  existing bullets still warn.
+
 ### Fixed — Hub authentication clock correction
 
 - **Fast device clocks recover automatically** — The hub refuses future-dated

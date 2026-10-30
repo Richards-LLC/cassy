@@ -31,6 +31,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Cloud uploads can still return 403 until the separate presign fix ships
   ([Cloud #258](https://github.com/Richards-LLC/petra-stella-cloud/issues/258)).
 
+### Fixed — Release proof tooling on macOS
+
+- **Assembly proofs find the same GNU objdump as the ISA audit** — Homebrew's
+  keg-only binutils and the configured objdump override now work for row proofs.
+  Changelog-only harness checks run without an ELF compiler.
+
 ### Fixed — Fleet keyboard feedback
 
 - **Undo keeps focus when the phone shell refreshes** — After returning from

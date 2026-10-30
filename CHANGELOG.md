@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merge CI diagnostics
+
+- **Delivery Git failures name their cause** — Merge CI receipts distinguish Git timeouts, start failures and nonzero exits by subcommand without exposing stderr. A failed delivery-range inspection says the GitHub endpoint was not queried; repository lookup failures keep their separate headline.
+
 ### Fixed — Screencast guidance
 
 - **QA examples recommend 10 fps** — Lower frame rates reduce encoding work;

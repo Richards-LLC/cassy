@@ -1,5 +1,21 @@
 # Published merge CI admission
 
+## Delivery Git inspection failures
+
+**First two lines:** The receipt names a delivery Git inspection failure when
+Git fails before repository lookup, followed by the unresolved CI SHA.
+**Scannable:** The cause names the Git subcommand and distinguishes timeout,
+start/completion I/O failure and a nonzero exit status.
+**Readable:** Git stderr and full command arguments remain private; repository
+lookup failures retain their existing distinct headline.
+**Machine output:** Existing MCP text receipt and CI admission state are retained;
+an internal provenance flag distinguishes an unattempted repository lookup.
+**Omitted:** No change to merge policy, retry behavior, endpoint selection or layout.
+
+Evidence: the existing unresolved-delivery receipt test covers missing branch
+and target, with bounded timeout and start-failure controls. Terminal palette
+walkthrough remains unexercised pending integrated batch QA.
+
 **Reader and decision:** A factory worker or supervisor reading a task's merge
 receipt needs to distinguish confirmed CI from an advisory admission or an
 explicit override before describing the delivery as green.

@@ -69,6 +69,7 @@ enum BranchCiState {
 struct BranchCiLookup {
     state: BranchCiState,
     repo: Option<String>,
+    repository_lookup_attempted: bool,
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/check-runs";
@@ -164,11 +165,21 @@ fn ci_git(
 ) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command.current_dir(cwd).args(args);
+    let subcommand = args.first().copied().unwrap_or("<unknown>");
     let output =
         crate::bounded_process::run_command(&mut command, deadline, BRANCH_CI_LOOKUP_TIMEOUT)
-            .map_err(|_| "could not inspect delivery Git range".to_string())?;
+            .map_err(|error| {
+                let cause = match error {
+                    crate::bounded_process::BoundedCommandError::TimedOut => "timed out",
+                    crate::bounded_process::BoundedCommandError::Io => "could not start or complete",
+                };
+                format!("git {subcommand} {cause} while inspecting delivery Git range")
+            })?;
     if !output.status.success() {
-        return Err("could not inspect delivery Git range".to_string());
+        return Err(format!(
+            "git {subcommand} failed while inspecting delivery Git range ({})",
+            output.status
+        ));
     }
     Ok(output.stdout)
 }
@@ -398,6 +409,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     reason,
                 },
                 repo: None,
+                repository_lookup_attempted: false,
             };
         }
     };
@@ -412,6 +424,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     None => BranchCiState::Unknown { sha: tip, reason },
                 },
                 repo: None,
+                repository_lookup_attempted: true,
             };
         }
     };
@@ -438,6 +451,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     BranchCiLookup {
         state,
         repo: Some(repo),
+        repository_lookup_attempted: true,
     }
 }
 
@@ -897,6 +911,10 @@ fn describe_branch_ci_lookup(branch: &str, lookup: &BranchCiLookup) -> String {
     let receipt = describe_branch_ci_state(branch, &lookup.state);
     match lookup.repo.as_deref() {
         Some(repo) => receipt.replace("repos/<unresolved-repository>/", &format!("repos/{repo}/")),
+        None if !lookup.repository_lookup_attempted => receipt.replace(
+            "gh endpoint queried: GET",
+            "gh endpoint not queried: delivery Git inspection failed; intended GET",
+        ),
         None => receipt.replace(
             "gh endpoint queried: GET",
             "gh endpoint unavailable: repository unresolved; intended GET",
@@ -6279,11 +6297,23 @@ mod tests {
             crate::github_issue_attach::GH_BIN_ENV,
             repo.path().join("gh-fixture"),
         );
-        let state = super::lookup_branch_ci("factory/ci-fixture", "missing-target", repo.path()).state;
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-        assert!(
-            !describe_branch_ci_state("factory/ci-fixture", &state).contains("CI state: green")
-        );
+        for (branch, target, subcommand) in [
+            ("factory/ci-fixture", "missing-target", "merge-base"),
+            ("missing-branch", "main", "rev-parse"),
+        ] {
+            let lookup = super::lookup_branch_ci(branch, target, repo.path());
+            assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
+            let receipt = super::describe_branch_ci_lookup(branch, &lookup);
+            assert!(!receipt.contains("CI state: green"), "{receipt}");
+            assert!(receipt.contains("gh endpoint not queried: delivery Git inspection failed"), "{receipt}");
+            assert!(receipt.contains(&format!("git {subcommand} failed while inspecting delivery Git range (exit status: 128)")), "{receipt}");
+            assert!(!receipt.contains("repository unresolved"), "{receipt}");
+            assert!(!receipt.contains("fatal:"), "Git stderr must stay private: {receipt}");
+        }
+        let timed_out = super::ci_git(repo.path(), &["status"], crate::bounded_process::Deadline::after(std::time::Duration::ZERO)).unwrap_err();
+        assert!(timed_out.contains("git status timed out"), "{timed_out}");
+        let unavailable = super::ci_git(&repo.path().join("missing-directory"), &["status"], crate::bounded_process::Deadline::after(std::time::Duration::from_secs(2))).unwrap_err();
+        assert!(unavailable.contains("git status could not start or complete"), "{unavailable}");
         assert!(!repo.path().join("gh-requests.log").exists());
     }
 

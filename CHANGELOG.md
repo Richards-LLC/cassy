@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merge-readiness guidance
+
+- **Merge guidance points to readiness gates** — The supervisor's merge row now
+  links to the caveats that a green push alone is not ready and pending or red CI
+  requires override authority and a reason. The Codex coordination note now says
+  the merge verdict closes or reopens the task, so workers do not re-close it.
+
 ### Fixed — Release draft linting
 
 - **Unused draft helper removed** — Delete the orphan failure classifier.

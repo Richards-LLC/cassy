@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Deliverable capture on macOS
+
+- **Capture from linked directories returns its receipt** — Evidence capture
+  runs through macOS temporary paths instead of silently exiting, preserving
+  the JSON timeout result and cleanup behavior.
+
 ### Fixed — Extracted handler journey coverage
 
 - **Rich inspection stays in source-impact selection** — Literal DOM lookups

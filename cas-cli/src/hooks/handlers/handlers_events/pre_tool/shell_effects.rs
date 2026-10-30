@@ -321,6 +321,13 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
     None
 }
 
+/// Whether this operator continues a redirect, as in `>&` and `>|`. The next word
+/// is that redirect's filename, so it is not in command position and cannot be a
+/// keyword. Bash runs `>case touch in /outside/p` as `touch in /outside/p`.
+fn after_redirect(previous: Option<(char, usize)>, end: usize) -> bool {
+    matches!(previous, Some(('<' | '>', at)) if at + 1 == end)
+}
+
 /// Resolve a substitution with the ordinary shell lexer. Only real operator
 /// tokens can close it: quoted/comment text and case-pattern ')' are data.
 pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Option<usize> {
@@ -427,7 +434,8 @@ pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Opti
                 return (cases.is_empty() && lexed.unresolved_at.is_none_or(|at| at >= end))
                     .then_some(index + end - 1);
             }
-            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
             _ => {}
         }
     }
@@ -496,7 +504,12 @@ fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'st
                         command_start = false;
                         continue;
                     }
-                    if word.contains(['`', '$']) {
+                    // Words in a pattern are joined by `|`. Two in a row are a command
+                    // this has misread, and must never be hidden as pattern text.
+                    let after_word = index > 0
+                        && syntax[index - 1] == CaseSyntax::Hidden
+                        && matches!(lexed.tokens[index - 1], ShellToken::Word(_));
+                    if after_word || word.contains(['`', '$']) {
                         return Err("an unresolved shell payload");
                     }
                     *started = true;
@@ -559,7 +572,8 @@ fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'st
                 level = level.saturating_sub(1);
                 command_start = false;
             }
-            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
             _ => {}
         }
     }

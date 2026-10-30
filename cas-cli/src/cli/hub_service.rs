@@ -1048,12 +1048,15 @@ fn advance_managed_hub_pin_after_check(
     before_lock: impl FnOnce(),
 ) -> Result<bool> {
     let receipt_path = state.join("hub-pin.json");
-    let Ok(receipt) = fs::read_to_string(&receipt_path) else {
-        return Ok(false);
+    let pin_is_current = || -> Result<bool> {
+        let Ok(receipt) = fs::read_to_string(&receipt_path) else {
+            return Ok(false);
+        };
+        let receipt: HubPinReceipt =
+            serde_json::from_str(&receipt).context("hub pin receipt is unreadable")?;
+        Ok(fs::read_link(current).ok().as_deref() == Some(receipt.slot.as_path()))
     };
-    let receipt: HubPinReceipt =
-        serde_json::from_str(&receipt).context("hub pin receipt is unreadable")?;
-    if fs::read_link(current).ok().as_deref() != Some(receipt.slot.as_path()) {
+    if !pin_is_current()? {
         return Ok(false);
     }
     before_lock();
@@ -1065,6 +1068,9 @@ fn advance_managed_hub_pin_after_check(
         .open(state.join("hub-pin.lock"))
         .context("open hub pin lock")?;
     fs2::FileExt::try_lock_exclusive(&lock).context("another hub pin operation is running")?;
+    if !pin_is_current()? {
+        return Ok(false);
+    }
     let parent = current.parent().context("hub pin path has no parent")?;
     let temporary = parent.join(format!(".current.{}.tmp", std::process::id()));
     let _ = fs::remove_file(&temporary);

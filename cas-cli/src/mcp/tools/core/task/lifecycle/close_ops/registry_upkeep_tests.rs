@@ -576,6 +576,21 @@ fn registry_upkeep_waivers_require_delivery_and_finding_cas_b7e7() {
         }
         f.decision(&format!("{token} reviewed current finding"));
         f.run(&head).expect("current delivery and finding with a reason may be waived");
+        git(f.repo.path(), &["checkout", "-qb", "target", &f.base]);
+        write(f.repo.path(), "README.md", "unrelated target work");
+        commit(f.repo.path());
+        git(f.repo.path(), &["merge", "--no-ff", &head, "-m", "integrate delivery"]);
+        f.task.status = TaskStatus::AwaitingMerge;
+        f.task.deliverables.factory_branch_anchor = Some(head.clone());
+        f.task.deliverables.green_merge_commit = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
+        at_park(
+            &mut CloseNoteTracker::new(&f.store, &f.task),
+            &mut f.task, f._db.path(), f.repo.path(), "target", None, Some(&head), None,
+        ).expect("integration must preserve a waiver for the same parked delivery and finding");
+        git(f.repo.path(), &["checkout", "main"]);
+        f.task.status = TaskStatus::Open;
+        f.task.deliverables.factory_branch_anchor = None;
+        f.task.deliverables.green_merge_commit = None;
         write(f.repo.path(), "src/pages/signup.ts", "revised fix");
         let later = commit(f.repo.path());
         assert!(f.run(&later).is_err(), "{gate} waiver must not survive a later delivery");

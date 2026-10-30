@@ -14,7 +14,11 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
     return unavailable ? route.abort() : route.fulfill({ json: { tag_name: "v3.88.0" } });
   });
   const versions = { atlas: "3.9.0", studio: "3.88.0" };
-  await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], versions });
+  const supervisors: Machine[] = [
+    { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude", mcp_version: "3.90.0", installed_version: "3.91.1" })) },
+    { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session, harness: "codex", mcp_version: "3.91.1", installed_version: "3.91.1" })) },
+  ];
+  await journey.hub({ machines: supervisors, paired: ["atlas", "studio"], versions });
   await journey.open();
   // seedPaired clears localStorage during fixture setup. Measure the cache
   // after the real returning-user navigation, independently of that warm-up.
@@ -27,6 +31,15 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
   await expect(studio).toContainText("Cassy 3.88.0");
   await expect(studio.locator(".machine-version-update")).toHaveCount(0);
   await expect(page.locator('[title="Web client release and build"]')).toHaveText(/^Web \d+\.\d+\.\d+ · [a-f0-9]{8}$/);
+  const atlasSupervisor = page.locator(`[data-thread-key="atlas:${PELICAN}"] .supervisor-version`);
+  const studioSupervisor = page.locator(`[data-thread-key="studio:${OTTER}"] .supervisor-version`);
+  await journey.stage("Read each supervisor's MCP version and the installed upgrade (cas-8125)", async () => {
+    await expect(atlasSupervisor).toContainText("3.90.0");
+    await expect(atlasSupervisor).toContainText("↑");
+    await expect(atlasSupervisor).toHaveAttribute("title", /3\.91\.1.*Reconnect MCP/);
+    await expect(studioSupervisor).toHaveText("3.91.1");
+    await expect(studioSupervisor).not.toHaveClass(/update-available/);
+  });
   const captureVersions = async (name: string) => {
     if (!process.env.VERSION_QA) return;
     // Preserve the real production DOM and CSS for the strict visual polish
@@ -59,9 +72,11 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
   });
   await journey.stage("Reloads and unknown machine versions do not invent update warnings or extra checks", async () => {
     versions.studio = "unknown";
+    supervisors[1]!.sessions[0]!.mcp_version = undefined;
     await page.reload();
     await expect(studio).toContainText("Version unknown");
     await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+    await expect(studioSupervisor).toHaveCount(0);
     await expect(atlas).toContainText("Update available → 3.88.0");
     expect(checks).toBe(initialChecks);
   });

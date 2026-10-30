@@ -22,6 +22,17 @@ export function isNewerRelease(current: string | undefined, latest: string | und
   return installed.prerelease;
 }
 
+/** A session's MCP process, compared only with the binary installed on its own machine. */
+export function supervisorVersion(running: string | undefined, installed?: string): { version: string; update: boolean; description: string } | undefined {
+  if (!parsed(running)) return undefined;
+  const version = running!.trim().replace(/^v/, "");
+  const update = isNewerRelease(running, installed);
+  const description = update
+    ? `Cassy ${version}. Update available: ${installed!.replace(/^v/, "")} is installed on this machine. Reconnect MCP to use the installed version.`
+    : `Cassy ${version}, running in this supervisor's MCP server.`;
+  return { version, update, description };
+}
+
 export function machineVersionMarkup(runtime: string | undefined, latest?: string, unknownLabel = "Version unknown"): string {
   const known = typeof runtime === "string" && runtime && runtime !== "unknown";
   const update = isNewerRelease(runtime, latest);

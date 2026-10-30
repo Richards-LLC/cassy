@@ -7298,11 +7298,11 @@ mod workspace_contract_tests {
     fn changelog_new_bullet_is_append_only() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("CHANGELOG.md");
-        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n  Wrapped detail.\n").unwrap();
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n  Wrapped detail.\n\n").unwrap();
         let input = tool_input(
             "apply_patch",
             serde_json::json!({
-                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n+  Wrapped detail.\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n   Wrapped detail.\n \n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
             }),
             root.path(),
         );

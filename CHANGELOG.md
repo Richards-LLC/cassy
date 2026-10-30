@@ -9,7 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — macOS automatic release installation
 
-- Reinstalling the release LaunchAgent retries a failed load once after a short
+- **LaunchAgent reinstall tolerates shutdown delay** — Reinstalling the release
+  LaunchAgent retries a failed load once after a short
   delay, allowing the previous job to finish shutting down. Persistent load errors
   still fail the install. The script test skips plist validation with a message
   when Python 3 is unavailable, while keeping scheduler lifecycle checks active.

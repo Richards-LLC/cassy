@@ -19,6 +19,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   contracts merge on READY TO MERGE, `awaiting_merge` or that ready signal,
   never on a green push alone.
 
+### Fixed — Shared-file advisories
+
+- **Remote file holders keep the coordination hint** — Was: a named holder on
+  another machine lost the cross-session supervisor hint. Now: recorded remote
+  identities retain it; the unknown-session fallback stays unchanged.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

@@ -263,11 +263,11 @@ pub(crate) fn claim_with(
         Acquire::PeerHolds(hold) | Acquire::StalePeer(hold) => {
             // A live holder is named from the agent list; its claim reason
             // also carries the task it is editing for.
-            let who = claims
+            let holder = claims
                 .recorded_holder(&id, agent_id, CLAIM_BUDGET)
-                .map(|recorded| format!("{} on {}", recorded.name, recorded.machine))
-                .unwrap_or_else(|| hold.describe());
-            (FileLease::HeldBy(FileHolder::UnknownSession(who)), None)
+                .map(|recorded| FileHolder::OtherSession(format!("{} on {}", recorded.name, recorded.machine)))
+                .unwrap_or_else(|| FileHolder::UnknownSession(hold.describe()));
+            (FileLease::HeldBy(holder), None)
         }
         Acquire::Unavailable(_) => (FileLease::Unchecked, Some(false)),
     };

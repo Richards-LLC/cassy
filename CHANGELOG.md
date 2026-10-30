@@ -11,6 +11,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.
 
+### Fixed — Merge-readiness guidance
+
+- **Merge guidance points to readiness gates** — The supervisor's merge row now
+  links to the caveats that a green push alone is not ready and pending or red CI
+  requires override authority and a reason. The Codex coordination note now says
+  the merge verdict closes or reopens the task, so workers do not re-close it.
+
 ### Fixed — Release draft linting
 
 - **Unused draft helper removed** — Delete the orphan failure classifier.
@@ -156,6 +163,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added — Commander secret auto-delete
 
 - **A saved secret can delete itself** — Was: a secret saved from Commander's secret card stayed on the machine until someone deleted it. Now: the card offers to keep the file, delete it once the agent has used it, or delete it after 1 or 24 hours. The project setting `secrets.auto_delete` (default `off`) sets the default. Each deletion leaves a receipt in `.cas/secret-receipts.jsonl` that never contains the value.
+
+### Changed — Journey source snapshots
+
+- **Lanes test their committed source without generated dist commits** — Journey runs build a scratch production snapshot, verify its source revision and content hash when serving and recording evidence, and preserve that provenance in reused receipts. Source-only changes invalidate background evaluations even when committed dist stays unchanged.
 
 ### Fixed — Codex profile listing width
 

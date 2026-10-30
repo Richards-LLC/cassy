@@ -676,9 +676,21 @@ mod tests {
         assert_eq!(ledger(&cas, &window)[0].check, "batch-qa-receipt");
     }
 
+    fn post_release_probe(dir: &Path, alarm: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let output = serde_json::json!({
+            "ok": true, "checked_at": Utc::now(),
+            "alarms": if alarm { serde_json::json!([{"id":"production-alarm","summary":"Missing readback","count":1}]) } else { serde_json::json!([]) },
+        });
+        let path = dir.join("check");
+        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     fn post_release_fixture() -> (tempfile::TempDir, PathBuf, std::sync::Arc<dyn cas_store::TaskStore>, Task, Window) {
         let (dir, cas, store, _) = epic_fixture();
-        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"echo healthy\"\nrelease_branches = [\"main\"]\n").unwrap();
+        post_release_probe(dir.path(), false);
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = \"./check\"\nrelease_branches = [\"main\"]\n").unwrap();
         git(dir.path(), &["remote", "add", "origin", "."]);
         let epic = store.get("cas-ep1c").unwrap();
         let window = open(&cas, store.as_ref());
@@ -693,6 +705,7 @@ mod tests {
 
     #[test]
     fn window_relaxes_only_for_automatic_release_merge() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         // A merge resolution can add risk absent from the epic delivery.
         // Scan the release's first parent, including those resolution edits.
         let secret = format!("gh{}_{}", "p", "a".repeat(24));
@@ -722,6 +735,7 @@ mod tests {
                 crate::qa_post_release::tick(&cas).unwrap();
             }
             let receipt = crate::qa_post_release::load(&cas, &epic.id).unwrap().unwrap();
+            assert_eq!(receipt.verdict(Utc::now()), crate::qa_post_release::Verdict::Pending);
             assert_ne!(release, tip);
             assert_eq!(receipt.sha, release, "observe the introducing release merge");
             assert!(cas.join("operator/post-release").join(format!("{}.json", epic.id)).exists(), "release identity is protected from agent writes");
@@ -731,8 +745,27 @@ mod tests {
                 assert_eq!(skips[0].check, "post-release");
                 assert!(crate::qa_post_release::gate(&cas, &epic, false).is_none());
                 assert_eq!(ledger(&cas, &window).len(), 1, "release notes and close share a skip");
-                disable(&cas, store.as_ref(), &epic.id, Utc::now()).unwrap();
-                assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "expiry/disable restores the gate");
+                if via_reminder {
+                    // The reminder starts observation; its first real probe
+                    // now reports an alarm while the rapid-response window is active.
+                    post_release_probe(dir.path(), true);
+                    crate::qa_post_release::tick(&cas).unwrap();
+                    assert_eq!(crate::qa_post_release::load(&cas, &epic.id).unwrap().unwrap().verdict(Utc::now()), crate::qa_post_release::Verdict::Failed);
+                    for release_notes in [true, false] {
+                        assert!(crate::qa_post_release::gate(&cas, &epic, release_notes).is_some(), "an active window must not hide a production alarm (release_notes={release_notes})");
+                    }
+                    store.append_note(&epic.id, &format!("[{}] ✅ DECISION POST-RELEASE OVERRIDE: operator accepts this alarm", Utc::now().format("%Y-%m-%d %H:%M"))).unwrap();
+                    let overridden = store.get(&epic.id).unwrap();
+                    for release_notes in [true, false] {
+                        assert!(crate::qa_post_release::gate(&cas, &overridden, release_notes).is_none(), "an explicit operator override still applies");
+                    }
+                    let audited = store.get(&epic.id).unwrap().notes;
+                    assert!(audited.contains("post-release gate overridden for release notes"));
+                    assert!(audited.contains("post-release gate overridden for epic close"));
+                } else {
+                    disable(&cas, store.as_ref(), &epic.id, Utc::now()).unwrap();
+                    assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "expiry/disable restores the gate");
+                }
             } else {
                 assert!(skips.is_empty(), "unsafe release cannot record a skip");
             }

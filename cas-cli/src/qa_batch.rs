@@ -159,15 +159,10 @@ pub(crate) fn validate_ledger(
     Ok((artifact, path))
 }
 
-/// The note marker carrying the operator's words for an author-lineage override.
-pub(crate) const AUTHOR_OVERRIDE_MARKER: &str = "QA AUTHOR OVERRIDE:";
-
-/// The operator's recorded override for this task, if any (cas-26ac).
-pub(crate) fn author_override(task: &Task) -> Option<String> {
-    task.notes.lines().rev().find_map(|line| {
-        let (_, words) = line.split_once(AUTHOR_OVERRIDE_MARKER)?;
-        Some(words.trim()).filter(|words| !words.is_empty()).map(str::to_owned)
-    })
+/// The operator's recorded override for this task, if any (cas-26ac). Only
+/// the operator-written file counts; task notes never do.
+pub(crate) fn author_override(root: &Path, task: &Task) -> Option<String> {
+    crate::qa_author_override::for_task(root, &task.id)
 }
 
 /// Every identity that implemented `task` across assignments and deliveries:
@@ -252,7 +247,7 @@ pub(crate) fn author_is_independent(
 
 pub(crate) fn author_refusal(task: &str, author: &str) -> String {
     format!(
-        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. Only the operator can override: record their words with `task action=notes id={task} note_type=decision notes=\"{AUTHOR_OVERRIDE_MARKER} <operator's words>\"`"
+        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. Only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
     )
 }
 
@@ -303,7 +298,7 @@ pub(crate) fn prepare_receipt(
             return Err(format!("no self-review: recorder implemented {id}"));
         }
         if author_gated(&task, &repo) && in_lineage(agents.as_ref(), &actors, &author_id) {
-            match author_override(&task) {
+            match author_override(root, &task) {
                 Some(words) => {
                     overrides.insert(id.clone(), words);
                 }
@@ -383,7 +378,7 @@ pub(crate) fn satisfying_receipt(
         // Receipts from before authors were recorded carry none.
         if let Some(author) = receipt.ledger_author_id.as_deref()
             && !receipt.author_overrides.contains_key(&task.id)
-            && author_override(task).is_none()
+            && author_override(root, task).is_none()
             && !author_is_independent(root, task, repo, author)?
         {
             continue;
@@ -432,7 +427,7 @@ pub(crate) fn covering_pass(
         }
         // cas-26ac: a reviewer later found in the task's lineage is not independent.
         if let Some(reviewer) = pass.reviewer_agent_id.as_deref()
-            && author_override(task).is_none()
+            && author_override(root, task).is_none()
             && !author_is_independent(root, task, repo, reviewer)?
         {
             continue;

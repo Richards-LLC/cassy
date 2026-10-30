@@ -30,7 +30,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Independent batch QA
 
-- **A worker's own QA walk no longer counts as independent QA** — Was: a batch QA receipt and a QA-backed close accepted a ledger walked by the worker that delivered the task, as long as a different supervisor recorded it. → Now: `batch_receipt` requires `ledger_author` and records its id and role. It refuses an author in any listed tier 1 or 2 task's implementation lineage, and close rechecks receipts and passed QA rounds the same way. QA reviewers, verifiers and non-delivering workers, including on another machine, are accepted. Only an operator's `QA AUTHOR OVERRIDE:` task note lets a lineage author through. Receipts recorded before authors were tracked still count.
+- **A worker's own QA walk no longer counts as independent QA** — Was: a batch QA receipt and a QA-backed close accepted a ledger walked by the worker that delivered the task, as long as a different supervisor recorded it. → Now: `batch_receipt` requires `ledger_author` and records its id and role. It refuses an author in any listed tier 1 or 2 task's implementation lineage, and close rechecks receipts and passed QA rounds the same way. QA reviewers, verifiers and non-delivering workers, including on another machine, are accepted. Only the operator's own `cas qa author-override <task> --note "<why>"` lets a lineage author through; agents are refused, and a task note does not count. Receipts recorded before authors were tracked still count.
 
 ### Added — Supervisor Cassy versions in Commander
 

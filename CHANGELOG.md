@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA evidence
+
+- **Published QA bundles restore through macOS path aliases** — Was: a peer
+  could miss a published bundle cited under `/var` because publication recorded
+  `/private/var`. → Now: restore compares canonical source identities even
+  after producer files are gone, then validates the published evidence as usual.
+
 ### Fixed — Commander
 
 - **Messages kept in two tabs all go out after an outage** — Was: with two

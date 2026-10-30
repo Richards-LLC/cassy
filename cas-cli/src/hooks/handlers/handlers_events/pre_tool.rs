@@ -10920,6 +10920,44 @@ mod worker_commit_guard_tests {
         add_linked_worktree(repo.path(), linked.path(), "factory/linked-worker");
         let repo_path = repo.path().to_string_lossy().to_string();
         let linked_path = linked.path().to_string_lossy().to_string();
+        let remote = tempfile::tempdir().expect("bare remote path");
+        let remote_init = std::process::Command::new("git")
+            .args(["init", "--bare", &remote.path().to_string_lossy()])
+            .output()
+            .expect("initialize probe remote");
+        assert!(remote_init.status.success());
+        let remote_add = std::process::Command::new("git")
+            .args(["remote", "add", "origin", &remote.path().to_string_lossy()])
+            .current_dir(linked.path())
+            .output()
+            .expect("add probe remote");
+        assert!(remote_add.status.success());
+        let failing_hooks = tempfile::tempdir().expect("failing hooks path");
+        let pre_push = failing_hooks.path().join("pre-push");
+        std::fs::write(
+            &pre_push,
+            "#!/bin/sh\necho 'probe pre-push hook refused' >&2\nexit 1\n",
+        )
+        .expect("write failing probe hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &pre_push,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("make probe hook executable");
+        }
+        let hook_config = std::process::Command::new("git")
+            .args([
+                "config",
+                "core.hooksPath",
+                &failing_hooks.path().to_string_lossy(),
+            ])
+            .current_dir(linked.path())
+            .output()
+            .expect("configure failing probe hook");
+        assert!(hook_config.status.success());
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
@@ -10936,6 +10974,7 @@ mod worker_commit_guard_tests {
             ("printf '%s' git commit".to_string(), false),
             (format!("git -C '{repo_path}' log --grep commit"), false),
             ("GIT_CONFIG_KEY_0=core.hooksPath git status".to_string(), false),
+            (format!("git -C '{linked_path}' push origin factory/linked-worker"), false),
             (format!("git -C '{linked_path}' config --remove-section core"), true),
             (format!("git -C '{linked_path}' config --worktree --remove-section core"), true),
             (format!("set -ae; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
@@ -10953,6 +10992,18 @@ mod worker_commit_guard_tests {
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/linked-worker"])
+            .current_dir(linked.path())
+            .output()
+            .expect("run baseline push against failing probe hook");
+        assert!(!push.status.success(), "the probe pre-push hook must fail");
+        assert!(
+            String::from_utf8_lossy(&push.stderr).contains("probe pre-push hook refused"),
+            "push must reach the configured failing probe hook: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
     }
 
     #[test]

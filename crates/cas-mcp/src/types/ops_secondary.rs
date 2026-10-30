@@ -367,6 +367,10 @@ pub struct VerificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "batch_receipt: full 40-hex staging commit SHA, contained in each task's configured target")]
     pub staging_sha: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: agent id or name that walked the ledger; refused if it implemented a listed tier 1/2 task unless a task note records 'QA AUTHOR OVERRIDE: <operator's words>'")]
+    pub ledger_author: Option<String>,
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
     #[schemars(

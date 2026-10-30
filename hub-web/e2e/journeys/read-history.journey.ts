@@ -4,6 +4,7 @@ import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
 import { journeyDay } from "./clock";
 import { ATLAS, PELICAN } from "./world";
+import { openConversation, showConversationList } from "./responsive-goals";
 
 const you = (id: number, text: string, at: string) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at });
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
@@ -782,7 +783,37 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await expect(tab.locator("iframe[srcdoc]")).toHaveCount(0);
     });
 
+    await journey.stage(`Choose Dark on a light device and read the page in dark (${name})`, async () => {
+      // cas-a4f4: OS emulation alone cannot prove the in-app preference
+      // reaches an embedded page's prefers-color-scheme query.
+      // Playwright's page override also forces cross-origin frame media,
+      // hiding native color-scheme inheritance. Emulate the light device on
+      // the top-level target only; let the embedded page follow its frame.
+      await tab.emulateMedia({ colorScheme: null });
+      const lightDevice = await tab.context().newCDPSession(tab);
+      await lightDevice.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
+      const inside = tab.frameLocator('iframe[title="Gate report.html, a page from the supervisor"]');
+      await expect(inside.locator("body")).not.toHaveCSS("background-color", "rgb(21, 23, 29)");
+      await showConversationList(tab);
+      await tab.getByRole("button", { name: "Appearance & commands", exact: true }).click();
+      await tab.getByRole("button", { name: /^Appearance · Dark/ }).click();
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
+      await openConversation(tab, "cas-src");
+      await log.getByTitle("Gate report.html, a page from the supervisor").scrollIntoViewIfNeeded();
+      expect(await tab.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches), "the device preference stays light").toBe(false);
+      await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
+    });
+
     await journey.stage(`In dark mode the page sits in the theme, and a dark-capable page renders dark (${name})`, async () => {
+      await tab.emulateMedia({ colorScheme: "light" });
+      // Restore System so the separate OS-preference stage still proves its
+      // own input, including the plain page's light fallback.
+      await showConversationList(tab);
+      await tab.getByRole("button", { name: "Appearance & commands", exact: true }).click();
+      await tab.getByRole("button", { name: /^Appearance · System/ }).click();
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
+      await openConversation(tab, "cas-src");
       // cas-2326: the frame chrome follows Commander's scheme and hands it to
       // the page (the iframe's color-scheme); a page without dark styles gets
       // the browser's own opaque backdrop, so it stays legible.

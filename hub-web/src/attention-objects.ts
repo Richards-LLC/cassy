@@ -187,14 +187,18 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
     foot.append(note);
   } else {
     object.dataset.answered = "false";
-    const form = document.createElement("form"); form.className = "secret-form";
+    // No <form> and no submit: a password field submitted in a form is what
+    // browsers offer to save. The ignore attributes keep 1Password, LastPass,
+    // Bitwarden and Dashlane from offering to store or fill it.
+    const form = document.createElement("div"); form.className = "secret-form";
     const input = document.createElement("input");
-    input.type = "password"; input.className = "secret-value"; input.name = "secret";
+    input.type = "password"; input.className = "secret-value";
     input.autocomplete = "off"; input.spellcheck = false;
     input.setAttribute("autocapitalize", "off"); input.setAttribute("autocorrect", "off");
+    for (const [name, value] of [["data-1p-ignore", ""], ["data-lpignore", "true"], ["data-bwignore", "true"], ["data-form-type", "other"]]) input.setAttribute(name!, value!);
     input.setAttribute("aria-label", `Value for ${name}`);
     input.placeholder = "Paste the value";
-    const save = document.createElement("button"); save.type = "submit"; save.className = "chip secret-save"; save.textContent = "Save securely";
+    const save = document.createElement("button"); save.type = "button"; save.className = "chip secret-save"; save.textContent = "Save securely";
     const decline = document.createElement("button"); decline.type = "button"; decline.className = "chip secret-decline"; decline.textContent = "Decline";
     const status = document.createElement("p"); status.className = "secret-status"; status.setAttribute("role", "status");
     const controls = [input, save, decline];
@@ -217,11 +221,12 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
         for (const control of controls) control.disabled = false;
       }
     };
-    form.onsubmit = (event) => {
-      event.preventDefault();
+    const submit = (): void => {
       if (!input.value.trim()) { status.textContent = "Paste the value first."; input.focus(); return; }
       void send({ value: input.value });
     };
+    save.onclick = submit;
+    input.onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } };
     decline.onclick = () => { void send({ decline: true }); };
     form.append(input, save, decline);
     foot.append(form, status);

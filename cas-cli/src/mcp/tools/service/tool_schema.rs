@@ -90,7 +90,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("blocker", "Blocker escalation; wakes idle supervisor."),
     ("merge_request", "Parked task_id merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
-    ("kind", "answer|status|receipt|ask|blocker; receipts never wake a supervisor."),
+    ("kind", "answer|status|receipt|ask|blocker|secret (summary=NAME; reply names its file); receipts never wake a supervisor."),
     ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
     ("options", "Operator ask choices; tap returns the label with in_reply_to."),
     ("attachment", "Published artifact id for Commander."),
@@ -252,6 +252,9 @@ mod tests {
         }
         assert!(message.contains("operator") && message.contains("refused"), "{message}");
         assert!(description("remind_event").contains("cross_session=true"));
+        // cas-1996: a secret request is discoverable, so agents never ask for a key in chat.
+        let kind = description("kind");
+        assert!(kind.contains("secret") && kind.contains("summary=NAME"), "{kind}");
         let filters = description("remind_filter");
         for example in [r#"{"commit":"<ref>","target_branch":"main"}"#,
             r#"{"tag":"v1.0.0"}"#, r#"{"sha":"<40-hex>","workflow":"CI"}"#,

@@ -58,6 +58,16 @@ coordination action=message target=operator in_reply_to=N summary="..." message=
 The fallback routes to the originating paired device and reports queued delivery while it is offline. Reply through that route once; do not also produce a mirrored pane answer. Never derive a routing target from the human-readable `From:` label. A missing receipt alone does not establish that a surface is unmirrored.
 For phone-sized wording in either route, follow the [phone reply contract](operator-reply.md).
 
+### Secret requests
+
+Request credentials only with `kind=secret`, never with `kind=ask` or in chat. When work needs a credential (API key, token, password), a pasted value in chat lands in history, transcripts and the relay. Send a secret request instead:
+
+```text
+coordination action=message target=operator kind=secret summary=STRIPE_KEY message="Needed to run the billing tests. Create a restricted key at dashboard → Developers → API keys."
+```
+
+`summary` is the secret's name and its file name: 1-64 letters, digits, `_`, `.` or `-`. Commander shows a card with a masked field. When the operator saves it, the hub writes the value to a mode-600 file in `secrets.destination` (default `~/.cas/private/creds/<project>/`) and you receive a reply naming that path; a decline says nothing was saved. Use it via `$(cat <path>)` or an env var in the command that needs it (for example `STRIPE_KEY="$(cat <path>)" npm test`); never print it, and never copy it into the repository, a note, a task or a message. A name that already exists is refused, so ask with a new name to replace a key. A worker that needs a secret asks its supervisor, which sends the request.
+
 ## Supervisor override
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.

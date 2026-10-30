@@ -441,6 +441,33 @@ fn text_width(value: &str) -> usize {
     ratatui::text::Line::from(value).width()
 }
 
+/// Render the shared two-line listing row without changing account identity.
+/// Reserve the complete login/active suffix before shortening by display cells.
+pub(crate) fn profile_listing_row(home: &Path, profile: &Profile, full: bool) -> (String, bool) {
+    let login = login_state_label(profile.login_state);
+    let active = if profile.active { " (active)" } else { "" };
+    let suffix = format!(" ({login}){active}");
+    let label = if profile.display_name == profile.name {
+        profile.name.clone()
+    } else {
+        format!("{} ({})", profile.display_name, profile.name)
+    };
+    let directory = profile
+        .directory
+        .strip_prefix(home)
+        .map(|rest| format!("~/{}", rest.display()))
+        .unwrap_or_else(|_| profile.directory.display().to_string());
+    let (label, directory, truncated) = if full {
+        (label, directory, false)
+    } else {
+        let short_label = shorten_picker_text(&label, 80 - 2 - text_width(&suffix));
+        let short_directory = shorten_picker_text(&directory, 80 - 4);
+        let truncated = short_label != label || short_directory != directory;
+        (short_label, short_directory, truncated)
+    };
+    (format!("  {label}{suffix}\n    {directory}\n"), truncated)
+}
+
 fn shorten_picker_text(value: &str, width: usize) -> String {
     if text_width(value) <= width {
         return value.to_string();

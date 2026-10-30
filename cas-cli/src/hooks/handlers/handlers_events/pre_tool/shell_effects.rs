@@ -746,6 +746,30 @@ fn collect_script(
             };
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
+            if matches!(name, Some("test" | "[")) {
+                let mut at = 0;
+                while at < args.len() {
+                    // Binary operators consume both data operands. In
+                    // particular, a string comparison's RHS may be "-eq".
+                    let binary = args.get(at + 1).map(String::as_str);
+                    if matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge")) {
+                        numeric_arithmetic(&args[at])?;
+                        numeric_arithmetic(args.get(at + 2)
+                            .ok_or("an unresolved conditional operand")?)?;
+                        at += 3;
+                    } else if matches!(binary, Some("=" | "==" | "!=" | "-nt" | "-ot" | "-ef")) {
+                        at += 3;
+                    } else if matches!(args[at].as_str(), "!" | "(" | ")" | "-a" | "-o") {
+                        at += 1;
+                    } else if args[at].len() == 2 && args[at].starts_with('-')
+                        && !args[at].as_bytes()[1].is_ascii_digit()
+                    {
+                        at += 2; // A unary predicate consumes one data operand.
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
             if name == Some("let") {
                 for arg in args.iter().filter(|arg| arg.as_str() != "--") {
                     numeric_arithmetic(arg)?;

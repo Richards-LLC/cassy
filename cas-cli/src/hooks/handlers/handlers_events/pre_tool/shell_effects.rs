@@ -130,6 +130,132 @@ fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'sta
     Ok(())
 }
 
+/// Numeric comparisons evaluate both operands recursively, even when quoted.
+/// Inspect a whole conditional before command separators split its &&/|| arms.
+fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'static str> {
+    let raw = |index: usize| {
+        let start = if index == 0 { 0 } else { lexed.ends[index - 1] };
+        source[start..lexed.ends[index]].trim()
+    };
+    let arithmetic = |word: &str| matches!(word, "-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge");
+    let other_binary = |word: &str| matches!(word, "=" | "==" | "!=" | "=~" | "-nt" | "-ot" | "-ef");
+    let mut index = 0;
+    while index < lexed.tokens.len() {
+        if !matches!(&lexed.tokens[index], ShellToken::Word(word) if word == "[[")
+            || raw(index) != "[["
+        {
+            index += 1;
+            continue;
+        }
+        let start = (0..index).rfind(|&at| matches!(lexed.tokens[at],
+            ShellToken::Operator(';' | '&' | '|' | '(' | ')'))).map_or(0, |at| at + 1);
+        let mut prefix: Vec<String> = lexed.tokens[start..=index].iter().filter_map(|token| {
+            if let ShellToken::Word(word) = token { Some(word.clone()) } else { None }
+        }).collect();
+        while prefix.first().is_some_and(|word| matches!(word.as_str(),
+            "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"))
+        {
+            prefix.remove(0);
+        }
+        if !unwrapped_command_index(&prefix).is_some_and(|at| prefix[at] == "[[") {
+            index += 1;
+            continue;
+        }
+        let end = (index + 1..lexed.tokens.len()).find(|&at| {
+            matches!(&lexed.tokens[at], ShellToken::Word(word) if word == "]]") && raw(at) == "]]"
+        }).ok_or("an unresolved conditional operand")?;
+        let mut operand = true;
+        let mut at = index + 1;
+        while at < end {
+            // Executable substitutions have their own conditional grammar.
+            // The ordinary recursive collector checks their bodies separately.
+            if matches!(lexed.tokens[at], ShellToken::Operator('('))
+                && at > 0 && matches!(&lexed.tokens[at - 1],
+                    ShellToken::Word(word) if word.ends_with('$'))
+            {
+                let close = substitution_end(source.as_bytes(), lexed.ends[at], 0)
+                    .ok_or("an unresolved conditional operand")?;
+                at = (at + 1..end).find(|&next| lexed.ends[next] == close + 1)
+                    .ok_or("an unresolved conditional operand")?;
+                operand = false;
+            } else {
+                match &lexed.tokens[at] {
+                    ShellToken::Operator('&' | '|' | '(') => operand = true,
+                    ShellToken::Operator(')') => operand = false,
+                    ShellToken::Operator('<' | '>') if !operand => {
+                        at += 1;
+                        operand = false;
+                    }
+                    ShellToken::Word(word) => {
+                        let binary_follows = at + 2 < end
+                            && matches!(&lexed.tokens[at + 1], ShellToken::Word(next)
+                                if arithmetic(next) || other_binary(next))
+                            && !matches!(lexed.tokens[at + 2], ShellToken::Operator('&' | '|' | ')'));
+                        if operand && raw(at) == "!" && !binary_follows {
+                            // Conditional negation, not an operand.
+                        } else if operand && word.len() == 2 && word.starts_with('-')
+                            && !word.as_bytes()[1].is_ascii_digit() && !binary_follows
+                        {
+                            at += 1; // An ordinary unary test consumes its data operand.
+                            operand = false;
+                        } else if !operand && arithmetic(word) {
+                            let (Some(ShellToken::Word(left)), Some(ShellToken::Word(right))) =
+                                (lexed.tokens.get(at - 1), lexed.tokens.get(at + 1).filter(|_| at + 1 < end))
+                            else { return Err("an unresolved conditional operand"); };
+                            numeric_arithmetic(left)?;
+                            numeric_arithmetic(right)?;
+                            at += 1;
+                            operand = false;
+                        } else if !operand && other_binary(word) {
+                            at += 1; // String/file comparisons do not reevaluate arithmetic.
+                            operand = false;
+                        } else {
+                            operand = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            at += 1;
+        }
+        index = end + 1;
+    }
+    Ok(())
+}
+
+/// Parameter syntax comes from the lexer's original source spans, never
+/// cooked words that have lost the distinction between data and expansion.
+fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
+    if matches!(body, "!" | "#") { return Ok(()); } // PID/count, not indirection.
+    if let Some(target) = body.strip_prefix('!') {
+        numeric_arithmetic(target)?;
+        // Even a numeric parameter name reads an unknown value as syntax.
+        return Err("an unresolved indirect parameter");
+    }
+    let body = body.strip_prefix('#').unwrap_or(body);
+    let mut name = body.bytes().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == b'_').count();
+    if name == 0 && body.as_bytes().first().is_some_and(|ch| b"@*?$-".contains(ch)) {
+        name = 1;
+    }
+    if name == 0 { return Err("an unresolved parameter operand"); }
+    let mut rest = &body[name..];
+    while let Some(subscript) = rest.strip_prefix('[') {
+        let end = subscript.find(']').ok_or("an unresolved parameter operand")?;
+        let index = &subscript[..end];
+        if !matches!(index, "@" | "*") { numeric_arithmetic(index)?; }
+        rest = &subscript[end + 1..];
+    }
+    if let Some(position) = rest.strip_prefix(':') {
+        // The four default-value operators do not evaluate arithmetic.
+        if !position.starts_with(['-', '+', '=', '?']) {
+            numeric_arithmetic(position)?;
+        }
+    } else if !rest.is_empty() && !rest.starts_with(['-', '+', '=', '?', '/', '#', '%']) {
+        return Err("an unresolved parameter operand");
+    }
+    Ok(())
+}
+
 /// Extract executable substitutions from a shell word. Arithmetic operands
 /// must be numeric source, never values obtained from shell expansion.
 fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
@@ -486,6 +612,10 @@ fn collect_script(
     let mut lexed = factory_shell_lex(&projected, false, 0);
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");
+    }
+    conditional_arithmetic(&projected, &lexed)?;
+    for &(start, end) in &lexed.parameters {
+        parameter_arithmetic(&projected[start..end])?;
     }
     arithmetic_commands(&projected, &mut lexed)?;
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);

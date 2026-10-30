@@ -9,8 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Conditional and parameter operands
 
-- **Recursive parameter operands stay unresolved** — Arithmetic comparisons,
-  array indices, substring positions and indirection cannot hide executable
+- **Recursive parameter operands stay unresolved** — `[[ … ]]` comparisons and
+  `${…}` array indices, substring positions and indirection cannot hide executable
   subscript text. Literal numeric comparisons, indices and slices stay allowed.
 
 ### Fixed — Hub pin safety

@@ -159,6 +159,12 @@ its private HOME and registered containment, instead of the operator's user
 manager on Linux. Its recorded process group and start fingerprint bound cleanup
 to the owned launch. On macOS the hub uses its native direct process-session
 launch, so that Linux adapter and its `/proc` fingerprint are not invoked.
+Cleanup captures that owned hub's descendant PIDs and `ps` start fingerprints
+before stopping it, retaining those identities across reparenting. It never
+scans host command arguments or environments to establish ownership.
+The inert provider consumes actual bracketed-paste frames and CR submissions
+without canonical terminal buffering; only a submitted `/exit` command ends it,
+so startup prose mentioning that command cannot terminate the provider.
 This does not prove host systemd/cgroup placement or model action.
 The installed official provider and login remain a separate bounded live check;
 never use an existing hub or read/copy credentials into this fixture.

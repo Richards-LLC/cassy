@@ -15,6 +15,8 @@ import {
 } from "node:fs/promises";
 import { existsSync, createWriteStream } from "node:fs";
 import { createRealHubHome, createRealHubEnvironment } from "./real-hub-home.mjs";
+import { realHubProviderScript } from "./real-hub-provider.mjs";
+import { darwinProcessIdentity, darwinOwnedProcesses } from "./real-hub-processes.mjs";
 import { resolve, join } from "node:path";
 import { redactQaText, redactQaValue } from "../../../scripts/visual-qa.mjs";
 const run = promisify(execFile);
@@ -87,6 +89,7 @@ async function startHub() {
     ["hub", "serve", "--no-tailscale-serve", "--port", String(hubPort)],
     "hub-process.log",
   );
+  if (process.platform === "darwin") state.hubIdentity = await processIdentity(state.hub.pid);
   const end = performance.now() + 15000;
   while (performance.now() < end) {
     if (await healthy()) return;
@@ -98,6 +101,7 @@ async function startHub() {
   );
 }
 async function processIdentity(pid) {
+  if (process.platform === "darwin") return darwinProcessIdentity(pid);
   try {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/);
@@ -109,6 +113,8 @@ async function processIdentity(pid) {
   }
 }
 async function privateProcesses(home) {
+  if (process.platform === "darwin")
+    return darwinOwnedProcesses(state.hubIdentity, state.launchedProcesses);
   // PTY children have their own session/group, and can be reparented when
   // the reaper exits. This marked fixture's unique HOME follows those children.
   const expected = `HOME=${home}`;
@@ -159,6 +165,10 @@ async function stopLaunchedDaemon(home, owned) {
 async function cleanup() {
   if (!state) return;
   if (state.paused) state.hub.kill("SIGCONT");
+  // The native macOS daemon is a direct hub child, not the Linux shim's
+  // recorded reaper. Capture its tree while the owned hub is still alive.
+  if (state.newSession && process.platform === "darwin")
+    await stopLaunchedDaemon(state.home, { pid: state.hub.pid });
   await stop(state.hub);
   await stop(state.daemon);
   const ownedLaunch = join(state.home, "launched-pid");
@@ -219,34 +229,7 @@ async function reset({ messageControl = false, newSession = false, nativeCommand
     `#!/usr/bin/python3\nimport sys,time\nif sys.argv[1:3] == ['auth','status']: print('{\"loggedIn\":true}');sys.exit(0)\nif '--version' in sys.argv: print('2.1.47');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Claude Code disposable test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`,
     { mode: 0o700 },
   );
-  if (newSession) await writeFile(join(bin, "claude"), `#!/usr/bin/python3
-import sys,os,json,subprocess,uuid
-from datetime import datetime,timezone
-if sys.argv[1:3] == ['auth','status']: print('{"loggedIn":true}');sys.exit(0)
-if '--version' in sys.argv: print('2.1.47');sys.exit(0)
-if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)
-sid=sys.argv[sys.argv.index('--session-id')+1] if '--session-id' in sys.argv else str(uuid.uuid4())
-transcript=os.path.join(os.environ['HOME'],'.claude','projects',os.getcwd().replace('/','-').replace('.','-'),sid+'.jsonl')
-os.makedirs(os.path.dirname(transcript),exist_ok=True)
-open(transcript,'a').close()
-def hook(event):
- payload=json.dumps(dict(session_id=sid,cwd=os.getcwd(),hook_event_name=event,transcript_path=transcript))
- subprocess.run([${JSON.stringify(cli)},'hook',event],input=payload,text=True,stdout=subprocess.DEVNULL,check=True)
-hook('SessionStart')
-def reply(message):
- with open(transcript,'a') as f: f.write(json.dumps(dict(type='system',subtype='turn_duration',sessionId=sid,timestamp=datetime.now(timezone.utc).isoformat()))+'\\n')
- payload=json.dumps(dict(schema_version=2,reply_to=None,message=message,summary=message,device_id='*',kind='status',attachments=[]))
- subprocess.run([${JSON.stringify(cli)},'--json','factory','message','--session',os.environ['CAS_FACTORY_SESSION'],'--project-dir',os.getcwd(),'--target','operator','--from','supervisor','--no-wrap','--message',payload],stdout=subprocess.DEVNULL,check=True)
- hook('Stop')
- print('❯ ',flush=True)
-print('Claude Code disposable test supervisor\\n❯ ',flush=True)
-started=False
-for line in sys.stdin:
- if '/exit' in line: sys.exit(0)
- if not started:
-  reply('Supervisor ready');started=True
- if 'ping launch supervisor' in line: reply('Launch supervisor answered')
-`, { mode: 0o700 });
+  if (newSession) await writeFile(join(bin, "claude"), realHubProviderScript(cli), { mode: 0o700 });
   await mkdir(join(home, ".claude"));
   // The user-service manager is the sole host boundary: retain this fixture's
   // HOME and containment instead of asking the real login manager to launch
@@ -262,7 +245,7 @@ starttime=open('/proc/'+str(p.pid)+'/stat').read().split(') ',1)[1].split()[19]
 with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(dict(pid=p.pid,starttime=starttime),f)
 `, { mode: 0o700 });
   const env = await createRealHubEnvironment(home, project);
-  state = { home, project, env, session: "real-hub-journey" };
+  state = { home, project, env, session: "real-hub-journey", newSession, launchedProcesses: new Map() };
   await run("git", ["init", "-q", project], { env, timeout: 5000 });
   await cas(["init", "--yes", "--no-integrations"]);
   await writeFile(

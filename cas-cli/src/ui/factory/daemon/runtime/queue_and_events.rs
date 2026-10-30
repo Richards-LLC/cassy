@@ -1320,7 +1320,7 @@ pub(super) fn append_spawn_audit(
     if let Some(id) = request_id {
         if let Some(state) = cas_store::SpawnLifecycleState::from_stage_outcome(stage, outcome) {
             if state == cas_store::SpawnLifecycleState::Registered {
-                record_terminal_spawn_state(cas_dir, id, state, worker_name, detail);
+                record_terminal_spawn_state(cas_dir, id, state, worker_name.filter(|name| !name.is_empty()), detail);
             } else if let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) {
                 let _ = queue.record_spawn_state(
                     id,

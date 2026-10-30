@@ -68,6 +68,8 @@ impl AttentionInputs {
         let mut transcript_cache = HashMap::new();
         let mut merge_cache = HashMap::<String, bool>::new();
         let mut decisions = HashMap::new();
+        // Only shutdown evidence needs a durable replacement lookup. Cache by
+        // recipient, preserving pending intent when the store is unreadable.
         let spawns = std::cell::OnceCell::new();
         let mut replacement_cache = HashMap::new();
         let mut replacement_pending = |target: &str| {

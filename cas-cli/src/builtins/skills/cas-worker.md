@@ -37,7 +37,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 One event gets one message. A close is the lifecycle report; never send a post-close
 summary or echo the close relay. After a merge request, wait for the supervisor's
-response.
+response; send no follow-up update.
 
 Finish or hand off before another task. Stay available after handoff; follow
 injected `Message from …` turns. Start only assignments from the supervisor or `mine`. Never self-dispatch: every time you go idle,

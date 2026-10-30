@@ -16,11 +16,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   room for the context header and Codex worker note. Tested instruction and
   credential-request contracts stay intact.
 
+### Fixed — Shared-file warnings
+
+- **Workers can add their own changelog entries without coordination** — Was:
+  append-only detection accepted edits that rewrote another entry while adding
+  a new bullet. Now: the hook applies edits to current text and only skips the
+  warning for whole-line new entries; rewrites, deletions and continuations to
+  existing bullets still warn.
+
 ### Fixed — Hub authentication clock correction
 
 - **Fast device clocks recover automatically** — The hub refuses future-dated
   authentication proofs to prevent replay after a restart. Commander retries
   on the hub's clock even when the device is only 1–4 seconds ahead.
+
+### Fixed — Reverted task receipts
+
+- **Backlog hygiene distinguishes reverted deliveries** — Was: `cas doctor`
+  and supervisor startup could suggest closing an open task with its revert
+  commit. Now: the latest explicit revert, or complete restoration of the
+  task's changed paths, appears as delivered then reverted without a close
+  receipt. Normal deliveries keep their close suggestions; unavailable tree
+  checks withhold unchecked receipts.
 
 ### Fixed — Worker recycle recipe
 

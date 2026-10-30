@@ -599,7 +599,7 @@ impl CasService {
         let mut out = String::new();
         if !filed.is_empty() {
             if let Some(epic) = epic.as_ref() {
-                crate::mcp::tools::core::task::lifecycle::review_loop::notify_on_crossing(&self.inner.cas_root, &epic.id);
+                crate::mcp::tools::core::task::lifecycle::review_loop::notify_when_tripped(&self.inner.cas_root, &epic.id);
             }
             let note = format!(
                 "[{}] Independent QA round {} recorded {} pre-existing issue(s) as follow-ups: {} (not counted against this delivery; ledger {ledger_path})",

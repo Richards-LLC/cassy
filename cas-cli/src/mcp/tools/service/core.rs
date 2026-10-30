@@ -350,7 +350,7 @@ impl CasService {
         if created.as_ref().is_ok_and(|result| result.is_error != Some(true))
             && let Some(epic) = finding_epic.as_deref()
         {
-            crate::mcp::tools::core::task::lifecycle::review_loop::notify_on_crossing(&self.inner.cas_root, epic);
+            crate::mcp::tools::core::task::lifecycle::review_loop::notify_when_tripped(&self.inner.cas_root, epic);
         }
         created
     }

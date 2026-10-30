@@ -4,7 +4,7 @@
 //! how to reproduce the wrong behaviour and who acts on it today. Every such task
 //! carries [`FINDING_LABEL`], and the epic's loop gain counts them against its
 //! completed reviews: at 0.5 or more, reviews are generating work about as fast as
-//! they finish it, and the supervisor hears about it once per crossing.
+//! they finish it, and the supervisor hears about it once for that epic.
 
 use std::path::Path;
 
@@ -16,6 +16,8 @@ pub(crate) const FINDING_LABEL: &str = "from-finding";
 const NOT_A_FINDING: &str = "none";
 const LOOP_GAIN_WINDOW: usize = 10;
 const LOOP_GAIN_LIMIT: f64 = 0.5;
+/// Too few reviews to call a trend: one follow-up over two reviews is not a loop.
+const LOOP_GAIN_MIN_REVIEWS: usize = 5;
 
 pub(crate) struct SpawnRequest<'a> {
     pub(crate) origin: Option<&'a str>,
@@ -90,7 +92,7 @@ impl LoopGain {
     }
 
     pub(crate) fn tripped(self) -> bool {
-        self.ratio() >= LOOP_GAIN_LIMIT
+        self.reviews >= LOOP_GAIN_MIN_REVIEWS && self.ratio() >= LOOP_GAIN_LIMIT
     }
 
     pub(crate) fn status_line(self) -> String {
@@ -149,16 +151,13 @@ pub(crate) fn epic_loop_gain(cas_root: &Path, epic: &str) -> Option<LoopGain> {
     loop_gain_from(reviews, &followups)
 }
 
-/// Called after a follow-up from a finding joins an epic. Tells the supervisor
-/// only when this follow-up crossed the limit, so a tripped epic does not repeat.
-pub(crate) fn notify_on_crossing(cas_root: &Path, epic: &str) {
+/// Called after a follow-up from a finding joins an epic. The queue's dedupe key
+/// holds this to one notice per epic, including an epic that trips because its
+/// fifth review arrived between follow-ups.
+pub(crate) fn notify_when_tripped(cas_root: &Path, epic: &str) {
     let Some(gain) = epic_loop_gain(cas_root, epic).filter(|gain| gain.tripped()) else {
         return;
     };
-    let before = LoopGain { followups: gain.followups.saturating_sub(1), ..gain };
-    if before.tripped() {
-        return;
-    }
     let notice = format!(
         "review loop gain {:.2}; findings are being filed as work; apply the spawn threshold",
         gain.ratio()
@@ -167,7 +166,7 @@ pub(crate) fn notify_on_crossing(cas_root: &Path, epic: &str) {
         return;
     };
     let session = std::env::var("CAS_FACTORY_SESSION").ok().filter(|session| !session.trim().is_empty());
-    let source = format!("review-loop-gain:{epic}:{}", gain.followups);
+    let source = format!("review-loop-gain:{epic}");
     if let Err(error) = queue.enqueue_idempotent(
         &source,
         "supervisor",
@@ -233,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn the_breaker_notifies_once_when_loop_gain_crosses_the_limit() {
+    fn the_breaker_notifies_once_past_its_review_floor() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         env.set_current_dir(dir.path());
@@ -254,26 +253,36 @@ mod tests {
                 .add_dependency(&Dependency::new(id.to_string(), "cas-epic".to_string(), DependencyType::ParentChild))
                 .unwrap();
         };
-        for id in ["cas-a", "cas-b"] {
+        let review = |id: &str| {
             add(id, false);
             let mut verdict = Verification::new(format!("ver-{id}"), id.to_string());
             verdict.status = VerificationStatus::Approved;
             verdict.created_at = Utc::now() - chrono::Duration::hours(1);
             verifications.add(&verdict).unwrap();
-        }
+        };
         let notices = || queue.peek_all(10).unwrap().len();
 
-        // One follow-up over two reviews reaches 0.5, and that crossing is told.
+        // Two reviews are below the floor, however high the ratio.
+        review("cas-a");
+        review("cas-b");
         add("cas-f1", true);
-        notify_on_crossing(&cas, "cas-epic");
+        notify_when_tripped(&cas, "cas-epic");
         let gain = epic_loop_gain(&cas, "cas-epic").unwrap();
         assert_eq!(gain, LoopGain { followups: 1, reviews: 2 });
-        assert!(gain.status_line().contains("0.50"), "{}", gain.status_line());
-        assert_eq!(notices(), 1);
+        assert!(!gain.tripped() && gain.status_line().contains("0.50"), "{}", gain.status_line());
+        assert_eq!(notices(), 0);
 
-        // Already tripped: the next follow-up does not repeat it.
+        // Five reviews and three follow-ups reach 0.6, and the supervisor hears once.
+        for id in ["cas-c", "cas-d", "cas-e"] {
+            review(id);
+        }
         add("cas-f2", true);
-        notify_on_crossing(&cas, "cas-epic");
+        add("cas-f3", true);
+        notify_when_tripped(&cas, "cas-epic");
+        assert!(epic_loop_gain(&cas, "cas-epic").unwrap().tripped());
+        assert_eq!(notices(), 1);
+        add("cas-f4", true);
+        notify_when_tripped(&cas, "cas-epic");
         assert_eq!(notices(), 1);
     }
 }

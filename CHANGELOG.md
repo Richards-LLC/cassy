@@ -38,8 +38,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   refuses a follow-up from a finding without `repro` and `affected`, and a P0/P1
   bug an operator or supervisor observed directly stays exempt. QA's automatic
   pre-existing follow-ups need the same two fields; the rest stay in the verdict.
-  At 0.5 follow-ups
-  per review over an epic's last 10 reviews, the supervisor gets one notice, and
+  With at least 5 completed reviews, at 0.5 follow-ups per review over an epic's
+  last 10, the supervisor gets one notice, and
   `epic_status` shows the ratio.
 
 ### Fixed — Hub pin safety

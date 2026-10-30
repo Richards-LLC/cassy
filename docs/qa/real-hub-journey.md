@@ -19,14 +19,17 @@ zero style-policy events, then continues the actual image upload. Its binary
 comes from `cas qa candidate path --task <task-id>`, and the recording is
 `native-chapter.webm` in that part's Playwright output directory.
 
-`HUB-J11` has a separate real-hub part. It serves the committed Commander
-bundle, pairs a real browser, and runs a real `cas factory daemon` and
+`HUB-J11` has a separate real-hub part. It serves only the Commander assets
+embedded in `CAS_BIN`, pairs a real browser, and runs a real `cas factory daemon` and
 `cas hub serve` in a new private HOME and Git project for every repetition.
 The supervisor provider is an inert local executable: the real daemon owns
 the operator queue, conversation history and WebSocket protocol. No hosted
 model, production hub or existing browser pairing is used.
 
-The fixture's HTTPS listener only forwards bytes to the actual local hub.
+Both the fixture's `/commander` route and HTTPS listener forward bytes to the
+actual local hub, including missing-asset responses and security headers. Neither
+serves files from `hub-web/dist`. `REAL_HUB_DIST` is refused; external-dist
+previews cannot be used as embedded-candidate evidence.
 `journey-hub.ts.net` resolves to loopback in Chromium; a disposable certificate
 and public address-space override make Chromium enforce actual Local Network
 Access. The journey uses CDP to deny and then grant both `local-network` and
@@ -46,8 +49,12 @@ On macOS the fixture allocates its private HOME under `/tmp` (canonicalized to
 macOS's 103-byte pathname limit. No `TMPDIR` override is needed; other platforms
 keep using their normal temporary directory. Cleanup still removes only the
 fixture's marked private HOME. The native journey preflight and `npm test` run
-`node --test e2e/journeys/real-hub-home.test.mjs`, which checks the byte budget
-and binds a real Unix socket even with a deliberately long macOS temp base.
+`node --test e2e/journeys/real-hub-home.test.mjs e2e/journeys/real-hub-server.test.mjs`.
+The HOME check binds a real Unix socket even with a deliberately long macOS temp
+base. The asset check runs the actual helper against a disposable HTTP upstream:
+a missing embedded stylesheet remains 404 even when external dist contains it,
+and the document retains the upstream security policy. This boundary regression
+does not substitute for a journey against the exact candidate binary.
 
 Start the fixture through the Cassy server registry (replace paths):
 
@@ -113,13 +120,13 @@ The journey proves:
   history were exercised again on recovery. No observed connection state
   said Needs pairing.
 
-For a negative control, extract the committed `hub-web/dist` from pre-fix
-`5eaba13da` into scratch and start a second registered fixture with
-`REAL_HUB_DIST=/absolute/pre-fix/hub-web/dist` and a different port triple.
-Run the same journey against that control port. Keep the same tip-built hub
-binary to isolate the browser reconnect fix; record both revisions, the failing
-stage, and the visible Needs pairing or failure to recover. Do not weaken the
-assertions to turn an unexpected passing baseline into a failure.
+For a negative control, ask the supervisor for a baseline candidate binary
+that embeds the pre-fix Commander bundle, then copy it to scratch and start a
+second registered fixture with that `CAS_BIN` and a different port triple.
+Run the same journey against that control port. Record both candidate revisions,
+any backend differences, the failing stage, and the visible Needs pairing or
+failure to recover. A loose dist directory cannot prove the baseline candidate
+embeds those assets. Do not weaken assertions to force a baseline failure.
 
 ## Real New session launch (HUB-J13)
 

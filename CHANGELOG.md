@@ -11,6 +11,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Delivery Git failures name their cause** — Merge CI receipts distinguish Git timeouts, start failures and nonzero exits by subcommand without exposing stderr. A failed delivery-range inspection says the GitHub endpoint was not queried; repository lookup failures keep their separate headline.
 
+### Fixed — Candidate QA assets
+
+- **Real-hub QA checks the candidate's embedded Commander** — Was: the helper
+  could serve a stylesheet from external dist even when the candidate lacked
+  it. → Now: Commander requests preserve the actual hub's bytes, status and
+  security headers. External-dist overrides are refused; baseline checks use
+  their own candidate binary.
+
 ### Fixed — Screencast guidance
 
 - **QA examples recommend 10 fps** — Lower frame rates reduce encoding work;

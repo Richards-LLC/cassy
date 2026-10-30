@@ -3327,6 +3327,54 @@ fn factory_shell_tokens_for_projection(
     (lexed.tokens, lexed.literals)
 }
 
+/// ANSI-C quoting is a constant word part, not a parameter or command
+/// substitution. Unsupported escapes, NULs and non-UTF8 bytes stay unresolved
+/// so the effect guard refuses them rather than matching a different word.
+fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = command.as_bytes();
+    if bytes.get(start..start + 2) != Some(b"$'") {
+        return None;
+    }
+    let mut decoded = Vec::new();
+    let mut index = start + 2;
+    while let Some(&ch) = bytes.get(index) {
+        index += 1;
+        match ch {
+            b'\'' => return Some((String::from_utf8(decoded).ok()?, index)),
+            b'\\' => {
+                let escape = *bytes.get(index)?;
+                index += 1;
+                let value = match escape {
+                    b'a' => 7, b'b' => 8, b'e' | b'E' => 27, b'f' => 12,
+                    b'n' => b'\n', b'r' => b'\r', b't' => b'\t', b'v' => 11,
+                    b'\\' | b'\'' | b'"' | b'?' => escape,
+                    b'x' | b'0'..=b'7' => {
+                        let (radix, limit, mut value, mut digits) = if escape == b'x' {
+                            (16, 2, 0, 0)
+                        } else {
+                            (8, 3, u32::from(escape - b'0'), 1)
+                        };
+                        while digits < limit {
+                            let Some(digit) = bytes.get(index).and_then(|ch| (*ch as char).to_digit(radix)) else { break };
+                            value = value * radix + digit;
+                            digits += 1;
+                            index += 1;
+                        }
+                        if digits == 0 { return None; }
+                        value as u8
+                    }
+                    _ => return None,
+                };
+                if value == 0 { return None; }
+                decoded.push(value);
+            }
+            0 => return None,
+            _ => decoded.push(ch),
+        }
+    }
+    None
+}
+
 /// The same lexer backs ordinary commands and substitution boundaries. Source
 /// positions avoid recovering syntax from cooked words or quoted/comment text.
 fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> ShellLexed {
@@ -3414,6 +3462,25 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         {
             let end = command[index + 2..].find('}').map_or(command.len(), |end| index + 2 + end);
             parameters.push((index + 2, end));
+        }
+        // Shell line continuations disappear before word matching, including
+        // inside double quotes; single-quoted backslash/newline stays data.
+        if active_quote != Some('\'') && ch == '\\'
+            && chars.peek().is_some_and(|(_, next)| *next == '\n')
+        {
+            chars.next();
+            continue;
+        }
+        if quote.is_none() && expansions.is_empty() && ch == '$'
+            && chars.peek().is_some_and(|(_, next)| *next == '\'')
+        {
+            if let Some((decoded, end)) = shell_ansi_c_word(command, index) {
+                word.push_str(&decoded);
+                for _ in command[index + 1..end].chars() { chars.next(); }
+                word_quoted = true;
+                continue;
+            }
+            unresolved_at.get_or_insert(index);
         }
         if active_quote != Some('\'') && ch == '$' {
             let expansion = match command.as_bytes().get(index + 1..) {
@@ -3749,7 +3816,7 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
     while index < words.len() {
         let word = &words[index];
         match shell_word_basename(word) {
-            "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
+            "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
             "env" => {
                 // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
                 // value; skipping only the flag made `env -u X cargo …` name
@@ -4320,37 +4387,49 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
                 while chars.get(index).is_some_and(|ch| ch.is_whitespace()) {
                     index += 1;
                 }
-                let Some(&first) = chars.get(index) else {
-                    continue;
-                };
-                let (value, next_index) = if first == '\'' || first == '"' {
-                    index += 1;
-                    let start = index;
-                    while index < chars.len() && chars[index] != first {
+                // Bash removes quoting from the entire delimiter word. Any
+                // quoted/escaped character makes the complete body literal.
+                let mut value = String::new();
+                let mut quote = None;
+                let mut literal_body = false;
+                while let Some(&ch) = chars.get(index) {
+                    if quote == Some('\'') {
+                        if ch == '\'' { quote = None; } else { value.push(ch); }
+                        index += 1;
+                    } else if quote == Some('"') {
+                        if ch == '"' {
+                            quote = None;
+                            index += 1;
+                        } else if ch == '\\' && chars.get(index + 1)
+                            .is_some_and(|next| matches!(next, '$' | '`' | '"' | '\\'))
+                        {
+                            value.push(chars[index + 1]);
+                            index += 2;
+                        } else {
+                            value.push(ch);
+                            index += 1;
+                        }
+                    } else if matches!(ch, '\'' | '"') {
+                        literal_body = true;
+                        quote = Some(ch);
+                        index += 1;
+                    } else if ch == '\\' {
+                        literal_body = true;
+                        index += 1;
+                        if let Some(&next) = chars.get(index) {
+                            value.push(next);
+                            index += 1;
+                        }
+                    } else if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                        break;
+                    } else {
+                        value.push(ch);
                         index += 1;
                     }
-                    if index >= chars.len() {
-                        continue;
-                    }
-                    (chars[start..index].iter().collect::<String>(), index + 1)
-                } else {
-                    let start = index;
-                    while index < chars.len()
-                        && !chars[index].is_whitespace()
-                        && !matches!(chars[index], ';' | '|' | '&' | '<' | '>')
-                    {
-                        index += 1;
-                    }
-                    (chars[start..index].iter().collect(), index)
-                };
-                if !value.is_empty() {
-                    delimiters.push(HeredocDelimiter {
-                        value,
-                        strip_leading_tabs,
-                        literal_body: matches!(first, '\'' | '"'),
-                    });
                 }
-                index = next_index;
+                if quote.is_none() && (!value.is_empty() || literal_body) {
+                    delimiters.push(HeredocDelimiter { value, strip_leading_tabs, literal_body });
+                }
             }
             _ => index += 1,
         }
@@ -5718,6 +5797,7 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
 struct ShellInvocationScan {
     commands: Vec<(String, Vec<String>)>,
     unresolved_heredoc: bool,
+    unresolved_ansi_c: bool,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5807,6 +5887,15 @@ fn collect_shell_substitutions(
             while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
+            continue;
+        }
+        if quote.is_none() && bytes.get(index..index + 2) == Some(b"$'") {
+            let Some((_, end)) = shell_ansi_c_word(command, index) else {
+                found.unresolved_ansi_c = true;
+                break;
+            };
+            index = end;
+            word_start = false;
             continue;
         }
         let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
@@ -5909,6 +5998,9 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
+    if scan.unresolved_ansi_c {
+        return Some("🚫 OPERATOR-ONLY: Cannot inspect an unsupported ANSI-C shell word.".into());
+    }
     if scan.unresolved_heredoc {
         return Some("🚫 Cannot inspect an unresolved command substitution in an expanding heredoc.".into());
     }
@@ -8676,6 +8768,16 @@ EOF
 ".into(), false),
             ("mixed delimiters", "cat <<'DATA' <<RUN\n$(touch /outside/ignored)\nDATA\n$(touch /outside/cas-b8ae-must-not-execute)\nRUN\n".into(), true),
             ("effective directory", "cd /outside && cat <<EOF\n$(touch cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("comment marker desync", "echo hi # <<'X'\nX\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("missing quoted body", "echo see <<'X' # doc\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("backtick marker desync", "x=`cat <<'A'\nA\n`; cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("arithmetic marker desync", "echo $((1<<2)); cat <<EOF\n2))\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("unclaimed quoted body", "echo hi # <<'X'\ntouch /outside/cas-b8ae-must-not-execute\nX\n".into(), true),
+            ("unclaimed shift body", "echo $(( 1<<2 ))\ntouch /outside/cas-b8ae-must-not-execute\n2\n".into(), true),
+            ("joined terminator", "cat <<EOF\nEO\\\nF\ntouch /outside/cas-b8ae-must-not-execute\nEOF\n".into(), true),
+            ("escaped delimiter", "cat <<\\EOF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially single quoted delimiter", "cat <<E'O'F\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially double quoted delimiter", "cat <<\"E\"OF\n$(touch /outside/p)\nEOF\n".into(), false),
         ] {
             // These are JSON request strings only. Never execute their payloads.
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
@@ -8791,6 +8893,20 @@ EOF
                     .to_string(),
             )
         };
+        // cas-9685: each independent spelling/command-position bypass must
+        // reach the real hook; collect failures so RED proves all three.
+        let mut bypasses = Vec::new();
+        for (vector, command) in [
+            ("brace command position", "{ cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("continued verb", "cas config gr\\\nant-write --task cas-1234 --path /x --reason r"),
+            ("ANSI-C verb", r"cas config $'gr\x61nt-write' --task cas-1234 --path /x --reason r"),
+        ] {
+            let (status, reason) = decision(command);
+            if status != "deny" || !reason.contains("operator") {
+                bypasses.push(format!("{vector}: {status}: {reason}"));
+            }
+        }
+        assert!(bypasses.is_empty(), "operator-policy bypasses: {bypasses:#?}");
         for command in [
             "cas config set factory.write_roots ~/soundwave-config",
             "/home/u/.local/bin/cas config set factory.write_roots ''",

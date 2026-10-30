@@ -6989,7 +6989,7 @@ impl CasCore {
         )
     }
 
-    fn advance_commit_time_anchor_before_park_with_receipt(
+    pub(crate) fn advance_commit_time_anchor_before_park_with_receipt(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
@@ -7020,21 +7020,21 @@ impl CasCore {
             return parking;
         };
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
+        // GH #1389: a final target-sync merge can add no non-merge task
+        // subjects after the commit-time anchor. A worker's explicit receipt
+        // still identifies that pushed final branch tip; the attribution
+        // checks below must continue to vet its first-parent path, imported
+        // target and sibling lease boundary.
+        let named_final_tip = explicit_receipt
+            .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
+            .is_some_and(|receipt| receipt == tip)
+            && measured_branch.is_some_and(|branch| {
+                task.assignee.as_deref().is_some_and(|assignee| {
+                    branch.strip_prefix("origin/").unwrap_or(branch)
+                        == close_measured_factory_branch(repo_path, task, assignee)
+                })
+            });
         let advance = if git_commit_is_ancestor(repo_path, recorded, &tip) {
-            // GH #1389: a final target-sync merge can add no non-merge task
-            // subjects after the commit-time anchor. A worker's explicit
-            // receipt still identifies that pushed final branch tip; the
-            // attribution check below must continue to vet its first-parent
-            // path, imported target and sibling lease boundary.
-            let named_final_tip = explicit_receipt
-                .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
-                .is_some_and(|receipt| receipt == tip)
-                && measured_branch.is_some_and(|branch| {
-                    task.assignee.as_deref().is_some_and(|assignee| {
-                        branch.strip_prefix("origin/").unwrap_or(branch)
-                            == close_measured_factory_branch(repo_path, task, assignee)
-                    })
-                });
             self.tip_is_own_task_lineage_with_receipt(
                 task_store,
                 task,
@@ -7054,6 +7054,8 @@ impl CasCore {
         } else {
             self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &tip, &target)
                 || self.rebased_tip_supersedes_anchor(task_store, task, repo_path, &tip, &target)
+                || (named_final_tip
+                    && self.receipt_tip_supersedes_foreign_anchor(task_store, task, repo_path, &tip, &target))
         };
         if !advance {
             return parking;
@@ -7174,20 +7176,51 @@ impl CasCore {
         {
             return false;
         }
-        task_store.list(None).is_ok_and(|others| {
-            !others.iter().any(|other| {
-                other.id != task.id
-                    && other.status != TaskStatus::Closed
-                    && other
-                        .deliverables
-                        .factory_branch_anchor
-                        .as_deref()
-                        .is_some_and(|anchor| {
-                            git_commit_is_ancestor(repo_path, anchor, tip)
-                                && !git_commit_is_ancestor(repo_path, anchor, &base)
-                        })
-            })
-        })
+        no_other_open_anchor_between(task_store, task, repo_path, &base, tip)
+    }
+
+    /// cas-3d70: a commit-time anchor stamped from a separate helper branch is
+    /// on neither this task's branch nor origin's copy of it, and stays on that
+    /// helper, so neither recovery above applies. The worker's explicit receipt
+    /// naming the exact current tip of its own measured branch (checked by the
+    /// caller) rebinds to that tip when the tip's first-parent lineage since it
+    /// forked from the target is this task's: each commit is a target sync
+    /// merge or names no other task, none lies after a sibling's lease, and no
+    /// other open task anchors inside it. Otherwise the stale anchor is kept and
+    /// the refusal would repeat the same instruction forever.
+    fn receipt_tip_supersedes_foreign_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        tip: &str,
+        target: &str,
+    ) -> bool {
+        if !is_safe_git_refname(target) || git_commit_is_ancestor(repo_path, tip, target) {
+            return false;
+        }
+        let Some(first_own) = git_stdout_lines(
+            repo_path,
+            &["rev-list", "--first-parent", tip, &format!("^{target}"), "--"],
+        )
+        .ok()
+        .and_then(|commits| commits.last().cloned())
+        else {
+            return false;
+        };
+        let Some(fork) = resolve_branch_sha(repo_path, &format!("{first_own}^1"))
+            .filter(|fork| git_commit_is_ancestor(repo_path, fork, target))
+        else {
+            return false;
+        };
+        parked_anchor_advance_with_target_is_attributable(
+            repo_path,
+            &fork,
+            tip,
+            &task.id,
+            self.sibling_lease_boundary(task_store, task),
+            target,
+        ) && no_other_open_anchor_between(task_store, task, repo_path, &fork, tip)
     }
 
     pub(crate) fn advance_awaiting_merge_anchor(
@@ -24720,6 +24753,30 @@ pub(crate) fn parked_anchor_advance_is_attributable(
 /// target or released trunk to bypass the foreign-task check; direct commits
 /// and lease cutoffs still apply. The recorded anchor must lie on the first-parent chain, so a
 /// supervisor's integration merge cannot become a worker continuation.
+/// No other open task's delivery anchor lies in `base..tip`.
+fn no_other_open_anchor_between(
+    task_store: &dyn cas_store::TaskStore,
+    task: &Task,
+    repo_path: &std::path::Path,
+    base: &str,
+    tip: &str,
+) -> bool {
+    task_store.list(None).is_ok_and(|others| {
+        !others.iter().any(|other| {
+            other.id != task.id
+                && other.status != TaskStatus::Closed
+                && other
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .is_some_and(|anchor| {
+                        git_commit_is_ancestor(repo_path, anchor, tip)
+                            && !git_commit_is_ancestor(repo_path, anchor, base)
+                    })
+        })
+    })
+}
+
 fn parked_anchor_advance_with_target_is_attributable(
     repo_path: &std::path::Path,
     recorded: &str,

@@ -26,6 +26,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Worker state reads at a glance** — Working, waiting, stalled and parked workers now have distinct pill colors in Team and the side rail, and each Team lane has a status dot on its avatar. The Needs you control uses the warning treatment and names the question when exactly one is open.
 
+### Fixed — Park after a helper-branch commit
+
+- **A worker's helper branch no longer hijacks its delivery, and park stops looping** — Was: a commit on a separate helper branch (such as a main-ready copy) became the task's delivery anchor, so park refused because that commit was missing from the worker's own branch, and the `commit_receipt=<tip>` it asked for was refused again with the same instruction. → Now: only the task's own branches move its anchor, and the exact receipt for the worker's current tip rebinds the anchor when that tip's history since it left the target is this task's work plus target sync merges.
+
 ### Fixed — Supervisor idle alerts
 
 - **A worker waiting on its own tests no longer pages the supervisor every minute** — Was: a worker that told the supervisor it was not blocked, or that kept rerunning its background tests, drew the same "pending delivery" idle alert about once a minute. → Now: a changed condition (new tip, CI result or task state) still alerts at once. The same alert repeats at most once in 10 minutes after a background run ends, and is held for 10 minutes after the worker's own status for that task that needs nothing. A blocker, question, ready report or stated need never quiets it.

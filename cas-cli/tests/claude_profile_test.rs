@@ -132,7 +132,51 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         ))
         .stdout(predicate::str::contains(
             "  work (not logged in)\n    ~/.claude-work\n",
-        ));
+        ))
+        .stdout(predicate::str::contains("Full profile names and folders:").not());
+
+    for alias in [
+        format!("{}@example.com", "long-profile-".repeat(5)),
+        "界".repeat(50),
+        "🚀".repeat(40),
+    ] {
+        let directory = home.path().join(format!(".claude-{alias}"));
+        std::fs::create_dir(&directory).unwrap();
+        let email = format!("{alias}@example.org");
+        std::fs::write(directory.join(".claude.json"), serde_json::json!({
+            "oauthAccount": {"emailAddress": email, "accountUuid": alias, "organizationUuid": "long-profile"}
+        }).to_string()).unwrap();
+        let output = cas_cmd(home.path())
+            .env("COLUMNS", "80")
+            .env("CLAUDE_CONFIG_DIR", &directory)
+            .args(["claude", "--list-profiles"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        for line in output.lines() {
+            let width = ratatui::text::Line::from(line).width();
+            assert!(width <= 80, "profile list overflows 80 cells: {line}");
+        }
+        let header = output.lines().find(|line| line.contains("(active)")).unwrap();
+        assert!(ratatui::text::Line::from(header).width() >= 79, "unused display cells: {header}");
+        assert!(header.contains("(not logged in) (active)"), "{output}");
+        assert!(output.contains("--full"), "truncated identity needs an escape: {output}");
+        for flag in ["--full", "--json"] {
+            cas_cmd(home.path())
+                .env("CLAUDE_CONFIG_DIR", &directory)
+                .args(["claude", "--list-profiles", flag])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(&email))
+                .stdout(predicate::str::contains(&alias))
+                .stdout(predicate::str::contains(format!("~/.claude-{alias}")))
+                .stdout(predicate::str::contains("Full profile names and folders:").not());
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }
 
 #[test]

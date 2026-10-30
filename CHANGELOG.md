@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.91.0] - 2026-10-30
+
 ### Fixed — Factory workflow
 
 - **Parked delivery anchors stay on the branch** — Was: A push could replace a

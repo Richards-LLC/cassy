@@ -756,7 +756,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
         "after the quiet window, an idle worker must still alert without a new detector event");
     // A same-SHA rerun is visible when the settled-failure backoff expires.
-    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    let later = now + chrono::Duration::minutes(12);
+    f.app.merge_alert_retries.now = Some(later);
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
     assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
@@ -777,16 +778,31 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
 
-    // cas-0ea7: the worker's own status to the supervisor covers its idle turn.
-    crate::store::open_prompt_queue_store(&f.app.cas_dir).unwrap()
-        .enqueue("merge-w", "test-supervisor", "status: in_progress\nneed: nothing. Not blocked; tests rerunning.")
-        .unwrap();
-    let reported = Utc::now();
-    f.app.merge_alert_retries.now = Some(reported + chrono::Duration::minutes(1));
+    // cas-0ea7: a changed condition always relays; only an identical repeat is
+    // held, and only the worker's latest no-need status for this task holds it.
+    let cas_dir = f.app.cas_dir.clone();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let message = |at: chrono::DateTime<Utc>, text: &str| {
+        let id = queue.enqueue("merge-w", "test-supervisor", text).unwrap();
+        rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2", rusqlite::params![at.to_rfc3339(), id])
+            .unwrap();
+    };
+    let status = crate::prompt_revalidation::attach_worker_action_envelope(
+        "status: in_progress\nneed: nothing. Not blocked; tests rerunning.",
+        crate::prompt_revalidation::WorkerActionKind::Status, "merge-w", Some("cas-9efb-test"),
+    );
+    let at = |minutes| later + chrono::Duration::minutes(minutes);
+    message(at(1), &status);
+    f.app.merge_alert_retries.now = Some(at(2));
     f.ci(Some("failure"));
-    assert!(f.relay().is_empty(), "a status the worker just sent covers even a changed idle signal");
-    f.app.merge_alert_retries.now = Some(reported + chrono::Duration::minutes(11));
-    assert_eq!(f.relay().len(), 1, "the worker's status quiets the alert, never hides it for good");
+    assert_eq!(f.relay().len(), 1, "a changed condition alerts at once, even after a status");
+    f.app.merge_alert_retries.waiting("merge-w");
+    message(at(6), &status);
+    f.app.merge_alert_retries.now = Some(at(13));
+    assert!(f.relay().is_empty(), "a no-need status quiets the identical repeat");
+    message(at(7), "Blocked: need a supervisor decision on the failing check.");
+    assert_eq!(f.relay().len(), 1, "a later blocker never mutes the alert");
 }
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.

@@ -3444,6 +3444,16 @@ pub trait PromptQueueStore: Send + Sync {
     /// agent, which lets a supervisor securely answer that exact message.
     fn queued_prompt(&self, prompt_id: i64) -> Result<Option<QueuedPrompt>>;
 
+    /// The newest row from `source` to any of `targets`, processed or not, in
+    /// `factory_session` or with no session recorded (cas-0ea7: the director
+    /// reads a worker's own latest account before repeating an idle alert).
+    fn latest_from_source_to_targets(
+        &self,
+        source: &str,
+        targets: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<Option<QueuedPrompt>>;
+
     /// Stamp the authenticated device that is the recipient of an operator
     /// reply. The write is only accepted for an existing `operator` row.
     fn stamp_recipient_device(&self, prompt_id: i64, device_id: &str) -> Result<()>;
@@ -8948,6 +8958,36 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )
             .optional()?;
         Ok(row)
+    }
+
+    fn latest_from_source_to_targets(
+        &self,
+        source: &str,
+        targets: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<Option<QueuedPrompt>> {
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let placeholders = std::iter::repeat_n("?", targets.len()).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT id, source, target, prompt, created_at, processed_at,
+                    summary, priority, acked_at, urgent, factory_session,
+                    origin_agent_id, origin_kind, operator_label,
+                    operator_device_id, operator_device_label, operator_scopes,
+                    operator_verified, recipient_device_id, kind, attachments
+             FROM prompt_queue
+             WHERE source = ? AND target IN ({placeholders})
+               AND (factory_session = ? OR factory_session IS NULL)
+             ORDER BY id DESC LIMIT 1"
+        );
+        let mut values: Vec<String> = vec![source.to_string()];
+        values.extend(targets.iter().map(|target| target.to_string()));
+        values.push(factory_session.unwrap_or_default().to_string());
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn
+            .query_row(&sql, rusqlite::params_from_iter(values.iter()), Self::prompt_from_row)
+            .optional()?)
     }
 
     fn stamp_recipient_device(&self, prompt_id: i64, device_id: &str) -> Result<()> {

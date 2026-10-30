@@ -182,7 +182,7 @@ pub(super) fn read_delivery(
         let mut wait = previous.wait.clone();
         if let Some((worker, read)) = &mut wait {
             read.waiting = worker_build_pending(data, &cas_dir, worker) || read.ci == "pending";
-            read.reported_at = worker_reported_at(data, &cas_dir, worker, supervisor);
+            read.status_at = worker_status_at(data, &cas_dir, worker, supervisor, &read.task);
         }
         return (previous.ready.clone(), wait);
     }
@@ -264,19 +264,22 @@ impl Retries {
     }
 
     /// Consume only a rendered, live relay. Suppressed waits never consume it.
-    /// The worker's own recent message to the supervisor already accounts for
-    /// its idle turn (cas-0ea7), so it holds the relay for a quiet window.
+    /// A changed condition always relays. Only an identical repeat is held:
+    /// for the long backoff, for a quiet window after a wait ends, or for a
+    /// quiet window after the worker's own no-need status (cas-0ea7).
     pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait, now: DateTime<Utc>) -> bool {
-        if read.reported_at.is_some_and(|at| now.signed_duration_since(at) < IDLE_RELAY_QUIET) {
-            return false;
-        }
         let signal = IdleSignal { task: read.task.clone(), tip: read.tip.clone(), ci: read.ci };
         if let Some((previous, sent_at, rearmed)) = self.idle_signals.get(worker)
             && previous == &signal
-            && now.signed_duration_since(*sent_at)
-                < if *rearmed { IDLE_RELAY_QUIET } else { IDLE_RELAY_BACKOFF }
         {
-            return false;
+            let held = now.signed_duration_since(*sent_at)
+                < if *rearmed { IDLE_RELAY_QUIET } else { IDLE_RELAY_BACKOFF };
+            let reported = read.status_at.is_some_and(|at| {
+                at > *sent_at && now.signed_duration_since(at) < IDLE_RELAY_QUIET
+            });
+            if held || reported {
+                return false;
+            }
         }
         self.idle_signals.insert(worker.to_string(), (signal, now, false));
         true
@@ -420,8 +423,10 @@ pub(super) struct WorkerWait {
     pub tip: Option<String>,
     pub ci: &'static str,
     pub waiting: bool,
-    /// When the worker last messaged the supervisor (cas-0ea7).
-    pub reported_at: Option<DateTime<Utc>>,
+    /// When the worker's latest message to the supervisor was a typed status
+    /// for this task with no need (cas-0ea7). Any later blocker, ask, ready
+    /// or need-bearing message clears it.
+    pub status_at: Option<DateTime<Utc>>,
 }
 
 /// A self-reminder is a promised wake, not a stalled worker. Old-task,
@@ -463,18 +468,30 @@ pub(super) fn worker_has_pending_reminder(
     })
 }
 
-/// cas-0ea7: the worker's latest message to the supervisor in its session,
-/// processed or not. Its status reply is its own account of the idle turn.
-fn worker_reported_at(
-    data: &DirectorData, cas_dir: &Path, worker: &str, supervisor: &str,
+/// cas-0ea7: when the worker's latest message to the supervisor in its
+/// session is a typed status for `task` that needs nothing. Only that account
+/// may quiet a repeat; a blocker, ask, ready or stated need never does.
+fn worker_status_at(
+    data: &DirectorData, cas_dir: &Path, worker: &str, supervisor: &str, task: &str,
 ) -> Option<DateTime<Utc>> {
     let agent = data.agents.iter().find(|agent| agent.name == worker)?;
     let session = crate::store::open_agent_store(cas_dir).ok()?.get(&agent.id).ok()?.factory_session;
-    crate::store::open_prompt_queue_store(cas_dir).ok()?
-        .latest_created_at_for_targets_from_sources(&[worker], &[supervisor, "supervisor"], session.as_deref())
-        .ok()?
-        .into_values()
-        .max()
+    let row = crate::store::open_prompt_queue_store(cas_dir).ok()?
+        .latest_from_source_to_targets(worker, &[supervisor, "supervisor"], session.as_deref())
+        .ok()??;
+    let action = crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)?;
+    let needs_nothing = row.prompt.lines().filter_map(|line| {
+        let line = line.trim();
+        line.get(..5).filter(|head| head.eq_ignore_ascii_case("need:")).map(|_| line[5..].trim())
+    }).all(|need| {
+        let need = need.to_ascii_lowercase();
+        need.is_empty() || need.starts_with("none") || need.starts_with("nothing")
+    });
+    (action.kind == crate::prompt_revalidation::WorkerActionKind::Status
+        && action.worker == worker
+        && action.task_id.as_deref() == Some(task)
+        && needs_nothing)
+        .then_some(row.created_at)
 }
 
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
@@ -512,8 +529,8 @@ pub(super) fn read_worker_wait(
             })
     })?;
     let build_pending = worker_build_pending(data, cas_dir, worker);
-    let reported_at = worker_reported_at(data, cas_dir, worker, supervisor);
-    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending, reported_at };
+    let status_at = worker_status_at(data, cas_dir, worker, supervisor, &task.id);
+    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending, status_at };
     if build_pending { return Some((worker.clone(), read)); }
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
         .or_else(|| crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")));

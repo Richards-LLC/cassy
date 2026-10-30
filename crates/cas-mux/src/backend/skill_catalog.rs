@@ -291,7 +291,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         for (name, body) in [
-            ("cas-tdd", MANAGED),
+            ("cas-release-report", MANAGED),
             ("cas-worker", MANAGED),
             ("own-skill", "---\nname: own\n---\nPRIVATE\n"),
             ("customized", MANAGED),
@@ -311,17 +311,17 @@ mod tests {
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"]);
 
         assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 1);
-        let copy = std::fs::read_to_string(project.join("cas-tdd/SKILL.md")).unwrap();
+        let copy = std::fs::read_to_string(project.join("cas-release-report/SKILL.md")).unwrap();
         assert!(copy.contains("\ndisable-model-invocation: true\n---\nBODY"), "{copy}");
         let read = |path: PathBuf| std::fs::read_to_string(path).unwrap();
-        assert_eq!(read(project.join("cas-tdd/references/a.md")), read(home.join("skills/cas-tdd/references/a.md")));
+        assert_eq!(read(project.join("cas-release-report/references/a.md")), read(home.join("skills/cas-release-report/references/a.md")));
         assert!(!project.join("cas-worker").exists() && !project.join("own-skill").exists());
         assert_eq!(read(project.join("customized/SKILL.md")), customization);
         // Clean status: the tracked copy is untouched and the rest is excluded.
         assert!(git_lines(&repo, &["status", "--porcelain"]).is_empty());
         // A later launch refreshes in place rather than stacking frontmatter.
         assert_eq!(prepare_grok_project_skills(&repo, &home).unwrap(), 1);
-        let again = std::fs::read_to_string(project.join("cas-tdd/SKILL.md")).unwrap();
+        let again = std::fs::read_to_string(project.join("cas-release-report/SKILL.md")).unwrap();
         assert_eq!(again.matches("disable-model-invocation").count(), 1);
     }
 }

@@ -23,6 +23,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Unused draft helper removed** — Delete the orphan failure classifier.
   Draft routing, lint failures and posted-receipt matching keep their behavior.
 
+### Added — Cloud request correlation
+
+- **Cloud discovery and claim failures retain a local attempt ID** — Agent lists,
+  lock reads and claim submissions send a fresh diagnostic UUID for each explicit
+  dispatch. Local receipts preserve available server IDs and distinguish response,
+  body/decode and transport failures without recording bodies or credential URLs.
+  A missing claim response still leaves its mutation outcome unknown.
+
 ### Fixed — Factory guidance size
 
 - **Factory instructions leave room to grow** — Shared check, delivery and blocker

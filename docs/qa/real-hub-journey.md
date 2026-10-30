@@ -1,5 +1,24 @@
 # Real disposable hub recovery
 
+## Native recording chapters
+
+Use `showRecordingChapter` from
+`hub-web/e2e/journeys/receipt-directory.mjs` for chapter labels in Commander
+recordings. The shared journey fixture and real-hub recording use this helper.
+It draws a temporary caption with a constructed stylesheet, uses the page's
+theme tokens, preserves focus and pointer input, and removes the caption before
+the next stage. Titles are plain text and long titles wrap within the viewport.
+
+Playwright 1.64.1's direct `page.screencast.showChapter` injects an inline
+`style` element. Native Commander's `style-src 'self'` refuses it; serving static
+dist files without that header hides the problem. Keep the production policy
+and vendor unchanged. Do not enable `bypassCSP` for a recording.
+
+The native HUB-J24 part records a visible helper caption, checks its removal and
+zero style-policy events, then continues the actual image upload. Its binary
+comes from `cas qa candidate path --task <task-id>`, and the recording is
+`native-chapter.webm` in that part's Playwright output directory.
+
 `HUB-J11` has a separate real-hub part. It serves the committed Commander
 bundle, pairs a real browser, and runs a real `cas factory daemon` and
 `cas hub serve` in a new private HOME and Git project for every repetition.

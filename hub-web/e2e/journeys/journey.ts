@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
 import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
-import { captureMask, captureStageScreenshot, claimReceiptDirectory, receiptPartName } from "./receipt-directory.mjs";
+import { captureMask, captureStageScreenshot, claimReceiptDirectory, receiptPartName, showRecordingChapter } from "./receipt-directory.mjs";
 
 export { expect };
 
@@ -148,7 +148,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
       id,
       async stage(title, body) {
         await test.step(title, async () => {
-          if (RECORD) await page.screencast.showChapter(title, { duration: 1000 });
+          if (RECORD) await showRecordingChapter(page, title, { duration: 1000 });
           const started = performance.now();
           await body();
           const ms = performance.now() - started;

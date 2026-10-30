@@ -110,7 +110,7 @@ test(
     const header = page.locator("#conversation-connection");
     const stage = async (title: string, body: () => Promise<void>) =>
       test.step(title, async () => {
-        await page.screencast.showChapter(title, { duration: 1000 });
+        await showRecordingChapter(page, title, { duration: 1000 });
         const started = performance.now();
         await body();
         const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
@@ -630,7 +630,11 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
       });
     });
     await page.screencast.start({ path: info.outputPath("native-chapter.webm"), size: { width: 390, height: 844 } });
-    await showRecordingChapter(page, "M01 Choose a local image", { duration: 1000 });
+    const chapter = showRecordingChapter(page, "M01 Choose a local image", { duration: 5000 });
+    await expect(page.getByText("M01 Choose a local image", { exact: true })).toBeVisible();
+    await page.screenshot({ path: info.outputPath("native-chapter.png") });
+    await chapter;
+    await expect(page.getByText("M01 Choose a local image", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations)).toEqual([]);
     const imageViolations: string[] = [];
     await page.exposeFunction("recordImageViolation", (blocked: string) => imageViolations.push(blocked));

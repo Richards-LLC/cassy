@@ -1844,16 +1844,6 @@ check_fixture_paths_src() {
 # cas-e7d4: a cut once stopped at preflight on a Slack draft committed
 # hours earlier (a 26-word Dev punch). A Slack suffix identifies the channel,
 # not the workflow: route diary threads and runtime release drafts separately.
-draft_failure_scope() {
-    local path="$1" code="$2" output="$3"
-    # Tool/IO failures cannot be approved as historical wording exceptions.
-    if [[ "$code" == 1 && "$output" == *"error: $path: "* && "$output" != *'[Errno'* ]]; then
-        printf 'SCOPE release-notes-draft %s\n' "$path"
-    else
-        printf 'UNSCOPED release-notes-draft %s\n' "$path"
-    fi
-}
-
 draft_has_posted_receipt() {
     python3 - "$1" <<'PY'
 from pathlib import Path

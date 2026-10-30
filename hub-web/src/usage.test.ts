@@ -1,6 +1,7 @@
+// @vitest-environment jsdom
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-import { USAGE_ACTIONS, UsageCounter, countAttentionDelivery, type UsageEntry } from "./usage";
+import { describe, expect, it, onTestFinished } from "vitest";
+import { USAGE_ACTIONS, UsageCounter, bindRichInspectionUsage, countAttentionDelivery, type UsageEntry } from "./usage";
 
 function memoryStore() {
   const values = new Map<string, string>();
@@ -8,6 +9,23 @@ function memoryStore() {
 }
 
 describe("usage counter (cas-0b3d)", () => {
+  it("counts opening diagram and diff inspections even when their toggle events coalesce", async () => {
+    const counter = new UsageCounter(memoryStore(), () => new Date("2026-10-26T12:00:00Z"));
+    const root = document.createElement("div");
+    root.innerHTML = '<figure class="rich-diagram"><details><summary>Diagram source</summary>source</details></figure><div class="rich-diff"><details><summary>Show diff</summary>diff</details></div>';
+    document.body.append(root); onTestFinished(() => root.remove());
+    bindRichInspectionUsage(root, counter);
+    const details = [...root.querySelectorAll("details")];
+    const delivered = Promise.all(details.map(detail => new Promise(resolve => detail.addEventListener("toggle", resolve, { once: true }))));
+    for (const detail of details) {
+      const summary = detail.querySelector("summary")!;
+      summary.click(); expect(detail.open).toBe(true);
+      summary.click(); expect(detail.open).toBe(false);
+    }
+    await delivered;
+    expect(counter.pending("m")).toEqual([{ day: "2026-10-26", action: "rich-content.inspect", journey: "HUB-J22", count: 2 }]);
+  });
+
   it("sends each changed day to every machine once, cumulatively, and retries a failed post", async () => {
     let now = new Date("2026-10-26T12:00:00Z");
     const counter = new UsageCounter(memoryStore(), () => now);

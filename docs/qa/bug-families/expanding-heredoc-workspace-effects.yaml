@@ -1,4 +1,4 @@
-title: Unquoted heredoc substitutions obey workspace boundaries and ambiguous body pairing fails closed while quoted bodies and escaped markers stay inert
+title: Unquoted heredoc substitutions obey workspace boundaries and ambiguous body pairing, byte boundaries and continued declarations fail closed while quoted bodies and escaped markers stay inert
 tasks: [cas-b8ae]
 invariants: []
 journeys: []

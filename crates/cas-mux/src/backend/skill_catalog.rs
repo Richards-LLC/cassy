@@ -54,6 +54,15 @@ fn skill_names(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether `cwd` is a Cassy-created worker checkout: a direct child of
+/// `<project>/.cas/worktrees`. This gates Grok's trust bypass, so the store must
+/// be `.cas`; a user's own `worktrees/<name>` directory does not qualify.
+pub(super) fn is_cassy_worktree(cwd: &Path) -> bool {
+    cas_types::factory_scratch::managed_worktree_store(cwd)
+        .and_then(Path::file_name)
+        .is_some_and(|store| store == ".cas")
+}
+
 /// The Claude account a worker runs under, resolved as the child resolves it.
 pub(super) fn claude_account(config_dir: Option<&str>) -> Option<PathBuf> {
     config_dir
@@ -101,6 +110,9 @@ pub(super) fn apply_claude(config: &mut PtyConfig, account: &Path, cwd: &Path) {
 /// `/name` working. Only Cassy-managed skills are copied; a user's own personal
 /// skills stay listed, because their contents are never read.
 pub(super) fn prepare_grok_project_skills(cwd: &Path, grok_home: &Path) -> std::io::Result<usize> {
+    if !is_cassy_worktree(cwd) {
+        return Ok(0);
+    }
     let source = grok_home.join("skills");
     let Ok(entries) = std::fs::read_dir(&source) else {
         return Ok(0);
@@ -209,7 +221,7 @@ fn exclude_from_git(cwd: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::WorkerLaunchConfig;
+    use crate::backend::{SupervisorLaunchConfig, WorkerLaunchConfig};
     use crate::harness::SupervisorCli;
 
     const MANAGED: &str = "---\nname: x\ndescription: d\nmetadata:\n  managed_by: cas\n---\nBODY\n";
@@ -254,7 +266,8 @@ mod tests {
         let codex = worker_config(SupervisorCli::Codex, dir.path(), &account);
         assert!(codex.args.windows(2).any(|pair| pair == ["-c", "skills.include_instructions=false"]));
 
-        let grok = worker_config(SupervisorCli::Grok, dir.path(), &account);
+        let worktree = dir.path().join(".cas/worktrees/probe");
+        let grok = worker_config(SupervisorCli::Grok, &worktree, &account);
         assert!(grok.env.iter().any(|(key, value)| key == "GROK_FOLDER_TRUST" && value == "false"));
 
         let opencode = worker_config(SupervisorCli::OpenCode, dir.path(), &account);
@@ -265,6 +278,38 @@ mod tests {
         for name in WORKER_ROLE_SKILLS {
             assert_eq!(skill[*name], "allow", "{name}");
         }
+    }
+
+    /// The trust bypass and its project copies stay inside Cassy's own worker
+    /// checkouts: never the main checkout, a lookalike path, or a supervisor.
+    #[test]
+    fn grok_trust_bypass_is_refused_outside_a_cassy_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join("skills/cas-release-report")).unwrap();
+        std::fs::write(home.join("skills/cas-release-report/SKILL.md"), MANAGED).unwrap();
+        let bypass = |config: &PtyConfig| config.env.iter().any(|(key, _)| key == "GROK_FOLDER_TRUST");
+
+        for refused in [dir.path().join("main"), dir.path().join("own/worktrees/feature")] {
+            std::fs::create_dir_all(&refused).unwrap();
+            assert!(!bypass(&worker_config(SupervisorCli::Grok, &refused, &home)), "{}", refused.display());
+            assert_eq!(prepare_grok_project_skills(&refused, &home).unwrap(), 0);
+            assert!(!refused.join(GROK_PROJECT_SKILLS).exists(), "{}", refused.display());
+        }
+
+        let worktree = dir.path().join("main/.cas/worktrees/probe");
+        assert!(bypass(&worker_config(SupervisorCli::Grok, &worktree, &home)));
+        let supervisor = SupervisorCli::Grok.backend().build_supervisor_config(SupervisorLaunchConfig {
+            name: "sup",
+            cwd: worktree,
+            cas_root: None,
+            worker_cli: SupervisorCli::Grok,
+            worker_names: &[],
+            model: None,
+            effort: None,
+            teams: None,
+        });
+        assert!(!bypass(&supervisor));
     }
 
     #[test]
@@ -287,7 +332,7 @@ mod tests {
     #[test]
     fn grok_projection_copies_only_what_it_owns() {
         let dir = tempfile::tempdir().unwrap();
-        let (home, repo) = (dir.path().join("home"), dir.path().join("repo"));
+        let (home, repo) = (dir.path().join("home"), dir.path().join(".cas/worktrees/probe"));
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         for (name, body) in [

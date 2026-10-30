@@ -33,14 +33,17 @@ in characters.
 
 ### Remaining limits
 
-1. A real-account launch is not verified here. These are fixtures.
+1. A real-account launch is not verified here. These are fixtures; that proof is
+   deferred to batch QA on the release candidate.
 2. Skills outside the shipped inventory can raise the real budget. User-authored
    Grok skills stay listed, because their contents are never read or copied.
    Claude plugin skills stay listed, because `skillOverrides` does not reach them.
 3. Selection is by role, not task: a worker's task is unknown at launch.
 4. `GROK_FOLDER_TRUST=false` loads the worker checkout's project configuration
    without a trust prompt, which is the trust Claude and Codex record for the same
-   checkout. It applies to that launch only; the shared trust store is untouched.
+   checkout. It applies to that launch only, and only to a worker in a direct child
+   of `<project>/.cas/worktrees`. Any other checkout keeps the full listing, and
+   the shared trust store is untouched.
 5. A model on Claude or Grok cannot run an explicit-only skill through its native
    skill tool. It reads the instructions through `skill action=show` instead.
 

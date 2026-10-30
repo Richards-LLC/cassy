@@ -30,6 +30,7 @@ impl Backend for Grok {
     }
 
     fn build_worker_config(&self, launch: WorkerLaunchConfig<'_>) -> PtyConfig {
+        let cwd = launch.cwd.clone();
         let mut config = PtyConfig::grok(
             launch.name,
             "worker",
@@ -50,9 +51,12 @@ impl Backend for Grok {
         );
         // Grok skips project skills in an untrusted folder and resolves a
         // non-interactive launch to untrusted. Per launch, not the shared trust
-        // store: a Cassy-created worker checkout is what Claude and Codex
-        // already record as trusted.
-        config.env.push(("GROK_FOLDER_TRUST".to_string(), "false".to_string()));
+        // store, and only in a Cassy-created worker checkout, which is what
+        // Claude and Codex already record as trusted. A user's own Grok session
+        // never comes through here.
+        if super::skill_catalog::is_cassy_worktree(&cwd) {
+            config.env.push(("GROK_FOLDER_TRUST".to_string(), "false".to_string()));
+        }
         config
     }
 

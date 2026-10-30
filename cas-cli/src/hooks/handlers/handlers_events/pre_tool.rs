@@ -192,6 +192,9 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
         if relative.is_empty() || relative.starts_with(".cas/") || relative.starts_with("target/") {
             continue;
         }
+        if changelog_append_only_edit(input, &relative, &file) {
+            continue;
+        }
         let crate::cloud::file_leases::FileLease::HeldBy(holder) =
             crate::cloud::file_leases::claim(cas_root, &agent_id, &agent_name, &task.id, &relative)
         else {
@@ -206,6 +209,11 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
         }
     }
     notes
+}
+
+fn changelog_append_only_edit(input: &HookInput, relative: &str, file: &Path) -> bool {
+    let _ = (input, relative, file);
+    false
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.
@@ -7055,6 +7063,42 @@ mod workspace_contract_tests {
         assert_eq!(worker_edit_targets(&input), ["src/a.rs", "src/b.rs"]);
         let edit = tool_input("Edit", serde_json::json!({"file_path": "/repo/src/c.rs"}), Path::new("/repo"));
         assert_eq!(worker_edit_targets(&edit), ["/repo/src/c.rs"]);
+    }
+
+    #[test]
+    fn changelog_new_bullet_is_append_only() {
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "file_path": "/repo/CHANGELOG.md",
+                "old_string": "## [Unreleased]",
+                "new_string": "## [Unreleased]\n\n### Fixed — Factory QA\n- Added this task's entry.",
+            }),
+            Path::new("/repo"),
+        );
+        assert!(changelog_append_only_edit(
+            &input,
+            "CHANGELOG.md",
+            Path::new("/repo/CHANGELOG.md")
+        ));
+    }
+
+    #[test]
+    fn changelog_existing_bullet_edit_is_not_append_only() {
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "file_path": "/repo/CHANGELOG.md",
+                "old_string": "- Existing delivery entry.",
+                "new_string": "- Reworded existing delivery entry.",
+            }),
+            Path::new("/repo"),
+        );
+        assert!(!changelog_append_only_edit(
+            &input,
+            "CHANGELOG.md",
+            Path::new("/repo/CHANGELOG.md")
+        ));
     }
 
     fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {

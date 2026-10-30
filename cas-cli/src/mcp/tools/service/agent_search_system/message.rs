@@ -235,6 +235,14 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
     "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
 
+fn commander_alias_reply_hint() -> String {
+    format!(
+        "Reply once in this pane; completed supervisor answers mirror to Commander. \
+         Use explicit routing only for disabled or unmirrored delivery.\n\
+         {COMMANDER_REPLY_CONTRACT_POINTER}"
+    )
+}
+
 /// A verified question needs one answer. Completed supervisor pane replies
 /// already enter the durable Commander lane, including offline catch-up.
 /// Keep the explicit-routing exception in the shared reference, rather than
@@ -1484,10 +1492,9 @@ impl CasService {
                     Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "target='commander:{selector}' requires an active factory session; \
-                             once a verified Commander message exists, call `coordination \
-                             action=message target=operator in_reply_to=<notification_id> \
-                             summary=\"...\" message=\"...\"`"
+                            "target='commander:{selector}' requires an active factory session. \
+                             Once a verified Commander message exists:\n{}",
+                            commander_alias_reply_hint()
                         ),
                     )
                 })?;
@@ -1522,9 +1529,8 @@ impl CasService {
                         ErrorCode::INVALID_PARAMS,
                         format!(
                             "No verified Commander message from '{selector}' is addressed to \
-                             this supervisor. Reply with `coordination action=message \
-                             target=operator in_reply_to=<notification_id> summary=\"...\" \
-                             message=\"...\"` after a verified Commander row arrives."
+                             this supervisor. After a verified Commander row arrives:\n{}",
+                            commander_alias_reply_hint()
                         ),
                     )
                 })?;
@@ -1535,9 +1541,8 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "target='commander:{selector}' resolves to notification_id={} \
-                         (not in_reply_to={explicit}); use `coordination action=message \
-                         target=operator in_reply_to={} summary=\"...\" message=\"...\"`",
-                        prior.id, prior.id
+                         (not in_reply_to={explicit}).\n{}",
+                        prior.id, commander_alias_reply_hint()
                     ),
                 ));
             }
@@ -7438,7 +7443,7 @@ mod cas_89e1_post_merge_message_type_tests {
             .id();
 
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        core.set_agent_id_for_testing(supervisor.id);
+        core.set_agent_id_for_testing(supervisor.id.clone());
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -7467,6 +7472,41 @@ mod cas_89e1_post_merge_message_type_tests {
             serde_json::from_str(&reply.prompt).expect("operator reply payload");
         assert_eq!(payload.reply_to, Some(commander));
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
+
+        for (selector, in_reply_to, sessionless, cause) in [
+            ("Daniel@Soundwave", Some(commander + 1), false, "resolves to notification_id="),
+            ("unknown-device", None, false, "No verified Commander message"),
+            ("Daniel@Soundwave", None, true, "requires an active factory session"),
+        ] {
+            let caller = if sessionless {
+                let mut sessionless_supervisor = supervisor.clone();
+                sessionless_supervisor.id = "sessionless-supervisor-id".into();
+                sessionless_supervisor.name = "sessionless-supervisor".into();
+                sessionless_supervisor.factory_session = None;
+                agents.register(&sessionless_supervisor).expect("register sessionless sender");
+                sessionless_supervisor.id
+            } else {
+                supervisor.id.clone()
+            };
+            let error_core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            error_core.set_agent_id_for_testing(caller);
+            #[cfg(feature = "mcp-proxy")]
+            let error_service = CasService::new(error_core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let error_service = CasService::new(error_core);
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": format!("commander:{selector}"),
+                "in_reply_to": in_reply_to, "summary": "refused alias", "message": "Status response.",
+            })).unwrap();
+            let error = error_service.message_send(request).await.expect_err("invalid alias reply must be refused");
+            assert!(error.message.contains(cause), "{selector}: {error:?}");
+            assert!(error.message.contains("Reply once in this pane"), "{selector}: {error:?}");
+            assert!(error.message.contains("disabled or unmirrored delivery"), "{selector}: {error:?}");
+            assert!(error.message.contains(COMMANDER_REPLY_CONTRACT_POINTER), "{selector}: {error:?}");
+            assert!(!error.message.contains("coordination action=message target=operator"), "no second-send command for mirrored replies: {error:?}");
+        }
+        assert_eq!(queue.peek_operator_replies("factory-commander-alias", 10).unwrap().len(), 1,
+            "error guidance must not queue another answer");
     }
 
     #[tokio::test(flavor = "current_thread")]

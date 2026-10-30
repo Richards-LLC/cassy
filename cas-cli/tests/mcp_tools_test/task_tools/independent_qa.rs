@@ -1559,6 +1559,134 @@ async fn recorded_qa_branch_waiver_cas_3288() {
     assert_eq!(pass.bound_head, head);
 }
 
+/// A legitimate handoff followed by a current-worker repark makes the new
+/// parked lane authoritative even when an older passed QA round names the
+/// retired worker's branch.
+#[tokio::test]
+async fn cas_81937_qa_waiver_binds_to_current_repark_after_handoff() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "main"]);
+    let _retired_worker = reviewer_core(&cas_dir, "bold-sparrow-35");
+    let _reviewer = reviewer_core(&cas_dir, "independent-reviewer");
+    let agents = open_agent_store(&cas_dir).unwrap().list(None).unwrap();
+    let reviewer_id = agents
+        .iter()
+        .find(|agent| agent.name == "independent-reviewer")
+        .unwrap()
+        .id
+        .clone();
+    let retired_id = agents
+        .into_iter()
+        .find(|agent| agent.name == "bold-sparrow-35")
+        .unwrap()
+        .id;
+
+    let retired_branch = "factory/bold-sparrow-35";
+    git(&repo, &["switch", "-q", "-c", retired_branch, "factory/test-agent"]);
+    let retired_head = commit_file(
+        &repo,
+        "web/composer.css",
+        ".composer{gap:8px}\n.retired{color:red}\n",
+        "retired worker delivery",
+    );
+    git(&repo, &["push", "-q", "origin", retired_branch]);
+
+    let now = chrono::Utc::now();
+    cas_store::open_qa_pass(
+        &cas_dir,
+        &cas_store::NewQaPass {
+            task_id: &task_id,
+            implementer_agent_id: &retired_id,
+            branch: retired_branch,
+            bound_head: &retired_head,
+            deadline_at: now + chrono::Duration::minutes(30),
+            max_rounds: 3,
+        },
+        now,
+    )
+    .unwrap();
+    cas_store::claim_qa_pass(&cas_dir, &task_id, &reviewer_id, now).unwrap();
+    let old_pass = cas_store::resolve_qa_pass(
+        &cas_dir,
+        &task_id,
+        &reviewer_id,
+        cas::types::QaVerdict::Approved,
+        "retired delivery passed review",
+        None,
+        "/qa/retired/LEDGER.md",
+        now,
+    )
+    .unwrap();
+
+    let current_name = "jolly-panther-11";
+    let _current_worker = reviewer_core(&cas_dir, current_name);
+    let current_id = open_agent_store(&cas_dir)
+        .unwrap()
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == current_name)
+        .unwrap()
+        .id;
+    let current_branch = "factory/jolly-panther-11";
+    git(&repo, &["switch", "-q", "-c", current_branch, retired_branch]);
+    let current_head = commit_file(
+        &repo,
+        "web/composer.css",
+        ".composer{gap:8px}\n.current{color:green}\n",
+        "current worker reparks delivery",
+    );
+    git(&repo, &["push", "-q", "origin", current_branch]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.assignee = Some(current_id);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.record_handoff_branch(retired_branch);
+    task.deliverables
+        .historical_factory_branch_anchors
+        .push(retired_head.clone());
+    task.deliverables.parked_branch = Some(current_branch.to_string());
+    task.deliverables.factory_branch_anchor = Some(current_head.clone());
+    tasks.update(&task).unwrap();
+
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let _role = SupervisorRole::enter(&mut test_env);
+    let result = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive",
+                "task_id": task_id,
+                "head_sha": current_head,
+                "summary": "reviewed the current worker repark",
+            }))))
+            .await
+            .expect("the exact pushed head on the current repark is waivable"),
+    );
+    assert!(result.contains(&current_branch), "{result}");
+    assert!(result.contains(&current_head[..8]), "{result}");
+
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 2);
+    assert_eq!(passes[0], old_pass, "the passed historical review is immutable");
+    assert_eq!(passes[1].branch, current_branch);
+    assert_eq!(passes[1].bound_head, current_head);
+    assert_eq!(passes[1].state, cas::types::QaPassState::Waived);
+    let after = tasks.get(&task_id).unwrap();
+    assert_eq!(after.deliverables.parked_branch.as_deref(), Some(current_branch));
+    assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(current_head.as_str()));
+    assert_eq!(after.deliverables.handoff_branches, vec![retired_branch]);
+    assert_eq!(after.deliverables.historical_factory_branch_anchors, vec![retired_head]);
+}
+
 /// Origin advances without updating this checkout's branch or tracking ref.
 /// The waiver receipt must describe the head actually validated on origin.
 #[tokio::test]

@@ -7383,17 +7383,23 @@ mod workspace_contract_tests {
 
     #[test]
     fn worker_file_lease_notes_checks_changelog_edit_before_claim() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("project");
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(&project)
             .status()
             .unwrap();
+        let project = project.canonicalize().unwrap();
         let file = project.join("CHANGELOG.md");
         std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
-        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let cas_root = crate::store::init_cas_dir(env.home()).unwrap();
+        assert_eq!(
+            std::env::var_os("CAS_ROOT").as_deref(),
+            Some(cas_root.as_os_str()),
+            "fixture stores and production hook root must share TestEnvGuard's canonical CAS_ROOT"
+        );
         crate::cloud::set_canonical_id_in_config_toml(&cas_root, "github.com/acme/lease-test").unwrap();
         crate::cloud::CloudConfig {
             endpoint: "http://127.0.0.1:9".into(),
@@ -7407,14 +7413,12 @@ mod workspace_contract_tests {
         task.assignee = Some("lease-test-session".into());
         crate::store::open_task_store(&cas_root).unwrap().add(&task).unwrap();
         let project_path = project.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_AGENT_NAME", Some("lease-test-worker")),
-            ("CAS_SESSION_ID", Some("lease-test-session")),
-            ("CAS_CLONE_PATH", Some(&project_path)),
-            ("CAS_USER_CLOUD_JSON", None),
-        ]);
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "lease-test-worker");
+        env.set("CAS_SESSION_ID", "lease-test-session");
+        env.set("CAS_CLONE_PATH", &project_path);
+        env.remove("CAS_USER_CLOUD_JSON");
         let input = tool_input(
             "Edit",
             serde_json::json!({
@@ -7425,7 +7429,7 @@ mod workspace_contract_tests {
             &project,
         );
         assert!(worker_file_lease_notes(&input, &cas_root, false).is_empty());
-        assert!(cas_root.join("file-leases/lease-test-session.json").exists(),
+        assert!(crate::cloud::file_leases::ledger_path(&cas_root, "lease-test-session").exists(),
             "a rewrite-plus-add must not bypass the file-lease check");
     }
 

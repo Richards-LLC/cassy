@@ -10915,6 +10915,7 @@ mod worker_commit_guard_tests {
             "env -S 'git push --no-verify origin factory/guard-test'".to_string(),
         ];
 
+        let mut mismatches = Vec::new();
         for role in ["worker", "reviewer"] {
             let _env = TestEnvGuard::with_optional_vars(&[
                 ("CAS_AGENT_ROLE", Some(role)),
@@ -10928,22 +10929,25 @@ mod worker_commit_guard_tests {
                 let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
                 let value = serde_json::to_value(output).expect("serialize hook result");
                 let hook_output = &value["hookSpecificOutput"];
-                assert_eq!(
-                    hook_output["permissionDecision"], "deny",
-                    "{role}: {command}: {value}"
-                );
+                if hook_output["permissionDecision"] != "deny" {
+                    mismatches.push(format!("{role}: expected refusal: {command}: {value}"));
+                    continue;
+                }
                 let reason = hook_output["permissionDecisionReason"]
                     .as_str()
                     .unwrap_or_default();
-                assert!(
-                    reason.contains("supervisor-approved") && reason.contains("plain `git push`"),
-                    "the refusal must point to the exception route: {reason}"
-                );
-                assert!(
-                    reason.contains("-n is a dry-run")
-                        && reason.contains("still runs the pre-push hook"),
-                    "the refusal must explain that -n does not skip hooks: {reason}"
-                );
+                if !reason.contains("supervisor-approved") || !reason.contains("plain `git push`")
+                {
+                    mismatches.push(format!("{role}: unclear exception route: {command}: {reason}"));
+                }
+                if command
+                    .split_whitespace()
+                    .any(|word| matches!(word, "-n" | "--dry-run"))
+                    && (!reason.contains("-n is a dry-run")
+                        || !reason.contains("still runs the pre-push hook"))
+                {
+                    mismatches.push(format!("{role}: inaccurate dry-run explanation: {reason}"));
+                }
             }
         }
 
@@ -10961,6 +10965,7 @@ mod worker_commit_guard_tests {
             value["hookSpecificOutput"]["permissionDecision"], "deny",
             "supervisors retain the approved exception route: {value}"
         );
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]

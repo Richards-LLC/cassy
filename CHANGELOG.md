@@ -9,11 +9,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Task close
 
-- **A changelog entry received by merging a predecessor's branch counts** — Was: a worker who merged an earlier worker's branch into its lane was refused with "CHANGELOG [Unreleased] REQUIRED", because the check skipped merge commits. → Now: close compares the Unreleased entries at the lane tip with those where the lane meets the target, so a merged-in entry counts and entries the target already has still do not.
+- **A changelog entry received by merging a predecessor's branch counts** — Was: a worker who merged an earlier worker's branch into its lane was refused with "CHANGELOG [Unreleased] REQUIRED", because the check skipped merge commits. → Now: close counts a titled Unreleased entry introduced by the commits it attributes to the task, including a merged branch of the same task. Entries brought in by a target refresh or another task's merged branch still do not count.
 
 ### Fixed — Workspace guard and `case`
 
 - **A `case` statement no longer reads as an unmatched scope** — Was: the workspace guard denied any `case` arm, even a harmless heredoc, because it took the pattern's `)` for the end of a subshell. → Now: pattern text and `)` are read as `case` syntax, and what an arm runs is checked as before. A pattern with a substitution or `$`, and an unterminated `case`, stay denied, and a `cd` in one arm no longer hides the directory the next arm runs in. A redirect's filename is no longer read as the command, so `>out touch /x` is judged as `touch /x`.
+
+### Fixed — Source-bound QA candidates
+
+- **QA candidates include current Commander source changes** — The isolated
+  candidate checkout now builds production web assets before compiling Cassy.
+  Its receipt records the source and served web digests, and publication fails
+  if the candidate serves different bytes. The previous candidate stays intact
+  when verification fails.
 
 ### Added — Supervisor Cassy versions in Commander
 
@@ -22,6 +30,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added — Batch QA overdue alarm
 
 - **Supervisors are told when merged work waits for QA** — Was: a batch QA round could be held for hours while merged tasks waited, and nothing flagged it. → Now: if a merged delivery has no receipt after 60 minutes and no round started in that time, every supervisor on the epic, on both machines, gets one notice an hour. The supervisor guidance now says a round covers what is merged at the tip and never waits for lanes still in review.
+
+### Fixed — Conditional and parameter operands
+
+- **Recursive parameter operands stay unresolved** — `[[ … ]]` comparisons and
+  `${…}` array indices, substring positions and indirection cannot hide executable
+  subscript text. Literal numeric comparisons, indices and slices stay allowed.
 
 ### Fixed — Merge admission after a cancelled lane run
 
@@ -44,6 +58,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   journeys, and Tier 2 needs an adversarial probe row in the task ledger.
   `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
   per release.
+- **Follow-ups from findings must clear the spawn threshold** — Was: nothing in
+  the tools stopped a review finding becoming a task, and nothing showed when an
+  epic's reviews were generating more work than they closed. → Now: `task create`
+  refuses a follow-up from a finding without `repro` and `affected`, and a P0/P1
+  bug an operator or supervisor observed directly stays exempt. QA's automatic
+  pre-existing follow-ups need the same two fields; the rest stay in the verdict.
+  With at least 5 completed reviews, at 0.5 follow-ups per review over an epic's
+  last 10, the supervisor gets one notice, and
+  `epic_status` shows the ratio.
 
 ### Fixed — Hub pin safety
 

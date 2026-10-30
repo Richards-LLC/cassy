@@ -104,9 +104,10 @@ pub(super) fn park_refusal(
     changed_paths: &[String],
     head: &str,
     target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
 ) -> Option<String> {
     let short = &head[..head.len().min(12)];
-    if let Some(refusal) = changelog_refusal(proof_repo, task, changed_paths, head, target) {
+    if let Some(refusal) = changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges) {
         return Some(refusal);
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -174,6 +175,7 @@ fn changelog_refusal(
     changed_paths: &[String],
     head: &str,
     target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
 ) -> Option<String> {
     if !changed_paths.iter().any(|path| product_source_path(path))
         || has_no_changelog_decision(&task.notes)
@@ -182,7 +184,7 @@ fn changelog_refusal(
         return None;
     }
     let changelog_changed = changed_paths.iter().any(|path| path == "CHANGELOG.md");
-    if changelog_changed && has_titled_unreleased_delta(repo, head, target) {
+    if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges) {
         return None;
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -225,12 +227,18 @@ fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
         })
 }
 
-/// Whether HEAD's titled Unreleased entries add or change one relative to the
-/// merge-base with the target. Comparing trees rather than walking commits
-/// counts an entry that arrives through a merge's second parent, such as a
-/// predecessor worker's branch (cas-2a65); refreshing from the target cannot
-/// claim the target's entries because they are already at the merge-base.
-fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
+/// Whether one of this task's delivery segments adds or changes a titled
+/// Unreleased entry that survives at HEAD. `delivery_ranges` are the close's
+/// task-attributed (base, tip) segments, which keep a same-task predecessor
+/// merge and drop target-sync and other tasks' merges (cas-2a65). Without
+/// them, only single-parent first-parent commits since the merge-base count,
+/// so a merge can never credit entries another branch wrote.
+fn has_titled_unreleased_delta(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .args(args)
@@ -240,20 +248,41 @@ fn has_titled_unreleased_delta(repo: &Path, head: &str, target: &str) -> bool {
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    let Some(base) = git(&["merge-base", head, target]) else {
+    let entries_at = |commit: &str| {
+        git(&["show", &format!("{commit}:CHANGELOG.md")])
+            .and_then(|text| titled_unreleased_entries(&text))
+    };
+    let Some(final_entries) = entries_at(head) else {
         return false;
     };
-    let Some(final_entries) = git(&["show", &format!("{head}:CHANGELOG.md")])
-        .and_then(|text| titled_unreleased_entries(&text))
-    else {
-        return false;
+    let ranges = match delivery_ranges {
+        Some(ranges) => ranges.to_vec(),
+        None => {
+            let Some(base) = git(&["merge-base", head, target]) else {
+                return false;
+            };
+            let range = format!("{}..{head}", base.trim());
+            let Some(commits) = git(&["rev-list", "--first-parent", "--parents", &range]) else {
+                return false;
+            };
+            commits
+                .lines()
+                .filter_map(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+                    [commit, parent] => Some((parent.to_string(), commit.to_string())),
+                    _ => None,
+                })
+                .collect()
+        }
     };
-    let base_entries = git(&["show", &format!("{}:CHANGELOG.md", base.trim())])
-        .and_then(|text| titled_unreleased_entries(&text))
-        .unwrap_or_default();
-    final_entries
-        .iter()
-        .any(|(key, entry)| base_entries.get(key) != Some(entry))
+    ranges.iter().any(|(base, tip)| {
+        let Some(after) = entries_at(tip) else {
+            return false;
+        };
+        let before = entries_at(base).unwrap_or_default();
+        after.iter().any(|(key, entry)| {
+            before.get(key) != Some(entry) && final_entries.get(key) == Some(entry)
+        })
+    })
 }
 
 fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), String>> {
@@ -739,7 +768,7 @@ mod tests {
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas", "test(worker)",
         );
-        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main")
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main", None)
             .expect("an untested crate is refused at park");
         assert!(refusal.contains("FOCUSED PROOF REQUIRED"), "{refusal}");
         assert!(refusal.contains(&format!("at {}: cas-store.", &head[..12])), "{refusal}");
@@ -748,17 +777,17 @@ mod tests {
         let mut plain = task.clone();
         plain.risk = vec![TaskRisk::None];
         for task in [&task, &plain] {
-            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head, "main").is_some());
+            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head, "main", None).is_some());
         }
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas-store", "test(worker)",
         );
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main", None).is_none());
 
         let bare = tempfile::tempdir().unwrap();
         let mut bare_task = blast_radius_task(&[]);
         bare_task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only proof-scope fixture".into();
-        let scope = park_refusal(cas_root.path(), bare.path(), &bare_task, &changed, &head, "main")
+        let scope = park_refusal(cas_root.path(), bare.path(), &bare_task, &changed, &head, "main", None)
             .expect("undeclared modules outside a workspace");
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }
@@ -821,7 +850,7 @@ mod tests {
         std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
         let source_only = commit_changelog_fixture(repo.path(), "product change");
         let changed = vec!["hub-web/src/app.ts".to_string()];
-        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &source_only, "main")
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &source_only, "main", None)
             .expect("product source without a changelog entry must be refused");
         assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
 
@@ -832,7 +861,7 @@ mod tests {
         .unwrap();
         let untitled = commit_changelog_fixture(repo.path(), "add an untitled note");
         let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
-        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &untitled, "main")
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &untitled, "main", None)
             .expect("an untitled Unreleased bullet is not release evidence");
         assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
 
@@ -844,8 +873,8 @@ mod tests {
         let titled = commit_changelog_fixture(repo.path(), "add release note");
         let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
         assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
-        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main"));
-        let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main");
+        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None));
+        let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main", None);
         assert!(accepted.is_none(), "{accepted:?}");
 
         std::fs::write(
@@ -854,42 +883,68 @@ mod tests {
         )
         .unwrap();
         let extended = commit_changelog_fixture(repo.path(), "extend release note");
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &extended, "main").is_none());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &extended, "main", None).is_none());
     }
 
-    /// cas-2a65: a lane that merges its predecessor's branch receives that
-    /// entry through the merge's second parent; a target refresh does not.
+    /// cas-2a65: through the close's task-attributed ranges, an entry a lane
+    /// receives by merging its predecessor's same-task branch counts. Another
+    /// task's merged entry beside the lane's own untitled bullet, and the
+    /// target's entry from a refresh, do not.
     #[test]
-    fn changelog_entry_received_by_merge_counts_but_target_entries_do_not() {
+    fn changelog_entry_counts_only_from_task_attributed_ranges() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
         let repo = changelog_fixture();
-        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        let task = Task::new("cas-a1b2".into(), "delivery".into());
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity { start_base: None, task_id: Some(task.id.clone()), known_commits: vec![] },
+        };
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
             assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         };
-        let entry = |title: &str| format!(
-            "# Changelog\n\n## [Unreleased]\n\n### Added — Commander\n\n- **{title}** — It is visible.\n\n## [1.0.0] - 2026-01-01\n"
-        );
-        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+        let changelog = |bullets: &str| std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            format!("# Changelog\n\n## [Unreleased]\n\n### Added — Commander\n\n{bullets}\n## [1.0.0] - 2026-01-01\n"),
+        ).unwrap();
+        let refusal = |branch: &str| {
+            git(&["checkout", "-q", branch]);
+            let head = commit_changelog_fixture(repo.path(), "tip");
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, None).unwrap();
+            let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+            changelog_refusal(repo.path(), &task, &changed, &head, "main", Some(&ranges))
+        };
 
         git(&["checkout", "-qb", "predecessor", "main"]);
         std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
-        std::fs::write(repo.path().join("CHANGELOG.md"), entry("Badges show versions")).unwrap();
-        commit_changelog_fixture(repo.path(), "predecessor delivery");
+        changelog("- **Badges show versions** — It is visible.\n");
+        commit_changelog_fixture(repo.path(), "feat: badges (cas-a1b2)");
         git(&["checkout", "-q", "delivery"]);
         git(&["merge", "-q", "--no-ff", "--no-edit", "predecessor"]);
-        let received = commit_changelog_fixture(repo.path(), "after merge");
-        assert!(changelog_refusal(repo.path(), &task, &changed, &received, "main").is_none());
+        assert!(refusal("delivery").is_none(), "the predecessor's same-task entry counts");
 
-        git(&["checkout", "-q", "main"]);
-        std::fs::write(repo.path().join("CHANGELOG.md"), entry("Another lane's change")).unwrap();
-        commit_changelog_fixture(repo.path(), "target entry");
-        git(&["checkout", "-qb", "refresh", "main~1"]);
+        git(&["checkout", "-qb", "foreign", "main"]);
+        changelog("- **Another task's change** — It is visible.\n");
+        commit_changelog_fixture(repo.path(), "feat: other lane (cas-beef)");
+        git(&["checkout", "-qb", "untitled", "main"]);
+        git(&["merge", "-q", "--no-ff", "--no-edit", "foreign"]);
         std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 3;\n").unwrap();
-        commit_changelog_fixture(repo.path(), "source only");
+        changelog("- **Another task's change** — It is visible.\n- Lane note without a title.\n");
+        commit_changelog_fixture(repo.path(), "fix: lane work (cas-a1b2)");
+        assert!(refusal("untitled").is_some(), "another task's merged entry is not this delivery's");
+
+        git(&["checkout", "-qb", "refresh", "main"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 4;\n").unwrap();
+        commit_changelog_fixture(repo.path(), "fix: source only (cas-a1b2)");
+        git(&["checkout", "-q", "main"]);
+        changelog("- **Target change** — It is visible.\n");
+        commit_changelog_fixture(repo.path(), "target entry");
+        git(&["checkout", "-q", "refresh"]);
         git(&["merge", "-q", "--no-edit", "main"]);
-        let refreshed = commit_changelog_fixture(repo.path(), "after refresh");
-        assert!(changelog_refusal(repo.path(), &task, &changed, &refreshed, "main").is_some());
+        assert!(refusal("refresh").is_some(), "a target refresh cannot claim the target's entry");
     }
 
     #[test]
@@ -906,11 +961,12 @@ mod tests {
             &["hub-web/src/app.ts".into()],
             &head,
             "main",
+            None,
         )
         .is_some(), "an empty reason must not exempt the delivery");
         task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: internal QA-only fixture correction".into();
         let refusal = park_refusal(
-            cas_root.path(), repo.path(), &task, &["hub-web/src/app.ts".into()], &head, "main",
+            cas_root.path(), repo.path(), &task, &["hub-web/src/app.ts".into()], &head, "main", None,
         );
         assert!(refusal.is_none(), "a typed decision with a reason should exempt the delivery: {refusal:?}");
     }
@@ -928,6 +984,7 @@ mod tests {
             &["hub-web/src/app.ts".into()],
             &head,
             "main",
+            None,
         ).is_none(), "projects without an Unreleased section are outside this gate");
     }
 
@@ -944,6 +1001,7 @@ mod tests {
             &["hub-web/src/app.ts".into()],
             &source_only,
             "main",
+            None,
         );
 
         task.notes.clear();
@@ -971,6 +1029,7 @@ mod tests {
                 &["CHANGELOG.md".into(), "hub-web/src/app.ts".into()],
                 &placeholder,
                 "main",
+                None,
             );
             placeholder_entries_refused &= refusal.is_some();
         }
@@ -986,7 +1045,7 @@ mod tests {
         let cas_root = tempfile::tempdir().unwrap();
         let head = commit_changelog_fixture(repo.path(), "documentation update");
         let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &["docs/guide.md".into()], &head, "main").is_none());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &["docs/guide.md".into()], &head, "main", None).is_none());
     }
 
     /// cas-d6eb AC2: a widening that adds only crate-qualified modules of

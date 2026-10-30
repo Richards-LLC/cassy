@@ -248,6 +248,23 @@ pub struct TaskRequest {
     #[serde(default)]
     pub proposal_attempt_id: Option<String>,
 
+    /// Where this follow-up came from, when it came from a review finding.
+    #[schemars(
+        description = "For create: the review finding this follow-up originates from (e.g. verification:ver-1a2b, qa:cas-1234, review:<reviewer>). Requires repro and affected. Use none when text that looks like a finding is not one."
+    )]
+    #[serde(default)]
+    pub finding_origin: Option<String>,
+
+    /// Reproduction of a finding-derived follow-up.
+    #[schemars(description = "For a follow-up from a finding: the steps or command, plus the wrong output observed")]
+    #[serde(default)]
+    pub repro: Option<String>,
+
+    /// Who a finding-derived follow-up affects.
+    #[schemars(description = "For a follow-up from a finding: who acts on the wrong output today")]
+    #[serde(default)]
+    pub affected: Option<String>,
+
     /// Description (for create)
     #[schemars(description = "Task description")]
     #[serde(default)]

@@ -7607,6 +7607,9 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
+            report.push_str(&gain.status_line());
+        }
         // cas-fd4c: a successor stacked on an open predecessor epic must not
         // silently fall behind it until the predecessor lands.
         if let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) {

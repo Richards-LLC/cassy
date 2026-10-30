@@ -1028,6 +1028,8 @@ An existing dispatch or verdict keeps its authority, and the `force-verifier` la
 
 Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none.
 
+`task action=create` enforces the threshold. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, needs `repro` and `affected`, or it is refused. It carries the `from-finding` label and a note recording all three. A P0/P1 bug that an operator or supervisor observed directly is exempt, and `finding_origin=none` declares that finding-like text is not a finding; reviewers cannot use it. `qa_record` applies the same threshold to its automatic pre-existing follow-ups: an issue without `repro` and `affected` stays in the verdict. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside
@@ -1953,6 +1955,14 @@ attempt does not remove unmanaged scratch directories or run full factory GC.
 Worker shutdown and replacement also retire safe terminal or parked-and-pushed
 targets, copying proof logs to durable artifacts before removal. In-progress,
 unpushed or unverifiable work keeps its target and checkout.
+QA candidate builds first install locked web dependencies and invoke the same
+source-bound production snapshot builder as journeys, in the isolated checkout.
+Only that disposable checkout receives the generated dist before Cargo embeds
+it. A private loopback hub then serves every expected asset under a disposable
+HOME and CAS_ROOT: publication refuses a source/served digest mismatch and
+preserves the previous candidate. RECEIPT.json records `web.source_sha`,
+`web.dist_sha256` and `web.served_dist_sha256`.
+
 QA candidate builds use a private bounded target inside their owned release
 scratch directory. Candidate artifacts are copied out before that directory is
 removed; existing shared supervisor targets remain review-only. Interrupted

@@ -136,6 +136,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   A user's own Grok skills and skills a repository tracks stay listed,
   as do Claude plugin skills, which Claude's control does not reach.
 
+### Fixed — Async terminal output at exit
+
+- **Terminal waits keep the final output** — Async PTY waits observe buffered
+  output and reader completion together, so a short-lived command cannot
+  report an unexpected exit while its matching output is already available.
+
+### Fixed — Worker guidance contracts
+
+- **Worker startup keeps its protected workflow** — Always-loaded guidance
+  again states sequential task ownership, checkpointing, evidence-ledger
+  commands and all component issue-routing keys within its existing budget.
+
+### Fixed — Secret policy configuration examples
+
+- **Secret auto-delete examples use accepted policies** — Configuration help now
+  offers `off`, `after_use` and `1h`, so registry round trips and reset contracts
+  exercise real stored policies instead of generic string values.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

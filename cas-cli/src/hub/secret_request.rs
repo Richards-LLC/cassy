@@ -32,6 +32,8 @@ enum Outcome {
 /// Why an answer was refused, in words that never include the value.
 enum Refusal {
     NotOpen,
+    /// A file with the request's name is already there; it is never replaced.
+    Exists(PathBuf),
     Storage(anyhow::Error),
 }
 
@@ -148,6 +150,15 @@ pub(super) async fn answer<R: SessionReadModel>(
             "invalid",
             format!("notification={notification_id} not open"),
         ),
+        Ok(Err(Refusal::Exists(path))) => (
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "secret_exists", "path": path.display().to_string(), "detail": format!(
+                "A secret with this name already exists at {}. Nothing was saved: delete that file, or Decline and ask for a new name.",
+                path.display()
+            )}),
+            "invalid",
+            format!("notification={notification_id} exists path={}", path.display()),
+        ),
         Ok(Err(Refusal::Storage(error))) => {
             tracing::warn!(%error, %session, notification_id, "cas-1996: secret could not be saved");
             (
@@ -206,11 +217,21 @@ fn save(
     let (outcome, text, summary) = match value {
         Some(value) => {
             let directory = destination(&cas_dir, project).map_err(Refusal::Storage)?;
-            let path = write_secret(&directory, &name, value).map_err(Refusal::Storage)?;
+            let path = match write_secret(&directory, &name, value) {
+                Ok(path) => path,
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+                {
+                    return Err(Refusal::Exists(directory.join(&name)));
+                }
+                Err(error) => return Err(Refusal::Storage(error)),
+            };
             let text = format!(
-                "Secret {name} saved to {} (mode 600). Read it from that file when you need it; \
-                 the value is not in this message or any history.",
-                path.display()
+                "Secret {name} saved to {path} (mode 600). Use it via $(cat {path}) or an env var \
+                 in the command that needs it; never print it. The value is not in this message or any history.",
+                path = path.display()
             );
             (Outcome::Saved(path), text, format!("Secret {name} saved"))
         }
@@ -267,8 +288,8 @@ fn destination(cas_dir: &FsPath, project: &FsPath) -> anyhow::Result<PathBuf> {
 }
 
 /// Create missing folders mode 700, then write `<directory>/<name>` mode 600
-/// through a private temporary file and an atomic rename. A later answer to a
-/// request with the same name replaces the file.
+/// through a private temporary file linked into place. The link never
+/// replaces an existing name: that fails with `AlreadyExists`.
 fn write_secret(directory: &FsPath, name: &str, value: &str) -> anyhow::Result<PathBuf> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -289,13 +310,11 @@ fn write_secret(directory: &FsPath, name: &str, value: &str) -> anyhow::Result<P
         let mut file = super::composer_upload::private_file(&pending, true)?;
         file.write_all(value.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&pending, &path)?;
+        std::fs::hard_link(&pending, &path)?;
         std::fs::File::open(directory)?.sync_all()?;
         Ok(())
     })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&pending);
-    }
+    let _ = std::fs::remove_file(&pending);
     written?;
     Ok(path)
 }

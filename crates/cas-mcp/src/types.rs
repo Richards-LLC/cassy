@@ -1089,7 +1089,9 @@ pub struct AgentRequest {
     pub in_reply_to: Option<i64>,
 
     /// Typed Commander turn kind for supervisor messages to `target=operator`.
-    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    #[schemars(
+        description = "Commander turn kind: answer, status, receipt, ask, blocker, or secret (summary=NAME; reply names its file)"
+    )]
     #[serde(default)]
     pub kind: Option<String>,
 

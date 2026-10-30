@@ -154,7 +154,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `secrets.destination` (`cas config set secrets.destination <path>`), with a
   user default in `~/.cas/config.toml` and a built-in default of
   `~/.cas/private/creds/<project>`; only the operator can change it. Saved
-  files are kept until you delete them.
+  files are kept until you delete them, and a name that already holds a file
+  is refused rather than replaced. The field tells browsers and password
+  managers not to save it. The coordination tool's `kind` description and the
+  cas-supervisor skill now name `kind=secret`, so supervisors request
+  credentials with it instead of asking in chat.
 
 ### Fixed — Fleet keyboard feedback
 

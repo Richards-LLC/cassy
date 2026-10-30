@@ -78,8 +78,11 @@ describe("secret request (cas-1996)", () => {
     expect(node.querySelector(".secret-scope")?.textContent).toContain("soundwave");
     const input = node.querySelector<HTMLInputElement>("input.secret-value")!;
     expect(input.type).toBe("password"); expect(input.autocomplete).toBe("off");
+    // Password managers are told to leave it alone, and there is no form for a browser to offer to save.
+    expect(input.hasAttribute("data-1p-ignore") && input.dataset.lpignore === "true").toBe(true);
+    expect(node.querySelector("form")).toBeNull();
     input.value = "cio_secret_value";
-    node.querySelector<HTMLFormElement>("form.secret-form")!.requestSubmit();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await vi.waitFor(() => expect(node.dataset.answered).toBe("true"));
     expect(answerSecret).toHaveBeenCalledWith(request, { value: "cio_secret_value" });
     expect(respond).not.toHaveBeenCalled();

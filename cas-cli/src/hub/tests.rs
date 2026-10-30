@@ -4961,6 +4961,15 @@ async fn cas_1996_secret_answer_refuses_unscoped_devices_and_other_turns() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!destination.exists(), "nothing was written");
+    // A name that already holds a file is refused, and the file is kept.
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("STRIPE_KEY"), "existing").unwrap();
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::CONFLICT, Some("secret_exists")), "{body}");
+    // pin: the existing file's bytes are untouched.
+    assert_eq!(std::fs::read(destination.join("STRIPE_KEY")).unwrap(), b"existing");
     assert!(fixture.queued().iter().all(|row| row.target == "operator"), "nothing was sent");
 }
 

@@ -23,8 +23,9 @@ describe("work events (cas-ff22)", () => {
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => "detail") };
     const makePicture = () => new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => void storage.set(key, value) } });
     const files = [
-      { path: "src/a.ts", operation: "edit", source_event_id: "edit" },
+      { path: "src/a.ts", operation: "edit", source_event_id: "edit", line_counts: { added: 12, removed: 4 } },
       { path: "src/<b>.ts", operation: "edit", source_event_id: "other" },
+      { path: "src/empty.ts", operation: "edit", source_event_id: "other", line_counts: { added: 0, removed: 0 } },
     ];
     const events = [
       wire("edit", 1, { turn: "one", changed_files: { files: files.slice(0, 1), provenance: "successful_tool_calls", complete: false } }),
@@ -43,11 +44,16 @@ describe("work events (cas-ff22)", () => {
     expect(node.querySelector(".changed-files")).toBeNull();
     paint();
     expect(node.querySelectorAll(".changed-files")).toHaveLength(2);
-    expect(node.textContent).toContain("Tool-reported edits · 2 files");
+    expect(node.textContent).toContain("Tool-reported edits · 3 files");
     expect(node.textContent).not.toMatch(/\+\d|−\d/);
     expect(transport.requestWorkEventDetail).not.toHaveBeenCalled();
     const card = () => node.querySelector<HTMLElement>(".changed-files")!;
     card().querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
+    const rows = card().querySelectorAll(".changed-file");
+    expect(rows[0]!.querySelector(".changed-file-count-visual")?.textContent).toBe("+12/−4");
+    expect(rows[0]!.querySelector(".changed-file-count-label")?.textContent).toBe("12 lines added, 4 lines removed in the latest successful edit");
+    expect(rows[1]!.querySelector(".changed-file-counts")).toBeNull();
+    expect(rows[2]!.querySelector(".changed-file-count-visual")?.textContent).toBe("+0/−0");
     const file = () => card().querySelector<HTMLButtonElement>(".changed-file-toggle")!;
     file().focus(); file().click();
     expect(document.activeElement).toBe(file());

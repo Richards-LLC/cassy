@@ -1265,9 +1265,15 @@ async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {
     let refused = fx.close("cas-bq01").await;
     assert_ne!(status("cas-bq01"), TaskStatus::Closed, "{refused}");
 
-    // Only the operator's recorded words override, at record time and at close.
+    // The delivering worker can write task notes, so a note never overrides.
     tasks
         .append_note("cas-bq01", "[2026-10-30 13:00] DECISION: QA AUTHOR OVERRIDE: operator accepts this walk")
+        .unwrap();
+    let forged = fx.close("cas-bq01").await;
+    assert_ne!(status("cas-bq01"), TaskStatus::Closed, "{forged}");
+
+    // Only the operator's `cas qa author-override` record does, at record time and at close.
+    cas::qa_author_override::record(&root, tasks.as_ref(), "cas-bq01", "operator accepts this walk", chrono::Utc::now())
         .unwrap();
     let mut request = serde_json::to_value(fx.request()).unwrap();
     request["task_ids"] = serde_json::json!(["cas-bq01"]);

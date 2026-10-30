@@ -169,6 +169,13 @@ pub enum QaCommand {
     PostRelease(super::qa_post_release::PostReleaseArgs),
     /// Operator-only, time-boxed rapid-response window for one epic
     RapidResponse(super::qa_rapid_response::RapidResponseArgs),
+    /// Operator-only: accept QA authored by someone who implemented the task
+    AuthorOverride {
+        task: String,
+        /// Why this author's QA is accepted; recorded on the task
+        #[arg(long)]
+        note: String,
+    },
     /// Seed, inspect or validate the journey registry
     #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status", "traffic"])))]
     Journeys {
@@ -240,6 +247,23 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
     }
 }
 
+/// cas-26ac: the operator accepts a lineage author's QA for one task.
+fn author_override(task: &str, note: &str, cas_root: Option<&Path>) -> Result<()> {
+    use crate::config::operator_policy::{InvocationContext, operator_action_refusal};
+    if let Some(refusal) = operator_action_refusal(
+        "Overriding the independent QA author rule",
+        "run `cas qa author-override` yourself from your own terminal",
+        &InvocationContext::from_process(),
+    ) {
+        anyhow::bail!(refusal);
+    }
+    let root = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))?;
+    let store = crate::store::open_task_store(root)?;
+    crate::qa_author_override::record(root, store.as_ref(), task, note, chrono::Utc::now())?;
+    println!("QA author override recorded for {task}; its batch receipt or QA round may now count.");
+    Ok(())
+}
+
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
         QaCommand::Ledger(args) => super::qa_ledger::execute(args, cli, cas_root),
@@ -248,6 +272,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         QaCommand::Polish(args) => super::qa_polish::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
         QaCommand::RapidResponse(args) => super::qa_rapid_response::execute(args, cas_root),
+        QaCommand::AuthorOverride { task, note } => author_override(task, note, cas_root),
         QaCommand::Journeys {
             check: _,
             seed,

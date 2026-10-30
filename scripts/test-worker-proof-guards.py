@@ -195,6 +195,32 @@ else:
                     self.assertEqual(ids, [touched['tests'][0]['id']])
                     self.assertEqual(resolved, expected)
 
+    def test_plan_selects_only_changed_vitest_playwright_and_pytest_cases(self):
+        web = self.repo / 'hub-web/src/worker.test.ts'
+        web.parent.mkdir(parents=True)
+        web.write_text("import { test } from 'vitest';\ntest('stable', () => { expect(1).toBe(1); });\ntest('changed', () => { expect('before').toBe('before'); });\n")
+        browser = self.repo / 'hub-web/e2e/worker.spec.ts'
+        browser.parent.mkdir(parents=True)
+        browser.write_text("import { test, expect } from '@playwright/test';\ntest('stable', async ({ page }) => { await expect(page).toHaveTitle('stable'); });\ntest('changed', async ({ page }) => { await expect(page).toHaveTitle('before'); });\n")
+        python = self.repo / 'scripts/test_worker.py'
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("def test_stable():\n    assert 1 == 1\n\ndef test_changed():\n    assert 'before' == 'before'\n")
+        base = self.commit()
+        web.write_text(web.read_text().replace("expect('before').toBe('before')", "expect('after').toBe('after')"))
+        browser.write_text(browser.read_text().replace("toHaveTitle('before')", "toHaveTitle('after')"))
+        python.write_text(python.read_text().replace("assert 'before' == 'before'", "assert 'after' == 'after'"))
+        head = self.commit()
+
+        planned = STABILITY.plan(self.repo, base, head)
+        self.assertEqual(
+            {(test['runner'], test['id']) for test in planned['tests']},
+            {
+                ('vitest', 'hub-web/src/worker.test.ts::changed'),
+                ('playwright', 'hub-web/e2e/worker.spec.ts::changed'),
+                ('pytest', 'scripts/test_worker.py::test_changed'),
+            },
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

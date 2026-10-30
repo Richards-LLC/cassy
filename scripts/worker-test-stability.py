@@ -280,7 +280,7 @@ def adapter_args(runner, tests):
     if not tests or any(test['runner'] != runner for test in tests):
         raise ValueError(f'no resolvable touched {runner} tests')
     if runner == 'pytest':
-        return [test['file'] + '::' + test['function'].replace('::', '::') for test in tests]
+        return [test['file'] + '::' + test['function'] for test in tests]
     if runner == 'playwright':
         locations = [f"{test['file']}:{test['line']}" for test in tests]
         if len(set(locations)) != len(locations):

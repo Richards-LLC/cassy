@@ -107,6 +107,9 @@ pub(super) fn validated_started_delivery(
     if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
         return Err(refuse("the base is no longer an ancestor of the delivery"));
     }
+    // cas-985f: a worker told to merge the released trunk into its lane brings
+    // in other tasks' already-released commits. They are upstream, not foreign.
+    let upstream = released_upstream_refs(repo, &target);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -120,8 +123,11 @@ pub(super) fn validated_started_delivery(
             "--format=%H %P%x1f%B%x1e",
             &range,
             &format!("^{target}"),
-            "--",
-        ],
+        ]
+        .into_iter()
+        .chain(upstream.iter().map(String::as_str))
+        .chain(["--"])
+        .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the lane history cannot be read"))?;
     // Inspect side-parent work too, excluding integrated target history so a
@@ -136,8 +142,11 @@ pub(super) fn validated_started_delivery(
             &tip,
             &format!("^{}", start.base_sha),
             &format!("^{target}"),
-            "--",
-        ],
+        ]
+        .into_iter()
+        .chain(upstream.iter().map(String::as_str))
+        .chain(["--"])
+        .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the off-target history cannot be read"))?;
     let mut records = Vec::new();
@@ -168,7 +177,9 @@ pub(super) fn validated_started_delivery(
         }
         let parents: Vec<String> = metadata.map(str::to_owned).collect();
         let merged = parents.get(1..).unwrap_or_default();
-        if is_target_sync_merge(repo, merged, &target) {
+        if is_target_sync_merge(repo, merged, &target)
+            || upstream.iter().any(|reference| is_target_sync_merge(repo, merged, &reference[1..]))
+        {
             continue;
         }
         if subject_claims_another_task(message, &identity) {
@@ -451,6 +462,24 @@ fn merge_brings_foreign_work(
         }
     }
     false
+}
+
+/// cas-985f: exclusions (`^ref`) for the repository's released trunk, local
+/// and on origin. Empty when the trunk is the target itself or unresolvable,
+/// so a delivery to the trunk keeps its existing attribution.
+fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
+    let Ok(trunk) = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo) else {
+        return Vec::new();
+    };
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    if trunk == target || !is_safe_git_refname(&trunk) {
+        return Vec::new();
+    }
+    [trunk.clone(), format!("origin/{trunk}")]
+        .into_iter()
+        .filter(|reference| git_ref_exists(repo, reference))
+        .map(|reference| format!("^{reference}"))
+        .collect()
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {

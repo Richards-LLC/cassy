@@ -8013,6 +8013,8 @@ mod tests {
         assert_eq!(queued.source, "zen-condor");
         assert_eq!(queued.factory_session.as_deref(), Some("session-a622"));
         let brief = &queued.prompt;
+        assert!(!brief.contains("re-close"), "merge verdict owns parked completion: {brief}");
+
         assert!(
             brief.contains("task action=start id=cas-e0be"),
             "the in-progress task is resumed by re-taking its lease: {brief}"

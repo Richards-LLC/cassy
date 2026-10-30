@@ -4096,8 +4096,8 @@ mod tests {
         );
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("cas__task action=close id=cas-8eff"),
-            "homogeneous Grok: worker re-close must use cas__ prefix: {}",
+            !prompt.text.contains("task action=close"),
+            "merge verdict must own completion without another close command: {}",
             prompt.text
         );
         assert!(
@@ -4125,225 +4125,11 @@ mod tests {
         );
     }
 
-    /// cas-fa1c: worker re-close instructions target the worker's own session,
-    /// while the separately labelled supervisor escape hatch uses the
-    /// supervisor's harness.
     #[test]
-    fn test_c145_mixed_harness_awaiting_merge_separates_worker_and_supervisor_prefixes() {
-        let event = DirectorEvent::WorkerIdle {
-            worker: "codex-worker".to_string(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: "cas-mix1".to_string(),
-                task_title: "Mixed factory merge park".to_string(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
-                pending_qa: None,
-            }),
-        };
-        let mut data = make_data(0);
-        data.agents[0].name = "codex-worker".to_string();
-        data.agent_id_to_name
-            .insert("sess-id-abc123".to_string(), "codex-worker".to_string());
-        data.in_progress_tasks = vec![TaskSummary {
-            id: "cas-mix1".to_string(),
-            title: "Mixed factory merge park".to_string(),
-            status: TaskStatus::AwaitingMerge,
-            priority: Priority::MEDIUM,
-            assignee: Some("codex-worker".to_string()),
-            task_type: TaskType::Task,
-            epic: Some("cas-epic1".to_string()),
-            branch: None,
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        data.epic_tasks = vec![TaskSummary {
-            id: "cas-epic1".to_string(),
-            title: "Epic".to_string(),
-            status: TaskStatus::InProgress,
-            priority: Priority::HIGH,
-            assignee: None,
-            task_type: TaskType::Epic,
-            epic: None,
-            branch: Some("epic/mixed-cas-epic1".to_string()),
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        let config = default_config();
-
-        // Claude supervisor, Codex worker
-        let prompt = generate_prompt(
-            &event,
-            &data,
-            &data,
-            "supervisor",
-            &config,
-            claude(),
-            codex(),
-            &HashSet::new(),
-            None,
-        )
-        .expect("mixed-harness AwaitingMerge must produce a supervisor prompt");
-
-        // Split body from with_response_instructions footer so a Claude
-        // footer `mcp__cas__coordination action=message` cannot false-pass
-        // supervisor body-command assertions (cas-c145 review follow-up).
-        let body = prompt.text.split("\n---\n").next().unwrap_or(&prompt.text);
-
-        // Supervisor-facing body tools: exact Claude alias (not footer-only).
-        assert!(
-            body.contains("mcp__cas__factory action=epic_status id=cas-epic1"),
-            "supervisor body epic_status must use exact Claude command: {}",
-            body
-        );
-        assert!(
-            body.contains("mcp__cas__task action=list status=awaiting_merge"),
-            "supervisor body list must use exact Claude command: {}",
-            body
-        );
-        assert!(
-            body.contains("mcp__cas__task action=show id=cas-mix1"),
-            "supervisor body show must use exact Claude command: {}",
-            body
-        );
-        // Worker prefix must not appear on supervisor body actions.
-        assert!(
-            !body.contains("mcp__cs__factory action=epic_status"),
-            "supervisor epic_status must not use worker (Codex) prefix: {}",
-            body
-        );
-        assert!(
-            !body.contains("mcp__cs__task action=list status=awaiting_merge"),
-            "supervisor list must not use worker (Codex) prefix: {}",
-            body
-        );
-        assert!(
-            !body.contains("mcp__cs__task action=show id=cas-mix1"),
-            "supervisor show must not use worker (Codex) prefix: {}",
-            body
-        );
-        // The re-close command is relayed to the Codex worker and must be
-        // explicit that it runs in the worker's own session.
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            body.contains("Tell codex-worker to run this in its own session: `mcp__cs__task action=close id=cas-mix1"),
-            "worker re-close command must use the worker's Codex prefix: {}",
-            body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            body.lines().any(|line| {
-                line.contains("Supervisor escape hatch")
-                    && line.contains("`mcp__cas__task action=close id=cas-mix1")
-                    && line.contains("supervisor_override=true")
-            }),
-            "supervisor escape hatch must be a separate Claude-prefixed line: {}",
-            body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            !body.contains("Tell codex-worker to run this in its own session: `mcp__cas__task"),
-            "worker instruction must not use the supervisor's Claude prefix: {}",
-            body
-        );
-
-        // Claude supervisor + Grok worker: re-close uses cas__
-        let grok_worker_event = DirectorEvent::WorkerIdle {
-            worker: "grok-worker".to_string(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: "cas-mix2".to_string(),
-                task_title: "Grok worker merge park".to_string(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
-                pending_qa: None,
-            }),
-        };
-        let mut grok_data = make_data(0);
-        grok_data.agents[0].name = "grok-worker".to_string();
-        grok_data
-            .agent_id_to_name
-            .insert("sess-id-abc123".to_string(), "grok-worker".to_string());
-        let grok_prompt = generate_prompt(
-            &grok_worker_event,
-            &grok_data,
-            &grok_data,
-            "supervisor",
-            &config,
-            claude(),
-            SupervisorCli::Grok,
-            &HashSet::new(),
-            None,
-        )
-        .expect("Claude+Grok AwaitingMerge must produce a prompt");
-        let grok_body = grok_prompt
-            .text
-            .split("\n---\n")
-            .next()
-            .unwrap_or(&grok_prompt.text);
-
-        // Supervisor body commands: exact Claude prefix (not footer `mcp__cas__`).
-        assert!(
-            grok_body.contains("mcp__cas__factory action=epic_status id=<focused-epic>"),
-            "Claude+Grok supervisor body epic_status must be exact Claude command: {}",
-            grok_body
-        );
-        assert!(
-            grok_body.contains("mcp__cas__task action=list status=awaiting_merge"),
-            "Claude+Grok supervisor body list must be exact Claude command: {}",
-            grok_body
-        );
-        assert!(
-            grok_body.contains("mcp__cas__task action=show id=cas-mix2"),
-            "Claude+Grok supervisor body show must be exact Claude command: {}",
-            grok_body
-        );
-        // Negative: bare Grok `cas__` tool calls on supervisor actions.
-        // Match the leading backtick so Claude's `mcp__cas__` (which
-        // contains the substring `cas__`) does not false-fail the check.
-        assert!(
-            !grok_body.contains("`cas__factory action=epic_status"),
-            "supervisor epic_status must not use bare worker (Grok) prefix: {}",
-            grok_body
-        );
-        assert!(
-            !grok_body.contains("`cas__task action=list status=awaiting_merge"),
-            "supervisor list must not use bare worker (Grok) prefix: {}",
-            grok_body
-        );
-        assert!(
-            !grok_body.contains("`cas__task action=show id=cas-mix2"),
-            "supervisor show must not use bare worker (Grok) prefix: {}",
-            grok_body
-        );
-        // The worker instruction targets Grok, while the escape hatch stays
-        // with the Claude supervisor.
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            grok_body.contains("Tell grok-worker to run this in its own session: `cas__task action=close id=cas-mix2"),
-            "Grok worker re-close command must use its own prefix: {}",
-            grok_body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            grok_body.lines().any(|line| {
-                line.contains("Supervisor escape hatch")
-                    && line.contains("`mcp__cas__task action=close id=cas-mix2")
-                    && line.contains("supervisor_override=true")
-            }),
-            "Claude supervisor escape hatch must be a separate Claude-prefixed line: {}",
-            grok_body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            !grok_body.contains("Tell grok-worker to run this in its own session: `mcp__cas__task"),
-            "Grok worker instruction must not use the supervisor's Claude prefix: {}",
-            grok_body
-        );
-    }
-
-    fn assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-        supervisor_cli: SupervisorCli,
-        worker_cli: SupervisorCli,
-    ) {
+    fn merge_verdict_owns_completion_across_harnesses_and_targets() {
+        for supervisor_cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+            for worker_cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+                for target in ["epic/harness-prefix", "main"] {
         let worker = "worker";
         let task_id = "cas-fa1c-prefix";
         let event = DirectorEvent::WorkerIdle {
@@ -4380,94 +4166,23 @@ mod tests {
             assignee: None,
             task_type: TaskType::Epic,
             epic: None,
-            branch: Some("epic/harness-prefix".to_string()),
+            branch: Some(target.to_string()),
             updated_at: None,
             epic_verification_owner: None,
         }];
         let prompt = generate_prompt(
-            &event,
-            &data,
-            &data,
-            "supervisor",
-            &default_config(),
-            supervisor_cli,
-            worker_cli,
-            &HashSet::new(),
-            None,
-        )
-        .expect("AwaitingMerge idle must produce a supervisor prompt");
-        let body = prompt.text.split("\n---\n").next().unwrap_or(&prompt.text);
-        let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
-        let supervisor_prefix = supervisor_cli.backend().capabilities().tool_prefix;
-        // pin: rendered supervisor/worker prompt text is the contract under test.
-        let expected_worker = format!(
-            "Tell {worker} to run this in its own session: `{worker_prefix}task action=close id={task_id}"
-        );
-        assert!(
-            body.contains(&expected_worker),
-            "merge relay worker command must use {worker_prefix} and name its own session: {body}"
-        );
-        // pin: rendered supervisor/worker prompt text is the contract under test.
-        let expected_supervisor_line = format!(
-            "Supervisor escape hatch if {worker} is unresponsive: `{supervisor_prefix}task action=close id={task_id}"
-        );
-        assert!(
-            body.lines()
-                .any(|line| line.contains(&expected_supervisor_line)),
-            "supervisor escape hatch must be on its own line with {supervisor_prefix}: {body}"
-        );
-        let worker_on_escape = format!(
-            "Supervisor escape hatch if {worker} is unresponsive: `{worker_prefix}task action=close id={task_id}"
-        );
-        if worker_prefix != supervisor_prefix {
-            assert!(
-                !body.contains(&worker_on_escape),
-                "supervisor escape hatch must not use the worker prefix: {body}"
-            );
-        }
-    }
-
-    #[test]
-    fn cas_fa1c_claude_supervisor_codex_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::Claude,
-            SupervisorCli::Codex,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_codex_supervisor_claude_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::Codex,
-            SupervisorCli::Claude,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_grok_supervisor_codex_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::Grok,
-            SupervisorCli::Codex,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_opencode_supervisor_codex_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::OpenCode,
-            SupervisorCli::Codex,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_same_harness_reclose_and_escape_hatch_use_one_prefix() {
-        for cli in [
-            SupervisorCli::Claude,
-            SupervisorCli::Codex,
-            SupervisorCli::Grok,
-            SupervisorCli::OpenCode,
-        ] {
-            assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(cli, cli);
+            &event, &data, &data, "supervisor", &default_config(),
+            supervisor_cli, worker_cli, &HashSet::new(), None,
+        ).expect("parked delivery needs a merge relay");
+        let body = prompt.text.split("\n---\n").next().unwrap();
+        let prefix = supervisor_cli.backend().capabilities().tool_prefix;
+        assert!(body.contains(&format!("{prefix}task action=show id={task_id}")), "{body}");
+        // pin: the merge verdict, not a second close command, owns completion.
+        assert!(body.contains("The merge verdict closes or reopens the task"), "{body}");
+        assert!(!body.contains("task action=close"), "{body}");
+        assert!(!body.contains("Supervisor escape hatch"), "{body}");
+                }
+            }
         }
     }
 

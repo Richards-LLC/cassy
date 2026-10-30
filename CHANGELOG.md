@@ -188,7 +188,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `GROK_FOLDER_TRUST=false` and a generated `.grok/skills` that ignores itself, so
   the shared exclude file stays untouched; other checkouts keep the full listing.
   A user's own Grok skills and skills a repository tracks stay listed,
-  as do Claude plugin skills, which Claude's control does not reach.
+  as do Claude plugin skills, which Claude's control does not reach. Only directories holding a `SKILL.md` count as skills, so stray entries such as `.trash` are not listed in the overrides.
 
 ### Fixed — Async terminal output at exit
 

@@ -737,6 +737,43 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
 }
 
+/// cas-0ad8: through the real task tool. A follow-up naming a verifier finding is
+/// refused until it says how to reproduce it and who it affects.
+#[tokio::test]
+async fn task_create_applies_the_review_spawn_threshold_cas_0ad8() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, _task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let service = CasService::new(core, None);
+    let create = |extra: serde_json::Value| {
+        let mut request = serde_json::json!({
+            "action": "create", "title": "Tighten a check", "risk": "none", "task_type": "task",
+            "description": "Non-blocking verifier findings on the delivery (ver-7e87d441000d).",
+        });
+        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<cas::mcp::tools::TaskRequest>(request).unwrap()
+    };
+    let refused = service
+        .task(Parameters(create(serde_json::json!({}))))
+        .await
+        .expect_err("a follow-up from a finding without repro or affected is refused");
+    assert!(refused.message.contains("SPAWN THRESHOLD"), "{}", refused.message);
+
+    let created = extract_text(
+        service
+            .task(Parameters(create(serde_json::json!({
+                "repro": "run cas x; it prints y", "affected": "the supervisor reading it",
+            }))))
+            .await
+            .unwrap(),
+    );
+    let id = extract_task_id(&created).unwrap().to_string();
+    let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
+    assert!(task.labels.iter().any(|label| label == "from-finding"), "{:?}", task.labels);
+    assert!(task.notes.contains("Finding origin: verification:ver-7e87d441000d"), "{}", task.notes);
+    assert!(task.notes.contains("Affected: the supervisor reading it"), "{}", task.notes);
+}
+
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
     let (temp, core, repo, task_id) =
         fixture_with_project(test_env, under_epic.then_some("qa-follow-up-fixture"));

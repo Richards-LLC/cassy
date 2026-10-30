@@ -1245,7 +1245,7 @@ fn classify_area(title: &str, body: &str) -> String {
 /// contribute to change totals or the change map. Classify by source heading.
 fn is_non_shipped_category(category: &str) -> bool {
     let category = category.to_ascii_lowercase();
-    category.starts_with("test") || category.starts_with("doc") || category == "known limits"
+    category.starts_with("test") || category.starts_with("doc") || category.starts_with("known limit")
 }
 
 /// Strip trailing reference lists such as `(#1203, cas-d697)` from a title.

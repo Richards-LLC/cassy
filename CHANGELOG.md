@@ -17,6 +17,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Completed replacements stop retaining shutdown mail** — Registration retries a failed lifecycle write, so a later shutdown can cancel unread mail and retire its alarms. Dead-pane recycle failures now use the same stale fallback and visible deferred-retirement warning as live panes. Alarm scans query replacement intent only for shut-down recipients, once per recipient.
 
+### Fixed — Release report counts
+
+- **Known limitations stay out of shipped totals** — Was: only the exact
+  "Known limits" heading was excluded. Now: the "Known limit…" heading family
+  stays in report prose without adding shipped changes.
+
 ### Fixed — Portable QA guidance
 
 - **QA examples work outside the Cassy repository** — The generic evidence

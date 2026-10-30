@@ -189,17 +189,6 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
 
 /// Return `tool` with a compact input schema.
 pub(crate) fn compact_tool(mut tool: Tool) -> Tool {
-    if tool.name.as_ref() == "factory" {
-        let mut description = tool
-            .description
-            .take()
-            .map(|value| value.into_owned())
-            .unwrap_or_default();
-        description.push_str(" Actions: ");
-        description.push_str(&cas_mcp::actions::FACTORY_ACTIONS.join(", "));
-        description.push('.');
-        tool.description = Some(description.into());
-    }
     let mut schema = tool.input_schema.as_ref().clone();
     narrow_split_tool(tool.name.as_ref(), &mut schema);
     for keyword in ["$schema", "title", "description"] {
@@ -316,30 +305,35 @@ mod tests {
         assert_eq!(tool.description.as_deref(), Some("fixture tool"));
     }
 
-    /// cas-269ab (cas-c6ef review): `interrupt` once dispatched while the
-    /// coordination description omitted it. Each tool's description names
-    /// every action of its registry list, aliases included.
+    /// The coordination description documents its actions; factory publishes
+    /// its complete action list in the schema enum so tools/list stays compact.
     #[test]
-    fn coordination_and_factory_descriptions_name_every_registry_action() {
+    fn coordination_description_and_factory_enum_name_every_registry_action() {
         let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
-        for (name, actions) in [
-            ("coordination", cas_mcp::actions::COORDINATION_ACTIONS),
-            ("factory", cas_mcp::actions::FACTORY_ACTIONS),
-        ] {
-            let description = tools
-                .iter()
-                .find(|tool| tool.name == name)
-                .unwrap_or_else(|| panic!("{name} tool is not registered"))
-                .description
-                .as_deref()
-                .unwrap_or_default()
-                .to_string();
-            let words: std::collections::HashSet<&str> = description
-                .split(|c: char| !c.is_ascii_lowercase() && c != '_')
-                .collect();
-            for action in actions {
-                assert!(words.contains(action), "{name} description omits `{action}`: {description}");
-            }
+        let coordination = tools
+            .iter()
+            .find(|tool| tool.name == "coordination")
+            .expect("coordination tool is registered");
+        let description = coordination.description.as_deref().unwrap_or_default();
+        let words: std::collections::HashSet<&str> = description
+            .split(|c: char| !c.is_ascii_lowercase() && c != '_')
+            .collect();
+        for action in cas_mcp::actions::COORDINATION_ACTIONS {
+            assert!(words.contains(action), "coordination description omits `{action}`: {description}");
+        }
+
+        let factory = tools
+            .iter()
+            .find(|tool| tool.name == "factory")
+            .expect("factory tool is registered");
+        let actions = factory.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("factory action enum");
+        for action in cas_mcp::actions::FACTORY_ACTIONS {
+            assert!(
+                actions.iter().any(|published| published.as_str() == Some(action)),
+                "factory action enum omits `{action}`"
+            );
         }
     }
 

@@ -9,7 +9,7 @@ use crate::ui::theme::Icons;
 /// Heading level controlling visual prominence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
-    /// Primary heading: bold accent with separator bars (═══ TITLE ═══)
+    /// Primary heading: bold terminal foreground with locale-aware separator bars
     H1,
     /// Secondary heading: bold primary text
     H2,
@@ -75,16 +75,12 @@ impl Renderable for Header {
 
         match self.level {
             Level::H1 => {
-                if fmt.is_styled() {
-                    let bar = Icons::SEPARATOR_DOUBLE;
-                    let color = fmt.theme().palette.accent;
-                    fmt.write_bold_colored(
-                        &format!("{bar}{bar}{bar} {display_text} {bar}{bar}{bar}"),
-                        color,
-                    )?;
+                let bar = if fmt.is_styled() && fmt.unicode() {
+                    Icons::SEPARATOR_DOUBLE
                 } else {
-                    fmt.write_raw(&format!("=== {display_text} ==="))?;
-                }
+                    "="
+                };
+                fmt.write_bold_plain(&format!("{bar}{bar}{bar} {display_text} {bar}{bar}{bar}"))?;
             }
             Level::H2 => {
                 if fmt.is_styled() {

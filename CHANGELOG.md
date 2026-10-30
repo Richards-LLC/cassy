@@ -31,13 +31,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   beyond its parked delivery through unowned work, close reports the kept anchor,
   ignored tip and offending commit instead of returning an ordinary merge request.
 
-### Fixed — Case checks after registry repairs
+### Fixed — Independent case checks after registry failures
 
-- **Registry repairs retain ownership and regression checks** — Fixing a base
-  duplicate evaluates the delivered registry and compares every old case variant.
-  Registry escape notes cannot bypass the case gate; duplicates still present in
-  the delivery refuse with a named error. Unavailable Git inputs retain their
-  existing nonblocking warning.
+- **Registry waivers retain separate regression checks** — Fixing a base duplicate
+  evaluates the delivered registry and compares every old case variant. Unreadable
+  delivered registries and catalog drift still require a separate bug-case decision,
+  including when an earlier registry waiver exists. Duplicates still present in the
+  delivery refuse with a named error; unavailable Git inputs retain their warning.
 
 ### Fixed — Parked delivery attribution
 

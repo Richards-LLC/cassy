@@ -193,6 +193,24 @@ impl Finding {
             detail,
         }
     }
+    fn missing_case(detail: String) -> Self {
+        Self {
+            gate: "G3",
+            token: "no case:",
+            title: "BUG FIX WITHOUT A CASE",
+            detail,
+        }
+    }
+}
+
+/// A G1 waiver cannot authorize a bug whose case coverage was never evaluated.
+fn retain_case_gate(task: &Task, findings: &mut Vec<Finding>, reason: &str) {
+    if task.task_type == TaskType::Bug && findings.iter().any(|finding| finding.gate == "G1") {
+        findings.push(Finding::missing_case(format!(
+            "Task {} is a bug, but {reason}; regression-case coverage could not be evaluated. Repair the registry and add or extend a case naming {}.",
+            task.id, task.id
+        )));
+    }
 }
 
 fn decision_reason<'a>(notes: &'a str, token: &str) -> Option<&'a str> {
@@ -315,39 +333,40 @@ fn read_registry_baseline(
                 baseline.registry = registry;
                 return Ok(baseline);
             }
-            Err(error) if error.is::<DuplicateBugFamily>() => {
-                let duplicate = error.downcast_ref::<DuplicateBugFamily>().unwrap();
-                let (key, file) = (duplicate.key.clone(), duplicate.path.clone());
-                let notice = format!(
-                    "UPKEEP NOTICE: base registry duplicate repaired by this delivery: {error:#}"
-                );
-                let Some(contents) = read(repo, revision, &file, &remaining)? else {
-                    return Err(error.context(format!("BASE JOURNEY REGISTRY INVALID: {path}")));
-                };
-                let family = match serde_yaml::from_str(&contents) {
-                    Ok(family) => family,
-                    Err(cause) => {
-                        return Err(error.context(format!(
-                            "BASE JOURNEY REGISTRY INVALID: cannot compare {file}: {cause}"
-                        )));
-                    }
-                };
-                baseline.alternatives.entry(key).or_default().push(family);
-                baseline.notices.push(notice);
-                remaining.retain(|candidate| candidate != &file);
-                first_duplicate.get_or_insert(error);
+            Err(error) => {
+                if let Some(duplicate) = error.downcast_ref::<DuplicateBugFamily>() {
+                    let (key, file) = (duplicate.key.clone(), duplicate.path.clone());
+                    let notice = format!(
+                        "UPKEEP NOTICE: base registry duplicate repaired by this delivery: {error:#}"
+                    );
+                    let Some(contents) = read(repo, revision, &file, &remaining)? else {
+                        return Err(error.context(format!("BASE JOURNEY REGISTRY INVALID: {path}")));
+                    };
+                    let family = match serde_yaml::from_str(&contents) {
+                        Ok(family) => family,
+                        Err(cause) => {
+                            return Err(error.context(format!(
+                                "BASE JOURNEY REGISTRY INVALID: cannot compare {file}: {cause}"
+                            )));
+                        }
+                    };
+                    baseline.alternatives.entry(key).or_default().push(family);
+                    baseline.notices.push(notice);
+                    remaining.retain(|candidate| candidate != &file);
+                    first_duplicate.get_or_insert(error);
+                    continue;
+                }
+                if error.is::<serde_yaml::Error>() {
+                    // Retain YAML debt, never discard an incomplete duplicate comparison.
+                    return match first_duplicate {
+                        Some(duplicate) => Err(duplicate.context(format!(
+                            "BASE JOURNEY REGISTRY INVALID: cannot compare {path}: {error:#}"
+                        ))),
+                        None => Ok(baseline),
+                    };
+                }
+                return Err(error);
             }
-            Err(error) if error.is::<serde_yaml::Error>() => {
-                // Retain the historical YAML-debt fallback, but never discard
-                // an incomplete duplicate comparison and grant false case credit.
-                return match first_duplicate {
-                    Some(duplicate) => Err(duplicate.context(format!(
-                        "BASE JOURNEY REGISTRY INVALID: cannot compare {path}: {error:#}"
-                    ))),
-                    None => Ok(baseline),
-                };
-            }
-            Err(error) => return Err(error),
         }
     }
 }
@@ -485,13 +504,12 @@ fn inspect(
             )));
         }
         Err(error) if registry_touched => {
-            return Ok((
-                vec![Finding::broken(format!(
-                    "{}: cannot read or parse delivered registry: {error:#}",
-                    qa.registry.path
-                ))],
-                vec![],
-            ));
+            let mut findings = vec![Finding::broken(format!(
+                "{}: cannot read or parse delivered registry: {error:#}",
+                qa.registry.path
+            ))];
+            retain_case_gate(task, &mut findings, "the delivered registry cannot be read or parsed");
+            return Ok((findings, vec![]));
         }
         Err(error) => {
             return Ok((
@@ -572,6 +590,7 @@ fn inspect(
                 ));
             }
             // An unavailable impact report must not erase proven G1 findings.
+            retain_case_gate(task, &mut findings, "journey impact cannot be evaluated");
             return Ok((findings, warnings));
         }
     };
@@ -644,8 +663,7 @@ fn inspect(
         && !live.is_empty()
         && !(registry_touched && has_changed_case(&registry, &before, &task.id))
     {
-        findings.push(Finding {gate: "G3", token: "no case:", title: "BUG FIX WITHOUT A CASE",
-            detail: format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)});
+        findings.push(Finding::missing_case(format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)));
     }
     Ok((findings, warnings))
 }

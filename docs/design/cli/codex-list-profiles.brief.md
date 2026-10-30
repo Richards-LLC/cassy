@@ -27,6 +27,38 @@ under `<artifacts>/cas-f972/baseline/`, with `baseline-RECEIPT.json` binding the
 supervisor-built candidate. The historical critique below describes the prior
 Codex-only change.
 
+Treatment `e8d0bb358`: all six provider/identity cases have 80-cell headers,
+complete login/active suffixes, and exact names/folders under both `--full`
+and `--json`. Short listings omit the hint; both providers' help mentions
+profile listings. Folder and Claude metadata read-back confirm no identity
+mutation. Captures and assertions: `<artifacts>/cas-f972/terminal-qa/`;
+binary receipt: `candidate/RECEIPT.json`.
+
+```text
+terminal-qa: PASS claude-profiles-ascii · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS claude-profiles-cjk · 11 runs · 0 fail · 0 warn · 1 allowed
+terminal-qa: PASS claude-profiles-emoji · 11 runs · 0 fail · 0 warn · 1 allowed
+terminal-qa: PASS codex-profiles-ascii · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS codex-profiles-cjk · 11 runs · 0 fail · 0 warn · 1 allowed
+terminal-qa: PASS codex-profiles-emoji · 11 runs · 0 fail · 0 warn · 1 allowed
+```
+
+Each CJK/emoji run allows only `unicode-without-fallback` under C locale:
+the non-ASCII text is the account's identity, not an authored UI glyph.
+Renderer punctuation remains ASCII. The legacy listing's plain-text
+`--json` contract is explicit above; the structured account command remains
+available. Both providers' 80-column renders were inspected on dark, light
+and Solarized palettes; the same fixtures also passed at 120 columns,
+NO_COLOR, and through a pipe.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Existing launch syntax leads into provider profiles and complete states. |
+| Fit | 4 | All six long identity cases fit 80 cells without losing state words. |
+| Craft | 4 | Shared rows keep indentation and show the escape only when needed. |
+| Theme safety | 5 | All four palettes, NO_COLOR and pipe pass with no authored SGR. |
+| Machine contract | 4 | Both full-value flags preserve exact aliases, folders and Claude emails; the listing stays plain text. |
+
 ### Prior Codex-only change
 
 Baseline `9b1c55f3`: `terminal-qa: FAIL codex-list-profiles · 11 runs · 8 fail · 0 warn · 0 allowed`.

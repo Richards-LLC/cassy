@@ -16,6 +16,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Rapid response release checks
 
+- **Production alarms keep the release gate closed** — Rapid response can
+  defer a running post-release check, but a failed check still blocks release
+  notes and epic close until the operator records an explicit override.
+
 - **Verify the release merge before deferring observation** — Rapid response
   defers the post-release wait only for a protected recorded merge that brought
   the epic into a configured release branch. Its full first-parent diff must

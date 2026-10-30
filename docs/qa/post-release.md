@@ -64,15 +64,23 @@ fast-forward, squash, missing origin ref or merge confined to another branch
 cannot establish that identity; use the operator start for observation. Empty
 `release_branches` uses the default branch.
 
-During an operator-enabled rapid-response window, pending and failed checks can
-be deferred only for a protected recorded release merge that introduced the epic
+Release provenance uses the local `refs/remotes/origin/<branch>` tracking refs;
+the gate does not fetch them. Refresh those refs after publication. A cached
+tracking ref proves only the locally observed history, not the remote's current
+state.
+
+During an operator-enabled rapid-response window, only a still-pending check can
+be deferred, and only for a protected recorded release merge that introduced the epic
 on a configured origin release branch. Cassy scans `<sha>^1..<sha>`, including
 merge-resolution edits: a migration, secret-shaped added line or unreadable diff
 keeps the gate. An unverified, fast-forward, foreign or squash SHA keeps the
 gate too. A deferred check is recorded in the window's back-fill ledger; closing
 the window restores the gate. The background observations continue.
+A failed check keeps the gate even inside the window and still requires the
+explicit operator override described below.
 
-Pending and failed checks refuse release-note posts and epic close. Violet
+Outside that deferral, pending checks refuse release-note posts and epic close;
+failed checks always refuse them unless the operator records an override. Violet
 posts marked `release_notes: true`, or whose first nonempty line has a rubric
 release heading (`Live on production` / `Staging`, followed by `User` / `Dev`),
 use this gate, including `cas violet post`. Ordinary messages in the same

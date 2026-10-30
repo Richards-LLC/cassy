@@ -75,8 +75,10 @@ export interface TurnRenderContext {
  * on any turn that carries one (Pebble 4, the dog-eared sheet).
  */
 export type RenderableKind = "ask" | "blocker" | "secret" | "attachment";
-/** Saves (`value`) or declines a secret request; resolves with where the hub saved it. */
-export type SecretAnswerer = (request: OperatorReply, answer: { value: string } | { decline: true }) => Promise<{ path?: string }>;
+/** cas-2f55: when a saved secret is deleted; absent uses the project setting (keep by default). */
+export type SecretAutoDelete = "keep" | "after_use" | "1h" | "24h";
+/** Saves (`value`) or declines a secret request; resolves with where the hub saved it and when it deletes it. */
+export type SecretAnswerer = (request: OperatorReply, answer: { value: string; auto_delete?: SecretAutoDelete } | { decline: true }) => Promise<{ path?: string; auto_delete?: string | null }>;
 export type TurnRenderer = (event: OperatorReply, context: TurnRenderContext) => HTMLElement;
 
 const turnRenderers = new Map<RenderableKind, TurnRenderer>();
@@ -1123,7 +1125,7 @@ export class ConversationView {
    * at once, before the hub's reply reaches the history. The repaint waits a
    * task so the card first records its outcome.
    */
-  private async answerSecret(request: OperatorReply, answer: Parameters<SecretAnswerer>[1]): Promise<{ path?: string }> {
+  private async answerSecret(request: OperatorReply, answer: Parameters<SecretAnswerer>[1]): ReturnType<SecretAnswerer> {
     const outcome = await this.options.answerSecret!(request, answer);
     setTimeout(() => {
       if (this.disposed || !this.history.dismissAsk(request.notification_id)) return;

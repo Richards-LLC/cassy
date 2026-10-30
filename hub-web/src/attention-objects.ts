@@ -1,6 +1,6 @@
 import { sentMessageLabel } from "./sent-attachments";
 import { BLOCKER_HINT } from "./context-rail";
-import { registerTurnRenderer, renderBody, type TurnRenderContext } from "./conversation-view";
+import { registerTurnRenderer, renderBody, type SecretAutoDelete, type TurnRenderContext } from "./conversation-view";
 import { blockerEvidence } from "./thread-model";
 import type { AskRetirement } from "./conversation-history";
 import type { OperatorReply } from "./types";
@@ -140,6 +140,26 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
   return object;
 }
 
+/** The card's deletion choices; "" leaves it to the project setting. */
+const SECRET_AUTO_DELETE_CHOICES: readonly (readonly [SecretAutoDelete | "", string])[] = [
+  ["", "Project setting (keep unless set)"],
+  ["keep", "Keep the file"],
+  ["after_use", "Delete once the agent has used it"],
+  ["1h", "Delete after 1 hour"],
+  ["24h", "Delete after 24 hours"],
+];
+
+/** "once used" or "after 2 hours" for the hub's auto_delete label; undefined keeps. */
+function secretDeletionPhrase(label: string | null | undefined): string | undefined {
+  if (!label) return undefined;
+  if (label === "after_use") return "once used";
+  const match = /^(\d+)([mhd])$/.exec(label);
+  if (!match) return undefined;
+  const count = Number(match[1]);
+  const unit = { m: "minute", h: "hour", d: "day" }[match[2] as "m" | "h" | "d"];
+  return `after ${count} ${unit}${count === 1 ? "" : "s"}`;
+}
+
 /**
  * What this page's answer to a secret request said, by request id, until the
  * hub's reply reaches the history (cas-1996). Never the value.
@@ -198,19 +218,28 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
     for (const [name, value] of [["data-1p-ignore", ""], ["data-lpignore", "true"], ["data-bwignore", "true"], ["data-form-type", "other"]]) input.setAttribute(name!, value!);
     input.setAttribute("aria-label", `Value for ${name}`);
     input.placeholder = "Paste the value";
+    // cas-2f55: deleting the saved file is opt-in; the first choice follows
+    // the project's secrets.auto_delete, which keeps the file by default.
+    const expiry = document.createElement("select"); expiry.className = "secret-auto-delete";
+    expiry.setAttribute("aria-label", `After saving ${name}`);
+    for (const [value, label] of SECRET_AUTO_DELETE_CHOICES) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label;
+      expiry.append(option);
+    }
     const save = document.createElement("button"); save.type = "button"; save.className = "chip secret-save"; save.textContent = "Save securely";
     const decline = document.createElement("button"); decline.type = "button"; decline.className = "chip secret-decline"; decline.textContent = "Decline";
     const status = document.createElement("p"); status.className = "secret-status"; status.setAttribute("role", "status");
-    const controls = [input, save, decline];
+    const controls = [input, expiry, save, decline];
     if (!context.answerSecret) for (const control of controls) control.disabled = true;
-    const send = async (answerWith: { value: string } | { decline: true }): Promise<void> => {
+    const send = async (answerWith: Parameters<NonNullable<TurnRenderContext["answerSecret"]>>[1]): Promise<void> => {
       if (!context.answerSecret) return;
       for (const control of controls) control.disabled = true;
       status.textContent = "decline" in answerWith ? "Declining…" : "Saving on the machine…";
       try {
         const saved = await context.answerSecret(reply, answerWith);
         input.value = "";
-        const text = "decline" in answerWith ? "Declined" : `Saved to ${saved.path ?? "the machine"}`;
+        const deletes = "decline" in answerWith ? undefined : secretDeletionPhrase(saved.auto_delete);
+        const text = "decline" in answerWith ? "Declined" : `Saved to ${saved.path ?? "the machine"}${deletes ? ` · deleted ${deletes}` : ""}`;
         secretOutcomes.set(reply.notification_id, text);
         object.dataset.answered = "true";
         const sent = document.createElement("span"); sent.className = "chip sent";
@@ -223,12 +252,13 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
     };
     const submit = (): void => {
       if (!input.value.trim()) { status.textContent = "Paste the value first."; input.focus(); return; }
-      void send({ value: input.value });
+      const choice = expiry.value as SecretAutoDelete | "";
+      void send(choice ? { value: input.value, auto_delete: choice } : { value: input.value });
     };
     save.onclick = submit;
     input.onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } };
     decline.onclick = () => { void send({ decline: true }); };
-    form.append(input, save, decline);
+    form.append(input, expiry, save, decline);
     foot.append(form, status);
   }
   object.append(body, foot);

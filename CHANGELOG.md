@@ -50,6 +50,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   emoji, while preserving login and active states. `--full` and `--json` retain
   exact values; the full-value hint appears only when a value was shortened.
 
+### Added — Commander secret auto-delete
+
+- **A saved secret can delete itself** — Was: a secret saved from Commander's secret card stayed on the machine until someone deleted it. Now: the card offers to keep the file, delete it once the agent has used it, or delete it after 1 or 24 hours. The project setting `secrets.auto_delete` (default `off`) sets the default. Each deletion leaves a receipt in `.cas/secret-receipts.jsonl` that never contains the value.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

@@ -2273,6 +2273,8 @@ fn serve_foreground_logged(
             crate::hub::idle_sync::spawn_idle_sync_loop(paths.root().to_path_buf());
         let presence_task =
             crate::hub::operator_inbox::presence::spawn_presence_loop(paths.root().to_path_buf());
+        // cas-2f55: delete secrets saved with a stated time once it passes.
+        let secret_sweep_task = crate::hub::secret_auto_delete::spawn_sweep_loop();
 
         lock.set_phase("running")?;
         let result = if let Some(proxy_listener) = tailscale_listener {
@@ -2284,6 +2286,7 @@ fn serve_foreground_logged(
         operator_inbox_task.abort();
         idle_sync_loop.stop();
         presence_task.abort();
+        secret_sweep_task.abort();
         if let Some(task) = attention_task {
             task.abort();
         }

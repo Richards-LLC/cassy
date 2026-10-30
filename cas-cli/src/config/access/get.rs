@@ -305,6 +305,12 @@ impl Config {
                     .and_then(|secrets| secrets.destination.clone())
                     .unwrap_or_default(),
             ),
+            "secrets.auto_delete" => Some(
+                self.secrets
+                    .as_ref()
+                    .and_then(|secrets| secrets.auto_delete.clone())
+                    .unwrap_or_else(|| "off".into()),
+            ),
             // History section
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),
             // Release section

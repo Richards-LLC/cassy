@@ -8660,6 +8660,7 @@ mod workspace_contract_tests {
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
             // Rejected review: a nearby final pair does not prove arithmetic.
+            "echo \"$(( $(cat <<'EOF'\n> /outside/cas-0c9c-p\nEOF\n) ))\"",
             "echo \"$((touch /outside/cas-0c9c-p) && (true))\"",
             "echo $((touch /outside/cas-0c9c-p) && (true))",
             "echo \"$((touch /outside/cas-0c9c-p)|(true))\"",

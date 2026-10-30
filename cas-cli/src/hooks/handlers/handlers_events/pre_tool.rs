@@ -7307,6 +7307,23 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn changelog_edit_continuation_plus_new_bullet_warns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        let old = "- Existing delivery entry.\n  Existing wrapped detail.\n";
+        std::fs::write(&file, old).unwrap();
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "old_string": old,
+                "new_string": "- Existing delivery entry.\n  Existing wrapped detail.\n  Continuation edited by another delivery.\n\n- New task entry.\n"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
     fn worker_file_lease_notes_checks_changelog_edit_before_claim() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");

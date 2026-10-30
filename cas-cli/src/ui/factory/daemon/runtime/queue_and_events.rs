@@ -9116,7 +9116,7 @@ impl FactoryDaemon {
                                 &envelope.target_branch,
                                 &target_tip,
                             )),
-                            "merge already landed — re-close task",
+                            "merge already landed — awaiting verdict",
                         ),
                         MergeRequestDelivery::SuppressResolved { status } => (
                             Some(format!(

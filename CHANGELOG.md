@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merged delivery recovery guidance
+
+- **Launch and status messages agree on merge completion** — All harness launch
+  contracts, stale merge replies and worker status rows let the merge verdict
+  close or reopen the delivery, without another close command from the worker.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

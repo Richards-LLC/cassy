@@ -40,6 +40,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   issue restores the test. Persistent failures still eject, and worker/lane
   checks retain zero retries. Rust recovery adds at most 30 seconds.
 
+### Fixed — Shell policy command recognition
+
+- **Shell syntax cannot hide operator-only commands** — Agent checks now
+  recognize brace and loop command positions, remove shell line continuations,
+  and decode common ANSI-C quoted words before matching policy commands.
+  Unsupported ANSI-C escapes are refused; quoted data remains literal.
+
 ### Fixed — QA impact for test fixtures
 
 - **Test fixtures stay outside product QA impact** — Files in fixture directories

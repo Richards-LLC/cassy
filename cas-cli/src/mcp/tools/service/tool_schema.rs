@@ -189,6 +189,17 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
 
 /// Return `tool` with a compact input schema.
 pub(crate) fn compact_tool(mut tool: Tool) -> Tool {
+    if tool.name.as_ref() == "factory" {
+        let mut description = tool
+            .description
+            .take()
+            .map(|value| value.into_owned())
+            .unwrap_or_default();
+        description.push_str(" Actions: ");
+        description.push_str(&cas_mcp::actions::FACTORY_ACTIONS.join(", "));
+        description.push('.');
+        tool.description = Some(description.into());
+    }
     let mut schema = tool.input_schema.as_ref().clone();
     narrow_split_tool(tool.name.as_ref(), &mut schema);
     for keyword in ["$schema", "title", "description"] {

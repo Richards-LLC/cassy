@@ -904,8 +904,13 @@ main {
 }
 
 .status-chip--active,
-.status-chip--in-progress { color: var(--state-ok); }
-.status-chip--blocked { color: var(--state-warn); background: var(--tint-warn); }
+.status-chip--in-progress,
+.status-chip--executing,
+.status-chip--merged { color: var(--state-ok); }
+.status-chip--blocked,
+.status-chip--stalled,
+.status-chip--budget-stopped,
+.status-chip--parked-for-merge { color: var(--state-warn); background: var(--tint-warn); }
 .status-chip--idle,
 .status-chip--open { color: var(--text-mid); }
 
@@ -1880,7 +1885,7 @@ dialog form > *,
 .team-needs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-block: var(--space-1); margin-block-end: var(--space-2); border-block: 1px solid var(--line-subtle); }
 .team-needs h3, .team-needs p { margin: 0; font-size: 13px; }
 .team-needs h3 { margin-right: var(--space-2); }
-.team-needs button { min-height: 44px; }
+.team-needs button { min-height: 44px; border: var(--line-width) solid var(--state-warn); background: var(--tint-warn); color: var(--state-warn); }
 .team-lanes { list-style: none; margin: 0; padding: 0; }
 .team-lane { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line-subtle); padding-block: var(--space-4); }
 .team-identity { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); }

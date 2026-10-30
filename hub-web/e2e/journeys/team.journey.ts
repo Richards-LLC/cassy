@@ -38,6 +38,13 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel.locator('.team-lane[data-worker="swift-lark-3"] .team-model')).toHaveText("codex · gpt-6.1");
         await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-model')).toHaveText("codex · Model not reported");
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
+        // Working and waiting differ by color and mark, not just by the word.
+        const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => getComputedStyle(node).color + getComputedStyle(node).backgroundColor));
+        const [working, waiting] = [await look("swift-lark-3"), await look("brisk-wren-9")];
+        expect(working[0]).not.toBe(waiting[0]);
+        expect(working[1]).not.toBe(waiting[1]);
+        const merges = panel.locator('[data-team-action="merges"]');
+        expect(await merges.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();
         expect(hub.frames.filter(frame => ["ScrollbackRequest", "WorkEventsRequest", "WorkEventDetailRequest"].includes(frame.kind))).toEqual([]);
       });

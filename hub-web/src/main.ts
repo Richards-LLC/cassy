@@ -5298,6 +5298,7 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
     epics: (status?.epics as ReleaseEpic[]) ?? [], focused: typeof status?.focused_epic === "string" ? status.focused_epic : null,
     supervisors: [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name)),
     asks: key ? waitingOnOperator(conversationHistories.get(key)) : 0,
+    askLabel: key ? conversationHistories.get(key)?.waiting()[0]?.summary : undefined,
     stale: statusFailures.has(key!) ? "Staffing update failed. Showing the last state received." : stale,
     unavailable: session?.ended ? "This session has ended." : !status ? statusFailures.has(key!) ? "Couldn’t load staffing." : "Waiting for project status…" : undefined,
   }, () => select(false), openProgressSheet);

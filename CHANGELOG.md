@@ -22,6 +22,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   sync may combine epic and released-trunk parents; every side parent must
   independently belong to one of those upstreams.
 
+### Fixed — Team tab state and decisions stand out
+
+- **Worker state reads at a glance** — Working, waiting, stalled and parked workers now have distinct pill colors in Team and the side rail, and each Team lane has a status dot on its avatar. The Needs you control uses the warning treatment and names the question when exactly one is open.
+
 ### Fixed — Supervisor idle alerts
 
 - **A worker waiting on its own tests no longer pages the supervisor every minute** — Was: a worker that told the supervisor it was not blocked, or that kept rerunning its background tests, drew the same "pending delivery" idle alert about once a minute. → Now: a changed condition (new tip, CI result or task state) still alerts at once. The same alert repeats at most once in 10 minutes after a background run ends, and is held for 10 minutes after the worker's own status for that task that needs nothing. A blocker, question, ready report or stated need never quiets it.

@@ -2057,6 +2057,37 @@ for that invocation. The runner prints the reason and stores it in the test
 receipt (`host_path_opt_out`); an empty reason refuses instead of silently
 relaxing the rule. Do not use this opt-out to repair an incomplete fixture.
 
+#### Operator live headful mode (macOS)
+
+From an operator terminal in a clean isolated worktree, combine
+`CAS_HEADFUL_E2E=1` with a reasoned `CAS_WORKER_TEST_ALLOW_HOST_PATH` opt-in.
+Use a candidate `cas` binary containing this runner change and retain the real
+`HOME`, XDG environment, `CLAUDE_CONFIG_DIR`, secure-storage selector and any
+Claude/Anthropic credentials. Do not use `--isolated-test-env`. For example,
+replace the two absolute paths with the candidate binary and main project's
+`.cas` directory:
+
+```bash
+env CAS_HEADFUL_E2E=1 CAS_WORKER_TEST_ALLOW_HOST_PATH='operator live headful credential proof' /absolute/candidate/cas factory worker-check --cas-root /absolute/project/.cas -- nextest run -p cas --test e2e_test -E 'test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)' > target/headful-live.log 2>&1
+```
+
+This mode accepts only that exact test selection on macOS. It keeps clean-HEAD,
+private-target, builder-slot, load/memory admission, nonzero-test and receipt
+checks, inherits host PATH and credentials, and prints successful test output
+immediately. It works with `--detach` too, retaining those environment opt-ins.
+The factory's operator-only ancestry guard remains active: an agent terminal
+cannot supply live proof, even with both environment opt-ins.
+
+Read the complete log, not just nextest's passed count. Without explicit opt-in,
+headful selection reports `NOT EXERCISED`. Missing or failing `claude --version`
+fails as `headful dependency unavailable`; a selected account whose
+`claude auth status --json` does not confirm `loggedIn=true` fails as
+`headful authentication failed`. Auth output and credentials are never printed.
+Worker-registration failures after that preflight are distinct and do not prove
+credential loss. Actual success prints `headful live: PASS` only after three
+worker replies and reuse of the same Terminal window. Preserve the log with
+the tested SHA and macOS version for the task's platform proof.
+
 In the Cassy source repository, every named run first executes the fixed cheap
 guards: `test_support::lib_test_process_env_mutation_is_isolated`,
 `config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9`,

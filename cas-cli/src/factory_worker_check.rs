@@ -615,6 +615,29 @@ fn executable(path: &Path) -> bool {
 }
 
 const HOST_PATH_OPT_OUT: &str = "CAS_WORKER_TEST_ALLOW_HOST_PATH";
+const HEADFUL_FILTER: &str = "test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)";
+
+/// Compose the existing explicit opt-ins rather than weakening default test isolation.
+fn live_headful_mode(test: Option<&TargetedTest>, isolated_test_env: Option<&Path>, host_reason: Option<&str>) -> Result<bool> {
+    if std::env::var_os("CAS_HEADFUL_E2E").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Ok(false);
+    }
+    if !test.is_some_and(|test| test.package == "cas"
+        && test.harness.as_deref() == Some("e2e_test") && test.filter == HEADFUL_FILTER)
+    {
+        bail!("Live headful requires the exact headful e2e_test selection documented in CONTRIBUTING");
+    }
+    if host_reason.is_none() {
+        bail!("Live headful requires CAS_WORKER_TEST_ALLOW_HOST_PATH with a single-line reason; run from the operator's own terminal");
+    }
+    if isolated_test_env.is_some() {
+        bail!("Live headful cannot use the credential-free isolated-test-env profile; retain the selected Claude account environment");
+    }
+    if !cfg!(target_os = "macos") {
+        bail!("Live headful requires macOS with Terminal.app; no live test was executed");
+    }
+    Ok(true)
+}
 
 fn host_path_opt_out() -> Result<Option<String>> {
     let Some(reason) = std::env::var_os(HOST_PATH_OPT_OUT) else {
@@ -1791,6 +1814,15 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
+    let live_headful = live_headful_mode(test.as_ref(), isolated_test_env, host_path_opt_out.as_deref())?;
+    if live_headful {
+        println!("Live headful: enabled; host PATH and Claude credentials inherited");
+        println!("Factory launch remains operator-only; normal build caps apply");
+    } else if test.as_ref().is_some_and(|test| test.harness.as_deref() == Some("e2e_test")
+        && test.filter.contains("factory_tui_headful")) {
+        println!("Live headful: NOT EXERCISED (CAS_HEADFUL_E2E=1 not set)");
+    }
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -1859,7 +1891,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
     if let Some(reason) = &host_path_opt_out {
         println!("Worker test PATH: host opt-out: {reason}");
     }
@@ -1920,6 +1951,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         command.env("PATH", path);
     }
     let mut cargo_args = args.to_vec();
+    if live_headful {
+        cargo_args.extend(["--success-output".into(), "immediate".into()]);
+    }
     // An omitted harness means library tests; do not build every test binary.
     if test.as_ref().is_some_and(|test| test.harness.is_none())
         && cargo_args.get(4).is_some_and(|arg| arg == "-E")
@@ -2853,6 +2887,49 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
                 .contains("nonempty, single-line reason")
         );
         assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_headful_profile_requires_reason_and_preserves_credentials_cas_7e12() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        env.set("CAS_HEADFUL_E2E", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname='cas'\nversion='0.1.0'\n[[test]]\nname='e2e_test'\npath='tests/e2e.rs'\n").unwrap();
+        std::fs::write(repo.join("tests/e2e.rs"), "").unwrap();
+        fixture_commit_as(&repo, "explicit e2e harness");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, "printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\\n'");
+        let args = ["nextest", "run", "-p", "cas", "--test", "e2e_test", "-E",
+            "test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)"].map(str::to_string);
+        let error = execute_at(&root, &args, &repo, &cargo).unwrap_err().to_string();
+        assert!(error.contains("CAS_WORKER_TEST_ALLOW_HOST_PATH"), "{error}");
+        env.set(HOST_PATH_OPT_OUT, "operator live headful credential proof");
+        let xdg = dir.path().join("private-config");
+        std::fs::create_dir(&xdg).unwrap();
+        let error = execute_at_with_scope(&root, &args, &repo, &cargo, None, Some(&xdg)).unwrap_err().to_string();
+        assert!(error.contains("credential-free"), "{error}");
+        let lib_args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(selected)"].map(str::to_string);
+        let error = execute_at(&root, &lib_args, &repo, &cargo).unwrap_err().to_string();
+        assert!(error.contains("exact headful"), "{error}");
+        if !cfg!(target_os = "macos") { return; }
+        env.set("CLAUDE_CONFIG_DIR", "/fixture/selected-account");
+        env.set("CLAUDE_CODE_OAUTH_TOKEN", "fixture-token");
+        env.set("XDG_CONFIG_HOME", &xdg);
+        fake_cargo(&cargo, r#"[ "$CAS_HEADFUL_E2E" = 1 ] || exit 21
+[ "$CLAUDE_CONFIG_DIR" = /fixture/selected-account ] || exit 22
+[ "$CLAUDE_CODE_OAUTH_TOKEN" = fixture-token ] || exit 23
+[ -d "$XDG_CONFIG_HOME" ] || exit 24
+[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 25
+case "$*" in *'--success-output immediate'*) ;; *) exit 26 ;; esac
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+        execute_at(&root, &args, &repo, &cargo).unwrap();
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].contains("operator live headful credential proof"));
     }
 
     #[cfg(unix)]
@@ -4427,22 +4504,28 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 2\n").unwrap();
         let fake = dir.path().join("fake-cargo");
-        // A pipe handshake holds admitted payloads until all N+1 processes
-        // report admission/refusal. No compiler, host load, or sleep race.
+        // A per-payload FIFO holds admitted slots until all N+1 processes
+        // answer. Cargo's verified wrapper deliberately gives it null stdin.
         fake_cargo(&fake, r#"printf 'PAYLOAD_STARTED\n'
-IFS= read -r release
+IFS= read -r release < target/release.fifo
 printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut children = Vec::new();
         let mut readers = Vec::new();
+        let mut releases = Vec::new();
         for index in 0..3 {
             let repo = root.join(format!("worktrees/worker-{index}"));
             fixture_commit(&repo);
             std::fs::create_dir(repo.join("target")).unwrap();
+            let fifo = repo.join("target/release.fifo");
+            assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            // Hold both ends so opening/writing cannot block during failure
+            // cleanup, even for the refused child which never opens its FIFO.
+            releases.push(std::fs::OpenOptions::new().read(true).write(true).open(&fifo).unwrap());
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
                 .env(CHILD, serde_json::to_string(&[&root, &repo, &fake]).unwrap())
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit())
                 .spawn().unwrap();
             let output = child.stdout.take().unwrap();
             let sender = sender.clone();
@@ -4451,7 +4534,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
                 for line in std::io::BufReader::new(output).lines() {
                     let line = line.unwrap();
                     if line == "PAYLOAD_STARTED" || line.starts_with("RUNNER_RESULT refused:") {
-                        sender.send(line.clone()).unwrap();
+                        sender.send((index, line.clone())).unwrap();
                     }
                     lines.push(line);
                 }
@@ -4468,9 +4551,11 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         }
         // Release before assertions, including a failed handshake, so no
         // payload survives a failed regression.
-        for child in &mut children {
-            if let Some(mut input) = child.stdin.take() {
-                let _ = writeln!(input, "release");
+        for (index, release) in releases.iter_mut().enumerate() {
+            if events.len() != 3 || events.iter().any(|(child, line)|
+                *child == index && line == "PAYLOAD_STARTED")
+            {
+                let _ = writeln!(release, "release");
             }
         }
         for child in &mut children {
@@ -4478,8 +4563,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         }
         let logs: Vec<_> = readers.into_iter().map(|reader| reader.join().unwrap()).collect();
         assert_eq!(events.len(), 3, "all runner processes must answer: {logs:?}");
-        assert_eq!(events.iter().filter(|line| *line == "PAYLOAD_STARTED").count(), 2);
-        let refusal = events.iter().find(|line| line.starts_with("RUNNER_RESULT refused:")).unwrap();
+        assert_eq!(events.iter().filter(|(_, line)| line == "PAYLOAD_STARTED").count(), 2);
+        let (_, refusal) = events.iter().find(|(_, line)| line.starts_with("RUNNER_RESULT refused:")).unwrap();
         assert!(refusal.contains("Waiting for build admission"), "{refusal}");
         assert!(refusal.contains("max_concurrent_builders=2"), "{refusal}");
         let mut held_slots = Vec::new();

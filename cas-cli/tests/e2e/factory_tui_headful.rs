@@ -21,6 +21,7 @@ struct EnvGuard;
 impl EnvGuard {
     fn set(vars: &[(&str, String)]) -> crate::test_env_guard::TestEnvGuard {
         let mut env = crate::test_env_guard::TestEnvGuard::new();
+        env.preserve_claude_credentials();
         for (key, value) in vars { env.set(key, value); }
         env
     }
@@ -155,6 +156,82 @@ fn count_worker_replies(output: &str, token: &str) -> usize {
         .count()
 }
 
+fn require_claude(claude: &std::ffi::OsStr) -> Result<(), String> {
+    let version = Command::new(claude).arg("--version").output()
+        .map_err(|err| format!("headful dependency unavailable: claude --version could not spawn: {err}"))?;
+    if !version.status.success() {
+        return Err(format!("headful dependency unavailable: claude --version exited {}", version.status));
+    }
+    // Never print auth output: it contains account identifiers and config paths.
+    let auth = Command::new(claude).args(["auth", "status", "--json"]).output()
+        .map_err(|err| format!("headful authentication unverified: claude auth status could not spawn: {err}"))?;
+    let logged_in = serde_json::from_slice::<serde_json::Value>(&auth.stdout)
+        .ok().and_then(|value| value.get("loggedIn").and_then(|value| value.as_bool()));
+    if !auth.status.success() || logged_in != Some(true) {
+        return Err("headful authentication failed: claude auth status did not confirm loggedIn=true; run claude auth login in the selected account".into());
+    }
+    eprintln!("headful preflight: Claude available; selected account authenticated");
+    Ok(())
+}
+
+#[test]
+fn headful_preflight_distinguishes_dependency_authentication_and_success_cas_7e12() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let claude = dir.path().join("claude");
+    for (version_exit, auth_json, expected) in [
+        (9, r#"{"loggedIn":true}"#, Some("dependency unavailable")),
+        (0, r#"{"loggedIn":false}"#, Some("authentication failed")),
+        (0, r#"{"loggedIn":true}"#, None),
+    ] {
+        std::fs::write(&claude, format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit {version_exit}; fi\nprintf '%s' '{auth_json}'\n"
+        )).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = require_claude(claude.as_os_str());
+        match expected {
+            Some(reason) => assert!(result.unwrap_err().contains(reason)),
+            None => assert!(result.is_ok()),
+        }
+    }
+}
+
+#[test]
+fn explicit_headful_missing_claude_fails_cas_7e12() {
+    let empty_path = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "e2e::factory_tui_headful::factory_tui_headful_reuse_window", "--nocapture"])
+        .env("CAS_HEADFUL_E2E", "1")
+        .env("PATH", empty_path.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "explicit live opt-in must not pass without Claude");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("headful dependency unavailable"));
+}
+
+#[test]
+fn headful_fixture_preserves_selected_claude_credentials_cas_7e12() {
+    let keys = ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+    let _ambient = keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, "headful-fixture-value"));
+    let _unrelated = crate::test_env_guard::AmbientEnvRestore::set("VIKTOR_API_KEY", "unrelated-fixture");
+    {
+        let _guard = EnvGuard::set(&[("TUI_TEST_HEADFUL", "1".into())]);
+        let child = Command::new("/bin/sh").args(["-c",
+            "[ \"$CLAUDE_CONFIG_DIR\" = headful-fixture-value ] && \
+             [ \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" = headful-fixture-value ] && \
+             [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = headful-fixture-value ] && \
+             [ \"$ANTHROPIC_API_KEY\" = headful-fixture-value ] && \
+             [ \"$ANTHROPIC_AUTH_TOKEN\" = headful-fixture-value ] && \
+             [ \"$TUI_TEST_HEADFUL\" = 1 ] && [ -z \"${VIKTOR_API_KEY+x}\" ] && [ -z \"${CAS_ROOT+x}\" ]"])
+            .status().unwrap();
+        assert!(child.success(), "live fixture must preserve Claude account selection and credentials in children");
+    }
+    for key in keys { assert_eq!(std::env::var(key).unwrap(), "headful-fixture-value"); }
+    let _ordinary = crate::test_env_guard::TestEnvGuard::new();
+    for key in keys { assert!(std::env::var_os(key).is_none(), "ordinary fixtures still scrub {key}"); }
+}
+
 #[test]
 fn factory_tui_headful_reuse_window() {
     if std::env::var("CAS_HEADFUL_E2E").ok().as_deref() != Some("1") {
@@ -162,28 +239,25 @@ fn factory_tui_headful_reuse_window() {
         return;
     }
     let _guard = headful_lock().lock().expect("lock poisoned");
-    if Command::new("claude").arg("--version").output().is_err() {
-        eprintln!("Skipping: claude CLI not available");
-        return;
-    }
+
+    let name = format!("cas-factory-e2e-{}", std::process::id());
+    let _env_guard = EnvGuard::set(&[
+        ("TUI_TEST_HEADFUL", "1".to_string()),
+        ("TUI_TEST_HEADFUL_REUSE", "1".to_string()),
+        ("TUI_TEST_HEADFUL_NAME", name.clone()),
+    ]);
+    require_claude(std::ffi::OsStr::new("claude")).expect("headful preflight failed");
 
     let cas = new_cas_instance();
     let cwd = std::fs::canonicalize(cas.temp_dir.path())
         .unwrap_or_else(|_| cas.temp_dir.path().to_path_buf());
     let cas_root = cwd.join(".cas");
 
-    let name = format!("cas-factory-e2e-{}", std::process::id());
     let title = format!("cas-tui-headful:{name}");
     let fifo_path = std::env::temp_dir().join(format!("cas-tui-headful-{name}.fifo"));
     let window_id_path = std::env::temp_dir().join(format!("cas-tui-headful-{name}.windowid"));
     let _ = std::fs::remove_file(&fifo_path);
     let _ = std::fs::remove_file(&window_id_path);
-
-    let _env_guard = EnvGuard::set(&[
-        ("TUI_TEST_HEADFUL", "1".to_string()),
-        ("TUI_TEST_HEADFUL_REUSE", "1".to_string()),
-        ("TUI_TEST_HEADFUL_NAME", name.clone()),
-    ]);
 
     let config = PtyRunnerConfig::with_size(120, 40)
         .env("CAS_FACTORY_BUILD_GUARD", "off")
@@ -207,6 +281,9 @@ fn factory_tui_headful_reuse_window() {
         if let Err(err) = header_result {
             let output = runner.get_output();
             let raw = output.as_str();
+            if raw.contains("Launching a factory is operator-only") {
+                panic!("headful launch refused: operator-only factory guard; run from the operator's own terminal");
+            }
             if raw.contains("Error:") || raw.contains("CAS is not initialized") {
                 let scr = screen_with_size(&output.as_str(), 120, 40);
                 panic!(
@@ -258,7 +335,7 @@ Do not add extra text."
                 .expect("enqueue supervisor prompt");
 
             wait_for_worker_count(&cas_root, 3, Duration::from_secs(120))
-                .expect("workers did not register (is claude logged in?)");
+                .expect("headful worker registration failed after authenticated preflight; authentication loss is not proven");
 
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(120) {
@@ -305,4 +382,5 @@ Do not add extra text."
     close_terminal_window(&ids[0]);
     let _ = std::fs::remove_file(&fifo_path);
     let _ = std::fs::remove_file(&window_id_path);
+    eprintln!("headful live: PASS (3 worker replies; same Terminal window reused)");
 }

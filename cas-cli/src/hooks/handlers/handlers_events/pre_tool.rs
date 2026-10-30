@@ -8666,6 +8666,12 @@ mod workspace_contract_tests {
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
+            if command.contains("ambient") && !response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str().unwrap_or("")
+                .contains("cannot resolve shell filesystem effects (an unresolved arithmetic operand)")
+            {
+                failures.push(format!("arithmetic diagnostic {command}: {response}"));
+            }
             if response["hookSpecificOutput"]["permissionDecision"] != "deny" {
                 failures.push(format!("{command}: {response}"));
             }

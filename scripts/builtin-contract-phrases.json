@@ -1965,8 +1965,8 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
         },
         {
-          "text": "showChapter",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+          "text": "showRecordingChapter",
+          "reason": "QA chapter examples use the constructed-stylesheet helper compatible with native Commander's style-src policy."
         },
         {
           "text": "toMatchAriaSnapshot",

@@ -13,6 +13,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   project list refresh retains the focused machine button, so Tab navigation and
   its visible focus ring continue to work while machines report their status.
 
+### Fixed — Commander supervisor commands
+
+- **Supervisor commands keep working after 256 uses** — Was: the factory daemon
+  kept every slash-command receipt for its whole run, so after 256 commands it
+  refused every further command until the daemon restarted. → Now: a finished
+  receipt is kept for 10 minutes after its last activity and then dropped. A
+  repeated request inside that window still returns the stored receipt and does
+  not run the command again.
+- **A refused unconfirmed Clear or Exit is audited as denied** — Was: the hub
+  logged the command as "requested" before checking its confirmation, so a
+  refused Clear or Exit left a "requested" row with no outcome. → Now: it is
+  logged as "denied".
+
 ### Fixed — macOS automatic release installation
 
 - **LaunchAgent reinstall tolerates shutdown delay** — Reinstalling the release

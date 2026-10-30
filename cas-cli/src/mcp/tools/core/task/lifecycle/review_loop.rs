@@ -261,7 +261,7 @@ mod tests {
             verdict.created_at = Utc::now() - chrono::Duration::hours(1);
             verifications.add(&verdict).unwrap();
         }
-        let notices = || queue.poll_for_target("supervisor", 10).unwrap().len();
+        let notices = || queue.peek_all(10).unwrap().len();
 
         // One follow-up over two reviews reaches 0.5, and that crossing is told.
         add("cas-f1", true);

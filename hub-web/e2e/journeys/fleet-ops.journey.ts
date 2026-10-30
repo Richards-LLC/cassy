@@ -580,7 +580,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
             // next action. Wait for the catalog read-back, then check focus.
             machine.sessions.push({ ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/new-project", workers: [] });
             await hub.announceCatalog("atlas", { added: ["calm-wren-2"] });
-            await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row")).toHaveCount(2);
+            await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
             await expect(undo).toBeFocused();
           }
         });

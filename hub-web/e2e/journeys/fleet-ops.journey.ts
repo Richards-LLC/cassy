@@ -523,7 +523,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
     test.use({ viewport });
     for (const disposition of ["success", "stale"] as const) {
       test(`HUB-J17 phone Raw output return ${viewport.width}×${viewport.height}: pending and ${disposition} remain usable`, journeyPart, async ({ page, journey }) => {
-        const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+        const machine = fleetMachine(ATLAS);
+        const hub = await journey.hub({ machines: [machine], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
         let request: Route | undefined;
         await page.route("**/v1/sessions/*/operations", async (route) => { request = route; });
         const agent = () => page.locator(".status-agent", { hasText: "swift-lark-3" });
@@ -574,6 +575,12 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
               return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
             })).toBe(true);
             await undo.focus();
+            await expect(undo).toBeFocused();
+            // A new session changes the shell while Undo is the keyboard's
+            // next action. Wait for the catalog read-back, then check focus.
+            machine.sessions.push({ ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/new-project", workers: [] });
+            await hub.announceCatalog("atlas", { added: ["calm-wren-2"] });
+            await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
             await expect(undo).toBeFocused();
           }
         });

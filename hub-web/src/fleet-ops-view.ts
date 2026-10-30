@@ -439,7 +439,10 @@ export function undoBar(document: Document, context: FleetOpsViewContext): HTMLE
   const bar = document.createElement("div");
   bar.className = "fleet-ops-undo";
   const text = document.createElement("span"); text.textContent = offer.label;
-  bar.append(text, button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo()));
+  const undo = button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo());
+  // Shell focus restoration uses the control's id after replacing its nodes.
+  undo.id = "fleet-undo-action";
+  bar.append(text, undo);
   // cas-2796a F03: dismissing the floating offer no longer forfeits Undo in
   // silence: Undo stays in Tasks & progress for the rest of its window, and
   // the × says so.

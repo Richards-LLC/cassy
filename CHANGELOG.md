@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Fleet keyboard feedback
+
+- **Undo keeps focus when the phone shell refreshes** — After returning from
+  Raw output, a newly discovered session no longer leaves the visible Undo
+  button without keyboard focus.
+
 ### Fixed — Conversation keyboard navigation
 
 - **Machine filters keep keyboard focus during catalog refreshes** — An unchanged

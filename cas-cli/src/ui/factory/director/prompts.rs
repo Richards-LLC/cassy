@@ -1238,7 +1238,7 @@ fn merge_delivery_branch(repo_root: &Path, task_id: &str, worker: &str) -> Strin
 /// See `docs/requests/BUG-stale-merge-required-alerts-refire-after-merge.md`:
 /// the task-status snapshot backing this alert can be accurate (the task
 /// really is still `AwaitingMerge` in the DB) while stale in the sense that
-/// matters — the branch was already merged and nobody has re-closed the
+/// matters — the branch was already merged but verification has not closed the
 /// task yet. The check uses the close gate's success-bearing
 /// `known_unmerged_factory_commits` helper against immutable snapshots of
 /// both the local epic ref and `origin/<epic>`, after a bounded exact-ref
@@ -1456,9 +1456,8 @@ fn pending_qa_idle_prompt_text(
 /// signals (cas-c145). Carries task, source factory branch, merge target,
 /// and next action. Explicitly push-based (no polling loop).
 ///
-/// `supervisor_prefix` is used for MCP commands the supervisor must run. The
-/// re-close instruction is explicitly handed to the worker, so it uses
-/// `worker_prefix`; the supervisor's escape hatch uses `supervisor_prefix`.
+/// `supervisor_prefix` is used for MCP commands the supervisor must run.
+/// The merge verdict owns completion; no second close command is relayed.
 ///
 /// Wording constraint: must not contain "assign" — the AwaitingMerge idle
 /// path is not "idle needing work" (cas-09d0 / cas-728b).
@@ -1474,7 +1473,6 @@ fn merge_required_idle_prompt_text(
     task: &ActiveLeaseSummary,
     data: &DirectorData,
     supervisor_prefix: &str,
-    worker_prefix: &str,
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = evidence.map(|e| e.factory_branch.clone()).unwrap_or_else(|| format!("factory/{worker}"));
@@ -1508,16 +1506,6 @@ fn merge_required_idle_prompt_text(
     };
     let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
     let show = format!("`{supervisor_prefix}task action=show id={}`", task.task_id);
-    // This exact command is handed to the worker to execute in its own session.
-    let reclose = format!(
-        "`{worker_prefix}task action=close id={} commit_receipt=<merged sha> reason=\"merged task\"`",
-        task.task_id
-    );
-    // Keep the supervisor's emergency path separate and in their harness.
-    let supervisor_close = format!(
-        "`{supervisor_prefix}task action=close id={} supervisor_override=true commit_receipt=<merged sha> reason=\"worker unavailable\"`",
-        task.task_id
-    );
     let rejection = task
         .close_rejected_reason
         .as_deref()
@@ -1541,8 +1529,7 @@ fn merge_required_idle_prompt_text(
              2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
              Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
              then queue it with `gh pr merge <number> --auto`. Do not merge into or push {target} locally.\n\
-             3. When the merge queue lands it, tell {worker} to run this in its own session: {reclose}\n\
-             Supervisor escape hatch if {worker} is unresponsive: {supervisor_close}\n\
+             3. The merge verdict closes or reopens the task; wait for its result.\n\
              4. Then clear context / hand the worker their next task if more work is ready\n\
              Live task state: {show}\n\
              This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
@@ -1563,8 +1550,7 @@ fn merge_required_idle_prompt_text(
          1. Confirm: {epic_status} and/or {list_awaiting}\n\
          {merge_step}\n\
          3. Push {target} if remote tracking applies\n\
-         4. Tell {worker} to run this in its own session: {reclose}\n\
-         Supervisor escape hatch if {worker} is unresponsive: {supervisor_close}\n\
+         4. The merge verdict closes or reopens the task; wait for its result.\n\
          5. Then clear context / hand the worker their next task if more work is ready\n\
          Live task state: {show}\n\
          This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
@@ -1919,7 +1905,6 @@ pub fn generate_prompt_at(
                         task,
                         data,
                         supervisor_prefix,
-                        worker_prefix,
                         merge_alert_evidence,
                     )
                 } else {
@@ -3761,7 +3746,7 @@ mod tests {
         };
         let mut data = make_data(0);
         data.in_progress_tasks = vec![summary("main")];
-        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
             text.contains("protected: pull requests through the merge queue only"),
             "{text}"
@@ -3777,7 +3762,7 @@ mod tests {
         );
 
         data.in_progress_tasks = vec![summary("epic/some-epic-cas-1234")];
-        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
             epic.contains("git merge --no-ff factory/wise-badger-5"),
             "{epic}"
@@ -3818,14 +3803,14 @@ mod tests {
         for target in ["epic/burn-down-v43-cas-3-58", "main"] {
             data.in_progress_tasks = vec![summary(target)];
             let text =
-                merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+                merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
             assert!(text.contains(&format!("Merge target: {target}")), "{text}");
             assert!(!text.contains("free-form"), "{text}");
             assert!(!text.to_lowercase().contains("chat"), "{text}");
         }
         let bundled = {
             data.in_progress_tasks = vec![summary("epic/burn-down-v43-cas-3-58")];
-            merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None)
+            merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None)
         };
         assert!(
             bundled.contains("git merge --no-ff factory/wise-badger-5")
@@ -4127,60 +4112,84 @@ mod tests {
 
     #[test]
     fn merge_verdict_owns_completion_across_harnesses_and_targets() {
-        for supervisor_cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
-            for worker_cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+        for supervisor_cli in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
+        ] {
+            for worker_cli in [
+                SupervisorCli::Claude,
+                SupervisorCli::Codex,
+                SupervisorCli::Grok,
+                SupervisorCli::OpenCode,
+            ] {
                 for target in ["epic/harness-prefix", "main"] {
-        let worker = "worker";
-        let task_id = "cas-fa1c-prefix";
-        let event = DirectorEvent::WorkerIdle {
-            worker: worker.to_string(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: task_id.to_string(),
-                task_title: "Harness prefix relay".to_string(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
-                pending_qa: None,
-            }),
-        };
-        let mut data = make_data(0);
-        data.agents[0].name = worker.to_string();
-        data.agent_id_to_name
-            .insert("sess-id-abc123".to_string(), worker.to_string());
-        data.in_progress_tasks = vec![TaskSummary {
-            id: task_id.to_string(),
-            title: "Harness prefix relay".to_string(),
-            status: TaskStatus::AwaitingMerge,
-            priority: Priority::MEDIUM,
-            assignee: Some(worker.to_string()),
-            task_type: TaskType::Task,
-            epic: Some("cas-fa1c-epic".to_string()),
-            branch: None,
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        data.epic_tasks = vec![TaskSummary {
-            id: "cas-fa1c-epic".to_string(),
-            title: "Harness prefix epic".to_string(),
-            status: TaskStatus::InProgress,
-            priority: Priority::HIGH,
-            assignee: None,
-            task_type: TaskType::Epic,
-            epic: None,
-            branch: Some(target.to_string()),
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        let prompt = generate_prompt(
-            &event, &data, &data, "supervisor", &default_config(),
-            supervisor_cli, worker_cli, &HashSet::new(), None,
-        ).expect("parked delivery needs a merge relay");
-        let body = prompt.text.split("\n---\n").next().unwrap();
-        let prefix = supervisor_cli.backend().capabilities().tool_prefix;
-        assert!(body.contains(&format!("{prefix}task action=show id={task_id}")), "{body}");
-        // pin: the merge verdict, not a second close command, owns completion.
-        assert!(body.contains("The merge verdict closes or reopens the task"), "{body}");
-        assert!(!body.contains("task action=close"), "{body}");
-        assert!(!body.contains("Supervisor escape hatch"), "{body}");
+                    let worker = "worker";
+                    let task_id = "cas-fa1c-prefix";
+                    let event = DirectorEvent::WorkerIdle {
+                        worker: worker.to_string(),
+                        active_task: Some(ActiveLeaseSummary {
+                            task_id: task_id.to_string(),
+                            task_title: "Harness prefix relay".to_string(),
+                            task_status: TaskStatus::AwaitingMerge,
+                            close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                            pending_qa: None,
+                        }),
+                    };
+                    let mut data = make_data(0);
+                    data.agents[0].name = worker.to_string();
+                    data.agent_id_to_name
+                        .insert("sess-id-abc123".to_string(), worker.to_string());
+                    data.in_progress_tasks = vec![TaskSummary {
+                        id: task_id.to_string(),
+                        title: "Harness prefix relay".to_string(),
+                        status: TaskStatus::AwaitingMerge,
+                        priority: Priority::MEDIUM,
+                        assignee: Some(worker.to_string()),
+                        task_type: TaskType::Task,
+                        epic: Some("cas-fa1c-epic".to_string()),
+                        branch: None,
+                        updated_at: None,
+                        epic_verification_owner: None,
+                    }];
+                    data.epic_tasks = vec![TaskSummary {
+                        id: "cas-fa1c-epic".to_string(),
+                        title: "Harness prefix epic".to_string(),
+                        status: TaskStatus::InProgress,
+                        priority: Priority::HIGH,
+                        assignee: None,
+                        task_type: TaskType::Epic,
+                        epic: None,
+                        branch: Some(target.to_string()),
+                        updated_at: None,
+                        epic_verification_owner: None,
+                    }];
+                    let prompt = generate_prompt(
+                        &event,
+                        &data,
+                        &data,
+                        "supervisor",
+                        &default_config(),
+                        supervisor_cli,
+                        worker_cli,
+                        &HashSet::new(),
+                        None,
+                    )
+                    .expect("parked delivery needs a merge relay");
+                    let body = prompt.text.split("\n---\n").next().unwrap();
+                    let prefix = supervisor_cli.backend().capabilities().tool_prefix;
+                    assert!(
+                        body.contains(&format!("{prefix}task action=show id={task_id}")),
+                        "{body}"
+                    );
+                    // pin: the merge verdict, not a second close command, owns completion.
+                    assert!(
+                        body.contains("The merge verdict closes or reopens the task"),
+                        "{body}"
+                    );
+                    assert!(!body.contains("task action=close"), "{body}");
+                    assert!(!body.contains("Supervisor escape hatch"), "{body}");
                 }
             }
         }
@@ -6971,7 +6980,7 @@ mod tests {
         }
 
         /// GH #74's third occurrence, at the same last mile: the task left
-        /// `AwaitingMerge` (re-closed after the supervisor merged) while the
+        /// `AwaitingMerge` (closed by the merge verdict) while the
         /// alert was queued behind other prompts in the injection loop.
         #[test]
         fn merge_alert_is_dropped_when_the_task_reopens_for_changes() {

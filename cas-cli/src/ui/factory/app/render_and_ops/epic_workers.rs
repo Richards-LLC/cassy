@@ -2074,7 +2074,7 @@ pub(crate) fn recycle_resume_brief(
         .collect();
     if !parked.is_empty() {
         brief.push_str(&format!(
-            "Awaiting merge (re-close each after its merge lands; do not start it):\n{}\n",
+            "Awaiting merge (the merge verdict closes or reopens each task; do not start it):\n{}\n",
             parked.join("\n")
         ));
     }
@@ -8014,7 +8014,10 @@ mod tests {
         assert_eq!(queued.factory_session.as_deref(), Some("session-a622"));
         let brief = &queued.prompt;
         // pin: recycled workers must await the merge verdict.
-        assert!(!brief.contains("re-close"), "merge verdict owns parked completion: {brief}");
+        assert!(
+            !brief.contains("re-close"),
+            "merge verdict owns parked completion: {brief}"
+        );
 
         assert!(
             brief.contains("task action=start id=cas-e0be"),

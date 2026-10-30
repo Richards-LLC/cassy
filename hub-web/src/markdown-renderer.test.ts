@@ -7,6 +7,12 @@ vi.mock("pele/lazy", async (original) => ({ ...await original<typeof import("pel
 describe("supervisor markdown subset", () => {
   it.each([
     {
+      language: "bash",
+      source: "awk '{\n  print $1\n}' file.txt\njq '.items[]\n  | .name' data.json",
+      strings: ["'{\n  print $1\n}'", "'.items[]\n  | .name'"],
+      keywords: [],
+    },
+    {
       language: "rust",
       source: String.raw`fn borrow<'a>(value: &'a str) -> &'a str {
   let chars = ['a', '\n', '\'', '\x41', '\u{1F980}', '🦀'];

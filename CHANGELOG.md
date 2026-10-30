@@ -7,11 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Shared reading frames and compact work rows
+### Added — Commander reading frames
 
-- Commander diagrams and diffs retain their literal source in the same Copy, Source/Preview and Expand frame as code, including tool-reported file edits.
-- Work rows align on a fixed icon gutter, use denser desktop spacing, and animate only explicitly live tools when motion and system colors permit it; phone targets remain 44px.
-
+- **Shared source frames and compact work rows** — Diagrams, diffs and code
+  share Copy and inline Expand, with Source/Preview for rich content, including
+  tool-reported file edits. Desktop work rows use a fixed icon gutter and less
+  space; phone targets stay 44px. Only explicitly live tools animate, with motion
+  disabled for reduced motion and forced colors.
 
 ### Fixed — Merge completion guidance
 

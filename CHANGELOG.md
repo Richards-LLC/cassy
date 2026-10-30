@@ -89,8 +89,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Quoted bodies and escaped substitution markers remain literal data.
   Ambiguous body ownership and joined terminators now fail closed; escaped
   and partially quoted delimiters retain their literal body semantics.
-  Expanding heredocs with carriage returns or non-ASCII whitespace, dollar-quoted
-  delimiters, and continued heredoc declarations are conservatively refused.
+  Heredocs containing whitespace other than space, tab or newline, dollar-quoted
+  delimiter fragments, and continued heredoc declarations are conservatively refused.
 
 ### Fixed — Team tab shows the whole team
 

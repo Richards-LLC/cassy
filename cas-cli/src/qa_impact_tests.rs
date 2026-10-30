@@ -108,7 +108,7 @@ fn qa_impact_test_only_delivery_is_not_user_facing_cas_63e9() {
         let (report, eligibility) = commander_delivery_impact(selection, &[
             "hub-web/test-fixtures/vitest-stability/package.json",
             "hub-web/test-fixtures/vitest-stability/package-lock.json",
-            "hub-web/src/reply.test.mjs",
+            "hub-web/test-fixtures/vitest-stability/reply.test.mjs",
             "hub-web/e2e/fixtures/reply.json",
         ]);
         assert!(report.journeys.is_empty(), "{selection}: {:?}", report.journeys);

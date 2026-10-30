@@ -9,9 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — QA impact for test fixtures
 
-- **Test fixtures stay outside product QA impact** — Changes confined to tests
-  and fixtures no longer select every Commander journey or appear as unowned
-  product surfaces. Product source changes retain their journey and QA checks.
+- **Test fixtures stay outside product QA impact** — Files in fixture directories
+  no longer select every Commander journey or appear as unowned product surfaces.
+  Registered suites and test inputs retain their journey coverage; product source
+  retains its QA checks.
 
 ### Fixed — Delivery process
 

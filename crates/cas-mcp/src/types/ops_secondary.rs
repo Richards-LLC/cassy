@@ -649,7 +649,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_queue' (inspect, reorder or clear pending task_ids for id=<worker>), 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
     )]
     pub action: String,
 
@@ -724,6 +724,14 @@ pub struct FactoryRequest {
     )]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Ordered task queue for one spawned worker, or replacement pending IDs for worker_queue.
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
+
+    /// worker_queue: replace only at this queue revision.
+    #[serde(default, deserialize_with = "deser::option_u64")]
+    pub expected_generation: Option<u64>,
 
     /// Server lifecycle filter; history is opt-in.
     #[schemars(
@@ -1085,6 +1093,10 @@ pub struct CoordinationRequest {
     )]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Ordered tasks for legacy factory dispatch.
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
 
     /// Factory delivery route for spawn_workers/focus_epic.
     #[schemars(
@@ -1653,6 +1665,8 @@ impl CoordinationRequest {
                     .flatten()
             }),
             task_id: self.task_id.clone(),
+            task_ids: self.task_ids.clone(),
+            expected_generation: self.expected_generation,
             status: self.status.clone(),
             owner: self.owner.clone(),
             delivery_mode: self.delivery_mode.clone(),

@@ -757,6 +757,10 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
         Commands::Factory(factory) if factory.command.is_none() => {
             Some("Launching a factory (`cas factory`)")
         }
+        Commands::Qa(crate::cli::qa::QaCommand::RapidResponse(args)) => match args.command {
+            crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
+            _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
+        },
         _ => None,
     }
 }
@@ -1100,6 +1104,9 @@ mod tests {
             "factory",
             "factory --workers 3",
             "--verbose factory -w 2",
+            "qa rapid-response enable cas-ep1c --for 2h --reason outage --rollback revert",
+            "qa rapid-response disable cas-ep1c",
+            "qa rapid-response review-migration cas-de11 --note checked",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),
@@ -1112,6 +1119,7 @@ mod tests {
             "task list",
             "hub",
             "config get factory.write_roots",
+            "qa rapid-response status",
         ] {
             assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
         }

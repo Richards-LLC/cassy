@@ -895,6 +895,8 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await tab.getByRole("button", { name: /^Appearance · Dark/ }).click();
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
       await openConversation(tab, "cas-src");
+      // Re-entry recreates lazy page cards; scroll the card before its iframe exists.
+      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
       await log.getByTitle("Gate report.html, a page from the supervisor").scrollIntoViewIfNeeded();
       expect(await tab.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches), "the device preference stays light").toBe(false);
       await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
@@ -914,6 +916,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       // the browser's own opaque backdrop, so it stays legible.
       await tab.emulateMedia({ colorScheme: "dark" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
+      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
       const card = log.locator('a.sheet[data-artifact-id="art-report"]');
       const frame = log.locator('.visual-page[data-artifact-id="art-report"] .visual-frame');
       await expect(frame).toHaveCSS("background-color", await card.evaluate((node) => getComputedStyle(node).backgroundColor));

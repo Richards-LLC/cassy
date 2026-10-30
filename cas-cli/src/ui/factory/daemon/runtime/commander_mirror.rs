@@ -1387,7 +1387,9 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Claude] {
             let now = Utc::now();
-            let question = "Please check the terminal conversation capture";
+            // cas-7cd1: a real typed message that pastes harness-shaped text
+            // after its own words is still the operator's.
+            let question = "Message from lifecycle team: please check this capture\n<environment_context>\n  <shell>bash</shell>\n</environment_context>";
             let input = |id: &str, text: &str, at: DateTime<Utc>| match cli {
                 cas_mux::SupervisorCli::Claude => vec![serde_json::json!({
                     "timestamp":at.to_rfc3339(),"type":"user","uuid":format!("uuid-{id}"),"promptId":id,

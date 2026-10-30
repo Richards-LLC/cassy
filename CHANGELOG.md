@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Backquote command inspection
+
+- **Nested backquote commands keep workspace and operator checks** — The shell
+  guard removes one backquote escape layer before inspecting the inner command,
+  including escaped backticks, dollar signs and backslashes. Nested outside writes
+  and escaped operator-only verbs stay denied; escaped backticks used as literal
+  double-quoted data remain allowed.
+
 ### Fixed — Supervisor idle alerts
 
 - **A worker waiting on its own tests no longer pages the supervisor every minute** — Was: a worker that told the supervisor it was not blocked, or that kept rerunning its background tests, drew the same "pending delivery" idle alert about once a minute. → Now: a changed condition (new tip, CI result or task state) still alerts at once. The same alert repeats at most once in 10 minutes after a background run ends, and is held for 10 minutes after the worker's own status for that task that needs nothing. A blocker, question, ready report or stated need never quiets it.

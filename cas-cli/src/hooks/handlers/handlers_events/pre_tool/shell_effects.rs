@@ -255,7 +255,7 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
 
 /// Extract executable substitutions from a shell word. Arithmetic operands
 /// must be numeric source, never values obtained from shell expansion.
-fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
+fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
@@ -322,7 +322,7 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             {
                 return Err("an unresolved shell payload");
             }
-            bodies.push(&word[index + 2..end]);
+            bodies.push(word[index + 2..end].to_owned());
             index = end + 1;
         } else if bytes[index] == b'`' {
             let start = index + 1;
@@ -333,13 +333,28 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             if index >= bytes.len() {
                 return Err("an unresolved shell payload");
             }
-            bodies.push(&word[start..index]);
+            bodies.push(backquote_body(&word[start..index]));
             index += 1;
         } else {
             index += 1;
         }
     }
     Ok(bodies)
+}
+
+/// Backquotes remove one escape layer before parsing their command, even
+/// inside its quotes. Other backslashes must survive for the inner parser.
+pub(super) fn backquote_body(source: &str) -> String {
+    let mut body = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '`' | '\\' | '$')) {
+            body.push(chars.next().unwrap());
+        } else {
+            body.push(ch);
+        }
+    }
+    body
 }
 
 /// Heredoc quotes are data, but escaped markers are inert. Remove shell
@@ -399,7 +414,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Resu
             continue;
         };
         let end = end.ok_or("an unresolved shell payload")?;
-        bodies.extend(substitution_bodies(&logical[index..=end])?.into_iter().map(str::to_owned));
+        bodies.extend(substitution_bodies(&logical[index..=end])?);
         index = end + 1;
     }
     Ok(bodies)
@@ -1085,7 +1100,7 @@ fn collect_script(
                 if !literal {
                     for body in substitution_bodies(word)? {
                         collect_script(
-                            body,
+                            &body,
                             statement_dirs.clone(),
                             original,
                             &directory_values,

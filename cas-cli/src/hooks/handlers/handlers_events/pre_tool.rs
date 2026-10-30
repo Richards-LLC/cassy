@@ -5996,7 +5996,12 @@ fn collect_shell_substitutions(
             continue;
         };
         let Some(end) = end else { break };
-        collect_shell_invocations(&command[start..end], depth + 1, found);
+        if ch == b'`' {
+            let body = shell_effects::backquote_body(&command[start..end]);
+            collect_shell_invocations(&body, depth + 1, found);
+        } else {
+            collect_shell_invocations(&command[start..end], depth + 1, found);
+        }
         word_start = false;
         index = end + 1;
     }
@@ -6046,7 +6051,12 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvo
             found.unresolved_heredoc = true;
             break;
         };
-        collect_shell_invocations(&logical[start..end], depth + 1, found);
+        if bytes[index] == b'`' {
+            let body = shell_effects::backquote_body(&logical[start..end]);
+            collect_shell_invocations(&body, depth + 1, found);
+        } else {
+            collect_shell_invocations(&logical[start..end], depth + 1, found);
+        }
         index = end + 1;
     }
 }
@@ -9067,6 +9077,8 @@ EOF
             r#"echo "$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
             r#"echo "$(printf '%s' "$(cas co"nfig" gr''ant-write --task cas-1234 --path /x --reason r)")""#,
             r#"echo "`cas config gr''ant-write --task cas-1234 --path /x --reason r`""#,
+            // Backquotes remove an escape layer before shell word parsing.
+            r#"echo "`cas config gr\\ant-write --task cas-1234 --path /x --reason r`""#,
             // cas-a809: the structural check must reach expanding bodies,
             // even when shell quoting hides the textual policy spelling.
             "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
@@ -9093,6 +9105,18 @@ EOF
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
+        }
+        // Backquote bodies remove one shell escape layer before parsing.
+        // These are inert hook inputs: no command payload is ever executed.
+        for command in [
+            r#"echo `echo "\`touch /outside/cas-6e99-nested\`"`"#,
+            r#"echo `echo "\`cas config gr''ant-write --task cas-1234 --path /x --reason r\`"`"#,
+            r#"echo `echo \`touch /outside/cas-6e99-nested\``"#,
+            r#"echo "`echo \\"\`touch /outside/cas-6e99-nested\`\\"`""#,
+            r#"x=`echo "\`touch /outside/cas-6e99-nested\`"`"#,
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, "deny", "{command}: {reason}");
         }
         // Executable backticks and arithmetic data still undergo filesystem
         // checks. A separated closing pair can denote a subshell substitution.

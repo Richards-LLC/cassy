@@ -3812,6 +3812,13 @@ fn env_split_string_payload(words: &[String]) -> Option<String> {
 }
 
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
+    executable_word_index_with_alternatives(words, &mut |_| {})
+}
+
+fn executable_word_index_with_alternatives(
+    words: &[String],
+    alternative: &mut dyn FnMut(usize),
+) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
@@ -3819,12 +3826,17 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
             "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
             "coproc" => {
                 index += 1;
-                // A named coprocess uses `coproc NAME { ...; }`; a simple
-                // command directly after coproc is the executable itself.
+                // A name can precede any compound command. Otherwise the
+                // policy scanner must inspect both possible command words.
                 if words.get(index).is_some_and(|name| is_shell_variable_name(name))
-                    && words.get(index + 1).is_some_and(|word| word == "{")
+                    && words.get(index + 1).is_some_and(|word| matches!(word.as_str(),
+                        "{" | "}" | "(" | "((" | "[[" | "]]" | "while" | "until" | "if"
+                        | "then" | "elif" | "else" | "fi" | "for" | "select" | "case" | "in"
+                        | "esac" | "do" | "done" | "function" | "coproc" | "time" | "!"))
                 {
                     index += 1;
+                } else if index + 1 < words.len() {
+                    alternative(index + 1);
                 }
             }
             "function" => index += 2, // Skip the function name to inspect its body.
@@ -5872,28 +5884,40 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
         }
-        let Some(index) = unwrapped_command_index(&words) else {
-            continue;
-        };
-        let args = &words[index + 1..];
-        let name = shell_word_basename(&words[index]);
-        match name {
-            // Wrappers whose option value is itself a shell command.
-            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
-                for (position, arg) in args.iter().enumerate() {
-                    let flags_c =
-                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
-                    if (flags_c || arg == "--command")
-                        && let Some(payload) = args.get(position + 1)
-                    {
-                        collect_shell_invocations(payload, depth + 1, found);
+        let mut pending = vec![0];
+        let mut visited = vec![false; words.len()];
+        let mut indices = Vec::new();
+        while let Some(start) = pending.pop() {
+            if start >= words.len() || visited[start] { continue; }
+            visited[start] = true;
+            if let Some(relative) = unwrapped_command_index_with_alternatives(
+                &words[start..], &mut |offset| pending.push(start + offset),
+            ) {
+                let index = start + relative;
+                if !indices.contains(&index) { indices.push(index); }
+            }
+        }
+        for index in indices {
+            let args = &words[index + 1..];
+            let name = shell_word_basename(&words[index]);
+            match name {
+                // Wrappers whose option value is itself a shell command.
+                "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
+                    for (position, arg) in args.iter().enumerate() {
+                        let flags_c =
+                            arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                        if (flags_c || arg == "--command")
+                            && let Some(payload) = args.get(position + 1)
+                        {
+                            collect_shell_invocations(payload, depth + 1, found);
+                        }
                     }
                 }
+                "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
+                _ => {}
             }
-            "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
-            _ => {}
+            found.commands.push((name.to_string(), args.to_vec()));
         }
-        found.commands.push((name.to_string(), args.to_vec()));
     }
 }
 
@@ -6139,7 +6163,14 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
 pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
-    let mut index = executable_word_index(words)?;
+    unwrapped_command_index_with_alternatives(words, &mut |_| {})
+}
+
+fn unwrapped_command_index_with_alternatives(
+    words: &[String],
+    alternative: &mut dyn FnMut(usize),
+) -> Option<usize> {
+    let mut index = executable_word_index_with_alternatives(words, alternative)?;
     for _ in 0..16 {
         let name = shell_word_basename(&words[index]);
         if !COMMAND_WRAPPERS.contains(&name) {
@@ -6172,7 +6203,9 @@ pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
             }
         }
         let rest = words.get(next..)?;
-        index = next + executable_word_index(rest)?;
+        index = next + executable_word_index_with_alternatives(
+            rest, &mut |offset| alternative(next + offset),
+        )?;
     }
     Some(index)
 }
@@ -9009,6 +9042,8 @@ EOF
             "/home/u/.local/bin/cas config set factory.write_roots ''",
             "env -u CLAUDECODE -u CAS_AGENT_ROLE cas config set factory.write_roots /x",
             "cas config grant-write --task cas-1 --path /x --reason r",
+            // cas-9685: the second possible command is denied too (native RED).
+            "coproc NAME cas config gr''ant-write --task cas-1234 --path /x --reason r",
             "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",

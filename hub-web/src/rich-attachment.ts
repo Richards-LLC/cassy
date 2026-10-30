@@ -24,11 +24,25 @@ function previewElement(document: Document): Preview {
 }
 
 /** Reserve media's final viewport before any lazy code, URL or bytes arrive. */
-export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>, options: { machineId?: string; available?: () => boolean } = {}): HTMLElement {
+export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>, options: { machineId?: string; available?: () => boolean; gallery?: readonly ArtifactRef[]; fetchImage?: (file: ArtifactRef) => Promise<ArtifactViewResult | undefined> } = {}): HTMLElement {
   const mime = file.mime.split(";")[0]!.trim().toLowerCase();
   if (!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/pdf)$/.test(mime)) return sheet;
   const document = sheet.ownerDocument;
   const image = mime.startsWith("image/");
+  if (image) sheet.addEventListener("click", event => {
+    const click = event as MouseEvent;
+    if (event.defaultPrevented || click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return;
+    event.preventDefault();
+    const files = options.fetchImage ? (options.gallery ?? [file]).filter(entry => /^image\/(png|jpeg|gif|webp|avif)$/.test(entry.mime.split(";")[0]!.trim().toLowerCase())) : [file];
+    void import("./image-viewer").then(({ openImageViewer }) => {
+      if (!sheet.isConnected) return;
+      openImageViewer(sheet, files.map(entry => ({ file: entry, fetchView: () => entry.artifact_id === file.artifact_id ? fetchView() : options.fetchImage!(entry) })), Math.max(0, files.findIndex(entry => entry.artifact_id === file.artifact_id)));
+    }).catch(() => {
+      sheet.setAttribute("aria-label", `${file.name}. Image viewer unavailable. Try again.`);
+      const note = sheet.ownerDocument.createElement("span"); note.className = "preview-note"; note.setAttribute("role", "status"); note.textContent = "Image viewer unavailable. Try again.";
+      sheet.querySelector(".ftext")?.append(note);
+    });
+  });
   const root = document.createElement("div"); root.className = "rich-attachment"; root.style.width = image ? "320px" : "640px"; root.style.maxWidth = "100%"; root.style.minWidth = "0";
   const viewport = previewElement(document); viewport.className = "rich-media";
   viewport.machineId = options.machineId; viewport.available = options.available;

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Screencast guidance
+
+- **QA examples recommend 10 fps** — Lower frame rates reduce encoding work;
+  journey guidance points to the finalization trace step to monitor the
+  remaining encoder drain during four-worker release runs.
+
 ### Fixed — Portable QA guidance
 
 - **QA examples work outside the Cassy repository** — The generic evidence

@@ -66,7 +66,8 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     if (env.VERIFIED_TEST_REPORT_FILE) {
       writeFileSync(resolve(env.VERIFIED_TEST_REPORT_FILE), raw);
     }
-    if (env.CAS_WORKER_STABILITY_TRIAL !== '1') {
+    const hasFactoryTaskContext = env.CAS_FACTORY_MODE === '1' || Boolean(env.CAS_WORKER_STABILITY_BASE);
+    if (runner === 'vitest' && hasFactoryTaskContext && env.CAS_WORKER_STABILITY_TRIAL !== '1') {
       let repo = resolve(cwd);
       while (repo !== resolve('/') && !existsSync(join(repo, 'scripts/worker-test-stability.py'))) {
         repo = resolve(repo, '..');

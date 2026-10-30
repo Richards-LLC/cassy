@@ -119,14 +119,15 @@ pub(super) fn park_refusal(
             crates = untested.join(", "),
         ));
     }
-    // A workspace may live below the repository root; changed Rust tests,
-    // web tests and pytest files all enter the touched-test receipt gate.
+    // Rust tests use the existing receipt path. The web adapter is currently
+    // scoped to this repository's hub-web tests only; other ecosystems wait
+    // for cas-f702 rather than blocking deliveries they cannot receipt.
     let touched_web_tests = changed_paths.iter().any(|path| {
+        if !path.starts_with("hub-web/") { return false; }
         let file = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
         let suffix = Path::new(file).extension().and_then(|ext| ext.to_str()).unwrap_or_default();
-        (matches!(suffix, "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx")
-            && [".test.", ".spec.", ".journey."].iter().any(|marker| file.contains(marker)))
-            || (suffix == "py" && (file.starts_with("test_") || file.ends_with("_test.py")))
+        matches!(suffix, "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx")
+            && file.contains(".test.")
     });
     let touched_rust_tests = changed_paths.iter().any(|path| path.ends_with(".rs")
         && Path::new(path).ancestors().skip(1).any(|dir| proof_repo.join(dir).join("Cargo.toml").is_file()));
@@ -177,12 +178,6 @@ fn waived(task: &Task, kind: &str, id: &str) -> bool {
 /// a failing run before the change, and the runtime budget.
 fn touched_test_refusal(task: &Task, touched: &crate::factory_worker_check::Touched) -> Option<String> {
     let mut reasons = Vec::new();
-    if !touched.unsupported.is_empty() {
-        reasons.push(format!(
-            "stability receipts are not supported yet for {}; pytest and Playwright adapters are follow-up work.",
-            touched.unsupported.join(", ")
-        ));
-    }
     if !touched.unstable.is_empty() {
         reasons.push(format!(
             "missing five-run evidence for {}; five concurrent zero-retry passes are required.",
@@ -1003,6 +998,45 @@ mod tests {
             cas_root.path(), repo.path(), &head, &base, "vitest", "hub-web/src/worker.test.ts::changed", false,
         );
         assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+    }
+
+    #[test]
+    fn park_requires_web_receipts_only_for_hub_web_vitest_and_node_tests_cas_60a9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = crate::test_env_guard::git_fixture(repo.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        for directory in ["scripts", "slack-bridge/src", "hub-web/e2e"] {
+            std::fs::create_dir_all(repo.path().join(directory)).unwrap();
+        }
+        std::fs::write(repo.path().join("scripts/test_worker.py"), "def test_changed(): return 1\n").unwrap();
+        std::fs::write(repo.path().join("slack-bridge/src/worker.test.ts"), "test('changed', () => {});\n").unwrap();
+        std::fs::write(repo.path().join("hub-web/e2e/worker.spec.ts"), "test('changed', () => {});\n").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["switch", "-qc", "factory/unsupported-web"]);
+        std::fs::write(repo.path().join("scripts/test_worker.py"), "def test_changed(): return 2\n").unwrap();
+        std::fs::write(repo.path().join("slack-bridge/src/worker.test.ts"), "test('changed', () => { assert.equal(1, 2); });\n").unwrap();
+        std::fs::write(repo.path().join("hub-web/e2e/worker.spec.ts"), "test('changed', () => { expect(1).toBe(2); });\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "change non-supported web tests"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let mut task = blast_radius_task(&[]);
+        task.risk = vec![TaskRisk::None];
+        task.notes = "[2026-10-30 12:30] ✅ DECISION no changelog: gate scope fixture".into();
+
+        let outside_hub = [
+            "scripts/test_worker.py".to_string(),
+            "slack-bridge/src/worker.test.ts".to_string(),
+        ];
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &outside_hub, &head, "main").is_none());
+
+        let playwright = ["hub-web/e2e/worker.spec.ts".to_string()];
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &playwright, &head, "main").is_none());
     }
 
     #[cfg(unix)]

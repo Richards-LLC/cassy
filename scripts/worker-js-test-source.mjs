@@ -21,18 +21,25 @@ if (tree.parseDiagnostics.length) {
     ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('; ')}`);
 }
 
-function expressionName(expression) {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
-  return '';
+function rootIdentifier(expression) {
+  while (ts.isCallExpression(expression) || ts.isPropertyAccessExpression(expression)
+      || ts.isElementAccessExpression(expression) || ts.isNonNullExpression(expression)
+      || ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression)
+      || ts.isTypeAssertionExpression(expression) || ts.isSatisfiesExpression(expression)) {
+    expression = expression.expression;
+  }
+  return ts.isIdentifier(expression) ? expression.text : '';
 }
 function testCallName(call) {
-  let expression = call.expression;
-  if (ts.isCallExpression(expression)) expression = expression.expression;
-  if (ts.isPropertyAccessExpression(expression) && expression.name.text === 'each') {
-    return expressionName(expression.expression);
-  }
-  return expressionName(expression);
+  return rootIdentifier(call.expression);
+}
+function eachRoot(expression) {
+  return ts.isPropertyAccessExpression(expression) && expression.name.text === 'each'
+    ? rootIdentifier(expression.expression) : '';
+}
+function isEachChain(call) {
+  const expression = ts.isCallExpression(call.expression) ? call.expression.expression : call.expression;
+  return eachRoot(expression) !== '';
 }
 function staticTitle(expression) {
   if (ts.isStringLiteralLike(expression)) return expression.text;
@@ -102,15 +109,23 @@ function testRows(call) {
   }));
 }
 function walk(node, suites = []) {
+  if (ts.isTaggedTemplateExpression(node)) {
+    const name = eachRoot(node.tag);
+    if (['test', 'it', 'describe', 'suite'].includes(name)) {
+      throw new Error(`unresolved dynamic ${name === 'describe' || name === 'suite' ? 'suite' : 'test'} collection in ${filename}`);
+    }
+  }
   if (ts.isCallExpression(node)) {
     const name = testCallName(node);
+    const knownTestRoot = ['test', 'it', 'describe', 'suite'].includes(name);
+    const eachChain = isEachChain(node);
     const eachFactory = ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'each';
-    if (!eachFactory && (['describe', 'suite'].includes(name) || ['test', 'it'].includes(name))) {
+    if (knownTestRoot && eachChain && (name === 'describe' || name === 'suite')) {
+      throw new Error(`unresolved dynamic suite collection in ${filename}`);
+    }
+    if (knownTestRoot && !eachFactory) {
       const rows = ['test', 'it'].includes(name) ? testRows(node) : null;
       const title = node.arguments.length ? staticTitle(node.arguments[0]) : null;
-      const isEach = ['test', 'it'].includes(name) && ts.isCallExpression(node.expression)
-        && ts.isPropertyAccessExpression(node.expression.expression)
-        && node.expression.expression.name.text === 'each';
       if (rows) {
         const scopes = suites.map(item => item.title);
         for (const row of rows) calls.push({ function: [...scopes, row.functionTitle].join('::'),
@@ -122,7 +137,7 @@ function walk(node, suites = []) {
         } else if (name === 'describe' || name === 'suite') {
           throw new Error(`unresolved dynamic suite title in ${filename}`);
         }
-      } else if (isEach) {
+      } else if (['test', 'it'].includes(name) && eachChain) {
         throw new Error(`unresolved dynamic test collection in ${filename}`);
       } else if (name === 'describe' || name === 'suite') {
         suites = [...suites, { start: node.getStart(tree), end: node.end, title }];
@@ -136,8 +151,9 @@ function walk(node, suites = []) {
       }
     }
     const chain = node.expression;
-    if (ts.isPropertyAccessExpression(chain) && ['each', 'only', 'skip', 'concurrent', 'serial', 'fixme'].includes(chain.name.text)) {
-      if (chain.name.text !== 'each') throw new Error(`unresolved dynamic test modifier ${chain.name.text} in ${filename}`);
+    if (knownTestRoot && ts.isPropertyAccessExpression(chain)
+        && ['only', 'skip', 'concurrent', 'serial', 'fixme'].includes(chain.name.text)) {
+      throw new Error(`unresolved dynamic test modifier ${chain.name.text} in ${filename}`);
     }
   }
   ts.forEachChild(node, child => walk(child, suites));

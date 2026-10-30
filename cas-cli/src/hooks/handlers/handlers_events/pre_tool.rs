@@ -8877,7 +8877,11 @@ EOF
             ("ANSI-C delimiter desync", "cat <<$'EOF'\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
             ("locale delimiter desync", "cat <<$\"EOF\"\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
             ("split heredoc operator", "cat <\\\n<EOF\necho '$(touch /outside/p)'\nEOF\n".into(), true),
-            ("quoted CR body", "cat <<'EOF'\r\n$(touch /outside/p)\r\nEOF\r\n".into(), false),
+            ("quoted CR body refused conservatively", "cat <<'EOF'\r\n$(touch /outside/p)\r\nEOF\r\n".into(), true),
+            ("vertical tab delimiter", "cat <<EOF\u{b}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{b}\n".into(), true),
+            ("form feed delimiter", "cat <<EOF\u{c}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{c}\n".into(), true),
+            ("midword locale delimiter", "cat <<E$\"O\"F\nok\nEOF\ntouch /outside/p\nE$OF\n".into(), true),
+            ("quoted CR terminator swallowing command", "cat <<'EOF'\nok\nEOF\r\necho '\nEOF\ntouch /outside/p\n#'\n".into(), true),
             ("tab stripped literal", "cat <<-'EOF'\n\t$(touch /outside/p)\n\tEOF\n".into(), false),
             ("tab stripped numeric", "cat <<-EOF\n\t$(( 1+2 ))\n\tEOF\n".into(), false),
         ] {

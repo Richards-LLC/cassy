@@ -29,6 +29,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   contracts, stale merge replies and worker status rows let the merge verdict
   close or reopen the delivery, without another close command from the worker.
 
+### Added — Supervisor-only restart
+
+- **A supervisor can restart without stopping its workers** — Was: any supervisor
+  exit shut the factory down and stopped every worker, so a new harness version or
+  a fresh context meant checkpointing and respawning the whole fleet. → Now:
+  `factory action=restart_supervisor` ends only the supervisor's session and starts
+  a new one with the factory's boot harness, model and effort. Workers keep their
+  tasks, panes and leases. A plain exit or crash still shuts the factory down.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

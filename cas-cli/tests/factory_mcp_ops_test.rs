@@ -1004,6 +1004,37 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
 }
 
 #[tokio::test]
+async fn restart_supervisor_requests_the_daemon_only_for_a_supervisor() {
+    let worker = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let path = cas::factory_daemon_health::supervisor_restart_path(
+        &env.cas_root,
+        "session-restart-supervisor",
+    );
+    let error = env
+        .service
+        .factory_request(Parameters(factory_req("restart_supervisor")))
+        .await
+        .expect_err("a worker may not restart the supervisor");
+    assert!(error.message.contains("only the supervisor"), "{}", error.message);
+    assert!(!path.exists());
+
+    drop(worker);
+    let _supervisor = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "supervisor"),
+    ]);
+    env.service
+        .factory_request(Parameters(factory_req("restart_supervisor")))
+        .await
+        .expect("a supervisor may request its own restart");
+    assert!(path.exists(), "the daemon reads this request file");
+}
+
+#[tokio::test]
 async fn restart_spawn_queue_is_supervisor_only() {
     let _guard = EnvGuard::set(&[
         ("CAS_FACTORY_SESSION", "session-worker-restart"),

@@ -6,7 +6,7 @@ The operator can see who is working on the supervisor's epic, what needs a decis
 
 ## Hero form
 
-A compact epic progress rule above a staffing ledger: one lane per live worker, a shared left edge for task/state, and a short evidence trail toward delivery. On a phone the same lanes stack; no desktop diagram shrinks into illegibility. Four lanes fit above the fold at 1280x800 and 390x844, and the panel is the release block's one home while Team is open: the rail hides its copy, though its worker cards stay because they hold the only worker controls.
+A compact epic progress rule above a staffing ledger: one lane per live worker, a shared left edge for task/state, and a short evidence trail toward delivery. On a phone the same lanes stack; no desktop diagram shrinks into illegibility. Four lanes fit above the fold at 1280x800 and 390x844, and the panel is the release block's one home while Team is open: the rail hides its copy, and its worker rows step back to a quiet control list because they hold the only worker controls.
 
 ## Emotional register
 
@@ -14,7 +14,7 @@ Calm and exact Commander Glass. Reuse hub-web/DESIGN.md and tokens.css/glass.css
 
 ## Distinctive move
 
-The lane joins the worker to its current task and the actual delivery evidence. Started, pushed, CI green, merged and verified are distinct facts; absent evidence stays unreported. A small Needs you strip leads back to the existing ask, blocker or merge action rather than creating another operations console.
+The heading is a finding computed from the session, not a slogan, and each lane's figure is its delivery track: five receipts on one line, where a segment fills only between two recorded receipts. The lane joins the worker to its current task and the actual delivery evidence. Started, pushed, CI green, merged and verified are distinct facts; absent evidence stays unreported. A small Needs you strip leads back to the existing ask, blocker or merge action rather than creating another operations console.
 
 ## Deliberately omitted
 

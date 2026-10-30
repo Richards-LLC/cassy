@@ -47,6 +47,8 @@ struct Record {
     write: Box<dyn Fn() -> Option<Result<(), String>> + Send>,
     hook: Option<tokio::task::JoinHandle<Option<String>>>,
     last_key: Option<Key>,
+    /// Pane output stream position when the command was typed.
+    output_from: u64,
 }
 
 impl FactoryDaemon {
@@ -152,10 +154,14 @@ fn idle_prompt(text: &str) -> bool {
         })
 }
 
-fn native_observation(command: Command, before: &str, current: &str) -> Option<(String, bool)> {
-    if before == current { return None; }
+/// `output` is what the pane emitted since the command was typed. A repeat
+/// Codex /status can leave the screen unchanged while its old copy scrolls
+/// away, so a marker it printed again is fresh even when the screen had it.
+fn native_observation(command: Command, before: &str, current: &str, output: &str) -> Option<(String, bool)> {
+    if before == current && output.is_empty() { return None; }
     let lower = current.to_lowercase();
-    let fresh = |marker: &str| lower.contains(marker) && !before.to_lowercase().contains(marker);
+    let output = output.to_lowercase();
+    let fresh = |marker: &str| lower.contains(marker) && (!before.to_lowercase().contains(marker) || output.contains(marker));
     match command {
         Command::Compact if fresh("compacted (ctrl+o") || fresh("context compacted ·") =>
             Some(("Context compaction confirmed by the supervisor's harness.".into(), false)),
@@ -335,10 +341,11 @@ impl FactoryDaemon {
             anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
                 && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before) && self.output_settled(pane),
                 "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
+            let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         let record = self.supervisor_commands.records.get_mut(&owner).ok_or_else(|| anyhow::anyhow!("The original command receipt is unavailable. Do not resend an uncertain command."))?;
@@ -349,7 +356,7 @@ impl FactoryDaemon {
             // Navigation remains scoped to the observed native dialog. A stale
             // browser cannot send a key after that dialog disappeared.
             let current = screen(pane);
-            if !native_observation(record.receipt.command, "", &current).is_some_and(|(_, open)| open) {
+            if !native_observation(record.receipt.command, "", &current, "").is_some_and(|(_, open)| open) {
                 record.receipt.phase = Phase::Observed;
                 record.receipt.interactive = false;
                 record.receipt.detail = "The native chooser is no longer open. No additional change was confirmed.".into();
@@ -381,7 +388,11 @@ impl FactoryDaemon {
                 record.receipt.phase = Phase::Unconfirmed;
                 record.receipt.detail = format!("Command write failed; execution is uncertain: {error}. Do not resend automatically.");
             } else if let Some((detail, interactive)) = native_observation(record.receipt.command,
-                if matches!(record.last_key, Some(Key::Next | Key::Previous | Key::Select)) && current != record.before { "" } else { &record.before }, &current) {
+                if matches!(record.last_key, Some(Key::Next | Key::Previous | Key::Select)) && current != record.before { "" } else { &record.before }, &current,
+                // Codex prints /status into history; other harnesses keep the screen-diff rule.
+                &if record.receipt.command == Command::Usage && pane.harness() == cas_mux::SupervisorCli::Codex {
+                    self.pane_buffers.get(pane.id()).and_then(|buffer| buffer.plain_text_since(record.output_from)).unwrap_or_default()
+                } else { String::new() }) {
                 if record.receipt.command == Command::Model && !interactive && record.last_key == Some(Key::Select)
                     && pane.harness() == cas_mux::SupervisorCli::Codex
                 {
@@ -597,14 +608,14 @@ mod tests {
     }
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
-        assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯").is_none());
-        assert!(native_observation(Command::Compact, "›", "• Context compacted · 44s\n›").is_some());
-        assert!(native_observation(Command::Model, "Set model to Sonnet\n❯", "Set model to Sonnet\n❯ /model").is_none());
-        let opened = native_observation(Command::Model, "❯", "Select model\nOpus\nSonnet").unwrap();
+        assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯", "").is_none());
+        assert!(native_observation(Command::Compact, "›", "• Context compacted · 44s\n›", "").is_some());
+        assert!(native_observation(Command::Model, "Set model to Sonnet\n❯", "Set model to Sonnet\n❯ /model", "").is_none());
+        let opened = native_observation(Command::Model, "❯", "Select model\nOpus\nSonnet", "").unwrap();
         assert!(opened.1);
         assert!(opened.0.contains("chooser opened"));
-        assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet").is_none());
-        let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯").unwrap();
+        assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet", "").is_none());
+        let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯", "").unwrap();
         assert!(!confirmed.1);
         assert_eq!(codex_model_selection("Select model", "• Model changed to gpt-6.1-sol xhigh for this conversation\n›"), Some(("gpt-6.1-sol".into(), Some("xhigh".into()))));
         for text in ["Select model\ngpt-6.1-sol", "› /model gpt-6.1-sol", "Model changed to gpt-6.1-sol xhigh", "• Failed to save default model: error"] {
@@ -613,9 +624,9 @@ mod tests {
         assert!(codex_model_selection("• Model changed to gpt-6.1-sol high", "• Model changed to gpt-6.1-sol high\n›").is_none());
     }
     #[tokio::test(flavor = "current_thread")]
-    async fn native_clear_is_observed_when_codex_returns_to_its_welcome_prompt() {
+    async fn native_clear_and_a_repeat_codex_status_are_observed() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for};
-        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_clear_is_observed_when_codex_returns_to_its_welcome_prompt") { return; }
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_clear_and_a_repeat_codex_status_are_observed") { return; }
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = daemon.app.supervisor_name().to_owned();
@@ -632,9 +643,29 @@ mod tests {
         daemon.app.mux.get_mut(&name).unwrap().feed(
             "\x1bc\x1b[1;1HOpenAI Codex (v0.165.0)\r\nTip: Use the desktop app.\r\n\x1b[20;1H› Ask Codex to do anything".as_bytes(),
         ).unwrap();
-        let observed = daemon.dispatch_supervisor_command(Request::Status, "cmd-clear".into(), owner).await.unwrap();
+        let observed = daemon.dispatch_supervisor_command(Request::Status, "cmd-clear".into(), owner.clone()).await.unwrap();
         assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt }
             if receipt.phase == Phase::Observed && receipt.detail.contains("welcome prompt")));
+        // A repeat /status prints the same cell; its old copy scrolls away and
+        // the screen is unchanged, so only the pane's new output proves it (cas-7ec8).
+        let status = "\x1bc\x1b[12;1H• Model: gpt-6.1-sol (reasoning high)\r\n• Context window: 72% left\r\n\x1b[20;1H› Ask Codex to do anything";
+        daemon.app.mux.get_mut(&name).unwrap().feed(status.as_bytes()).unwrap();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+        let input = std::fs::read(root.path().join("input")).unwrap().len();
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "cmd-status".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap()[input..].ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        async fn daemon_status(daemon: &mut FactoryDaemon, client_ref: &str, owner: &MessageAttribution) -> Phase {
+            match daemon.dispatch_supervisor_command(Request::Status, client_ref.into(), owner.clone()).await.unwrap() {
+                DaemonMessage::SupervisorCommandReceipt { receipt } => receipt.phase,
+                _ => unreachable!(),
+            }
+        }
+        daemon.app.mux.get_mut(&name).unwrap().feed(status.as_bytes()).unwrap();
+        assert_eq!(daemon_status(&mut daemon, "cmd-status", &owner).await, Phase::Submitted, "an unchanged screen alone proves nothing");
+        daemon.buffer_pane_output(&name, status.as_bytes());
+        assert_eq!(daemon_status(&mut daemon, "cmd-status", &owner).await, Phase::Observed);
     }
     #[test]
     fn prompt_readiness_refuses_busy_and_modal_screens() {

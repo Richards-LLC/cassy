@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from "vitest";
-import { renderTeam, updateTeamElapsed, type TeamSnapshot } from "./team-view";
+import { renderTeam, teamFinding, updateTeamElapsed, type TeamSnapshot } from "./team-view";
 
 it("joins the selected session to real receipts, keeps focus on live updates and exposes no raw activity", () => {
   const root = document.createElement("section"); root.tabIndex = 0; document.body.append(root);
@@ -46,6 +46,13 @@ it("keeps unavailable, empty and stale staffing explicit without inventing worke
   renderTeam(root, { ...snapshot, stale: "Not live — reconnecting." }, vi.fn(), vi.fn());
   expect(root.textContent).toContain("No workers in this supervisor’s session.");
   expect(root.textContent).toContain("Not live — reconnecting.");
-  expect(root.textContent).toContain("No decisions waiting.");
+  expect(root.textContent).toContain("Nothing needs you.");
+  expect(root.querySelector("h2")?.textContent).toBe("Last reported: No workers reporting.");
   expect(root.textContent).not.toContain("unrelated");
+});
+
+it("leads with what the session reports and names what it cannot read", () => {
+  expect(teamFinding(["Executing", "Executing", "Executing", "Waiting"], 0)).toBe("3 working, 1 waiting.");
+  expect(teamFinding(["Executing", "Stalled", "Parked for merge"], 1)).toBe("1 working, 1 parked, 1 stalled. 1\u00a0needs\u00a0you.");
+  expect(teamFinding(["Executing", "Unknown"], 2)).toBe("1 working, 1 not reported. 2\u00a0need\u00a0you.");
 });

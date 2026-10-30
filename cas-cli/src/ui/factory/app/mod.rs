@@ -1329,10 +1329,13 @@ pub struct FactoryApp {
     pub sidecar_collapsed: bool,
     /// Worktree manager for worker isolation (None if worktrees disabled)
     worktree_manager: Option<WorktreeManager>,
-    /// cas-58a3 review H1: crashed workers whose reap and worktree cleanup
+    /// cas-58a3 review H1: retired workers whose reap or worktree cleanup
     /// have not been applied yet. Their names stay reserved, so a respawn
     /// never reuses the cgroup scope or worktree the late cleanup acts on.
     crash_cleanups_pending: std::collections::HashMap<String, usize>,
+    /// Target retirement and worktree removal run independently of control and delivery.
+    /// Names remain reserved until these results have been applied.
+    worktree_cleanup_jobs: Vec<render_and_ops::epic_workers::WorkerCleanupJob>,
     /// Index of the currently selected worker tab (0-based, used in tabbed mode)
     pub selected_worker_tab: usize,
     /// Use tabbed worker view instead of side-by-side (config preference)

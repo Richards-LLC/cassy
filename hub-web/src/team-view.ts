@@ -1,6 +1,7 @@
 import type { FleetAgent } from "./fleet-ops";
 import { workerProgress, workerState, releaseProgress, taskGroups, statusClass, type ProgressTask, type ReleaseEpic } from "./progress-model";
 import { releaseHeader } from "./progress-view";
+import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
 
 export interface TeamSnapshot {
   readonly roster?: readonly string[];
@@ -82,7 +83,9 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
       const detail = evidence ? `Reported${time && Number.isFinite(time.getTime()) ? ` at ${time.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : ""}: ${evidence.reference}` : "Not reported";
       item.title = detail; item.setAttribute("aria-label", `${label}: ${detail}`); trail.append(item);
     }
-    lane.append(identity, badge, work, elapsed, trail); list.append(lane);
+    const avatar = document.createElement("template");
+    avatar.innerHTML = providerAvatarMarkup({ harness: worker.agent?.harness, fallback: avatarLetters(worker.name), size: "lane" });
+    lane.append(avatar.content, identity, badge, work, elapsed, trail); list.append(lane);
   }
   root.append(list);
   if (!workers.length) root.append(text("p", "No workers in this supervisor’s session.", "team-empty"));

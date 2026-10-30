@@ -2677,6 +2677,7 @@ mod tests {
     /// operator had already left.
     #[test]
     fn relays_follow_the_supervisor_across_a_mid_session_restart() {
+        let mut env = TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
         agents.init().unwrap();
@@ -2743,7 +2744,7 @@ mod tests {
         let pq = SqlitePromptQueueStore::open(temp_q.path()).unwrap();
         pq.init().unwrap();
 
-        unsafe { std::env::set_var("CAS_FACTORY_SESSION", "cas-src-fast-pelican-83") };
+        env.set("CAS_FACTORY_SESSION", "cas-src-fast-pelican-83");
         let result = emit_task_lifecycle_transition(
             &sq,
             Some(&pq),
@@ -2758,7 +2759,6 @@ mod tests {
             "2026-08-07T18:51:51+00:00",
         )
         .unwrap();
-        unsafe { std::env::remove_var("CAS_FACTORY_SESSION") };
 
         let notification_id = match result {
             LifecyclePushResult::Enqueued { notification_id } => notification_id,

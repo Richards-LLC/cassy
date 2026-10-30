@@ -34,10 +34,10 @@
 //!
 //! End-to-end tests use a process-global `CAS_ROOT` env var to point
 //! `CloudConfig::load()` at a tempdir. CAS_ROOT mutations are serialized
-//! through `ENV_LOCK` to keep parallel tokio::test threads from racing.
+//! through the harness TestEnvGuard to keep parallel suites from racing.
 
 use std::path::Path;
-use std::sync::Mutex;
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "common/mod.rs"]
 mod common;
@@ -56,91 +56,24 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const FIXTURE_PROJECT_ID: &str = "p";
 
-/// Process-global lock for CAS_ROOT mutations. `cargo test` runs each
-/// `#[tokio::test]` on its own thread within the same binary process; the
-/// `CAS_ROOT` env var is shared across all of them, so concurrent
-/// set/restore pairs corrupt each other's state. Tests that need to set
-/// CAS_ROOT acquire this mutex; tests that don't (helper-level + source-grep)
-/// do not need the lock.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// RAII guard that sets CAS_ROOT for the duration of one test and restores
-/// the previous value (or removes the var) on drop. `unsafe` is required
-/// only because `std::env::set_var` is `unsafe` in edition 2024 — there is
-/// no actual undefined-behavior surface beyond the documented thread-safety
-/// caveats, which we handle with `ENV_LOCK`.
-struct CasRootGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
+/// Keep root and user-cloud overrides under the harness's shared lock.
+struct CasRootGuard;
 impl CasRootGuard {
-    fn set(cas_root: &Path) -> Self {
-        Self::set_with(cas_root, &[])
-    }
-
-    /// Set `CAS_ROOT` plus `extra` vars under a SINGLE `ENV_LOCK`
-    /// acquisition. Two separate guards cannot be combined: `std::sync::Mutex`
-    /// is not reentrant, so holding `CasRootGuard` and `ScopedEnvVar` at once
-    /// would deadlock the test thread.
-    fn set_with(cas_root: &Path, extra: &[(&'static str, &str)]) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut prev = vec![("CAS_ROOT", std::env::var_os("CAS_ROOT"))];
-        // SAFETY: env mutation on an integration-test process, guarded by
-        // ENV_LOCK so no other test can race the var concurrently.
-        unsafe { std::env::set_var("CAS_ROOT", cas_root) };
-        for (key, value) in extra {
-            prev.push((*key, std::env::var_os(key)));
-            // SAFETY: as above.
-            unsafe { std::env::set_var(key, value) };
-        }
-        Self { _lock: lock, prev }
+    fn set(root: &Path) -> TestEnvGuard { Self::set_with(root, &[]) }
+    fn set_with(root: &Path, extra: &[(&str, &str)]) -> TestEnvGuard {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_ROOT", root);
+        for (key, value) in extra { env.set(key, value); }
+        env
     }
 }
 
-impl Drop for CasRootGuard {
-    fn drop(&mut self) {
-        // SAFETY: same as `set` — ENV_LOCK held for entire guard lifetime.
-        unsafe {
-            for (key, prev) in &self.prev {
-                match prev {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
-
-/// RAII guard for scoping an arbitrary env-var mutation to the duration of
-/// one test. Used to isolate `active_team_id()` from `~/.cas/cloud.json`
-/// (which may have a `default_team_id` on the developer's machine) by
-/// pointing `CAS_USER_CLOUD_JSON` at a non-existent path.
-struct ScopedEnvVar {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-
+struct ScopedEnvVar;
 impl ScopedEnvVar {
-    fn set(key: &'static str, value: &str) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os(key);
-        // SAFETY: env mutation guarded by ENV_LOCK; no other test can race.
-        unsafe { std::env::set_var(key, value) };
-        Self { _lock: lock, key, prev }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        // SAFETY: ENV_LOCK held for entire guard lifetime.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
+    fn set(key: &str, value: &str) -> TestEnvGuard {
+        let mut env = TestEnvGuard::temp_home();
+        env.set(key, value);
+        env
     }
 }
 

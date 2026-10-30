@@ -3,6 +3,7 @@ import { escapeHtml, projectTitle } from "./cloud-brand";
 import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
+import { providerAvatarMarkup } from "./provider-mark";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
@@ -216,7 +217,12 @@ export function conversationRowSpokenName(row: ConversationRow): string {
  * then the last turn.
  */
 function rowPreviewText(row: ConversationRow, fallback: string): string {
-  if (row.ended) return `Ended · ${row.ended.workers_stopped.length} workers stopped${row.ended.orphans.length ? ` · Still alive: ${row.ended.orphans.join(", ")}` : ""}`;
+  if (row.ended) {
+    const stopped = row.ended.workers_stopped.length;
+    const stoppedText = stopped ? ` · ${stopped} worker${stopped === 1 ? "" : "s"} stopped` : "";
+    const aliveText = row.ended.orphans.length ? ` · Still alive: ${row.ended.orphans.join(", ")}` : "";
+    return `Ended${stoppedText}${aliveText}`;
+  }
   if (row.unreachable || row.interrupted) return row.connection;
   const draft = row.draft?.trim();
   if (draft && !row.selected) return `Draft: ${draft}`;
@@ -251,11 +257,9 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // running under the time stamp (cas-1ca1). The codename sits beneath.
   // cas-55a4: among one project's sessions, the most recently active one says so.
   const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
-  const harnesses = { claude: "✳", codex: ">_", grok: "/", opencode: "[ ]" };
-  const harness = row.harness && Object.hasOwn(harnesses, row.harness) ? row.harness : undefined;
   const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
-  const state = row.supervisorState ? `<span class="supervisor-state ${row.supervisorState}" title="${row.supervisorState === "needs-you" ? "Needs you" : row.supervisorState}" aria-hidden="true"></span>` : "";
-  return `<span class="conversation-avatar${harness ? " harness-mark" : ""}"${harness ? ` data-harness="${harness}" title="${harness}"` : ""} aria-hidden="true">${escapeHtml(harness ? harnesses[harness] : machineMonogram(row.host))}${state}</span>`
+  // DESIGN.md Avatars: the model's provider mark, or the machine monogram.
+  return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
     + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}${account}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
@@ -313,7 +317,7 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
-  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void> };
+  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; dismissEnded?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
    * a polite live region, until ENDED_NOTICE_MS passes or another one ends.
@@ -333,8 +337,8 @@ export class ConversationList {
   private press?: { pointerId: number; pointerType: string; key: string; x: number; y: number; released: boolean; opened?: boolean; timer?: ReturnType<typeof setTimeout> };
   /** The document whose pointer events this list follows. */
   private watched?: Document;
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
-    this.latest = { container, rows, open, end };
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>, dismissEnded?: (row: ConversationRow) => void): void {
+    this.latest = { container, rows, open, end, dismissEnded };
     const document = container.ownerDocument;
     this.watch(document);
     const ordered: HTMLElement[] = [];
@@ -391,6 +395,10 @@ export class ConversationList {
       if (row.canEnd && end) {
         const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
         this.renderEnd(control, row, end);
+        ordered.push(control);
+      } else if (row.ended && dismissEnded) {
+        const control = extra(`dismiss:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
+        this.renderDismissEnded(control, row, dismissEnded);
         ordered.push(control);
       }
     }
@@ -551,7 +559,7 @@ export class ConversationList {
     const container = latest.container.isConnected || !latest.container.id
       ? latest.container
       : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
-    this.render(container, latest.rows, latest.open, latest.end);
+    this.render(container, latest.rows, latest.open, latest.end, latest.dismissEnded);
   }
 
   /** The ended row is gone; if focus went with it, land it on the nearest thing left. */
@@ -660,5 +668,24 @@ export class ConversationList {
     // A double-click's second press on the question would take focus off
     // Cancel (and select a word): it does neither (cas-f60a).
     control.onmousedown = (event) => { if (event.detail > 1) event.preventDefault(); };
+  }
+
+  /** Hide an ended session from this device's conversation list; its history stays available. */
+  private renderDismissEnded(control: HTMLElement, row: ConversationRow, dismiss: (row: ConversationRow) => void): void {
+    const signature = JSON.stringify([row.supervisor, row.ended?.at]);
+    if (control.dataset.signature === signature) return;
+    control.dataset.signature = signature;
+    control.dataset.state = "dismiss";
+    const button = control.ownerDocument.createElement("button");
+    button.type = "button";
+    button.className = "conversation-end-cancel";
+    button.textContent = "Dismiss";
+    button.setAttribute("aria-label", `Dismiss ended session ${row.supervisor}`);
+    button.onclick = () => {
+      const neighbours = this.neighbours(row.key);
+      dismiss(row);
+      this.landAfterEnd(control, neighbours);
+    };
+    control.replaceChildren(button);
   }
 }

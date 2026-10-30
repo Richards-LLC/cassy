@@ -58,6 +58,8 @@ Post order: user top-level → capture `message.message_id` → user reply → d
 
 ## Hard rules
 
+- Put documentation-only and test-only CHANGELOG entries under headings starting
+  `Doc` or `Test` so release reports exclude them from shipped change totals.
 - **Was → Now for every item.** Never a bare feature list.
 - **No internal ticket labels** (`cas-XXXX`, epic IDs) in any message.
 - **No agent / factory / supervisor / worker / coordination narration and no drama.**

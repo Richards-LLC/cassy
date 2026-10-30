@@ -6868,7 +6868,14 @@ impl CasCore {
                 && git_commit_is_ancestor(repo_path, recorded, tip)
                 && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
                     (explicit_final_tip || !subjects.is_empty())
-                        && subjects.iter().all(|subject| message_references_task(subject, &task.id))
+                        && subjects.iter().all(|subject| {
+                            // cas-93d7: an exact-tip receipt can identify an
+                            // unnamed pre-push correction on the active lane.
+                            // A foreign subject still belongs to another task.
+                            message_references_task(subject, &task.id)
+                                || (explicit_final_tip
+                                    && !message_claims_other_task(subject, Some(&task.id)))
+                        })
                 })
         });
         if !own_task_branch && !own_active_lane {
@@ -9150,6 +9157,7 @@ impl CasCore {
                             &task,
                             &paths,
                             tip,
+                            &resolved_parent_branch,
                         )
                     {
                         return Ok(Self::tool_error(refusal));

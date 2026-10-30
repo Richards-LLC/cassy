@@ -704,6 +704,18 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     await page.getByRole("button", { name: "Send to the project supervisor", exact: true }).click();
     await expect(page.getByRole("log").getByText("Launch supervisor answered", { exact: true })).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: join(directory, "J03-answer.png") });
+    const composer = page.getByRole("textbox", { name: "Your message", exact: true });
+    await composer.fill("/exit");
+    await composer.press("Enter");
+    const confirmation = page.getByRole("alertdialog", { name: /Exit/ });
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole("button", { name: "Exit", exact: true }).click();
+    const exitReceipt = page.locator(".supervisor-command-receipt");
+    await expect(exitReceipt).toContainText("/exit");
+    await expect(exitReceipt).toHaveAttribute("data-phase", "observed", { timeout: 15_000 });
+    await expect(page.getByRole("tabpanel", { name: "Conversation" }).getByText("Session ended", { exact: true }))
+      .toBeVisible({ timeout: 15_000 });
+    await page.screenshot({ path: join(directory, "J04-exit-ended.png") });
     passed = true;
   } finally {
     try {

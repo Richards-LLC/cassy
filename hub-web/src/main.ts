@@ -1,5 +1,6 @@
 import { StatusRefresh } from "./status-refresh";
 import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
+import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
 import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
@@ -24,7 +25,7 @@ import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
-import { HeldSendFlushes } from "./held-send-flush";
+import { drainHeld, HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText, type TurnRenderContext } from "./conversation-view";
@@ -3916,25 +3917,25 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     try {
       const history = conversationHistory(key);
       const queue = heldSends.get(key) ?? [];
-      while (queue.length) {
-        const held = queue[0]!;
+      await drainHeld(queue, async (held) => {
         const accepted = machines.get(machine.id);
-        if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
+        if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) return false;
         const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
           () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
-        if (result === "waiting") { waiting = true; break; }
-        if (result === "not-saved") break;
-        queue.shift();
-        clearTimeout(held.expiry);
-        history.release(held.clientRef);
-        if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
-        else if (result !== "written") {
-          // Another tab may own this send. A lost claim is not a failed wire
-          // write: project its durable state and original receipt deadline.
-          const snapshot = await sendJournal.read(deliveryScope(machine, session));
-          history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
-        }
-      }
+        if (result === "waiting") { waiting = true; return false; }
+        if (result === "not-saved") return false;
+        return async () => {
+          clearTimeout(held.expiry);
+          history.release(held.clientRef);
+          if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
+          else if (result !== "written") {
+            // Another tab may own this send. A lost claim is not a failed wire
+            // write: project its durable state and original receipt deadline.
+            const snapshot = await sendJournal.read(deliveryScope(machine, session));
+            history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
+          }
+        };
+      });
       if (queue.length === 0) heldSends.delete(key);
       scheduleReceiptCheck(key);
     } finally {
@@ -4272,7 +4273,7 @@ function render(captureDraft = true): void {
     commandPaletteOpen,
     pairingView,
   };
-  const signatureTail = JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
+  const signatureTail = JSON.stringify([selectedHubSession?.project_dir, selectedHubSession?.harness, selectedHubSession?.model, selectedHubSession?.effort, infoItems.length > 0, launchAvailability()]);
   const signature = shellSignature(signatureParts) + signatureTail;
   const active = document.activeElement;
   // Focus anywhere inside the open palette counts as composing too: a rebuild
@@ -4359,7 +4360,7 @@ function render(captureDraft = true): void {
   // Only what the conversation shell shows is built (cas-0546): the thread's
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
-  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
+  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, harness: selectedHubSession?.harness, model: selectedHubSession?.model, effort: selectedHubSession?.effort, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
   if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
@@ -4661,7 +4662,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()), allRows: rows });
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -5432,7 +5433,9 @@ function renderStatus(status?: Record<string, unknown>): void {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
-    line.append(identifier(worker.name), chip(workerState(worker, tasks)));
+    const avatar = document.createElement("template");
+    avatar.innerHTML = providerAvatarMarkup({ harness: metadata?.harness, fallback: avatarLetters(worker.name), size: "lane" });
+    line.append(avatar.content, identifier(worker.name), chip(workerState(worker, tasks)));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {

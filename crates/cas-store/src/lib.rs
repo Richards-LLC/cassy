@@ -1173,3 +1173,7 @@ pub trait EntityStore: Send + Sync {
     /// Close the store
     fn close(&self) -> Result<()>;
 }
+
+#[cfg(test)]
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;

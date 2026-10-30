@@ -32,15 +32,15 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    the current factory-branch tip SHA, and send one `merge_request=true` message;
    its body is the request, so do not send a separate prose summary or ACK before
    or after it. Don't poll: the merge's verdict closes the task (you hear
-   once) or reopens it with findings. Don't re-close or block on it. Read [recovery.md](references/recovery.md)
-   for the waiting rule and for rejection or crossed-message handling.
+   once) or reopens it with findings. Don't re-close or block on it.
+   Read [recovery.md](references/recovery.md) before proceeding.
 
 One event gets one message. A close is the lifecycle report; never send a post-close
 summary or echo the close relay. After a merge request, wait for the supervisor's
-response; send no follow-up update.
+response.
 
-Finish or hand off this task before starting another. Stay available after handoff; injected `Message from …` turns are instructions. Start only assignments
-from the supervisor or `mine`. Never self-dispatch: every time you go idle,
+Finish or hand off before another task. Stay available after handoff; follow
+injected `Message from …` turns. Start only assignments from the supervisor or `mine`. Never self-dispatch: every time you go idle,
 use assigned work; `ready` and `available` are backlog
   visibility, not authorization.
 
@@ -67,17 +67,17 @@ Do not preload later phases.
 
 | Phase or trigger | Read before acting |
 | --- | --- |
-| Design or review tests | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) |
-| First check/test command | [discipline.md](references/discipline.md) |
-| Browser change: affected journeys | [Browser checks](references/discipline.md#browser-checks) |
+| Test design/review | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) |
+| Before checks/tests | [discipline.md](references/discipline.md) |
+| Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
 | Delivery | [close-gate.md](references/close-gate.md); look up `qa.mode`, then [Batch QA](references/details.md#batch-qa) for a batch park |
 | Capacity refusal | [Capacity waits](references/discipline.md#capacity-waits), before treating it as a blocker |
 | Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before `task action=update id=<task-id> status=blocked` or `coordination action=message target=supervisor task_id=<task-id> blocker=true`; use `blocker: <cause>` in the return contract |
-| Queued successor, branch reuse or returned delivery | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>` |
-| Detached work or checkpoint timing | [reminders.md](../cas-supervisor/references/reminders.md) |
+| Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>` |
+| Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md); close records it |
-| Evidence/report task, sync or resume | [details.md](references/details.md) |
-| Bug filing | [Credentials and routing](references/details.md#credentials-and-routing): `issues.repo` and `issues.components.{cassy,violet,cloud}` |
+| Evidence, sync or resume | [details.md](references/details.md) |
+| Bug filing | [Routing](references/details.md#credentials-and-routing): `issues.repo` and `issues.components.{cassy,violet,cloud}` |
 
 Tool loading is two steps, not one: lookup does **not** execute the tool;
 call the resolved tool next, not another ToolSearch.

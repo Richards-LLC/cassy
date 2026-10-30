@@ -1822,6 +1822,12 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "round {round}");
     }
     let parked_anchor = f.task(id).deliverables.factory_branch_anchor;
+    // An own correction before the foreign merge remains attributable even
+    // when a sibling task later becomes in progress on this worker.
+    std::fs::write(worker_path.join("own.rs"), "pub fn own() { /* before foreign */ }\n").unwrap();
+    git(&worker_path, &["add", "own.rs"]);
+    git(&worker_path, &["commit", "-qm", "fix(cas-3d57): correction before next task"]);
+    let own_correction = git(&worker_path, &["rev-parse", "HEAD"]);
     let offending = merge_main("three.rs", "fix(cas-0e2b): unreleased, only on local main", false);
     // Keep the offending merge distinct from the ignored current tip.
     std::fs::write(worker_path.join("own.rs"), "pub fn own() { /* correction */ }\n").unwrap();
@@ -1829,13 +1835,40 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
     git(&worker_path, &["commit", "-qm", "fix(cas-3d57): final correction"]);
     git(&worker_path, &["push", "-q", "origin", &lane]);
     let ignored_tip = git(&worker_path, &["rev-parse", "HEAD"]);
-    let refused = call(&f.worker, close).await;
+    let mut unrelated = assigned("cas-dec0", TaskType::Bug, "epic/next");
+    unrelated.status = TaskStatus::Open;
+    f.put(&unrelated);
+    let refused = call(&f.worker, close.clone()).await;
     assert_eq!(f.task(id).deliverables.factory_branch_anchor, parked_anchor,
         "a local main ahead of origin is not released, so the anchor must not advance: {refused}");
     assert!(refused.contains("PARK REFUSED"), "{refused}");
+    assert!(refused.contains("request changes") && !refused.contains(&unrelated.id),
+        "an unrelated same-worker task must not acquire the foreign advance: {refused}");
     for boundary in [parked_anchor.as_ref().unwrap(), &ignored_tip, &offending] {
         assert!(refused.contains(boundary), "missing {boundary}: {refused}");
     }
+
+    let next = assigned("cas-0e2b", TaskType::Bug, "epic/next");
+    f.put(&next);
+    // A new target conflict must refresh the parked flag even when the
+    // rejected branch continuation returns before ordinary re-park work.
+    assert!(!f.task(id).deliverables.merge_conflicted);
+    git(repo, &["checkout", "-q", "epic/next"]);
+    std::fs::write(repo.join("own.rs"), "pub fn target_version() {}\n").unwrap();
+    git(repo, &["add", "own.rs"]);
+    git(repo, &["commit", "-qm", "fix: conflicting target delivery"]);
+    git(repo, &["push", "-q", "origin", "epic/next"]);
+    git(&worker_path, &["fetch", "-q", "origin"]);
+    let refused = call(&f.worker, close).await;
+    let parked = f.task(id);
+    let remedy = refused.contains(&next.id) && refused.contains("own branch")
+        && !refused.contains("request changes") && !refused.contains("request_changes");
+    let first_foreign = refused.contains(&offending) && !refused.contains(&own_correction);
+    assert!(remedy && first_foreign && parked.deliverables.merge_conflicted,
+        "next-task remedy={remedy}, first foreign commit={first_foreign}, refreshed conflict={}: {refused}",
+        parked.deliverables.merge_conflicted);
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert_eq!(parked.deliverables.factory_branch_anchor, parked_anchor);
 }
 /// A queued successor uses its own target, while the delivery just parked or
 /// closed keeps its immutable ref. Replaying that close cannot consume C.

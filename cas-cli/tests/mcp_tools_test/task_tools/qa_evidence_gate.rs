@@ -1750,6 +1750,9 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
             start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
         let retry = close_text(&fx.core, TASK).await;
         assert!(retry.contains("PARK REFUSED"), "{status:?}: {retry}");
+        assert!(retry.contains("cas-b0b1") && retry.contains("own branch")
+            && !retry.contains("request changes"),
+            "the first untagged next-task lease must supply the remedy: {status:?}: {retry}");
         for boundary in [&parked_at, &lane_tip] {
             assert!(retry.contains(boundary), "missing {boundary}: {retry}");
         }

@@ -38,6 +38,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   a new one with the factory's boot harness, model and effort. Workers keep their
   tasks, panes and leases. A plain exit or crash still shuts the factory down.
 
+### Fixed — Reused-lane recovery advice
+
+- **Refused advances identify the next task** — Re-parking names the first
+  foreign commit and directs the worker to deliver recognized next-task work
+  on its own branch. The parked anchor stays intact, and newly detected merge
+  conflicts refresh its recovery flag before close returns.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

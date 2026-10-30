@@ -13,6 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and fixtures no longer select every Commander journey or appear as unowned
   product surfaces. Product source changes retain their journey and QA checks.
 
+### Added — Per-file edit sizes in Commander
+
+- **Tool-reported files show known edit sizes** — Changed-file rows display added and removed line counts when a successful edit reports them, including zeroes. Unknown counts stay absent. Screen readers hear both numbers and their meaning; the counts describe the latest successful edit, not Git or turn totals.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

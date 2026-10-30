@@ -3249,6 +3249,12 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .changed-file { min-width: 0; border-top: 1px solid var(--line-subtle); }
 .changed-file-path { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-xs); }
 .changed-file-operation { flex: none; color: var(--ink-mid); font-size: var(--fs-xs); }
+.changed-file-toggle:has(.changed-file-counts) { flex-wrap: wrap; }
+.changed-file-toggle:has(.changed-file-counts) .changed-file-path { flex-basis: min(18ch, 100%); }
+.changed-file-counts { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: auto; font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.changed-file-count-visual { display: inline-flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-1); max-width: 100%; }
+.changed-file-count-added { color: var(--state-ok); white-space: nowrap; }
+.changed-file-count-removed { color: var(--state-crit); white-space: nowrap; }
 .changed-file-detail.work-detail { margin: 0 var(--space-2) var(--space-2); max-width: 100%; }
 .changed-file-detail .rich-diff { margin: 0; }
 .work-summary, .work-row-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; max-width: 100%; padding: 0 var(--space-2); border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink-mid); font: var(--weight-regular) var(--fs-meta)/1.3 var(--font-ui); text-align: left; cursor: pointer; }

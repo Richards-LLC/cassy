@@ -45,6 +45,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   on its own branch. The parked anchor stays intact, and newly detected merge
   conflicts refresh its recovery flag before close returns.
 
+### Changed — Factory workers
+
+- **Worker launches carry a role-scoped skill listing** — Was: every worker and
+  Codex verifier read the whole native skill listing at launch, 12,000 to 18,000
+  characters on every harness. → Now: workers list six role skills through each
+  harness's own control, under 2,500 characters on Claude, Codex, Grok and
+  OpenCode, and Codex verifiers list none. Supervisors are unchanged. Any skill
+  stays available: `/name` or `$name` still expands, and `skill action=list_all`
+  and `skill action=show` now serve the shipped catalog and its references even
+  when no project synced it. Grok workers in a Cassy-managed worktree run with
+  `GROK_FOLDER_TRUST=false` and a generated, git-excluded `.grok/skills`; other
+  checkouts keep the full listing. A user's own Grok skills stay listed,
+  as do Claude plugin skills, which Claude's control does not reach.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

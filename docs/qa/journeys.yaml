@@ -264,6 +264,10 @@ invariants:
     statement: Claude account choices consume profile-local native statusline observations, including factory sessions; an older percentage stays visible with its Eastern observation time and, for an earlier day, its date until its known reset, while expired windows and changed identities cannot retain that percentage.
     check: Run generated_statusline_records_usage_even_for_a_factory_supervisor, configure_migrates_bare_statuslines_in_every_profile_once (including malformed-profile warnings and continued project hook setup), configured_profile_beats_ambient_and_main, weekly_observation_date_follows_the_eastern_day and native_claude_snapshot_reaches_limits_and_picker_without_authentication; then use the batch candidate for real sessions on two profiles and read back both cas claude percentages and their profile snapshots without a usage endpoint request or credential-content reads.
     bug: {task: cas-7045}
+  HUB-J13-PROJECT-ACCOUNT-POLICY:
+    statement: New session recommends an account using the selected project's selection and threshold settings; changing the project refreshes the recommendation, stale responses cannot replace it, and the operator can still choose another logged-in account.
+    check: Run launch_profiles_follow_the_resolved_projects_account_policy, launch-session and connection Vitest tests, and the HUB-J13 start-session journey; inspect project and browse targets, global fallback, project switching and the explicit account in the launch request, with 390/1440 captures.
+    bug: {task: cas-774a}
   HUB-J13-ACCOUNT-MANAGEMENT:
     statement: The shell Accounts panel lists each machine independently and scrolls through every account on a phone; only factory-manage pairings mutate named Claude/Codex accounts, destructive operations confirm and audit, Grok is read-only, and New session refreshes choices without reload with local 12-hour capacity times. The confirmation editor is not rendered for read-only pairings or after Cancel/completion, and dismissal clears its text and typed value.
     check: Run accounts_route_tests, accounts-panel and launch-session UI tests and the HUB-J13 shell Accounts journey; assert rendered editor visibility after Cancel/remove and for read-only pairings, and prove CLI parity and each audited mutation on disposable profiles against the exact-tip real hub candidate, with 1280/390 light/dark captures.
@@ -1398,7 +1402,7 @@ journeys:
   - Open New session and find the project — the most recently used project leads, a running project offers Attach,
     Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as
     the machine's default
-  - Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out
+  - Choose the account — every Claude account on the machine is listed with the selected project's recommendation preselected (falling back to the default); changing projects refreshes the recommendation; a logged-out
     one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has
     no account step; the summary names the chosen account
   - Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>)
@@ -1474,6 +1478,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-PROJECT-ACCOUNT-POLICY
   - HUB-J13-ACCOUNT-MANAGEMENT
   - HUB-J13-ACCOUNTS-ENTRY
   - HUB-J13-NATIVE-CLAUDE-CAPACITY

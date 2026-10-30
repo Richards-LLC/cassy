@@ -86,8 +86,7 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
     }
     std::fs::write(claude.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"claude@example.test"}}"#).unwrap();
     std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"default-claude@example.test"}}"#).unwrap();
-    let repos = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
-    let project = repos.path().join("project");
+    let project = home.join("project");
     let cas_root = init_cas_dir(&project).unwrap();
     std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"catalog-project\"\n").unwrap();
     let unrelated = init_cas_dir(&home.join("unrelated")).unwrap();
@@ -848,7 +847,8 @@ async fn launch_profiles_follow_the_resolved_projects_account_policy() {
             }}}
         }).to_string()).unwrap();
     }
-    let project = home.join("project");
+    let repos = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let project = repos.path().join("project");
     std::fs::create_dir_all(project.join(".cas")).unwrap();
     assert!(Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
     crate::store::known_repos::register_repo_strict(&project).unwrap();

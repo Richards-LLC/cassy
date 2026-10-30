@@ -77,7 +77,12 @@ elif sys.argv[1] == 'hub':
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args): pass
         def do_GET(self):
-            key = self.path.removeprefix('/commander/') or 'index.html'
+            routes = {'/':'index.html','/commander':'index.html','/commander/':'index.html',
+                      '/commander/app.js':'app.js','/commander/app.css':'app.css'}
+            key = routes.get(self.path)
+            if key not in assets:
+                self.send_error(404)
+                return
             self.send_response(200)
             self.end_headers()
             self.wfile.write(assets[key].encode())

@@ -9245,7 +9245,7 @@ impl CasCore {
                                     .is_some_and(|receipt| commit_ids_match(&receipt, tip));
                                 if receipt_was_tip {
                                     return Ok(Self::tool_error(format!(
-                                        "PARK REFUSED: recorded delivery anchor {boundary} is absent from {branch}, and commit_receipt={tip} cannot replace it: the commits since {branch} left the target are not all attributable to {id} (another task's commit, or work after a sibling's lease). No park or anchor change was recorded. Do not retry the same receipt. Ask the supervisor to review the delivery and use `task action=request_changes id={id}` or rebind the branch.",
+                                        "PARK REFUSED: recorded delivery anchor {boundary} is absent from {branch}, and commit_receipt={tip} cannot replace it: the commits since {branch} left the target are not all attributable to {id} (another task's commit or work after a sibling's lease), or this is a rewritten delivery. No park or anchor change was recorded. Do not retry the same receipt; ask the supervisor to review the delivery and request changes or rebind the branch.",
                                         id = task.id,
                                     )));
                                 }

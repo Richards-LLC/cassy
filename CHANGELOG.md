@@ -44,6 +44,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   event could change a recycled worker registration from Shutdown to Stale. →
   Now: Stale updates leave shutdown registrations terminal.
 
+## [3.91.1] - 2026-10-30
+
+### Fixed — Commander daemon replacement
+
+- **An open conversation reconnects to a replacement daemon** — Was: if
+  Commander saw the old daemon's session end before its replacement was live,
+  the conversation stopped and never resumed. Now: Commander resumes the
+  requested conversation on the replacement automatically; an ended session
+  with no replacement still stops retries and sends.
+
+### Fixed — Shell substitution policy checks
+
+- **Operator-only commands cannot hide inside substitutions** — Was: an
+  operator-only command written inside a double-quoted substitution, an
+  expanding heredoc, or a substitution containing a case pattern or comment
+  parenthesis could pass the worker guard. Now: every executable substitution
+  is checked with the shared shell tokenizer, parameter and arithmetic
+  boundaries are preserved, unfinished heredoc scopes are refused, and
+  single-quoted words and quoted heredocs stay data.
+
+### Fixed — Commander clock correction
+
+- **Clock corrections stay inside the proof window** — Was: after a
+  stale-proof refusal, Commander adopted any clock offset the hub reported,
+  however large. Now: corrections are capped at the hub's 60-second proof
+  window; a larger difference shows "Device and machine clocks differ by more
+  than 60 seconds" instead of signing with a skewed time.
+
 ## [3.91.0] - 2026-10-30
 
 ### Fixed — Factory workflow

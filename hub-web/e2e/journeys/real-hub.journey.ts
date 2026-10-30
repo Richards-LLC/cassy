@@ -276,6 +276,9 @@ test(
         const before = welcomes.length;
         const stopped = await command("daemon-stop");
         await expect(header).toContainText("Reconnecting");
+        // Observe the old daemon's end receipt before starting its replacement.
+        // Otherwise a fast restart can hide the ended-to-live catalog gap.
+        await expect(page.locator('#message-status[data-session-ended="true"]')).toBeVisible();
         const replacement = await command("daemon-start");
         expect(replacement.daemonPid).not.toBe(stopped.daemonPid);
         fixture!.daemonPid = replacement.daemonPid;

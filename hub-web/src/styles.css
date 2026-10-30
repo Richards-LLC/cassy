@@ -1888,13 +1888,15 @@ dialog form > *,
 /* Beside Team the rail is a quiet control list: the lanes already say who is on
    what, and these rows keep the only worker controls. Phone sheets stay full. */
 @media (min-width: 721px) {
-  .conversation-main.team-open ~ .conversation-context .status-agent { margin: 0; padding: var(--space-1) 0; border-color: transparent; background: transparent; }
+  /* border: 0, not a transparent border, which forced colors would paint against the name. */
+  .conversation-main.team-open ~ .conversation-context .status-agent { gap: 0; margin: 0; padding: var(--space-1) 0; border: 0; background: transparent; }
+  .conversation-main.team-open ~ .conversation-context .status-agent .status-line { align-items: center; flex-wrap: nowrap; min-height: var(--rail-item-min); }
   /* The name replaces the avatar, task and state the lane already shows, so each control still says whose it is. */
   .conversation-main.team-open ~ .conversation-context .status-agent :is(.provider-avatar, .status-chip) { display: none; }
   .conversation-main.team-open ~ .conversation-context .status-agent .status-line > .status-identifier { display: inline; flex: 1; color: var(--ink-mid); }
   .conversation-main.team-open ~ .conversation-context .status-agent > :is(.status-activity, .status-last-activity) { display: none; }
   .conversation-main.team-open ~ .conversation-context .status-agent .status-timeline { border-color: transparent; background: transparent; color: var(--ink-mid); }
-  .conversation-main.team-open ~ .conversation-context .status-agent .fleet-ops-trigger { border-color: transparent; background: transparent; color: var(--ink-mid); }
+  .conversation-main.team-open ~ .conversation-context .status-agent > .fleet-ops > .fleet-ops-trigger { top: 50%; right: 0; transform: translateY(-50%); border-color: var(--line-subtle); background: transparent; color: var(--ink-mid); }
 }
 .team-needs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-block: var(--space-1); margin-block-end: var(--space-2); border-block: 1px solid var(--line-subtle); }
 .team-needs h3, .team-needs p { margin: 0; font-size: 13px; }

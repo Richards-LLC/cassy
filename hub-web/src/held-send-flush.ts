@@ -46,3 +46,18 @@ export class HeldSendFlushes {
     }
   }
 }
+
+/**
+ * Dispatch a conversation's held sends in order, each once. `dispatch`
+ * returns false to stop the batch, or the work to run once the entry has left
+ * the queue.
+ */
+export async function drainHeld<T>(queue: T[], dispatch: (entry: T) => Promise<false | (() => Promise<void> | void)>): Promise<void> {
+  while (queue.length) {
+    const entry = queue[0]!;
+    const settle = await dispatch(entry);
+    if (!settle) return;
+    queue.shift();
+    await settle();
+  }
+}

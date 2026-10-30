@@ -1988,13 +1988,12 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
 }
 
 /// Queue edits are supervisor operations and only affect pending work.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
     // First configuration and refill must not mistake an in-flight manual
     // start (Git done, lease/status not yet written) for an idle worker.
     for drained in [false, true] {
-        eprintln!("[DEBUG-cas2dc5] fixture drained={drained}");
         let f = queue_control_fixture(&mut env);
         let _ = call(&f.worker, serde_json::json!({
             "action":"update", "id":"cas-8488-current", "status":"blocked",
@@ -2010,31 +2009,25 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         lifecycle_race_hook::before_start_lease(&manual.id, move || {
-            eprintln!("[DEBUG-cas2dc5] entered pre-lease");
             let _ = entered_tx.send(());
-            let resumed = resume_rx.recv_timeout(std::time::Duration::from_secs(10));
-            eprintln!("[DEBUG-cas2dc5] resumed pre-lease: {resumed:?}");
+            let _ = resume_rx.recv();
         });
         let sender = f.worker.clone();
         let request = serde_json::from_value(serde_json::json!({
             "action":"start", "id":manual.id,
         })).unwrap();
-        let runtime = tokio::runtime::Handle::current();
-        let started = tokio::task::spawn_blocking(move || {
-            runtime.block_on(sender.task(Parameters(request)))
+        let started = tokio::spawn(async move {
+            sender.task(Parameters(request)).await
         });
         tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
             .await.expect("manual start must reach its pre-lease barrier").unwrap();
-        eprintln!("[DEBUG-cas2dc5] received pre-lease");
         assert_eq!(f.task(&manual.id).status, TaskStatus::Open);
         let configure = serde_json::from_value(serde_json::json!({
             "action":"update", "assignee":WORKER, "task_ids":["cas-8488-one"],
         })).unwrap();
         let configured = f.supervisor.task(Parameters(configure)).await;
-        eprintln!("[DEBUG-cas2dc5] configuration returned");
         let _ = resume_tx.send(());
         let result = started.await.unwrap().unwrap();
-        eprintln!("[DEBUG-cas2dc5] manual start returned");
         let active = open_task_store(&f.cas_dir()).unwrap().list(Some(TaskStatus::InProgress)).unwrap();
         assert!(configured.is_err(), "drained={drained}: configuration must not overlap manual start: {configured:?}; active={active:?}");
         assert_eq!(active.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(), vec![manual.id.as_str()], "{result:?}");

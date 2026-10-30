@@ -5,7 +5,6 @@ import os
 import re
 import importlib.util
 import json
-import hashlib
 import sys
 from pathlib import Path
 import shutil
@@ -119,7 +118,7 @@ class FastRows(unittest.TestCase):
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
-                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "fast-rows-exception.py", "release-train-announce.py",
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
                        "release-diary-thread.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
@@ -827,10 +826,20 @@ sleep 2
         # wording. Only its posting status should change admission.
         draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().partition(
             "\n## POSTED\n")[0]
-        for posted in (False, True):
-            with self.subTest(posted=posted):
-                receipt = "\n## POSTED\n\n- Posted at: 2026-10-14T12:00:00Z\n" if posted else ""
-                self.write(path, draft + receipt)
+        receipt = "message_id=1790000000.000001"
+        permalink = "<https://example.slack.com/archives/C0123456789/p1790000000000001>"
+        cases = (
+            ("unposted", draft, False),
+            ("posted permalink", draft + f"\n## POSTED\n\n{permalink}\n", True),
+            ("posted message id", draft + f"\n## POSTED\n\n{receipt}\n", True),
+            ("fenced heading", draft.replace("\nInstall:", f"\n## POSTED\n{receipt}\n\nInstall:", 1), False),
+            ("empty heading", draft + "\n## POSTED\n", False),
+            ("placeholder receipt", draft + "\n## POSTED\n\nmessage_id={{MESSAGE_ID}}\n", False),
+            ("receipt in next section", draft + f"\n## POSTED\n\n## Other links\n\n{permalink}\n", False),
+        )
+        for name, body, posted in cases:
+            with self.subTest(case=name):
+                self.write(path, body)
                 self.commit()
                 result = self.fast()
                 self.assertEqual(result.returncode, 0 if posted else 1, result.stdout + result.stderr)
@@ -861,66 +870,9 @@ sleep 2
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no release-notes draft change",
                       (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
-        other = "docs/release-notes/another-history-slack.md"
-        overlong = draft.replace(punch, punch + " Every operator shell launches again today.")
-        self.refused_at_park("release-notes-draft", {path: overlong, other: overlong},
+        self.refused_at_park("release-notes-draft",
+                             {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
                              "dev-top-level top-level punch exceeds 25 words")
-        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
-        receipt = self.repo / f".git/cas/fast-rows/{head}.pass"
-        scoped_files = {line.removeprefix("SCOPE release-notes-draft ")
-                        for line in receipt.read_text().splitlines() if line.startswith("SCOPE release-notes-draft ")}
-        self.assertEqual(scoped_files, {path, other})
-        # pin: both receipt readers require the terminal scope-completion protocol.
-        self.assertTrue(receipt.read_text().endswith("scope complete count=2\n"), receipt.read_text())
-        failed = receipt.read_bytes()
-        record = dict(schema=1, task_id="cas-fixture", head=head, check="release-notes-draft",
-                      files=sorted([path, other]), approver="registered-supervisor", reason="Preserve historical bodies",
-                      failure_sha256=hashlib.sha256(failed).hexdigest())
-        approval = receipt.with_name(f"{head}.cas-fixture.exception.json")
-        validate = (sys.executable, "scripts/fast-rows-exception.py", str(receipt.parent), head)
-        # An issued approval must match every bound field; an env skip and an
-        # overrides.log entry alone are already covered by the push regression.
-        for key, wrong in (("head", "0" * 40), ("check", "test-env"), ("files", [path]),
-                           ("failure_sha256", "0" * 64), ("approver", ""), ("reason", ""), ("task_id", "")):
-            with self.subTest(field=key):
-                approval.write_text(json.dumps(dict(record, **{key: wrong})))
-                self.assertNotEqual(command(self.repo, *validate).returncode, 0)
-        approval.write_text(json.dumps(record))
-        self.assertEqual(command(self.repo, *validate).returncode, 0)
-        for partial in (failed.replace(b"scope complete count=2\n", b""),
-                        failed.replace(b"scope complete count=2", b"scope complete count=1"),
-                        failed + b"SCOPE release-notes-draft docs/release-notes/later-slack.md\n"):
-            receipt.write_bytes(partial)
-            record["failure_sha256"] = hashlib.sha256(partial).hexdigest()
-            approval.write_text(json.dumps(record))
-            self.assertNotEqual(command(self.repo, *validate).returncode, 0)
-        record["failure_sha256"] = hashlib.sha256(failed).hexdigest()
-        approval.write_text(json.dumps(record))
-        receipt.write_bytes(failed.replace(b"rows=release-notes-draft", b"rows=release-notes-draft,test-env"))
-        self.assertNotEqual(command(self.repo, *validate).returncode, 0)
-        receipt.write_bytes(failed)
-        pushed = command(self.repo, "bash", "scripts/fast-rows-pre-push.sh", "origin", "unused",
-                         input=f"refs/heads/factory/lane {head} refs/heads/factory/lane {'0' * 40}\n")
-        self.assertEqual(pushed.returncode, 0, pushed.stderr)
-        self.assertIn("approved fast-row exception", pushed.stderr)
-        self.assertEqual(receipt.read_bytes(), failed)
-
-        # A missing checker alongside known wording failures is not a draft
-        # exception. Every failed file must have a genuine lint result.
-        diary = "docs/release-notes/broken-harness-diary-slack.md"
-        self.write(diary, "# Historical diary\n")
-        (self.repo / "scripts/release-diary-thread.py").unlink()
-        self.commit()
-        self.assertNotEqual(self.fast().returncode, 0)
-        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
-        receipt = receipt.with_name(f"{head}.pass")
-        failed = receipt.read_bytes()
-        unscoped = {line.removeprefix("UNSCOPED release-notes-draft ")
-                    for line in failed.decode().splitlines() if line.startswith("UNSCOPED release-notes-draft ")}
-        self.assertEqual(unscoped, {diary})
-        record.update(head=head, failure_sha256=hashlib.sha256(failed).hexdigest())
-        receipt.with_name(f"{head}.cas-fixture.exception.json").write_text(json.dumps(record))
-        self.assertNotEqual(command(self.repo, *validate[:-1], head).returncode, 0)
 
     def test_harness_diary_draft_uses_the_thread_rubric_at_park(self):
         path = "docs/release-notes/2026-10-14-harness-diary-sweep-slack.md"

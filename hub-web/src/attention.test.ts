@@ -9,6 +9,7 @@ import {
   dismissableInfoItems,
   groupAttention,
   machineEventAttention,
+  machineEventRaisesAttention,
   mergeAttentionItem,
   severityForEvent,
 } from "./attention";
@@ -292,6 +293,18 @@ describe("Commander attention triage queue", () => {
       severity: "critical",
       action: "view_pane",
     });
+  });
+
+  it("raises nothing for a deliberate supervisor exit and the clean daemon exit after it (cas-c095)", () => {
+    expect(machineEventRaisesAttention("pane_exited", { exit_code: 0, role: "supervisor" })).toBe(false);
+    expect(machineEventRaisesAttention("daemon_disconnected", { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log." })).toBe(false);
+  });
+
+  it("still alerts on a crash, naming the supervisor when it is the one that stopped (cas-c095)", () => {
+    expect(machineEventRaisesAttention("pane_exited", { exit_code: 0 })).toBe(true);
+    expect(machineEventRaisesAttention("pane_exited", { exit_code: null, role: "supervisor" })).toBe(true);
+    expect(machineEventRaisesAttention("daemon_disconnected", { cause: { kind: "signal", signal: 9, name: "SIGKILL" } })).toBe(true);
+    expect(machineEventAttention("pane_exited", { exit_code: 1, role: "supervisor" })).toMatchObject({ headline: "Supervisor stopped", severity: "critical", action: "view_pane" });
   });
 });
 

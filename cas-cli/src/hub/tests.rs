@@ -2025,6 +2025,42 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     assert_eq!(pane.kind, MachineEventKind::PaneAdded);
     assert_eq!(pane.pane_id.as_deref(), Some("worker-1"));
 
+    // cas-c095: a pane exit carries its code, and names the supervisor's, so
+    // a device can tell a deliberate supervisor exit from a worker crash.
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::PaneAdded {
+            pane: PaneInfo {
+                id: "noble-cheetah-84".into(),
+                kind: PaneKind::Supervisor,
+                focused: true,
+                title: "Supervisor".into(),
+                exited: false,
+            },
+        },
+    );
+    receiver.recv().await.unwrap();
+    for (pane_id, exit_code, payload) in [
+        ("worker-1", Some(1), serde_json::json!({ "exit_code": 1 })),
+        (
+            "noble-cheetah-84",
+            Some(0),
+            serde_json::json!({ "exit_code": 0, "role": "supervisor" }),
+        ),
+    ] {
+        events.observe_daemon(
+            "factory-a",
+            &DaemonMessage::PaneExited {
+                pane_id: pane_id.into(),
+                exit_code,
+            },
+        );
+        let exited = receiver.recv().await.unwrap();
+        assert_eq!(exited.kind, MachineEventKind::PaneExited);
+        assert_eq!(exited.pane_id.as_deref(), Some(pane_id));
+        assert_eq!(exited.payload, Some(payload));
+    }
+
     events.reconcile_sessions(std::iter::empty::<&str>()).await;
     let removed = receiver.recv().await.unwrap();
     assert_eq!(removed.kind, MachineEventKind::SessionRemoved);
@@ -5828,13 +5864,14 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     // cas-195a: the real upload must be previewable without publishing to Cloud,
     // including by another read-only paired device, but only in its own session.
     let image_id = image["artifact_id"].as_str().unwrap();
-    let ticket_request = |session: &str| {
-        let uri = format!("/v1/sessions/{session}/artifacts/{image_id}/ticket");
+    let ticket_for = |session: &str, artifact: &str| {
+        let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/ticket");
         Request::post(&uri).header("origin", "https://controller.example")
             .header("authorization", format!("DPoP {}", read_credential.credential))
             .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()))
             .body(Body::empty()).unwrap()
     };
+    let ticket_request = |session: &str| ticket_for(session, image_id);
     assert_eq!(app.clone().oneshot(ticket_request("factory-b")).await.unwrap().status(), StatusCode::NOT_FOUND);
     let response = app.clone().oneshot(ticket_request("factory-a")).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK, "a session's own upload must mint a preview ticket");
@@ -5855,6 +5892,17 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
             assert_eq!(bytes.as_ref(), if range.is_some() { &png[1..=4] } else { &png });
         }
     }
+    // cas-a4c4: the sender's own notes.txt opens too, as sandboxed plain text, never a document.
+    let text_id = first.as_ref().unwrap()["artifact_id"].as_str().unwrap().to_owned();
+    let response = app.clone().oneshot(ticket_for("factory-a", &text_id)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a session's own text upload must mint a ticket");
+    let text_ticket: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let response = app.clone().oneshot(Request::get(format!("/v1/sessions/factory-a/artifacts/{text_id}/content?t={}", text_ticket["ticket"].as_str().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(response.headers()["content-disposition"], "inline");
+    assert!(response.headers().get_all("content-security-policy").iter().any(|policy| policy == "default-src 'none'; sandbox"));
+    assert_eq!(to_bytes(response.into_body(), 65536).await.unwrap().as_ref(), b"hello");
     // Neither forged bytes nor symlink replacements become local preview access.
     let image_path = std::path::Path::new(image["path"].as_str().unwrap());
     std::fs::write(image_path, vec![b'x'; png.len()]).unwrap();

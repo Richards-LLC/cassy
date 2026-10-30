@@ -130,6 +130,10 @@ invariants:
     statement: A supervisor exit closes its conversation with a dated receipt, confirmed worker stop count and named surviving workers; the row and header say Ended and sends cannot queue to the dead session.
     check: 'Run the session-ended case in conversation-stage.test.ts and hub::tests::cec1_session_end_projection_survives_cleanup_without_ending_a_replacement; capture a real supervisor /exit with at least two workers and verify the receipt within ten seconds, local twelve-hour time, ended row/header and composer guidance.'
     bug: {task: cas-cec1}
+  HUB-J3-DELIBERATE-EXIT-QUIET:
+    statement: A deliberate supervisor exit with code 0 and the clean daemon exit after it raise no attention item, and the session-ended receipt names the exit in plain words; a supervisor crash still alerts as Supervisor stopped.
+    check: 'Run the HUB-J3 supervisor exit case in find-conversation.journey.ts (only the sentinel crash row is stored and the session badge stays hidden), the cas-c095 cases in hub-web/src/attention.test.ts, hub::tests::h1_aggregate_events_cover_session_and_pane_lifecycle and queue_and_events::tests::supervisor_exit_reason_is_plain_words_without_option_debug_text; walk a real supervisor /exit and verify no Daemon connection lost or Worker stopped item and no Some(...)/None text.'
+    bug: {task: cas-c095}
   HUB-J3-GOAL:
     statement: I can tell which conversation has something new and get to it quickly
     check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
@@ -420,7 +424,7 @@ invariants:
     bug: {task: cas-abb7}
   HUB-J24-SENT-ATTACHMENT:
     statement: Sent uploads show an image thumbnail or named file sheet without host paths, including after reload and on another paired device; the supervisor retains the exact resolvable artifact reference.
-    check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history.
+    check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history. The sender's own notes.txt opens as sandboxed UTF-8 plain text, never HTML, and Edit on a refused send restores its file cards with no host path in the composer (composer-uploads.test.ts); hub::server::composer_upload::tests::open_preview_hashes_each_upload_once_per_change proves one hash per upload change.
     bug: {task: cas-195a}
   HUB-J24-PHONE-UPLOAD:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
@@ -679,6 +683,7 @@ journeys:
   - HUB-J3-GOAL
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
+  - HUB-J3-DELIBERATE-EXIT-QUIET
   - HUB-J3-MACHINE-VERSIONS
   - HUB-J3-MACHINE-CHIP-FOCUS
   traffic:

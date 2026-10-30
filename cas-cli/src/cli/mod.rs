@@ -31,10 +31,11 @@ pub use knowledge_cmd::{
 mod known_repos;
 mod peers;
 mod project_overview_cmd;
-mod qa;
+pub(crate) mod qa;
 pub(crate) mod qa_ledger;
 mod qa_impact;
 pub(crate) mod qa_post_release;
+pub(crate) mod qa_rapid_response;
 mod provider_default;
 mod release_report;
 pub mod deliverable;

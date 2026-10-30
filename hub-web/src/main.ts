@@ -35,12 +35,13 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
+import { sentAttachments } from "./sent-attachments";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, schemePreference, setScheme, type SchemePreference } from "./scheme";
-import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, machineEventRaisesAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
 import { AuthenticationError, HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
@@ -534,9 +535,22 @@ function mountConversation(key: string, mount: HTMLElement): void {
       editMessage: (text, send) => {
         const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
         if (!composer || composer.dataset.threadKey !== threadKey) return;
-        if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
-        composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
-        editingRefused = { threadKey, id: send.id };
+        if (composer.value.trim() || composerUploads?.draftFor(threadKey).hasFiles()) { showComposerStatus("Your draft already has text or files. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+        const restore = (draftText: string) => {
+          if (!composer.isConnected || composer.value.trim()) return;
+          composer.value = draftText; composer.dispatchEvent(new Event("input")); composer.focus();
+          editingRefused = { threadKey, id: send.id };
+        };
+        // cas-a4c4: a refused send's files come back as their cards, already
+        // on the machine; the host path never enters the composer's text.
+        if (!sentAttachments(text).attachments.length) { restore(text); return; }
+        if (pendingSubmissions.has(threadKey)) { showComposerStatus("Wait for this send before editing the refused message.", "info"); return; }
+        void loadComposerUploads().then(module => {
+          const draft = module.draftFor(threadKey);
+          const root = composer.closest<HTMLElement>(".message");
+          if (root?.isConnected) draft.bind(root);
+          restore(draft.restoreSent(text));
+        }).catch(() => showComposerStatus("Couldn't reopen the files of the refused message. Try Edit again.", "error"));
       },
       // A quick-reply chip answers the ask through the same leased path as
       // the composer, with in_reply_to = the ask's notification id.
@@ -1009,7 +1023,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
-      if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
+      if ((["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined)
+        && machineEventRaisesAttention(kind, event.payload ?? event.diagnostic)) {
         void upsertMachineEventAttention(machine, event);
       }
       // A retained peer-session burst does not change this conversation's

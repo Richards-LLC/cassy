@@ -104,6 +104,31 @@ fn list_profiles_shows_detected_accounts_login_state_and_excludes_lock_dirs() {
         .stdout(predicate::str::contains("not logged in"))
         // a `.lock` directory is not an account and must not be selectable
         .stdout(predicate::str::contains("support@example.com").not());
+
+    let alias = format!("{}@example.com", "long-profile-".repeat(5));
+    let directory = home.path().join(format!(".codex-{alias}"));
+    std::fs::create_dir(&directory).unwrap();
+    let output = cas_cmd(home.path())
+        .env("CODEX_HOME", &directory)
+        .args(["codex", "--list-profiles"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    for line in output.lines() {
+        assert!(line.len() <= 80, "profile list overflows 80 columns: {line}");
+    }
+    assert!(output.contains("(not logged in) (active)"), "{output}");
+    assert!(output.contains("--full"), "truncated identity needs an escape: {output}");
+    cas_cmd(home.path())
+        .env("CODEX_HOME", &directory)
+        .args(["codex", "--list-profiles", "--full"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&alias))
+        .stdout(predicate::str::contains(format!("~/.codex-{alias}")));
 }
 
 /// The headline behavior: `cas codex alt` selects that account and hands off to

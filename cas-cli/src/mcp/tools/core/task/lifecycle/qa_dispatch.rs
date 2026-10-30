@@ -3175,6 +3175,44 @@ mod stale_anchor_rebind_tests_cas_00eb {
         }
     }
 
+    /// cas-3d70: a commit on a separate helper branch was stamped as the
+    /// anchor, so it is absent from the task's own branch and park refused,
+    /// asking for `commit_receipt=<tip>`. That exact receipt must rebind the
+    /// anchor to the tip, through a target sync merge, instead of repeating
+    /// the refusal. Without the receipt the recorded anchor stays.
+    #[test]
+    fn park_receipt_rebinds_an_anchor_stamped_on_a_helper_branch_cas_3d70() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["checkout", "-q", "-b", "factory/worker-cas-ui02-main", "main"]);
+        std::fs::write(repo.join("helper.txt"), "main-ready\n").unwrap();
+        git(repo, &["add", "helper.txt"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-ui02): main-ready helper"]);
+        let helper = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("target.txt"), "moved\n").unwrap();
+        git(repo, &["add", "target.txt"]);
+        git(repo, &["commit", "-q", "-m", "merge another delivery"]);
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "Merge branch 'main' into delivery", "main"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut task = f.task.clone();
+        task.deliverables.factory_branch_anchor = Some(helper.clone());
+        for (receipt, expected) in [(None, &helper), (Some(tip.as_str()), &tip)] {
+            let parking = f.core.advance_commit_time_anchor_before_park_with_receipt(
+                tasks.as_ref(), &task, repo, "main", Some(WORKER_TASK_BRANCH), Some(&tip), receipt,
+            );
+            assert_eq!(
+                parking.deliverables.factory_branch_anchor.as_deref(),
+                Some(expected.as_str()),
+                "receipt {receipt:?}"
+            );
+        }
+    }
+
     /// cas-ba4a still holds: a commit claiming another task stops the advance.
     /// (Task ids are hex: `cas-f0a6` is recognised as foreign, `cas-zz99` is not.)
     #[test]

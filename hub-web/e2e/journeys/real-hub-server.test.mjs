@@ -2,13 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
 test("real-hub candidate assets cannot fall back to external dist", { timeout: 15000 }, async t => {
   // The external bundle really has this stylesheet; this candidate lacks it.
-  assert.ok((await readFile(new URL("../../dist/app.css", import.meta.url))).length);
+  assert.ok((await stat(new URL("../../dist/app.css", import.meta.url))).isFile());
   const document = '<link rel="stylesheet" href="/commander/app.css">';
   const policy = "default-src 'self'; style-src 'self'";
   const candidate = createServer((req, res) => {

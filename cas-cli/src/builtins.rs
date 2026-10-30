@@ -5109,6 +5109,11 @@ This is the body content."#;
             guide.len()
         );
         assert!(
+            guide.len() <= 6_000,
+            "worker guidance needs 2,000B of room under its 8,000B component cap: {}B",
+            guide.len()
+        );
+        assert!(
             headroom >= 1_024,
             "worker_guidance is {} bytes — only {headroom}B remains below the \
              {SESSION_START_BUDGET_BYTES}B SessionStart budget",

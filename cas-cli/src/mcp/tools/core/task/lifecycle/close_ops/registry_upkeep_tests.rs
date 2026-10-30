@@ -85,6 +85,18 @@ impl Fixture {
         )
     }
     fn decision(&mut self, body: &str) {
+        // Follow the public refusal command, including its delivery/finding scope.
+        let head = git(self.repo.path(), &["rev-parse", "HEAD"]);
+        let scoped = self.run(&head).err().and_then(|error| {
+            let (token, reason) = body.split_once(':')?;
+            if reason.trim().is_empty() {
+                return None;
+            }
+            let marker = format!("notes=\"{token}:");
+            let command = error.split_once(&marker)?.1.split_once('"')?.0;
+            Some(format!("{token}:{}", command.replace("<reason>", reason.trim())))
+        });
+        let body = scoped.as_deref().unwrap_or(body);
         append_close_decision_note(&self.store, &mut self.task, &format!("✅ DECISION {body}"));
     }
     fn duplicate_family() -> Self {
@@ -536,28 +548,38 @@ fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case(
 
 #[test]
 fn registry_upkeep_waivers_require_delivery_and_finding_cas_b7e7() {
-    let mut results = Vec::new();
     for (token, gate, broken) in [("registry unchanged:", "G1", true), ("no case:", "G3", false)] {
-        for (stamp, scope) in [
-            ("2000-01-01 00:00".to_string(), "previous delivery".to_string()),
-            (chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string(), "delivery=0000000000000000000000000000000000000000 finding=unrelated".to_string()),
-        ] {
-            let mut f = Fixture::new(YAML);
-            if broken {
-                write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "invalid: [\n");
-            } else {
-                f.task.task_type = TaskType::Bug;
-            }
-            write(f.repo.path(), "src/pages/signup.ts", "fixed");
-            let head = commit(f.repo.path());
-            f.task.notes = format!("[{stamp}] ✅ DECISION {token} {scope} reviewed earlier finding");
-            f.task.updated_at = f.store.update(&f.task).unwrap();
-            let result = f.run(&head);
-            results.push((gate, scope, result.is_err()));
+        let mut f = Fixture::new(YAML);
+        if broken {
+            write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "invalid: [\n");
+        } else {
+            f.task.task_type = TaskType::Bug;
         }
+        write(f.repo.path(), "src/pages/signup.ts", "fixed");
+        let head = commit(f.repo.path());
+        let error = f.run(&head).unwrap_err();
+        let marker = format!("notes=\"{token}");
+        let scope = error.split_once(&marker).unwrap().1.split_once('"').unwrap().0;
+        let current = format!("{token}{}", scope.replace("<reason>", "reviewed finding"));
+        let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+        let wrong_finding = format!("{token} delivery={head} finding={gate}-unrelated reviewed finding");
+        for (stamp, decision) in [
+            ("2000-01-01 00:00", current.clone()),
+            (stamp.as_str(), current.replace(&head, &"0".repeat(40))),
+            (stamp.as_str(), wrong_finding),
+            (stamp.as_str(), current.replace("reviewed finding", "")),
+            (stamp.as_str(), format!("{token} generic legacy reason")),
+        ] {
+            f.task.notes = format!("[{stamp}] ✅ DECISION {decision}");
+            f.task.updated_at = f.store.update(&f.task).unwrap();
+            assert!(f.run(&head).is_err(), "{gate} must refuse stale or mismatched decision: {decision}");
+        }
+        f.decision(&format!("{token} reviewed current finding"));
+        f.run(&head).expect("current delivery and finding with a reason may be waived");
+        write(f.repo.path(), "src/pages/signup.ts", "revised fix");
+        let later = commit(f.repo.path());
+        assert!(f.run(&later).is_err(), "{gate} waiver must not survive a later delivery");
     }
-    assert!(results.iter().all(|(_, _, refused)| *refused),
-        "stale or mismatched decisions must not waive a current finding: {results:?}");
 }
 
 #[test]
@@ -844,6 +866,8 @@ fn registry_upkeep_malformed_delivery_g1_escape_preserves_g3() {
     assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
     assert!(error.contains(&format!("note_type=decision notes=\"no case: delivery={head} finding=G3-")),
         "G3 must print its current delivery-and-finding waiver command: {error}");
+    f.decision("registry unchanged: current registry migration reviewed");
+    assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
     f.decision("no case: registry migration and copy correction reviewed");
     f.run(&head).expect("explicit G3 waiver remains separate from G1");
 }
@@ -870,6 +894,8 @@ fn registry_upkeep_existing_catalog_drift_g1_escape_preserves_g3() {
 
     let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for existing catalog drift");
     assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    f.decision("registry unchanged: current catalog drift reviewed");
+    assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
     f.decision("no case: copy correction reviewed despite catalog migration");
     f.run(&head).expect("explicit G3 waiver remains separate from G1");
 }

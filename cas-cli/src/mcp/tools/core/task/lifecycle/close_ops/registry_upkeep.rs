@@ -3,6 +3,7 @@ use super::*;
 use crate::config::{QaConfig, RegistryEnforcement};
 use crate::qa_impact::io::git;
 use crate::qa_registry::{BugFamily, DuplicateBugFamily, Problem, Registry};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 
 /// One close-path entry point, sharing the QA gate's delivery head and attribution window.
@@ -50,7 +51,8 @@ pub(super) fn at_park(
     let target_tip = freshest_target_ref(repo, target);
     // A landed ownership repair can satisfy an older receipt. An unmerged
     // delivery still answers to its own registry, including newly added owners.
-    let ownership_head = if git(repo, &["merge-base", "--is-ancestor", &head, &target_tip]).is_ok() {
+    let ownership_head = if git(repo, &["merge-base", "--is-ancestor", &head, &target_tip]).is_ok()
+    {
         &target_tip
     } else {
         &head
@@ -83,11 +85,13 @@ pub(super) fn delivery_snapshot(
     if task.status == TaskStatus::AwaitingMerge
         && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
         && let Some(published) = task.deliverables.green_merge_commit.as_deref()
-        && let Some(head) = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+        && let Some(head) =
+            super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
         && resolve_branch_sha(repo, anchor).as_deref() == Some(head.as_str())
         && git_commit_is_ancestor(repo, &head, published)
         && git_commit_is_ancestor(repo, published, &freshest_target_ref(repo, target))
-        && let Some((base, integrated)) = crate::qa_evidence::delivery_range(repo, &head, published, None)
+        && let Some((base, integrated)) =
+            crate::qa_evidence::delivery_range(repo, &head, published, None)
         && integrated != head
         && crate::git_evidence::git_commit_parent_count(repo, &integrated) > 1
     {
@@ -213,36 +217,71 @@ fn retain_case_gate(task: &Task, findings: &mut Vec<Finding>, reason: &str) {
     }
 }
 
-fn decision_reason<'a>(notes: &'a str, token: &str) -> Option<&'a str> {
+impl Finding {
+    fn scoped_token(&self, input_path: &str, head: &str) -> String {
+        let mut digest = Sha256::new();
+        for field in [self.gate, input_path, self.title, &self.detail] {
+            digest.update(field.as_bytes());
+            digest.update([0]);
+        }
+        let id = hex::encode(digest.finalize());
+        format!(
+            "{} delivery={head} finding={}-{}",
+            self.token,
+            self.gate,
+            &id[..16]
+        )
+    }
+}
+
+fn decision_reason<'a>(
+    notes: &'a str,
+    token: &str,
+    delivery_minute: Option<i64>,
+) -> Option<&'a str> {
+    let delivery_minute = delivery_minute?;
     notes.lines().rev().find_map(|line| {
         let (stamp, decision) = line.strip_prefix('[')?.split_once("] ✅ DECISION ")?;
-        chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?;
-        let reason = decision.strip_prefix(token)?.trim();
+        let stamp = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?;
+        if stamp.and_utc().timestamp().div_euclid(60) < delivery_minute {
+            return None;
+        }
+        let reason = decision.strip_prefix(token)?.strip_prefix(' ')?.trim();
         (!reason.is_empty()).then_some(reason)
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finish(
     notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
+    repo: &Path,
+    head: &str,
     stage: RegistryEnforcement,
     input_path: &str,
     findings: Vec<Finding>,
     warnings: &[String],
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    // Notes have minute precision. Exact delivery/finding identity is primary;
+    // the timestamp also rejects a pre-delivery note carrying copied scope.
+    let delivery_minute = git(repo, &["show", "-s", "--format=%ct", head])
+        .ok()
+        .and_then(|stamp| stamp.trim().parse::<i64>().ok())
+        .map(|stamp| stamp.div_euclid(60));
     let mut notices = warnings.to_vec();
     for warning in warnings {
         notes.record(task, warning);
     }
     let mut refusals = Vec::new();
     for finding in findings {
+        let token = finding.scoped_token(input_path, head);
         let text = gate_text::upkeep_message(
             &task.id,
             input_path,
             finding.title,
             &finding.detail,
-            finding.token,
+            &token,
             warnings,
             crate::mcp::tools::core::guidance::caller_prefix(),
         );
@@ -261,15 +300,13 @@ pub(super) fn finish(
                 "UPKEEP OBSERVE {}: {} (see task notes)",
                 finding.gate, finding.title
             ));
-            notes.record(
-                task,
-                &format!("UPKEEP OBSERVE {}: {text}", finding.gate),
-            );
-        } else if let Some(reason) = decision_reason(&task.notes, finding.token).map(str::to_owned)
+            notes.record(task, &format!("UPKEEP OBSERVE {}: {text}", finding.gate));
+        } else if let Some(reason) =
+            decision_reason(&task.notes, &token, delivery_minute).map(str::to_owned)
         {
             notes.record(
                 task,
-                &format!("UPKEEP ESCAPE {}: {} {reason}", finding.gate, finding.token),
+                &format!("UPKEEP ESCAPE {}: {token} {reason}", finding.gate),
             );
         } else {
             refusals.push(text);
@@ -385,9 +422,17 @@ fn changed<T: serde::Serialize>(current: &T, before: Option<&T>) -> bool {
 fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) -> bool {
     registry.bug_families.iter().any(|(key, family)| {
         family.tasks.iter().any(|task| task == id)
-            && changed(family, before.registry.as_ref().and_then(|r| r.bug_families.get(key)))
+            && changed(
+                family,
+                before
+                    .registry
+                    .as_ref()
+                    .and_then(|r| r.bug_families.get(key)),
+            )
             && before.alternatives.get(key).is_none_or(|variants| {
-                variants.iter().all(|variant| changed(family, Some(variant)))
+                variants
+                    .iter()
+                    .all(|variant| changed(family, Some(variant)))
             })
     }) || registry.invariants.iter().any(|(key, invariant)| {
         let names_task = invariant.bug.as_ref().is_some_and(|bug| {
@@ -397,7 +442,11 @@ fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) ->
                     .and_then(serde_yaml::Value::as_sequence)
                     .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some(id)))
         });
-        names_task && changed(invariant, before.registry.as_ref().and_then(|r| r.invariants.get(key)))
+        names_task
+            && changed(
+                invariant,
+                before.registry.as_ref().and_then(|r| r.invariants.get(key)),
+            )
     })
 }
 
@@ -453,6 +502,8 @@ fn check(
         Ok((findings, warnings)) => finish(
             notes,
             task,
+            repo,
+            head,
             qa.registry.enforce,
             &qa.registry.path,
             findings,
@@ -508,12 +559,24 @@ fn inspect(
                 "{}: cannot read or parse delivered registry: {error:#}",
                 qa.registry.path
             ))];
-            retain_case_gate(task, &mut findings, "the delivered registry cannot be read or parsed");
+            retain_case_gate(
+                task,
+                &mut findings,
+                "the delivered registry cannot be read or parsed",
+            );
             return Ok((findings, vec![]));
         }
         Err(error) => {
+            let findings = if task.task_type == TaskType::Bug {
+                vec![Finding::missing_case(format!(
+                    "Task {} is a bug, but {} cannot be read or parsed; regression-case coverage cannot be evaluated. Repair the registry and add or extend a case naming {}.",
+                    task.id, qa.registry.path, task.id
+                ))]
+            } else {
+                vec![]
+            };
             return Ok((
-                vec![],
+                findings,
                 vec![format!(
                     "UPKEEP WARNING: {} unreadable or malformed (not blocking; untouched by this delivery): {error:#}",
                     qa.registry.path

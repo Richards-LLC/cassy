@@ -166,6 +166,8 @@ pub(super) fn at_park(
         match finish(
             notes,
             task,
+            repo,
+            &head,
             stage,
             path,
             findings,

@@ -1,4 +1,5 @@
 import type { AttentionItem } from "./types";
+import { COMMAND_ERROR_PREFIX } from "./supervisor-commands";
 import { stampLabel } from "./thread-model";
 
 export type AttentionSeverity = "critical" | "warning" | "info";
@@ -203,6 +204,8 @@ export function machineEventRaisesAttention(kind: string, diagnostic: unknown): 
   const record = asRecord(diagnostic);
   if (normalized === "pane_exited") return !(record?.role === "supervisor" && record.exit_code === 0);
   if (normalized === "daemon_disconnected") return asRecord(record?.cause)?.kind !== "clean_exit";
+  // A command error already answers the device that sent it, on the command's receipt.
+  if (normalized === "daemon_error") return !String(record?.message ?? "").startsWith(COMMAND_ERROR_PREFIX);
   return true;
 }
 

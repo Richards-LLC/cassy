@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
+import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
 
 describe("supervisor slash commands", () => {
   it("filters command suggestions but submits only an exact supported command", async () => {
@@ -149,6 +149,31 @@ describe("supervisor command receipts", () => {
       await expect(unsent.run("exit", true)).rejects.toThrow("not sent");
       unsent.ended("prompt_input_exit");
       expect(unsent.receipts.size).toBe(0);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("keeps one row for a command's refusals, clears it once accepted, and never hides an uncertain outcome", async () => {
+    vi.useFakeTimers();
+    try {
+      const commands = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send: () => true, changed: () => {} });
+      const busy = `${COMMAND_ERROR_PREFIX} The supervisor is busy. Wait until its turn ends.`;
+      const newest = () => [...commands.receipts.keys()].at(-1)!;
+      await commands.run("usage", false); commands.reject(newest(), busy);
+      await commands.run("usage", false); commands.reject(newest(), busy);
+      await commands.run("model", false); commands.reject(newest(), busy);
+      expect([...commands.receipts.values()].map(({ command, phase, detail }) => [command, phase, detail])).toEqual([
+        ["usage", "refused", "The supervisor is busy. Wait until its turn ends. Tried 2 times."],
+        ["model", "refused", "The supervisor is busy. Wait until its turn ends."],
+      ]);
+
+      await commands.run("usage", false);
+      const accepted = newest();
+      commands.receive({ client_ref: accepted, command: "usage", phase: "submitted", detail: "Command submitted.", output: "", interactive: false });
+      expect([...commands.receipts.values()].map(({ command, phase }) => [command, phase])).toEqual([["model", "refused"], ["usage", "submitted"]]);
+
+      // After a receipt the command may have run, so the same error stays uncertain.
+      commands.reject(accepted, `${COMMAND_ERROR_PREFIX} The original command receipt is unavailable.`);
+      expect(commands.receipts.get(accepted)?.phase).toBe("unconfirmed");
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 

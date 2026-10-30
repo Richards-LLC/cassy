@@ -15,10 +15,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Team tab finish
 
+- **Delivery track contrast** — The line between receipts on each Team lane now holds at least 3:1 against its lane in both schemes.
 - **Release track contrast and shapes** — The release progress track has a stronger outline in both schemes, the Team panel and tabs have rounded corners, and state pills sit evenly in their lanes.
 
 ### Fixed — Commander conversation
 
+- **A refused slash command keeps one row** — Was: each resend of a command the supervisor refused added another row to the conversation and another Attention event, and the rows stayed. Now: one row per command says why it was refused and how many times you tried, it clears once that command is accepted, and a refusal no longer raises Attention. A command that may have run still shows as uncertain.
 - **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages. Each is matched on the whole message, so a typed message that pastes such a block after your own words still reaches Commander.
 
 ### Fixed — Forced colors in Commander
@@ -35,6 +37,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Supervisor commands during a running turn
 
+- **Commands sent just after a reply wait for the prompt to settle** — Was:
+  promptly sending Exit after a supervisor reply could be refused as busy.
+  → Now: an idle prompt gets up to 3 seconds to complete its 2-second quiet
+  window, with fresh output and busy state checked again before typing.
 - **Slash commands wait for the supervisor's turn to end** — Commander no longer
   types a command into a running turn. Claude's `·` spinner frame counts as busy,
   and the supervisor's terminal must be quiet for 2 seconds first. A Codex

@@ -751,7 +751,7 @@ async fn task_create_applies_the_review_spawn_threshold_cas_0ad8() {
             "description": "Non-blocking verifier findings on the delivery (ver-7e87d441000d).",
         });
         request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        serde_json::from_value::<cas::mcp::tools::TaskRequest>(request).unwrap()
+        serde_json::from_value::<cas_mcp::types::TaskRequest>(request).unwrap()
     };
     let refused = service
         .task(Parameters(create(serde_json::json!({}))))

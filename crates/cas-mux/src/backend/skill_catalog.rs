@@ -43,13 +43,15 @@ fn is_role_skill(name: &str) -> bool {
     WORKER_ROLE_SKILLS.contains(&name)
 }
 
-/// Directory names only: a private skill's contents are never read here.
+/// The names of real skills: a directory holding a `SKILL.md`, which is what the
+/// harness lists. A private skill's contents are never read here.
 fn skill_names(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     entries
         .flatten()
+        .filter(|entry| entry.path().join("SKILL.md").is_file())
         .filter_map(|entry| entry.file_name().into_string().ok())
         .collect()
 }
@@ -269,8 +271,12 @@ mod tests {
     fn every_harness_scopes_the_worker_listing() {
         let dir = tempfile::tempdir().unwrap();
         let account = dir.path().join("account");
-        std::fs::create_dir_all(account.join("skills/cas-worker")).unwrap();
-        std::fs::create_dir_all(account.join("skills/private-note")).unwrap();
+        for name in ["cas-worker", "private-note"] {
+            std::fs::create_dir_all(account.join("skills").join(name)).unwrap();
+            std::fs::write(account.join("skills").join(name).join("SKILL.md"), "skill").unwrap();
+        }
+        // Not a skill: the harness does not list it, so there is nothing to hide.
+        std::fs::create_dir_all(account.join("skills/.trash")).unwrap();
 
         let claude = worker_config(SupervisorCli::Claude, dir.path(), &account);
         let at = claude.args.iter().position(|arg| arg == "--settings").unwrap();
@@ -278,6 +284,7 @@ mod tests {
         assert_eq!(settings["skillOverrides"]["private-note"], "user-invocable-only");
         assert_eq!(settings["skillOverrides"]["init"], "user-invocable-only");
         assert!(settings["skillOverrides"].get("cas-worker").is_none());
+        assert!(settings["skillOverrides"].get(".trash").is_none());
 
         let codex = worker_config(SupervisorCli::Codex, dir.path(), &account);
         assert!(codex.args.windows(2).any(|pair| pair == ["-c", "skills.include_instructions=false"]));

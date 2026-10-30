@@ -36,7 +36,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the tools stopped a review finding becoming a task, and nothing showed when an
   epic's reviews were generating more work than they closed. → Now: `task create`
   refuses a follow-up from a finding without `repro` and `affected`, and a P0/P1
-  bug an operator or supervisor observed directly stays exempt. At 0.5 follow-ups
+  bug an operator or supervisor observed directly stays exempt. QA's automatic
+  pre-existing follow-ups need the same two fields; the rest stay in the verdict.
+  At 0.5 follow-ups
   per review over an epic's last 10 reviews, the supervisor gets one notice, and
   `epic_status` shows the ratio.
 

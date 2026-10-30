@@ -124,9 +124,10 @@ function changedFiles(document: Document, event: WorkEvent, context: WorkRowsCon
       const detail = document.createElement("div"); detail.className = "work-detail changed-file-detail";
       detail.id = `changed-file-${domId(event.id)}-${facts.files.indexOf(file)}`; button.setAttribute("aria-controls", detail.id);
       detail.tabIndex = 0; detail.dataset.focusKey = `detail:${fileKey}`;
+      if (!context.detail(file.source_event_id)) context.requestDetail(file.source_event_id);
       const state = context.detail(file.source_event_id);
-      if (!state) context.requestDetail(file.source_event_id);
       if (!state || state.state === "loading") { detail.textContent = "Loading source edit…"; detail.setAttribute("aria-busy", "true"); }
+      else if (state.state === "offline") detail.textContent = "Machine offline. Source edit will load when it reconnects.";
       else if (state.state === "gone") detail.textContent = "This source edit is no longer on the machine.";
       else if (state.state === "failed") {
         const message = document.createElement("p"); message.textContent = `Could not load source edit: ${state.reason}`;
@@ -266,7 +267,6 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   toggle.onclick = () => {
     const opening = !context.isOpen(key);
     context.setOpen(key, opening);
-    if (opening && event.hasDetail && context.detail(event.id) === undefined) context.requestDetail(event.id);
     repaint(key);
   };
   row.append(toggle);
@@ -277,9 +277,11 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
     toggle.setAttribute("aria-controls", detail.id);
     detail.tabIndex = 0;
     detail.dataset.focusKey = `detail:${event.id}`;
+    if (event.hasDetail && !context.detail(event.id)) context.requestDetail(event.id);
     const state = event.hasDetail ? context.detail(event.id) : { state: "ready" as const, text: published!, truncated: false };
     if (!state || state.state === "loading") { detail.textContent = "Loading…"; detail.setAttribute("aria-busy", "true"); }
     else if (state.state === "ready") readyDetail(document, detail, event, state, context);
+    else if (state.state === "offline") detail.textContent = "Machine offline. Detail will load when it reconnects.";
     else if (state.state === "gone") detail.textContent = "This detail is no longer on the machine.";
     else detail.textContent = `Could not load: ${state.reason}`;
     row.append(detail);

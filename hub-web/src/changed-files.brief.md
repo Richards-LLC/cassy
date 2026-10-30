@@ -22,7 +22,7 @@ No invented line counts or Git verdict: show optional reported counts only, incl
 
 ## Component and state boundary
 
-The thread model selects the newest snapshot per session/agent/turn and places it once in the latest work block for that turn. Work rows render the card with the existing unified diff viewer. WorkPicture owns device-local disclosure state and lazy source detail requests. Unknown, loading, missing and failed evidence remain explicit.
+The thread model selects the newest snapshot per session/agent/turn and places it once in the latest work block for that turn. Work rows render the card with the existing unified diff viewer. WorkPicture owns device-local disclosure state and lazy source detail requests. Unknown, loading, offline, missing and failed evidence remain explicit. An unsent or interrupted request waits for the next connection; reconnect makes it eligible again. Closing a disclosure removes its saved entry.
 
 The row keeps its flexible path and trailing operation in separate spans. An optional trailing `+N/−M` readout uses the existing mono size and `--state-ok`/`--state-crit` tokens. The signs and a spoken full-text description carry meaning without color. Known zeroes remain visible; absent counts create no node. The readout wraps locally on narrow screens without changing count-free rows or requesting source details.
 

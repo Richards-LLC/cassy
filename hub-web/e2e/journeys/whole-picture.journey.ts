@@ -75,8 +75,17 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
     await expect(page.locator(".work-summary")).toHaveAttribute("aria-expanded", "false");
     expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest").map(frame => (frame.body as { event_id: string }).event_id)).toEqual(["edit-0"]);
   });
-  await journey.stage("A source without a unified diff stays exact and selectable", async () => {
+  await journey.stage("Offline source evidence waits for reconnect without spinning", async () => {
+    hub.hold(PELICAN); hub.drop(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
     await card.getByRole("button", { name: `${files[1]} edit`, exact: true }).click();
+    await expect(card.locator(".changed-file-detail").last()).toContainText("Machine offline");
+    await expect(card.locator('[aria-busy="true"]')).toHaveCount(0);
+    expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(1);
+  });
+  await journey.stage("A source without a unified diff stays exact and selectable", async () => {
+    hub.release(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
     await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
     await expect(card.locator("b")).toHaveCount(0);
   });
@@ -98,6 +107,9 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
     await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "true");
     await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
     await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
+    for (const file of files) await card.getByRole("button", { name: `${file} edit`, exact: true }).click();
+    await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
+    expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("commander.workDisclosure:")))).toEqual([]);
   });
 });
 

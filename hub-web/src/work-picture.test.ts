@@ -11,7 +11,7 @@ const wire = (id: string, second: number, extra: Record<string, unknown> = {}) =
 function livePicture(agent?: string) {
   let request = 0;
   const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: vi.fn(() => `r${++request}`), requestWorkEventDetail: () => undefined };
-  const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {} } });
+  const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {}, removeItem: () => {} } });
   const open = () => agent ? picture.watchTimeline({ machineId: "m", session: "s", agent }) : picture.watchThread("m", "s");
   open();
   return { picture, transport, open };
@@ -21,7 +21,7 @@ describe("work events (cas-ff22)", () => {
   it("shows each turn's newest tool-reported edits once and persists lazy file evidence", () => {
     const storage = new Map<string, string>([["commander.showWork", "1"]]);
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => "detail") };
-    const makePicture = () => new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => void storage.set(key, value) } });
+    const makePicture = () => new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => void storage.set(key, value), removeItem: key => void storage.delete(key) } });
     const files = [
       { path: "src/a.ts", operation: "edit", source_event_id: "edit", line_counts: { added: 12, removed: 4 } },
       { path: "src/<b>.ts", operation: "edit", source_event_id: "other" },
@@ -76,6 +76,43 @@ describe("work events (cas-ff22)", () => {
     expect(card().querySelector(".changed-files-toggle")?.getAttribute("aria-expanded")).toBe("true");
     expect(file().getAttribute("aria-expanded")).toBe("true");
     expect(card().textContent).toContain("Loading");
+    file().click();
+    card().querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
+    const saved = [...storage].filter(([key]) => key.startsWith("commander.workDisclosure:"));
+    expect(saved).toHaveLength(1); // Only the other file remains open.
+    expect(saved.every(([, value]) => value === "1")).toBe(true);
+    picture = makePicture(); load(); paint();
+    expect(card().querySelector(".changed-files-toggle")?.getAttribute("aria-expanded")).toBe("false");
+    node.remove();
+  });
+
+  it("shows offline source edits once per connection and recovers after reconnect", () => {
+    let online = false;
+    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => online ? "detail" : undefined) };
+    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn() });
+    const event = workEventsPage({ request_id: "page", events: [wire("edit", 1, { turn: "one", changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "edit" }], provenance: "successful_tool_calls", complete: false } })], has_earlier: false })!.events[0]!;
+    const context = picture.rows("m", "s");
+    const node = document.createElement("div"); document.body.append(node);
+    const item = { type: "work" as const, key: "work:edit", events: [event], changedFiles: [event] };
+    const paint = () => renderWork(node, item, context, "Supervisor");
+    paint();
+    node.querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
+    node.querySelector<HTMLButtonElement>(".changed-file-toggle")!.click();
+    expect(node.querySelector(".changed-file-detail")!.textContent).toMatch(/offline/i);
+    expect(node.querySelector('[aria-busy="true"]')).toBeNull();
+    paint(); paint();
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(1);
+    online = true; picture.reattached("m", "s"); paint(); paint();
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
+    expect(node.querySelector(".changed-file-detail")!.textContent).toContain("Loading");
+    picture.disconnected("m", "s"); paint(); paint();
+    expect(node.querySelector(".changed-file-detail")!.textContent).toMatch(/offline/i);
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
+    picture.reattached("m", "s"); paint();
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
+    picture.detail("m", "s", { request_id: "detail", event_id: "edit", detail: "Recovered edit", truncated: false });
+    paint();
+    expect(node.querySelector(".changed-file-detail")!.textContent).toContain("Recovered edit");
     node.remove();
   });
   it("merges pages by id and reads back from a newest page that missed the loaded events", () => {
@@ -130,7 +167,7 @@ describe("work events (cas-ff22)", () => {
     };
     const storage = new Map<string, string>();
     const setInterval = vi.fn(() => 7);
-    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => void storage.set(key, value) }, setInterval, clearInterval: vi.fn() });
+    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => void storage.set(key, value), removeItem: key => void storage.delete(key) }, setInterval, clearInterval: vi.fn() });
     picture.watchThread("m", "s");
     expect(transport.requestWorkEvents).not.toHaveBeenCalled();
     expect(picture.threadWork("m", "s")).toBeUndefined();
@@ -147,7 +184,7 @@ describe("work events (cas-ff22)", () => {
 
   it("re-reads a thread's newest work when the operator comes back to it", () => {
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: vi.fn((session: string) => `${session}-${Math.random()}`), requestWorkEventDetail: vi.fn(() => undefined) };
-    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {} }, setInterval: vi.fn(() => 1), clearInterval: vi.fn() });
+    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {}, removeItem: () => {} }, setInterval: vi.fn(() => 1), clearInterval: vi.fn() });
     picture.watchThread("m", "a");
     const [first] = (transport.requestWorkEvents as ReturnType<typeof vi.fn>).mock.results.map((result) => result.value as string);
     picture.page("m", "a", workEventsPage({ request_id: first!, events: [wire("a1", 1)], has_earlier: false })!);

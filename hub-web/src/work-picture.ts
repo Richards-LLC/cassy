@@ -23,7 +23,7 @@ export interface WorkPictureDeps {
   repaintThread(machineId: string, session: string): void;
   /** Repaint the open worker timeline, if any. */
   repaintTimeline(): void;
-  storage?: Pick<Storage, "getItem" | "setItem">;
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   setInterval?: (run: () => void, ms: number) => number;
   clearInterval?: (handle: number) => void;
 }
@@ -135,7 +135,8 @@ export class WorkPicture {
     return {
       detail: (eventId) => stream.detail(eventId),
       requestDetail: (eventId) => {
-        if (stream.detail(eventId)?.state === "loading") return;
+        const state = stream.detail(eventId)?.state;
+        if (state === "loading" || state === "offline") return;
         stream.requested(this.deps.transport(machineId)?.requestWorkEventDetail(session, eventId), { detail: eventId });
       },
       isOpen: (key) => {
@@ -148,7 +149,10 @@ export class WorkPicture {
       setOpen: (key, open) => {
         this.open.set(`${prefix}\u0000${key}`, open);
         const saved = savedKey(key);
-        try { if (saved) this.deps.storage?.setItem(saved, open ? "1" : "0"); } catch { /* this visit only */ }
+        try { if (saved) {
+          if (open) this.deps.storage?.setItem(saved, "1");
+          else this.deps.storage?.removeItem(saved);
+        } } catch { /* this visit only */ }
       },
     };
   }
@@ -202,6 +206,10 @@ export class WorkPicture {
 
   /** A reattach: re-read the newest page of what is on screen. */
   reattached(machineId: string, session: string): void {
+    for (const stream of this.sessionStreams(machineId, session)) {
+      stream.reconnected();
+      this.repaint(machineId, session, stream);
+    }
     this.appended(machineId, session);
     this.syncPoll();
   }

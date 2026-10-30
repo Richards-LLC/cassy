@@ -148,8 +148,9 @@ pub fn impact_for_changes(
 }
 
 fn journey_input(registry: &crate::qa_registry::Registry, path: &str) -> bool {
-    !crate::qa_pass::is_non_surface_path(path)
-        // Registered specs declare coverage without being product surfaces.
+    // The catalog and registered specs declare coverage without being product surfaces.
+    path == "docs/qa/journeys.md"
+        || !crate::qa_pass::is_non_surface_path(path)
         || registry.journeys.iter().any(|journey| journey.spec.as_deref() == Some(path))
 }
 

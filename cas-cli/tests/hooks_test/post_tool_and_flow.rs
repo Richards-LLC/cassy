@@ -600,9 +600,18 @@ fn test_hook_status_command() {
         .args(["hook", "status"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("SessionStart").or(predicate::str::contains("configured")),
-        );
+        .stdout(predicate::str::contains("PostModelSwitch: configured"));
+
+    let output = cas_cmd(&temp)
+        .args(["hook", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(status["post_model_switch"], true);
+    assert_eq!(status.as_object().unwrap().len(), 12);
 }
 
 #[test]

@@ -19,6 +19,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   security headers. External-dist overrides are refused; baseline checks use
   their own candidate binary.
 
+### Fixed — Terminal heading readability
+
+- **Hook status headings stay readable on light terminals** — Shared CLI H1
+  headings use bold terminal foreground instead of teal, and use ASCII rules
+  when the locale is not UTF-8, including `LANG=C`.
+
 ### Fixed — Screencast guidance
 
 - **QA examples recommend 10 fps** — Lower frame rates reduce encoding work;

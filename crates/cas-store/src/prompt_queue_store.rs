@@ -10869,34 +10869,61 @@ mod tests {
 
     #[test]
     fn delayed_current_lifecycle_digest_keeps_its_queue_age_for_visible_label() {
-        let (temp, store) = create_test_store();
-        use crate::AgentStore;
-        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
-        agents.init().unwrap();
-        let mut supervisor = cas_types::Agent::new_with_role(
-            "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
-        );
-        supervisor.factory_session = Some("session".into());
-        agents.register(&supervisor).unwrap();
-        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
-        tasks.init().unwrap();
-        let mut task = Task::new("cas-current-digest".into(), "relay target".into());
-        task.status = TaskStatus::InProgress;
-        tasks.add(&task).unwrap();
-        let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, task.updated_at.to_rfc3339());
-        let result = store.enqueue_idempotent("lifecycle:13952", "supervisor", &body, Some("session"), Some("task_started: cas-current-digest"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
-        let EnqueueIdempotentResult::Created(id) = result else { panic!("new relay") };
-        let queued_at = Utc::now() - chrono::Duration::minutes(29);
-        store.conn.lock().unwrap().execute(
-            "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
-            params![queued_at.to_rfc3339(), id],
-        ).unwrap();
-        let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
-        assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
-        assert_eq!(surfaced[0].id, id);
-        assert_eq!(surfaced[0].created_at, queued_at);
-        assert!(surfaced[0].summary.as_deref().is_some_and(|summary| summary.contains("[delayed 29m]")), "{:?}", surfaced[0].summary);
-        assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+        for (detail, busy) in [
+            (Some("recipient pane busy"), true),
+            (Some("directed supervisor message burst debounce"), false),
+            (Some("directed supervisor message pair rate limit"), false),
+            (None, false),
+        ] {
+            let (temp, store) = create_test_store();
+            use crate::AgentStore;
+            let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("session".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-current-digest".into(), "relay target".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, task.updated_at.to_rfc3339());
+            let result = store.enqueue_idempotent("lifecycle:13952", "supervisor", &body, Some("session"), Some("task_started: cas-current-digest"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
+            let EnqueueIdempotentResult::Created(id) = result else { panic!("new relay") };
+            let queued_at = Utc::now() - chrono::Duration::minutes(29);
+            store.conn.lock().unwrap().execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                params![queued_at.to_rfc3339(), id],
+            ).unwrap();
+            if let Some(detail) = detail {
+                if busy {
+                    store.record_wake_gate_decline(id, detail).unwrap();
+                } else {
+                    store.park_for_busy_recipient(id, Some(detail), Utc::now() + chrono::Duration::minutes(1)).unwrap();
+                }
+            }
+            let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+            assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
+            assert_eq!(surfaced[0].id, id);
+            assert_eq!(surfaced[0].created_at, queued_at);
+            assert!(surfaced[0].summary.as_deref().is_some_and(|summary| summary.contains("delayed 29m")), "{:?}", surfaced[0].summary);
+            assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+            let summary = surfaced[0].summary.as_deref().unwrap();
+            match detail {
+                Some(detail) => assert!(summary.contains(&format!("held: {detail}")), "{summary}"),
+                None => assert!(summary.contains("cause unrecorded"), "{summary}"),
+            }
+            // A separate read-only connection observes the committed receipt:
+            // hook acknowledgement must not erase the earlier holding cause.
+            let readonly = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+            let report = readonly.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.confirmation_source, ConfirmationSource::HookSurfaced);
+            assert!(report.pending_reason.is_none(), "confirmed is not still pending");
+            let json = serde_json::to_value(report).unwrap();
+            assert_eq!(json["holding_detail"], serde_json::json!(detail));
+        }
     }
 
     #[test]

@@ -3873,6 +3873,18 @@ impl FactoryDaemon {
                 let tick_interval_ms = last_refresh.elapsed().as_secs_f64() * 1000.0;
                 if refresh_due {
                     last_refresh = std::time::Instant::now();
+                    // cas-1b4d: a closed rapid-response window back-fills its
+                    // skipped checks; the store work runs off this loop.
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    if cas_dir.join(crate::rapid_response::STATE_FILE).exists() {
+                        let supervisor = self.app.supervisor_name().to_string();
+                        let session = self.session_name.clone();
+                        tokio::task::spawn_blocking(move || {
+                            super::queue_and_events::backfill_closed_rapid_response_windows(
+                                &cas_dir, &supervisor, &session,
+                            )
+                        });
+                    }
                 }
                 // cas-ee9ab: the director reads run on a background thread.
                 // This pass starts one when due and applies whichever read
@@ -4490,6 +4502,9 @@ impl FactoryDaemon {
         for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
             self.finish_merge_alert_inbox(completed).await;
         }
+        self.relay_jobs.submit_worker_task_queue_reconciliation(
+            &mut self.queue_jobs, self.app.cas_dir().to_path_buf(), self.session_name.clone(),
+        );
         self.relay_jobs.submit_external_work_reconciliation(
             &mut self.queue_jobs,
             move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),

@@ -193,6 +193,108 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
     );
 }
 
+/// cas-1b4d: inside an operator's rapid-response window an unsampled task
+/// closes without the verification jail and the skip is ledgered, while a
+/// task with a recorded rejected verdict still refuses.
+#[tokio::test]
+async fn rapid_response_window_samples_close_verification() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=T"])
+            .args(args)
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join("base.rs"), "fn main() {}\n").unwrap();
+    git(&["add", "base.rs"]);
+    git(&["commit", "-q", "-m", "init"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(temp.path().join("fix.rs"), "pub fn fix() {}\n").unwrap();
+    git(&["add", "fix.rs"]);
+    git(&["commit", "-q", "-m", "fix"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    let create = |req: TaskCreateRequest| {
+        let core = &core;
+        async move {
+            let text = extract_text(core.cas_task_create(Parameters(req)).await.unwrap());
+            extract_task_id(&text).expect("task id").to_string()
+        }
+    };
+    let mut epic = create_req("hotfix epic", None);
+    epic.task_type = "epic".to_string();
+    let epic_id = create(epic).await;
+    let mut child = create_req("hotfix", None);
+    child.epic = Some(epic_id.clone());
+    let mut unsampled = Vec::new();
+    while unsampled.len() < 2 {
+        let id = create(child.clone()).await;
+        if !cas::rapid_response::verification_sampled(&id) {
+            unsampled.push(id);
+        }
+    }
+    let control_id = create(child.clone()).await;
+    let close = |id: String| {
+        let core = &core;
+        let task_store = &task_store;
+        let (base, head) = (base.clone(), head.clone());
+        async move {
+            core.cas_task_start(Parameters(IdRequest { id: id.clone() })).await.unwrap();
+            let mut task = task_store.get(&id).unwrap();
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+                assignee: "test-agent".into(),
+                branch: "main".into(),
+                base_sha: base,
+            });
+            task.deliverables.factory_branch_anchor = Some(head);
+            task_store.update(&task).unwrap();
+            extract_text(
+                core.cas_task_close(Parameters(TaskCloseRequest {
+                    no_delivery: None,
+                    stranded_branch_override: None,
+                    id,
+                    reason: Some("Fixed.".to_string()),
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
+                    search_manifest: None,
+                    commit_receipt: None,
+                }))
+                .await
+                .unwrap(),
+            )
+        }
+    };
+    assert!(close(control_id).await.contains("VERIFICATION REQUIRED"), "no window: verification runs");
+    let window = cas::rapid_response::enable(
+        &cas_dir, task_store.as_ref(), &epic_id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
+    )
+    .unwrap();
+    let (clean, rejected) = (unsampled[0].clone(), unsampled[1].clone());
+    let mut verdict = cas_types::Verification::new("ver-rejected".to_string(), rejected.clone());
+    verdict.status = cas_types::VerificationStatus::Rejected;
+    verdict.summary = "Found issues".to_string();
+    cas::store::open_verification_store(&cas_dir).unwrap().add(&verdict).unwrap();
+    let text = close(rejected.clone()).await;
+    assert_ne!(task_store.get(&rejected).unwrap().status, TaskStatus::Closed, "a rejected verdict still refuses: {text}");
+    let text = close(clean.clone()).await;
+    assert!(!text.contains("VERIFICATION REQUIRED"), "{text}");
+    assert_eq!(task_store.get(&clean).unwrap().status, TaskStatus::Closed);
+    let skips = cas::rapid_response::ledger(&cas_dir, &window);
+    assert!(skips.iter().any(|skip| skip.task == clean && skip.check == "verification"), "{skips:?}");
+    assert!(
+        !skips.iter().any(|skip| skip.task == rejected && skip.check == "verification"),
+        "a rejected verdict is never ledgered as an unsampled skip: {skips:?}"
+    );
+}
+
 /// GH #276: a task close must quarantine its default reminders while retaining
 /// only the explicit cross-session/task-close opt-in.
 #[tokio::test]

@@ -185,6 +185,10 @@ invariants:
   HUB-J4-MESSAGE-HIERARCHY:
     statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
+  HUB-J4-TWELVE-HOUR-TIMES:
+    statement: Every Commander clock time (message groups, session dividers, other-day stamps, Team trail, Attention, Last seen, connection details) reads 12-hour with AM/PM in the viewer's locale and timezone, never a 24-hour clock.
+    check: 'Run thread-model.test.ts and attention-view.test.ts (cas-0cd1, cas-73dd9 case), and the HUB-J4/HUB-J7/HUB-J14/HUB-J15 journeys that assert "Sep 29, 5:20 PM", "You, h:mm AM/PM" and "Sep 29, 9:41 PM" in the UTC journey timezone. On the real hub, a bubble sent at 7:15 PM reads "7:15 PM".'
+    bug: {task: cas-73dd9}
   HUB-J5-GOAL:
     statement: my message reaches the supervisor and I see its answer
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge

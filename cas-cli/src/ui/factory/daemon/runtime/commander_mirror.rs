@@ -1420,6 +1420,11 @@ mod tests {
                 "<task-notification>completed</task-notification>",
                 "CAS wake: message 7 from supervisor is in your inbox",
                 "Plain prefix\n<teammate-message teammate_id=\"director\">agent text</teammate-message>",
+                // cas-7cd1: Codex's own context and the daemon's pane deliveries.
+                "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>\n<environment_context>\n  <shell>bash</shell>\n</environment_context>",
+                "<environment_context>\n  <current_date>2026-10-30</current_date>\n</environment_context>",
+                "Message from director: [cas #2 agent-authored 5s first]\n\nCodex supervisor startup: 0 current workers.",
+                "Message from lifecycle-wake:delivery-watchdog: Cassy delivery watchdog: a normal supervisor message may be waiting",
             ].into_iter().enumerate() {
                 values.extend(input(&format!("envelope-{index}"), text, now));
             }

@@ -29822,6 +29822,9 @@ esac
         let closed = text(response);
         assert!(!is_error, "{closed}");
         assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
+        eprintln!("real close reply: {} chars\n{closed}", closed.chars().count());
+        assert!(closed.contains("Worktree still exists"), "{closed}");
+
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
     }
 

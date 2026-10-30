@@ -1010,6 +1010,9 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "trunk fallback and unavailable publication keep full actionable details.\nGot:\n{text}"
     );
 
+    assert!(text.contains("Merge policy: merge proceeded because CI is advisory."), "{text}");
+    assert!(text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"), "{text}");
+
     // The merge actually landed: content reachable from the checked-out repo.
     assert!(
         repo.root.join("alice-work.txt").exists(),
@@ -7732,6 +7735,39 @@ fn c85e_trunk_target() -> WorkTarget {
         repo_selector: C85E_SELECTOR.to_string(),
         target_branch: "main".to_string(),
     }
+}
+
+/// Routine receipts must be exercised through the merge handler, not its formatter.
+#[tokio::test]
+async fn validated_epic_merge_returns_compact_receipt() {
+    let (repo, _env, cas_root, wt, _origin) = c85e_repo_with_alice_work();
+    let source_sha = git_stdout(&wt, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("compact-merge".into(), "Compact merge".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("alice".into());
+    task.depth = TaskDepth::Light;
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: C85E_SELECTOR.into(), target_branch: "epic/c85e".into(),
+    });
+    tasks.add(&task).unwrap();
+    park_merge_fixture(&cas_root, &wt, "alice", &task.id);
+    let service = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".into());
+    req.task_id = Some(task.id);
+    req.cleanup = Some(false);
+    let text = get_text(&service.coordination(Parameters(req)).await.unwrap());
+    eprintln!("real merge reply: {} chars\n{text}", text.chars().count());
+    assert!(text.chars().count() <= 800, "{text}");
+    let path = text.split_once("Details: ").expect("immutable detail reference").1
+        .split_once(" (SHA-256 ").unwrap().0;
+    let detail = std::fs::read_to_string(path).unwrap();
+    assert!(detail.contains("Merged worktree") && detail.contains(&source_sha), "{detail}");
+    assert!(text.contains("Merge policy: merge proceeded on successful validation."), "{text}");
+    assert!(text.contains(&format!("CI SHA: {source_sha}")), "{text}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+        git_stdout(_origin.path(), &["rev-parse", "refs/heads/epic/c85e"]));
 }
 
 /// cas-c85e (GH #997), the incident shape end to end through the public

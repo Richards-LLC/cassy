@@ -761,11 +761,13 @@ def select(paths: list[str], surfaces: dict[str, list[str]], journeys: list[dict
             add(hub_ids if reason.startswith("surface-wide:") else ids, reason)
             continue
         if path.startswith("hub-web/src/") and path.endswith((".ts", ".tsx", ".js", ".mjs")) or path.startswith("hub-web/e2e/"):
-            users = impact.source_users(path) if path.startswith("hub-web/src/") else impact.users(path)
+            imported_users = impact.users(path)
+            users = impact.source_users(path) if path.startswith("hub-web/src/") else imported_users
             for journey in journeys:
                 if journey["id"] in users:
                     direct = next((p for p in globs(journey["fields"].get("Touches", "")) if fnmatch.fnmatchcase(path, p)), None)
-                    add({journey["id"]}, "suite" if path == suite_path(journey) else direct or f"import-graph:{path}")
+                    inferred = "import-graph" if journey["id"] in imported_users else "dom-selectors"
+                    add({journey["id"]}, "suite" if path == suite_path(journey) else direct or f"{inferred}:{path}")
             if not users:
                 add(hub_ids, f"surface-wide:unmapped-source:{path}")
             continue

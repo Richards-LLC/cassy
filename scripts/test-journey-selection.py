@@ -146,6 +146,7 @@ class SelectionTests(unittest.TestCase):
         head = self.commit()
         result = json.loads(self.run_selector(base, head).stdout)
         self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J22'})
+        self.assertEqual(next(j['reason'] for j in result['journeys'] if j['id'] == 'HUB-J22'), 'dom-selectors:hub-web/src/usage.ts')
 
     def test_main_state_type_words_do_not_select_unrelated_handlers(self):
         self.write('hub-web/src/main.ts', 'import { reply } from "./reply";\nimport { fleet } from "./fleet";\nconst kept: Map<string, string> = new Map();\nfunction renderReply() { return reply + kept.size; }\nfunction renderFleet(label: string) { return fleet + label; }\n')

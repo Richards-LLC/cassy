@@ -8659,6 +8659,17 @@ mod workspace_contract_tests {
         for command in [
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
+            // Rejected review: a nearby final pair does not prove arithmetic.
+            "echo \"$((touch /outside/cas-0c9c-p) && (true))\"",
+            "echo $((touch /outside/cas-0c9c-p) && (true))",
+            "echo \"$((touch /outside/cas-0c9c-p)|(true))\"",
+            "echo \"$((touch /outside/cas-0c9c-p);(true))\"",
+            "echo $((touch /outside/cas-0c9c-p);(true))",
+            "echo \"$((touch /outside/cas-0c9c-p)$(true))\"",
+            "echo \"$((rm -rf /outside/cas-0c9c-dir) && (true))\"",
+            "echo \"$((echo hi > /outside/cas-0c9c-p) && (true))\"",
+            "echo \"$(( $(cat <<'EOF'\n1\nEOF\n) ))\"",
+            "echo \"$(( $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ))\"",
         ] {
             let (status, reason) = decision(command);
             assert_eq!(status, "deny", "{command}: {reason}");

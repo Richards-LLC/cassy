@@ -1760,7 +1760,7 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         assert!(csp.contains(required), "missing CSP directive {required}");
     }
     // pin: Native media and workers receive only these exact CSP sources.
-    for (directive, expected) in [("img-src", "img-src 'self' data:"),
+    for (directive, expected) in [("img-src", "img-src 'self' data: blob:"),
         ("media-src", "media-src 'self'"), ("worker-src", "worker-src 'self'")] {
         let value = csp.split(';').map(str::trim)
             .find(|value| value.starts_with(&format!("{directive} "))).unwrap();

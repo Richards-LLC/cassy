@@ -266,6 +266,7 @@ if [ "$2" = list ]; then printf '{{"rust-suites":{{"cas":{{"testcases":{{"touche
         let planned = stability::PlannedTest {
             id: "src/lib.rs::touched".into(),
             fingerprint: reds[0].tests[0].fingerprint.clone(),
+            runner: "rust".into(),
         };
         assert!(reds[0].proves(&repo, &head, &planned), "{reds:?}");
         assert!(!reds[0].proves(&repo, &head, &stability::PlannedTest { fingerprint: "edited".into(), ..planned }));

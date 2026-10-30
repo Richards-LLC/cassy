@@ -36,6 +36,19 @@ factory branch owners and exact Git actors on delivery anchor history also
 count as implementers after reassignment. Integration and verification alone
 do not count as implementation.
 
+Name who walked the ledger in `ledger_author` (agent id or name). For every
+listed tier 1 or tier 2 task, that author must be outside the same
+implementation lineage: a QA reviewer, a verifier, or a worker on this or
+another machine that did not deliver it. An unregistered author is recorded
+with role `external`. The receipt stores the author's id and role, and close
+rechecks them, so an author who later joins the lineage no longer satisfies
+it. A worker's own tests and captures remain its proof but never count as
+independent QA; a passed QA round whose reviewer joins the lineage is refused
+the same way. Tier 0 deliveries (docs and tests only) are not gated. Only the
+operator overrides, by recording their words on the task as a note containing
+`QA AUTHOR OVERRIDE: <operator's words>`; the receipt keeps those words and
+its audit note on the task records them.
+
 Use the verification MCP tool:
 
 ```json
@@ -44,7 +57,8 @@ Use the verification MCP tool:
   "task_ids": ["cas-a123", "cas-b456", "cas-c789"],
   "staging_sha": "<full 40-hex deployed staging commit>",
   "ledger_artifact_id": "art-1234abcd",
-  "ledger_path": "/absolute/path/STAGING-LEDGER.md"
+  "ledger_path": "/absolute/path/STAGING-LEDGER.md",
+  "ledger_author": "qa-reviewer-name"
 }
 ```
 

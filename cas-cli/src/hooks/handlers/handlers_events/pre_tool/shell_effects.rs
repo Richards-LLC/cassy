@@ -454,6 +454,43 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
     None
 }
 
+/// Marks each token that belongs to a redirect rather than the command: its
+/// filename, and a descriptor number in front of it. Bash runs `>out touch /x` as
+/// `touch /x`, so neither may be mistaken for the executable or an operand.
+fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
+    let redirect = |token: Option<&ShellToken>| matches!(token, Some(ShellToken::Operator('<' | '>')));
+    let mut marked = vec![false; tokens.len()];
+    let mut index = 0;
+    while index < tokens.len() {
+        if !redirect(tokens.get(index)) {
+            if let ShellToken::Word(word) = &tokens[index]
+                && redirect(tokens.get(index + 1))
+                && !word.is_empty()
+                && word.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                marked[index] = true;
+            }
+            index += 1;
+            continue;
+        }
+        while matches!(tokens.get(index), Some(ShellToken::Operator('<' | '>' | '&' | '|'))) {
+            index += 1;
+        }
+        if matches!(tokens.get(index), Some(ShellToken::Word(_))) {
+            marked[index] = true;
+            index += 1;
+        }
+    }
+    marked
+}
+
+/// Whether this operator continues a redirect, as in `>&` and `>|`. The next word
+/// is that redirect's filename, so it is not in command position and cannot be a
+/// keyword. Bash runs `>case touch in /outside/p` as `touch in /outside/p`.
+fn after_redirect(previous: Option<(char, usize)>, end: usize) -> bool {
+    matches!(previous, Some(('<' | '>', at)) if at + 1 == end)
+}
+
 /// Resolve a substitution with the ordinary shell lexer. Only real operator
 /// tokens can close it: quoted/comment text and case-pattern ')' are data.
 pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Option<usize> {
@@ -560,7 +597,8 @@ pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Opti
                 return (cases.is_empty() && lexed.unresolved_at.is_none_or(|at| at >= end))
                     .then_some(index + end - 1);
             }
-            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
             _ => {}
         }
     }
@@ -629,7 +667,12 @@ fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'st
                         command_start = false;
                         continue;
                     }
-                    if word.contains(['`', '$']) {
+                    // Words in a pattern are joined by `|`. Two in a row are a command
+                    // this has misread, and must never be hidden as pattern text.
+                    let after_word = index > 0
+                        && syntax[index - 1] == CaseSyntax::Hidden
+                        && matches!(lexed.tokens[index - 1], ShellToken::Word(_));
+                    if after_word || word.contains(['`', '$']) {
                         return Err("an unresolved shell payload");
                     }
                     *started = true;
@@ -692,7 +735,8 @@ fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'st
                 level = level.saturating_sub(1);
                 command_start = false;
             }
-            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
             _ => {}
         }
     }
@@ -718,11 +762,12 @@ fn resolve_executable(
     values: &HashMap<String, Vec<String>>,
 ) -> Result<(), &'static str> {
     for _ in 0..16 {
+        let redirects = redirect_words(tokens);
         let positions: Vec<_> = tokens
             .iter()
             .enumerate()
             .filter_map(|(position, token)| match token {
-                ShellToken::Word(word) => Some((position, word.clone())),
+                ShellToken::Word(word) if !redirects[position] => Some((position, word.clone())),
                 _ => None,
             })
             .collect();
@@ -876,6 +921,12 @@ fn collect_script(
             }
             (CaseSyntax::Hidden, _) => continue,
             (CaseSyntax::FirstArm | CaseSyntax::NextArm, _) => Some(';'),
+            // The `&` of `>&file` and the `|` of `>|file` belong to the redirect.
+            (CaseSyntax::Code, Some(ShellToken::Operator('&' | '|')))
+                if end > 0 && matches!(tokens[end - 1], ShellToken::Operator('<' | '>')) =>
+            {
+                continue;
+            }
             (CaseSyntax::Code, Some(ShellToken::Operator(ch @ (';' | '&' | '|' | '(' | ')')))) => Some(*ch),
             (CaseSyntax::Code, None) => None,
             (CaseSyntax::Code, _) => continue,
@@ -933,10 +984,12 @@ fn collect_script(
                     expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter)?);
                 }
             }
+            let redirects = redirect_words(&statement);
             let words: Vec<String> = statement
                 .iter()
-                .filter_map(|token| match token {
-                    ShellToken::Word(word) => Some(word.clone()),
+                .enumerate()
+                .filter_map(|(index, token)| match token {
+                    ShellToken::Word(word) if !redirects[index] => Some(word.clone()),
                     _ => None,
                 })
                 .collect();
@@ -944,7 +997,19 @@ fn collect_script(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, token)| {
-                    matches!(token, ShellToken::Word(_)).then_some(statement_literals[index])
+                    (matches!(token, ShellToken::Word(_)) && !redirects[index])
+                        .then_some(statement_literals[index])
+                })
+                .collect();
+            // A redirect's filename is no operand, but its substitutions still run.
+            let redirect_targets: Vec<(&str, bool)> = statement
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| match token {
+                    ShellToken::Word(word) if redirects[index] => {
+                        Some((word.as_str(), statement_literals[index]))
+                    }
+                    _ => None,
                 })
                 .collect();
             let index = if continuation {
@@ -1025,7 +1090,12 @@ fn collect_script(
             // outer tokenizer correctly keeps it as one word. Its filesystem
             // effects are checked in a subprocess scope; its output remains
             // unresolved when used as an executable, directory or write path.
-            for (word, literal) in words.iter().zip(&word_literals) {
+            let every_word = words
+                .iter()
+                .map(String::as_str)
+                .zip(word_literals.iter().copied())
+                .chain(redirect_targets.iter().copied());
+            for (word, literal) in every_word {
                 if !literal {
                     for body in substitution_bodies(word)? {
                         collect_script(

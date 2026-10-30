@@ -93,7 +93,8 @@ def verify_web(scope, binary, snapshot, owned):
                 relative = path.relative_to(snapshot['dist_path'])
                 target = served/relative
                 target.parent.mkdir(parents=True,exist_ok=True)
-                with opener.open(origin+'/commander/'+quote(relative.as_posix()),timeout=5) as response:
+                route = '/commander/' if relative.as_posix()=='index.html' else '/commander/'+quote(relative.as_posix())
+                with opener.open(origin+route,timeout=5) as response:
                     target.write_bytes(response.read())
             actual = journey_dist.dist_hash(served)
             if actual != snapshot['dist_sha256']:

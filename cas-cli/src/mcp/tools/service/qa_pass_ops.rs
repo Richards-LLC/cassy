@@ -22,6 +22,7 @@ impl CasService {
             return Err(reject("requires qa.mode=batch".into()));
         }
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
+            required(req.ledger_author.as_deref(), "ledger_author")?,
             req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
             required(req.staging_sha.as_deref(), "staging_sha")?,
             required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
@@ -29,9 +30,14 @@ impl CasService {
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={}",
-            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id);
+        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={} author={} ({})",
+            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
+            receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
         for task_id in receipt.task_heads.keys() {
+            let note = match receipt.author_overrides.get(task_id) {
+                Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
+                None => note.clone(),
+            };
             if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }

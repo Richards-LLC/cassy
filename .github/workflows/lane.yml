@@ -40,7 +40,10 @@ jobs:
     name: Full lane
     if: vars.CAS_LANE_SLIM != 'true'
     permissions:
-      contents: read
+      # Reusable-workflow ceiling: GitHub validates even skipped queue jobs.
+      # ci.yml still defaults to read-only; only its merge_group publisher writes.
+      contents: write
+      issues: write
       actions: read
       pull-requests: read
     uses: ./.github/workflows/ci.yml

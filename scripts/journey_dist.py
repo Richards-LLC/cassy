@@ -17,8 +17,6 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(['git', *args], cwd=repo, check=True, capture_output=True,
                           text=True).stdout.strip()
 
-
-
 # Only the opt-in comparison may overlay these producer-owned helpers from
 # its reviewed head onto the base checkout. Product, bundle and test inputs
 # remain the evaluated revision; record the helper revision explicitly.
@@ -105,9 +103,12 @@ def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | No
     snapshot = Path(tempfile.mkdtemp(prefix=source + '-', dir=builds))
     dist = snapshot / 'dist'
     log = snapshot / 'build.log'
+    command = ['npm', 'run', 'build', '--', '--outDir', str(dist)]
+    admission = repo / 'scripts/worker-memory.py'
+    if admission.is_file():
+        command = [sys.executable, str(admission), '--', *command]
     with log.open('w') as output:
-        result = subprocess.run(['npm', 'run', 'build', '--', '--outDir', str(dist)],
-                                cwd=repo / 'hub-web', stdout=output, stderr=subprocess.STDOUT)
+        result = subprocess.run(command, cwd=repo / 'hub-web', stdout=output, stderr=subprocess.STDOUT)
     if result.returncode:
         raise ValueError(f'journey snapshot build failed (exit {result.returncode}); see {log}')
     check_source(repo, source, compared)

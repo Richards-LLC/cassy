@@ -4609,11 +4609,15 @@ fn skip_redirect(tokens: &[ShellToken], index: &mut usize, parens: &mut ParenPos
     }
 }
 
-/// The descriptor number in `2>out touch /x`, which is not the command either.
+/// The descriptor in `2>out touch /x` or `{fd}>out touch /x`, which is not the
+/// command either.
 fn is_redirect_descriptor(word: &str, next: Option<&ShellToken>) -> bool {
-    !word.is_empty()
-        && word.bytes().all(|byte| byte.is_ascii_digit())
-        && matches!(next, Some(ShellToken::Operator('<' | '>')))
+    let numbered = !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit());
+    let named = word
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(is_shell_variable_name);
+    (numbered || named) && matches!(next, Some(ShellToken::Operator('<' | '>')))
 }
 
 /// Identify shell words that are actual output targets, without treating every

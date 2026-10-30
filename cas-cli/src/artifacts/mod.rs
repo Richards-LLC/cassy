@@ -851,6 +851,29 @@ mod tests {
         assert_eq!(mime_for(Path::new("a/noext")), "application/octet-stream");
     }
 
+    #[test]
+    fn typescript_sources_publish_as_text_while_transport_streams_remain_video() {
+        let f = fixture();
+        let mut transport_stream = vec![0xff; 188 * 2];
+        for packet in transport_stream.chunks_exact_mut(188) {
+            // Two valid null packets: sync, null PID, payload-only header.
+            packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        }
+        for (name, bytes, expected) in [
+            ("probe.ts", b"export const probe = true;\n".as_slice(), "text/plain"),
+            ("component.TSX", b"export const View = () => <div />;\n".as_slice(), "text/plain"),
+            // ASCII G is also 0x47, but source is not a transport stream.
+            ("graph.ts", b"Graph.render();\n".as_slice(), "text/plain"),
+            ("recording.ts", transport_stream.as_slice(), "video/mp2t"),
+        ] {
+            let file = f.task_dir.join(name);
+            fs::write(&file, bytes).unwrap();
+            let outcome = publish(&f.context(), &file).unwrap();
+            assert_eq!(outcome.artifact.mime, expected, "{name}");
+            assert_eq!(f.store.get(&outcome.artifact.id).unwrap().unwrap().mime, expected, "{name}");
+        }
+    }
+
     #[tokio::test]
     async fn webm_publish_is_rejected_before_cloud_requests_and_suggests_zip() {
         let server = wiremock::MockServer::start().await;

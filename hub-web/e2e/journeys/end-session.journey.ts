@@ -7,6 +7,9 @@ import { SCOPES, type Machine } from "./hub-double";
 // room for about three and a half sessions. With a conversation open, End
 // session also emptied the list for about 4.4 s and dropped focus to the page.
 const NAMES = ["calm-puma-34", "wild-shark-68", "noble-cheetah-84", "quiet-otter-12", "brave-lynx-7", "swift-heron-51", "amber-fox-29"];
+// Rows sort by supervisor name, so this is the bottom row of the list. Its
+// confirmation has the least room, and ending it moves focus to the row above.
+const LAST = "wild-shark-68";
 const ATLAS: Machine = {
   id: "atlas",
   label: "Atlas · Linux",
@@ -70,7 +73,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
         inView,
       };
     });
-    expect(at).toEqual({ question: "End amber-fox-29 on Atlas? Its supervisor and workers stop.", focused: "Cancel", rows: 7, inView: true });
+    expect(at).toEqual({ question: `End ${LAST} on Atlas? Its supervisor and workers stop.`, focused: "Cancel", rows: 7, inView: true });
     await expect(last.getByRole("button", { name: "Cancel" })).toBeFocused();
     await expect(last.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });
     await expect(last.getByRole("button", { name: "Cancel" })).toBeInViewport({ ratio: 1 });
@@ -79,7 +82,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   await journey.stage("A failed End session keeps its row and returns focus for retry (cas-a549)", async () => {
     const last = list.locator(".conversation-end").last();
     // One refused request, then the normal protocol double handles the retry.
-    await page.route("**/v1/sessions/gabber-studio-amber-fox-29", async (route) => {
+    await page.route(`**/v1/sessions/gabber-studio-${LAST}`, async (route) => {
       if (route.request().method() !== "DELETE") return route.fallback();
       await route.fulfill({ status: 500, json: { error: "internal_error" } });
     }, { times: 1 });
@@ -118,9 +121,9 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     });
     await page.keyboard.press("Tab");
     await page.keyboard.press("Enter");
-    const failure = "Could not end amber-fox-29 on Atlas. Try End session again. If it still fails, check the session on Atlas.";
+    const failure = `Could not end ${LAST} on Atlas. Try End session again. If it still fails, check the session on Atlas.`;
     await expect(last.locator(".conversation-end-error")).toHaveText(failure);
-    await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
+    await expect(last.getByRole("button", { name: `End session ${LAST} on Atlas` })).toBeFocused();
     // Focus came back to End session, which reads the failure as its
     // description, so the failure is not also an alert: said once (cas-9ae6).
     // The page clock runs half a second of the app's own timers at once, so a
@@ -128,7 +131,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await page.clock.runFor(500);
     const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
     expect(heard.filter((words) => words.includes("Could not end")), "the failure is said once").toEqual([failure]);
-    await expect(row("amber-fox-29")).toHaveCount(1);
+    await expect(row(LAST)).toHaveCount(1);
     await expect(list.locator(".conversation-row")).toHaveCount(7);
     expect(hub.ends).toEqual([]);
     // Enter on the returned control deliberately opens a fresh confirmation.
@@ -139,7 +142,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   await journey.stage("Cancel, then end it from the keyboard", async () => {
     const last = list.locator(".conversation-end").last();
     await last.getByRole("button", { name: "Cancel" }).tap();
-    await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
+    await expect(last.getByRole("button", { name: `End session ${LAST} on Atlas` })).toBeFocused();
     expect(hub.ends).toEqual([]);
     // cas-e634: keyboard only — Enter on End, Tab from Cancel to confirm, Enter.
     // cas-f60a: Cancel comes first, so the confirm is the next stop.
@@ -148,14 +151,14 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await page.keyboard.press("Tab");
     await expect(last.getByRole("button", { name: "End session", exact: true })).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(row("amber-fox-29")).toHaveCount(0);
+    await expect(row(LAST)).toHaveCount(0);
     // The ended row was the last: focus lands on the row before it, never on the page.
     await expect(row("swift-heron-51")).toBeFocused();
-    expect(hub.ends).toEqual([{ machine: "atlas", session: "gabber-studio-amber-fox-29", scopes: [...SCOPES, "factory-manage"] }]);
+    expect(hub.ends).toEqual([{ machine: "atlas", session: `gabber-studio-${LAST}`, scopes: [...SCOPES, "factory-manage"] }]);
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 6 conversations on Atlas");
     // cas-f60a: told it ended, on screen where the row was and to a screen reader.
-    await expect(list.locator(".conversation-ended")).toHaveText("amber-fox-29 on Atlas ended.");
+    await expect(list.locator(".conversation-ended")).toHaveText(`${LAST} on Atlas ended.`);
     await expect(list.locator(".conversation-ended")).toBeInViewport();
-    await expect(page.locator(".conversation-ended-status[role=status]")).toHaveText("amber-fox-29 on Atlas ended.");
+    await expect(page.locator(".conversation-ended-status[role=status]")).toHaveText(`${LAST} on Atlas ended.`);
   });
 });

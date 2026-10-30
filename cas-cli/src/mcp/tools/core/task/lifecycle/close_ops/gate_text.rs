@@ -17,13 +17,14 @@ use sha2::Digest as _;
 /// reference. The create-only path makes the detail immutable.
 pub(crate) fn compact_receipt(
     cas_root: &std::path::Path,
+    configured_artifacts_root: Option<&str>,
     task_id: &str,
     kind: &str,
     summary: &str,
     detail: &str,
 ) -> Result<String, String> {
     let digest = hex::encode(sha2::Sha256::digest(detail.as_bytes()));
-    let paths = crate::config::resolved_factory_artifact_paths(cas_root, None);
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, configured_artifacts_root);
     let dir = paths.task_dirs(task_id)[0].join("receipts");
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("could not create receipt detail directory: {error}"))?;
@@ -334,6 +335,7 @@ mod tests {
         let detail = "Closed task cas-x; verification passed; full diagnostic payload.";
         let short = compact_receipt(
             root.path(),
+            Some(root.path().to_str().unwrap()),
             "cas-x",
             "close",
             "Closed task cas-x; delivery abc123; target epic/x; next: none.",
@@ -349,7 +351,15 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
         assert_eq!(digest.trim_end_matches(')'), hex::encode(sha2::Sha256::digest(detail.as_bytes())));
-        assert!(compact_receipt(root.path(), "cas-x", "close", "retry", detail).is_ok());
+        assert!(compact_receipt(
+            root.path(),
+            Some(root.path().to_str().unwrap()),
+            "cas-x",
+            "close",
+            "retry",
+            detail
+        )
+        .is_ok());
         assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
     }
 

@@ -3000,7 +3000,7 @@ fn same_except_close_audit(before: &Task, after: &Task) -> bool {
 pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3017,6 +3017,14 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(crate) fn before_start_lease(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeLease, Box::new(hook)));
+    }
+
+    pub(crate) fn before_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforePark, Box::new(hook)));
+    }
+
+    pub(super) fn fire_before_park(task_id: &str) {
+        fire_at(task_id, Phase::BeforePark);
     }
 
     pub(crate) fn fire_before_start_lease(task_id: &str) {
@@ -9184,6 +9192,8 @@ impl CasCore {
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
+                        #[cfg(test)]
+                        lifecycle_race_hook::fire_before_park(&task.id);
                         if let Err(error) = self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &parking,
@@ -19767,8 +19777,21 @@ impl<'a> CloseNoteTracker<'a> {
     }
 }
 
-/// A long close can overlap receipt/upkeep note appends. Refresh only an
-/// append-only timeline or clock-only change, then CAS against that exact row.
+/// Cloud note union can reorder or deduplicate blocks without changing any
+/// audit text. Match complete lines so a correction that only starts with an
+/// older note cannot masquerade as retained history. Duplicate blocks have
+/// the same meaning here as in the sync union; every distinct block survives.
+fn preserves_close_note_history(before: &str, after: &str) -> bool {
+    cas_store::task_note_markers::note_blocks(before).iter().all(|block| {
+        std::iter::once(0)
+            .chain(after.match_indices('\n').map(|(offset, _)| offset + 1))
+            .any(|start| after[start..].strip_prefix(*block)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n')))
+    })
+}
+
+/// A long close can overlap receipt/upkeep appends or a cloud note union.
+/// Refresh only retained note history or clock changes, then CAS against that row.
 /// Other fields, rewritten history and request_changes still invalidate the
 /// snapshot. Keep the generic store and replication CAS strict.
 fn update_close_snapshot_preserving_notes(
@@ -19791,9 +19814,7 @@ fn update_close_snapshot_preserving_notes(
             Err(error @ cas_store::StoreError::Other(_)) if attempt < 2 => {
                 let current = task_store.get(&expected.id)?;
                 if !same_except_close_audit(&baseline, &current)
-                    || !current.notes.strip_prefix(&baseline.notes).is_some_and(|suffix| {
-                        suffix.is_empty() || baseline.notes.is_empty() || suffix.starts_with("\n\n")
-                    })
+                    || !preserves_close_note_history(&baseline.notes, &current.notes)
                 {
                     return Err(error);
                 }

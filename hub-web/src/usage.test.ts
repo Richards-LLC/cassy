@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { USAGE_ACTIONS, UsageCounter, bindRichInspectionUsage, countAttentionDelivery, type UsageEntry } from "./usage";
 
@@ -78,7 +80,7 @@ describe("usage counter (cas-0b3d)", () => {
   });
 
   it("counts an action for every live Commander journey in the registry", () => {
-    const registry = readFileSync(new URL("../../docs/qa/journeys.yaml", import.meta.url), "utf8");
+    const registry = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../docs/qa/journeys.yaml"), "utf8");
     const live = [...registry.matchAll(/^- id: (\S+)\n(?:  .*\n)*?  status: live$/gm)].map((match) => match[1]);
     expect(live.length).toBeGreaterThan(0);
     expect([...new Set(Object.values(USAGE_ACTIONS))].sort()).toEqual([...live].sort());

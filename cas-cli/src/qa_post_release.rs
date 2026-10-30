@@ -315,6 +315,12 @@ mod tests {
         fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
         let sha = "b".repeat(40);
         env.set("CAS_ROOT", &cas);
+        env.set("CAS_AGENT_NAME", "worker");
+        // Neither the old writable state nor the published artifact supplies
+        // trusted release identity after the protected-state transition.
+        fs::create_dir_all(cas.join("post-release")).unwrap();
+        fs::write(cas.join("post-release").join(format!("{}.json", epic.id)), r#"{"sha":"forged"}"#).unwrap();
+        assert!(load(&cas, &epic.id).unwrap().is_none());
         let cli = crate::cli::try_parse_from_with_wordmark([
             "cas",
             "qa",
@@ -326,7 +332,9 @@ mod tests {
             &sha,
         ])
         .unwrap();
-        crate::cli::run(cli).unwrap();
+        let refusal = crate::cli::run(cli).unwrap_err();
+        assert!(refusal.to_string().contains("operator-only"), "{refusal}");
+        super::start(&cas, &epic.id, &sha).unwrap();
         let started = load(&cas, &epic.id).unwrap().unwrap();
         assert_eq!(
             super::start(&cas, &epic.id, &sha).unwrap().started_at,
@@ -409,9 +417,14 @@ fn valid_id(id: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
+// Identity and runner state share the operator-protected root. Legacy state
+// outside it is deliberately not imported: agents could have forged its SHA.
+fn state_dir(cas_root: &Path) -> PathBuf {
+    cas_root.join("operator").join("post-release")
+}
 fn receipt_path(cas_root: &Path, epic: &str) -> Result<PathBuf> {
     ensure!(valid_id(epic), "Invalid epic id");
-    Ok(cas_root.join("post-release").join(format!("{epic}.json")))
+    Ok(state_dir(cas_root).join(format!("{epic}.json")))
 }
 pub fn load(cas_root: &Path, epic: &str) -> Result<Option<Receipt>> {
     match fs::read(receipt_path(cas_root, epic)?) {
@@ -452,7 +465,7 @@ fn save(cas_root: &Path, receipt: &Receipt) -> Result<()> {
     }
     Ok(())
 }
-pub fn start(cas_root: &Path, epic: &str, sha: &str) -> Result<Receipt> {
+pub(crate) fn start(cas_root: &Path, epic: &str, sha: &str) -> Result<Receipt> {
     let config = configured(cas_root).context("No qa.post_release.command configured")?;
     ensure!(
         config.interval_mins > 0 && config.window_mins > 0 && config.timeout_secs > 0,
@@ -553,6 +566,13 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         Err(_) => (Verdict::Failed, "receipt unreadable".into()),
     };
     if verdict == Verdict::Clean {
+        return None;
+    }
+    if waiting.is_none()
+        && let Ok(Some(receipt)) = load(cas_root, &epic.id)
+        && let Some(window) = crate::rapid_response::active_for_release(cas_root, epic, &receipt.sha)
+        && crate::rapid_response::record_skip(cas_root, &window, &epic.id, "post-release", &receipt.sha)
+    {
         return None;
     }
     if let Some(reason) = recent_override(&epic.notes, now) {
@@ -672,7 +692,7 @@ pub(crate) fn tick(cas_root: &Path) -> Result<()> {
         return Ok(());
     };
     start_landed(cas_root)?;
-    let Ok(entries) = fs::read_dir(cas_root.join("post-release")) else {
+    let Ok(entries) = fs::read_dir(state_dir(cas_root)) else {
         return Ok(());
     };
     for entry in entries.flatten() {
@@ -738,7 +758,7 @@ fn project_runner_lease(cas_root: &Path) -> Result<Option<File>> {
     if configured(cas_root).is_none() {
         return Ok(None);
     }
-    let directory = cas_root.join("post-release");
+    let directory = state_dir(cas_root);
     fs::create_dir_all(&directory)?;
     let lease = OpenOptions::new()
         .create(true)
@@ -833,6 +853,75 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     ensure!(output.status.success(), "Git probe did not succeed");
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
+fn release_branches(project: &Path, config: &PostReleaseConfig) -> Vec<String> {
+    if config.release_branches.is_empty() {
+        vec![crate::worktree::GitOperations::new(project.to_path_buf()).detect_default_branch()]
+    } else {
+        config.release_branches.clone()
+    }
+}
+
+/// Find the first merge on a release branch's first-parent chain that brought
+/// in the epic tip. FFs (including a merge at the epic tip), squashes and merges
+/// confined to other branches cannot establish this provenance.
+fn release_merge_for_tip(
+    project: &Path,
+    tip: &str,
+    branches: &[String],
+    recorded: Option<&str>,
+) -> Option<String> {
+    for branch in branches {
+        let range = format!("{tip}..refs/remotes/origin/{branch}");
+        let Some(merges) = git_output(
+            project,
+            &["rev-list", "--first-parent", "--merges", "--reverse", &range, "--"],
+        ).ok() else {
+            continue;
+        };
+        for sha in merges.lines() {
+            if recorded.is_some_and(|recorded| recorded != sha) {
+                continue;
+            }
+            let Some(parents) = git_output(project, &["rev-list", "--parents", "-n", "1", sha, "--"]).ok() else {
+                continue;
+            };
+            let parents: Vec<_> = parents.split_whitespace().skip(1).collect();
+            if parents.len() < 2 {
+                continue;
+            }
+            // Comparing an actual merge base distinguishes non-ancestry from
+            // a failed Git probe: failures keep the gate.
+            let Some(base) = git_output(project, &["merge-base", tip, parents[0]]).ok() else {
+                continue;
+            };
+            if base != tip
+                && parents[1..].iter().any(|parent| {
+                    git_output(project, &["merge-base", tip, parent]).is_ok_and(|base| base == tip)
+                })
+            {
+                return Some(sha.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Validate the recorded release SHA against today's epic and configured
+/// release refs before any rapid-response relaxation.
+pub(crate) fn verified_release_merge(cas_root: &Path, epic: &Task, sha: &str) -> Option<()> {
+    if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let project = cas_root.parent()?;
+    let branch = epic.branch.as_deref()?;
+    let tip = git_output(
+        project,
+        &["rev-parse", "--verify", "--end-of-options", &format!("{branch}^{{commit}}")],
+    ).ok()?;
+    let branches = release_branches(project, &configured(cas_root)?);
+    release_merge_for_tip(project, &tip, &branches, Some(sha)).map(|_| ())
+}
+
 /// Durable branch-contained fallback, armed at the epic's merge request.
 /// Best effort: arming never holds a merge or publication.
 pub(crate) fn arm_on_merge(cas_root: &Path, epic: &Task, owner: &str) -> Result<()> {
@@ -852,16 +941,10 @@ pub(crate) fn arm_on_merge(cas_root: &Path, epic: &Task, owner: &str) -> Result<
             &format!("{branch}^{{commit}}"),
         ],
     )?;
-    if load(cas_root, &epic.id)?.is_some_and(|r| {
-        r.sha == sha || git_output(project, &["merge-base", "--is-ancestor", &sha, &r.sha]).is_ok()
-    }) {
+    if load(cas_root, &epic.id)?.is_some_and(|r| verified_release_merge(cas_root, epic, &r.sha).is_some()) {
         return Ok(());
     }
-    let branches = if config.release_branches.is_empty() {
-        vec![crate::worktree::GitOperations::new(project.to_path_buf()).detect_default_branch()]
-    } else {
-        config.release_branches
-    };
+    let branches = release_branches(project, &config);
     let _lock = lock(cas_root, &epic.id)?;
     let path = receipt_path(cas_root, &epic.id)?.with_extension("armed");
     let watch = ArmedRelease {
@@ -922,12 +1005,15 @@ pub(crate) fn start_from_reminder(cas_root: &Path, reminder: &cas_store::Reminde
         .and_then(serde_json::Value::as_str)
         == Some(&watch.sha)
     {
-        start(cas_root, epic, &watch.sha)?;
+        let project = cas_root.parent().context("Missing project root")?;
+        if let Some(sha) = release_merge_for_tip(project, &watch.sha, &watch.branches, None) {
+            start(cas_root, epic, &sha)?;
+        }
     }
     Ok(())
 }
 fn start_landed(cas_root: &Path) -> Result<()> {
-    let Ok(entries) = fs::read_dir(cas_root.join("post-release")) else {
+    let Ok(entries) = fs::read_dir(state_dir(cas_root)) else {
         return Ok(());
     };
     let project = cas_root.parent().context("Missing project root")?;
@@ -937,19 +1023,8 @@ fn start_landed(cas_root: &Path) -> Result<()> {
             continue;
         }
         let watch: ArmedRelease = serde_json::from_slice(&fs::read(path)?)?;
-        if watch.branches.iter().any(|branch| {
-            git_output(
-                project,
-                &[
-                    "merge-base",
-                    "--is-ancestor",
-                    &watch.sha,
-                    &format!("origin/{branch}"),
-                ],
-            )
-            .is_ok()
-        }) {
-            start(cas_root, &watch.epic, &watch.sha)?;
+        if let Some(sha) = release_merge_for_tip(project, &watch.sha, &watch.branches, None) {
+            start(cas_root, &watch.epic, &sha)?;
         }
     }
     Ok(())

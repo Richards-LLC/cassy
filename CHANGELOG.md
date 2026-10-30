@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Rapid response release checks
+
+- **Verify the release merge before deferring observation** — Rapid response
+  defers the post-release wait only for a protected recorded merge that brought
+  the epic into a configured release branch. Its full first-parent diff must
+  clear migration and secret checks; fast-forward, squash and foreign merges
+  keep the gate. Automatic observation records the release merge SHA, and
+  manual SHA recording is operator-only.
+
 ### Fixed — Factory workflow
 
 - **Parked delivery anchors stay on the branch** — Worker pushes refuse

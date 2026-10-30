@@ -9,8 +9,8 @@
 //!   diff touched;
 //! - the batch QA receipt wait is skipped, so each fix merges as it lands;
 //!
-//! The post-release check stays a full gate inside a window (its relaxation
-//! is cas-9462). The safety floor never reads this mode: build proofs, the touched-test
+//! The post-release gate scales down only for a protected, verified release
+//! merge whose first-parent diff clears the safety floor. Build proofs, the touched-test
 //! receipt, the evidence secret check and every other close gate keep
 //! refusing. A delivery that touches a migration path never gets rapid
 //! treatment, so migrations keep their full review, and the operator states a
@@ -308,6 +308,16 @@ pub fn active_for_delivery(
     let window = window_for_task(cas_root, task)?;
     let delivery = recorded_delivery(repo, task)?;
     floor_clear(&delivery, changed.unwrap_or(&[])).then_some(window)
+}
+
+/// A post-release window applies only to an operator/Cassy-recorded release
+/// merge containing this epic, after scanning the entire release change.
+pub(crate) fn active_for_release(cas_root: &Path, epic: &Task, sha: &str) -> Option<Window> {
+    let window = window_for_task(cas_root, epic)?;
+    crate::qa_post_release::verified_release_merge(cas_root, epic, sha)?;
+    let base = format!("{sha}^1");
+    let delivery = diff_between(cas_root.parent()?, &[&base, sha, "--"])?;
+    floor_clear(&delivery, &[]).then_some(window)
 }
 
 fn git_text(repo: &Path, args: &[&str]) -> Option<String> {
@@ -683,20 +693,50 @@ mod tests {
 
     #[test]
     fn window_relaxes_only_for_automatic_release_merge() {
-        let (dir, cas, _store, epic, window) = post_release_fixture();
-        let tip = git(dir.path(), &["rev-parse", "epic/hot"]);
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
-        crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
-        git(dir.path(), &["checkout", "-q", "main"]);
-        git(dir.path(), &["merge", "-q", "--no-ff", "epic/hot", "-m", "release"]);
-        let release = publish_main(dir.path());
-        crate::qa_post_release::tick(&cas).unwrap();
-        let receipt = crate::qa_post_release::load(&cas, &epic.id).unwrap().unwrap();
-        assert_ne!(release, tip);
-        assert_eq!(receipt.sha, release, "observe the introducing release merge");
-        assert!(cas.join("operator/post-release").join(format!("{}.json", epic.id)).exists(), "release identity is protected from agent writes");
-        assert!(crate::qa_post_release::gate(&cas, &epic, true).is_none());
-        assert_eq!(ledger(&cas, &window)[0].check, "post-release");
+        // A merge resolution can add risk absent from the epic delivery.
+        // Scan the release's first parent, including those resolution edits.
+        let secret = format!("gh{}_{}", "p", "a".repeat(24));
+        for (extra, body, allowed, via_reminder) in [
+            (None, "", true, true),
+            (None, "", true, false),
+            (Some("db/migrate/001.sql"), "ALTER TABLE users;", false, false),
+            (Some("src/token.rs"), secret.as_str(), false, true),
+        ] {
+            let (dir, cas, store, epic, window) = post_release_fixture();
+            let tip = git(dir.path(), &["rev-parse", "epic/hot"]);
+            assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some());
+            crate::qa_post_release::arm_on_merge(&cas, &epic, "supervisor").unwrap();
+            git(dir.path(), &["checkout", "-q", "main"]);
+            git(dir.path(), &["merge", "-q", "--no-ff", "--no-commit", "epic/hot"]);
+            if let Some(path) = extra {
+                std::fs::create_dir_all(dir.path().join(path).parent().unwrap()).unwrap();
+                std::fs::write(dir.path().join(path), body).unwrap();
+                git(dir.path(), &["add", path]);
+            }
+            git(dir.path(), &["commit", "-q", "-m", "release"]);
+            let release = publish_main(dir.path());
+            if via_reminder {
+                let reminders = crate::store::open_reminder_store(&cas).unwrap().list_all_pending().unwrap();
+                crate::qa_post_release::start_from_reminder(&cas, &reminders[0]).unwrap();
+            } else {
+                crate::qa_post_release::tick(&cas).unwrap();
+            }
+            let receipt = crate::qa_post_release::load(&cas, &epic.id).unwrap().unwrap();
+            assert_ne!(release, tip);
+            assert_eq!(receipt.sha, release, "observe the introducing release merge");
+            assert!(cas.join("operator/post-release").join(format!("{}.json", epic.id)).exists(), "release identity is protected from agent writes");
+            assert_eq!(crate::qa_post_release::gate(&cas, &epic, true).is_none(), allowed, "{extra:?}");
+            let skips = ledger(&cas, &window);
+            if allowed {
+                assert_eq!(skips[0].check, "post-release");
+                assert!(crate::qa_post_release::gate(&cas, &epic, false).is_none());
+                assert_eq!(ledger(&cas, &window).len(), 1, "release notes and close share a skip");
+                disable(&cas, store.as_ref(), &epic.id, Utc::now()).unwrap();
+                assert!(crate::qa_post_release::gate(&cas, &epic, true).is_some(), "expiry/disable restores the gate");
+            } else {
+                assert!(skips.is_empty(), "unsafe release cannot record a skip");
+            }
+        }
     }
 
     #[test]

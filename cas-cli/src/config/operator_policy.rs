@@ -758,6 +758,10 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
             _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
         },
+        Commands::Qa(crate::cli::qa::QaCommand::PostRelease(args)) => match args.command {
+            crate::cli::qa_post_release::PostReleaseCommand::Start { .. } => Some("Recording a post-release SHA (`cas qa post-release start`)"),
+            _ => None,
+        },
         _ => None,
     }
 }

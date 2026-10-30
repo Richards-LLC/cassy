@@ -977,6 +977,11 @@ mod tests {
             drop(input);
             let signals = LoginSignals::enter().unwrap();
             assert_eq!(signals.answer().unwrap().trim(), "y");
+            // EOF does not echo Enter: the following cancellation must
+            // begin on a new line after the still-open question.
+            eprint!("EOF question: ");
+            assert!(signals.answer().unwrap().is_empty());
+            eprintln!("EOF cancelled");
             return;
         }
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -999,6 +1004,8 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("EOF question: \nEOF cancelled\n"),
+            "EOF must end the question line: {:?}", String::from_utf8_lossy(&output.stderr));
     }
 
     // Historical layouts from independent QA's qa_legacy_split.py. These

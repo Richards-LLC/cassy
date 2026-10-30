@@ -46,6 +46,8 @@ const LEGACY_RECEIPT_DRAIN_MS = 5_000;
 // A short-lived SSE stream can flap while its terminal socket still speaks.
 // Keep that event-only retry backoff separate from actual outage recovery.
 const EVENT_RETRY_CEILING_MS = 10_000;
+// Match the hub's 60-second DPoP window; a 401 cannot move signing time farther.
+const MAX_HUB_CLOCK_OFFSET_MS = 60_000;
 
 function revealDormant(): boolean {
   let storage: Storage | undefined;
@@ -158,6 +160,9 @@ export class AuthenticationError extends Error {
  */
 export class TransientAuthError extends Error {
   constructor(readonly reason: string) { super(`the hub refused a proof (${reason}); retrying`); }
+}
+class HubClockError extends Error {
+  constructor() { super("Device and machine clocks differ by more than 60 seconds. Check their date and time settings."); }
 }
 class EventRecoveryError extends Error {
   constructor(readonly code: "event_sequence_gap" | "viewer_lagged", readonly requestId?: string) { super(code); }
@@ -597,6 +602,7 @@ export class HubConnectionSupervisor {
     if (error instanceof EventRecoveryError) return { code: error.code, layer: "events", retryable: true, requestId: error.requestId };
     if (error instanceof AuthenticationError) return { code: `auth_${error.kind.replaceAll("-", "_")}` as CauseEvidence["code"], layer: "auth", retryable: false, requestId: error.requestId };
     if (error instanceof TransientAuthError) return { code: "proof_refused", layer: "auth", retryable: true };
+    if (error instanceof HubClockError) return { code: "clock_skew", layer: "auth", retryable: true };
     if (error instanceof DOMException && error.name === "TimeoutError") return { code: "request_timeout", layer: "http", retryable: true };
     if (error instanceof HubRequestError) return { code: httpRefusalCause(error.status, error.code, error.detail), layer: "http", retryable: true, status: error.status, requestId: error.requestId };
     if (typeof navigator !== "undefined" && navigator.onLine === false) return { code: "browser_offline", layer: "browser", retryable: true };
@@ -678,7 +684,9 @@ export class HubConnectionSupervisor {
     if (serverTime === undefined) return;
     // The hub refuses any future iat, so even sub-second corrections matter.
     // Its integer second also rounds the retry down conservatively.
-    this.clockOffsetMs = serverTime * 1000 - Date.now();
+    const offset = serverTime * 1000 - Date.now();
+    if (!Number.isFinite(offset) || Math.abs(offset) > MAX_HUB_CLOCK_OFFSET_MS) throw new HubClockError();
+    this.clockOffsetMs = offset;
   }
 
   uploadFile(session: string, id: string, name: string, data: string, onProgress?: (fraction: number) => void): Promise<{ path: string; artifact_id: string; mime: string }> {

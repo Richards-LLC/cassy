@@ -1,5 +1,5 @@
 title: A revoked semantic send names re-pairing without Take control, missing message permission names its grant, and true terminal lease refusals retain ownership guidance while refused text and drafts stay recoverable
 found: '2026-10-29'
-tasks: [cas-5e60]
+tasks: [cas-5e60, cas-573d]
 invariants: [HUB-J5-GOAL, HUB-J5-SEND-WITHOUT-PANE-LEASE]
 journeys: [HUB-J5, HUB-J12, HUB-J18]

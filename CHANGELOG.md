@@ -11,11 +11,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.
 
+### Fixed — Commander clock correction
+
+- **A refused proof cannot shift the clock by an arbitrary amount** — Commander
+  accepts clock corrections only within 60 seconds and shows clock-setting
+  guidance for larger differences, while still correcting small clock drift.
+
+### Fixed — Deliverable capture on macOS
+
+- **Capture from linked directories returns its receipt** — Evidence capture
+  runs through macOS temporary paths instead of silently exiting, preserving
+  the JSON timeout result and cleanup behavior.
+
 ### Fixed — Extracted handler journey coverage
 
 - **Rich inspection stays in source-impact selection** — Literal DOM lookups
   retain the journeys that own their UI when a handler moves into an existing
-  shared module. Existing import ownership and conservative fallbacks remain.
+  shared module. Existing import ownership remains; unmapped source still
+  selects the whole surface even when it queries known UI.
 
 ### Fixed — Changelog category validation
 

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Codex launch
+
+- **Codex workers and supervisors no longer update Codex by accident** — Was: when a newer Codex was available, launch showed an "Update now" dialog with that option selected, and the factory's first Enter accepted it, so Codex ran `npm install -g @openai/codex`, changed the machine's global npm and the session died. → Now: factory Codex panes launch with `check_for_update_on_startup=false`, so the dialog never appears and the first prompt reaches the agent.
+
 ### Fixed — Backquote command inspection
 
 - **Nested backquote commands keep workspace and operator checks** — The shell

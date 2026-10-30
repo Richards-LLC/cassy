@@ -352,10 +352,19 @@ pub struct WorkReasoning {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLineCounts {
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkChangedFile {
     pub path: String,
     pub operation: String,
     pub source_event_id: String,
+    /// The source event's edit counts, never cumulative or a net Git diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_counts: Option<WorkLineCounts>,
 }
 
 /// A cumulative per-turn snapshot of successful explicit edit calls, not Git state.

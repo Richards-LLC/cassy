@@ -24,7 +24,7 @@ use super::jobs::{Criticality, JobSpec, Lane};
 use super::prompt_queue_jobs::{ExternalOutcome, QueueJobs};
 use crate::ui::factory::{
     DaemonMessage, WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkChangedFile,
-    WorkChangedFiles, WorkEvent, WorkEventKind, WorkLifecycle, WorkReasoning, WorkTool,
+    WorkChangedFiles, WorkEvent, WorkEventKind, WorkLifecycle, WorkLineCounts, WorkReasoning, WorkTool,
     WorkToolCounts,
 };
 
@@ -201,6 +201,8 @@ struct Indexed {
     block: usize,
     result_line: Option<u64>,
     result_call: Option<String>,
+    /// Only numeric patch facts survive indexing; no extra copy of edit contents.
+    line_counts: HashMap<String, WorkLineCounts>,
 }
 
 /// Forward, incremental index of one transcript's work events.
@@ -316,6 +318,7 @@ impl TranscriptIndex {
             block,
             result_line: None,
             result_call: None,
+            line_counts: HashMap::new(),
         });
     }
 
@@ -339,6 +342,9 @@ impl TranscriptIndex {
             return;
         };
         indexed.event.tool = Some(tool_payload(name, input));
+        if short == "apply_patch" && let Some(patch) = patch_input(input) {
+            indexed.line_counts = patch_line_counts(patch);
+        }
         indexed.event.lifecycle = Some(WorkLifecycle {
             id: call
                 .map(str::to_owned)
@@ -444,6 +450,8 @@ impl TranscriptIndex {
                         path: path.clone(),
                         operation: "edit".into(),
                         source_event_id: indexed.event.id.clone(),
+                        line_counts: structured_line_counts(tool, path, result)
+                            .or_else(|| indexed.line_counts.get(path).cloned()),
                     };
                     if let Some(existing) = files.iter_mut().find(|file| &file.path == path) {
                         *existing = file;
@@ -859,6 +867,125 @@ fn session_key(value: &Value) -> Option<String> {
         .or_else(|| value.as_u64().map(|id| id.to_string()))
 }
 
+fn patch_input(input: &Value) -> Option<&str> {
+    input
+        .as_str()
+        .or_else(|| input.get("patch").and_then(Value::as_str))
+}
+
+/// Count the signed lines of complete, explicit add/update patches. Deletes
+/// lack old contents; moves lack an unambiguous per-path diff. Neither gets zeroes.
+fn patch_line_counts(patch: &str) -> HashMap<String, WorkLineCounts> {
+    let mut lines = patch.trim().lines();
+    if lines.next() != Some("*** Begin Patch") || lines.next_back() != Some("*** End Patch") {
+        return HashMap::new();
+    }
+    let mut files: HashMap<String, Option<WorkLineCounts>> = HashMap::new();
+    let mut current = None;
+    let mut adding = false;
+    for line in lines {
+        if let Some((path, is_add, known)) = [
+            ("*** Update File: ", false, true),
+            ("*** Add File: ", true, true),
+            ("*** Delete File: ", false, false),
+        ]
+        .into_iter()
+        .find_map(|(prefix, add, known)| line.strip_prefix(prefix).map(|path| (path, add, known)))
+        {
+            let path = bounded(&redact(path), 2048).0;
+            if files.len() >= 128 || path.is_empty() {
+                return HashMap::new();
+            }
+            // Repeated/redacted-colliding paths cannot be assigned one hunk's counts.
+            files
+                .entry(path.clone())
+                .and_modify(|counts| *counts = None)
+                .or_insert_with(|| {
+                    known.then_some(WorkLineCounts {
+                        added: 0,
+                        removed: 0,
+                    })
+                });
+            current = Some(path);
+            adding = is_add;
+            continue;
+        }
+        let Some(path) = current.as_ref() else {
+            return HashMap::new();
+        };
+        if let Some(destination) = line.strip_prefix("*** Move to: ") {
+            files.insert(path.clone(), None);
+            if files.len() >= 128 {
+                return HashMap::new();
+            }
+            files.insert(bounded(&redact(destination), 2048).0, None);
+            continue;
+        }
+        if let Some(counts) = files.get_mut(path).and_then(Option::as_mut) {
+            if line.starts_with('+') {
+                counts.added += 1;
+            } else if !adding && line.starts_with('-') {
+                counts.removed += 1;
+            } else if !adding
+                && (line.starts_with(' ') || line.starts_with("@@") || line == "*** End of File")
+            {
+                // Context, hunk headings and EOF markers do not change lines.
+            } else {
+                files.insert(path.clone(), None);
+            }
+        }
+    }
+    files
+        .into_iter()
+        .filter_map(|(path, counts)| Some((path, counts?)))
+        .collect()
+}
+
+/// Claude's published diff, attributed only to its explicit file. Input text
+/// lengths cannot prove replace-all multiplicity or an overwrite's old contents.
+fn structured_line_counts(tool: &WorkTool, path: &str, result: &Value) -> Option<WorkLineCounts> {
+    if !matches!(
+        tool.name.rsplit('.').next()?,
+        "Edit" | "MultiEdit" | "Write"
+    ) || bounded(&redact(result.get("filePath")?.as_str()?), 2048).0 != path
+    {
+        return None;
+    }
+    let hunks = result.get("structuredPatch")?.as_array()?;
+    if hunks.is_empty() {
+        return None;
+    }
+    let mut counts = WorkLineCounts {
+        added: 0,
+        removed: 0,
+    };
+    for hunk in hunks {
+        let (mut old, mut new) = (0, 0);
+        for line in hunk.get("lines")?.as_array()? {
+            match line.as_str()?.as_bytes().first()? {
+                b'+' => {
+                    counts.added += 1;
+                    new += 1;
+                }
+                b'-' => {
+                    counts.removed += 1;
+                    old += 1;
+                }
+                b' ' => {
+                    old += 1;
+                    new += 1;
+                }
+                _ if line.as_str()? == "\\ No newline at end of file" => {}
+                _ => return None,
+            }
+        }
+        if hunk.get("oldLines")?.as_u64()? != old || hunk.get("newLines")?.as_u64()? != new {
+            return None;
+        }
+    }
+    Some(counts)
+}
+
 fn tool_payload(name: &str, input: &Value) -> WorkTool {
     let short = name.rsplit('.').next().unwrap_or(name);
     let operation = match short {
@@ -875,9 +1002,7 @@ fn tool_payload(name: &str, input: &Value) -> WorkTool {
         .map(clean)
         .collect();
     if short == "apply_patch"
-        && let Some(patch) = input
-            .as_str()
-            .or_else(|| input.get("patch").and_then(Value::as_str))
+        && let Some(patch) = patch_input(input)
     {
         for line in patch.lines() {
             if let Some(path) = [

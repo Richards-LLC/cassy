@@ -619,6 +619,8 @@ fn v2_changed_files_are_per_turn_successful_edit_provenance() {
         "successful_tool_calls"
     );
     assert_eq!(wire[0]["changed_files"]["complete"], false);
+    let decoded: WorkEvent = serde_json::from_value(wire[0].clone()).unwrap();
+    assert_eq!(decoded.changed_files, events[0].changed_files, "counts round-trip through the wire");
     assert!(
         wire[1].get("changed_files").is_none(),
         "failed edit is not a changed file"
@@ -638,6 +640,8 @@ fn v2_changed_files_are_per_turn_successful_edit_provenance() {
     let wire = serde_json::to_value(events).unwrap();
     assert_eq!(wire[3]["changed_files"]["files"].as_array().unwrap().len(), 3, "the newest snapshot includes earlier calls settling later");
     assert_eq!(wire[4]["changed_files"]["files"].as_array().unwrap().len(), 1, "a new turn starts its own provenance");
+    let decoded: WorkEvent = serde_json::from_value(wire[4].clone()).unwrap();
+    assert!(decoded.changed_files.unwrap().files[0].line_counts.is_none(), "legacy edits without counts still decode");
 }
 
 #[test]

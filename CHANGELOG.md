@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Work-event edit line counts
+
+- **Edit facts can carry per-file additions and removals** — Successful explicit
+  patch records expose optional line counts through the Commander v2 contract
+  and parser. Counts describe each file's latest edit event; missing counts stay
+  unknown. The changed-files card can consume these facts in a follow-up.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.

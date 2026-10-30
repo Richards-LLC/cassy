@@ -44,6 +44,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory QA
 
+- **Task-specific QA branches survive a parked anchor** — Was: an anchored
+  plain worker lane could hide the task's per-task or companion delivery
+  branch. Now: QA selects recorded delivery branches before the anchored lane,
+  while retaining exact pushed-head validation.
+
 - **QA waivers follow a current repark after handoff** — Was: an older passed
   round on a retired worker's branch could override the current assignee's
   anchored repark. Now: a validated current-worker parked lane with an active

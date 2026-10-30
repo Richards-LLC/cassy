@@ -6848,7 +6848,7 @@ impl CasCore {
             return None;
         }
         let since = foreign_since?;
-        let epoch = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", offending])?
+        let epoch = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", offending]).ok()?
             .first()?.parse::<i64>().ok()?;
         if epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS) {
             return None;

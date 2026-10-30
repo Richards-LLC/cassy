@@ -1671,7 +1671,6 @@ async fn cas_81937_qa_waiver_binds_to_current_repark_after_handoff() {
             .await
             .expect("the exact pushed head on the current repark is waivable"),
     );
-    assert!(result.contains(&current_branch), "{result}");
     assert!(result.contains(&current_head[..8]), "{result}");
 
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();

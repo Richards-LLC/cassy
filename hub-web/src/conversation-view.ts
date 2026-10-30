@@ -511,7 +511,6 @@ export class ConversationView {
   private disposed = false;
   private updateRequest?: object;
   private resize?: ResizeObserver;
-  private contentChanges?: MutationObserver;
   private phase?: PhaseLine;
   private phaseClock?: ReturnType<typeof setInterval>;
 
@@ -702,13 +701,6 @@ export class ConversationView {
       // scroll-anchoring nudge then read as the reader scrolling away.
       this.resize.observe(this.msgs);
     }
-    // Preview DOM changes can clamp and regrow the thread before either a
-    // scroll event or ResizeObserver delivery. Re-pin in their microtask,
-    // while explicit reading intent has already released following.
-    this.contentChanges = new MutationObserver(() => {
-      if (!this.disposed && this.following) this.pin();
-    });
-    this.contentChanges.observe(this.msgs, { childList: true, subtree: true, attributes: true, characterData: true });
   }
 
   /** Mount and session-state callbacks share one presentation before paint.
@@ -1887,7 +1879,7 @@ export class ConversationView {
     });
   }
 
-  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.contentChanges?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
+  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */

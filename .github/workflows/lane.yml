@@ -2,8 +2,8 @@
 #
 # Every push to refs/heads/factory/** lands here; ci.yml no longer triggers on
 # those pushes directly. With CAS_LANE_SLIM=true a slim lane runs only the jobs
-# that still do work: classify, the two "Scoped Validation" checks (Docs Lint
-# for a docs-only diff). Their job names match ci.yml's, so worktree_merge's
+# that still do work: classify with no-build fast rows, the two "Scoped
+# Validation" checks (Docs Lint for a docs-only diff). Their job names match ci.yml's, so worktree_merge's
 # admission and the CI watchers read them unchanged. Skipped ci.yml jobs used
 # to resolve one by one (~30 s each, 13.3 min for run 39285508460 that did 21 s
 # of work); this workflow has none to wait for.
@@ -74,6 +74,20 @@ jobs:
       - name: Check Violet references before queue admission
         run: bash scripts/test-no-mecha-references.sh
 
+      # Local pre-push feedback is worker-writable. CI owns the proof: run
+      # once for every slim factory diff before downstream admission jobs.
+      - name: Run no-build release gate rows
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          npm ci --no-audit --no-fund
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
+
   docs-lint:
     name: Docs Lint
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class == 'docs-only'
@@ -85,8 +99,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      # Same check as ci.yml's Docs Lint; the worker's pre-push fast rows
-      # already ran Markdown lint and the release-note draft check.
+      # The classification job already ran Markdown lint and the release-note
+      # draft check through the fast rows.
       - name: Instruction files are current and within the size cap
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,19 +139,6 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
-
-      # Slim lanes omit the fast rows; retain this product-script regression
-      # in the existing fast job. Non-slim lanes run it through those rows.
-      - name: Run changed terminal QA tests on slim lanes
-        env:
-          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-        run: |
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
-            comparison_base="$ZERO_BASE_REF"
-          fi
-          python3 scripts/ci-script-tests-for-diff.py --base "$comparison_base" --only scripts/terminal-qa.test.mjs
 
       - name: Detect runner lock fixture changes
         id: runner-lock-diff
@@ -229,6 +230,26 @@ jobs:
           steps.pr-dedupe.outputs.covered != 'true'
           && needs.ci-diff.outputs.fast-admission != 'true'
         run: ./scripts/test-cas-install.sh
+
+      - name: Test release and install script fixtures
+        if: steps.pr-dedupe.outputs.covered != 'true'
+        env:
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
+        run: |
+          # Use the same resolved comparison base as the other scoped checks.
+          # Unknown bases run the fixtures, matching the classifier's fail-closed policy.
+          if [[ -n "$BASE_SHA" ]]; then
+            changed_scripts="$(git diff --name-only "$BASE_SHA" HEAD -- scripts/)"
+            if [[ -z "$changed_scripts" ]]; then
+              echo 'No scripts/ changes; skipping release and install fixtures.'
+              exit 0
+            fi
+          fi
+          # Report Python availability for the script fixtures.
+          python3 --version
+          ./scripts/test-release.sh
+          ./scripts/test-release-publish.sh
+          ./scripts/test-install-on-publish.sh
 
       # Larger pushes own these checks here; small pushes ran them in the fast job.
       - name: Typecheck and test Commander web assets

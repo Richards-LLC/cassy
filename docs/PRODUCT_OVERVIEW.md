@@ -19,6 +19,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 ## Core Concepts
 
 - **Provider account** - a Claude or Codex subscription identified by provider account and organization/workspace IDs, displayed by login email; `cas accounts list` shows usage, absolute resets and duplicate or login findings while legacy folder names remain launch aliases.
+- **Worker task queue** - an ordered backlog for one worker. Closing or parking starts the next eligible task on its own target branch; supervisors inspect, reorder or clear pending work, and stale entries carry skip notes.
 - **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI.
 - **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
 - **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.
@@ -31,6 +32,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns; journeys rank by traffic share.
 - **Journey traffic** - Commander counts each journey's defining act locally and reports the per-day totals only to the operator's paired machines; `cas qa journeys --traffic` turns them into per-journey shares.
 - **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
+- **Rapid response mode** - the operator opens a time-boxed window (at most 12 hours) for one epic with `cas qa rapid-response`; while it is open, per-task independent QA, unsampled verification, untouched-route journeys and the batch receipt wait are skipped, while the post-release check stays a full gate. Build and touched-test proofs still refuse; a change with a secret-shaped line or an unreadable diff keeps every gate; migrations keep every gate and need the operator's review; and each skipped check becomes a back-fill task when the window closes.
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
 - **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.
 - **Worker isolation** - on Linux, workers cannot read operator credential stores such as Neon and Vercel, and see only the connectors an operator grants a dedicated worker account.

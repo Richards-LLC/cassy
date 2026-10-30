@@ -165,6 +165,8 @@ pub enum QaCommand {
     Impact(super::qa_impact::ImpactArgs),
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
+    /// Operator-only, time-boxed rapid-response window for one epic
+    RapidResponse(super::qa_rapid_response::RapidResponseArgs),
     /// Seed, inspect or validate the journey registry
     #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status", "traffic"])))]
     Journeys {
@@ -224,6 +226,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
+        QaCommand::RapidResponse(args) => super::qa_rapid_response::execute(args, cas_root),
         QaCommand::Journeys {
             check: _,
             seed,

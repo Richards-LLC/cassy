@@ -813,6 +813,7 @@ mod tests {
             let catalog = serde_json::to_value(crate::hub::accounts::catalog(&home).unwrap()).unwrap();
             let displayed = catalog["accounts"].as_array().unwrap().iter().find(|row| row["key"] == "codex:chosen").unwrap();
             assert_eq!(displayed["display_name"], "chosen", "Accounts must retain the alias when credential-free Codex identity is unknown");
+            assert_eq!(displayed["location"], format!("~/{}chosen", Provider::Codex.prefix()), "Accounts say where a profile lives, home-relative only");
             return;
         }
         let fixture = tempfile::tempdir().unwrap();

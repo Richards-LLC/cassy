@@ -151,6 +151,11 @@ describe("Commander live connection lifecycle", () => {
 
   it("retains known hub capabilities when a reconnect's capability read is temporarily unavailable", async () => {
     transport(true);
+    const decoded: ReadableStream<string>[] = [];
+    const Decoder = TextDecoderStream;
+    vi.stubGlobal("TextDecoderStream", class extends Decoder {
+      constructor() { super(); decoded.push(this.readable); }
+    });
     const fetchNow = globalThis.fetch;
     let unavailable = false;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -166,9 +171,23 @@ describe("Commander live connection lifecycle", () => {
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const known = onMachineInfo.mock.calls.at(-1)?.[0];
     expect(known.capabilities).toContain("machine_multiplex_v2");
+    await vi.waitFor(() => expect(decoded).toHaveLength(1));
+    const cancel = ReadableStreamDefaultReader.prototype.cancel;
+    let completeCancel!: () => void;
+    let cancelStarted!: () => void;
+    const cancellation = new Promise<void>(resolve => { completeCancel = resolve; });
+    const started = new Promise<void>(resolve => { cancelStarted = resolve; });
+    vi.spyOn(ReadableStreamDefaultReader.prototype, "cancel").mockImplementationOnce(async function (this: ReadableStreamDefaultReader<unknown>, reason) {
+      cancelStarted();
+      await cancellation;
+      return cancel.call(this, reason);
+    });
     connection.stop();
-    // Drain the stopped event stream before starting the same paired connection.
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    // Cancellation can outlive an event-loop turn. The consumer owns its
+    // decoded reader until cancellation finishes and finally releases it.
+    await started;
+    try { expect(decoded[0]!.locked).toBe(true); } finally { completeCancel(); }
+    await vi.waitFor(() => expect(decoded[0]!.locked).toBe(false));
     unavailable = true;
     connection.start();
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));

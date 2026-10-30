@@ -822,13 +822,17 @@ impl SqliteKnowledgeStore {
     }
 
     fn parse_datetime(value: &str) -> DateTime<Utc> {
+        Self::parse_datetime_at(value, Utc::now())
+    }
+
+    fn parse_datetime_at(value: &str, fallback: DateTime<Utc>) -> DateTime<Utc> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
             return dt.with_timezone(&Utc);
         }
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
             return Utc.from_utc_datetime(&dt);
         }
-        Utc::now()
+        fallback
     }
 
     fn parse_sources(value: &str) -> Vec<String> {
@@ -3261,14 +3265,18 @@ mod tests {
 
     #[test]
     fn parse_helpers_have_defined_fallbacks() {
-        // Timestamps: RFC3339, the legacy space-separated form, then now().
+        // Timestamps: RFC3339, the legacy space-separated form, then the
+        // supplied fallback clock for malformed values.
         let rfc = SqliteKnowledgeStore::parse_datetime("2026-01-02T03:04:05Z");
         assert_eq!(rfc.to_rfc3339(), "2026-01-02T03:04:05+00:00");
         let legacy = SqliteKnowledgeStore::parse_datetime("2026-01-02 03:04:05");
         assert_eq!(legacy.to_rfc3339(), "2026-01-02T03:04:05+00:00");
         // Garbage falls back to "now" rather than failing the whole read.
-        let fallback = SqliteKnowledgeStore::parse_datetime("not a date");
-        assert!((Utc::now() - fallback).num_seconds().abs() < 5);
+        let fallback_now = DateTime::parse_from_rfc3339("2026-10-28T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let fallback = SqliteKnowledgeStore::parse_datetime_at("not a date", fallback_now);
+        assert_eq!(fallback, fallback_now);
 
         // Provenance: empty and malformed JSON both degrade to "no sources"
         // (which is safe: the cascade only deletes on an exact source match).

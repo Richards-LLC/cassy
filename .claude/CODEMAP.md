@@ -39,6 +39,8 @@
 
 ## CLI, hooks and application services
 
+- `cas-cli/src/agent_model.rs` - role-scoped pane model/effort observations shared by native hooks, Commander model selection, catalog and status.
+
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, module composition and command dispatch.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs` - initialization, recovery and provisioning.
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - recommendation policy, exclusions and thresholds.
@@ -75,6 +77,7 @@
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - semantic allowlist, native mappings and outcome evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
+- `cas-cli/src/worker_task_queue.rs` - ordered worker backlog policy, start authorization, delivery handoff and durable daemon reconciliation.
 
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_worker_check/stability.rs` - capped proof admission, touched-test plans and concurrent-run receipt validation.
 - `scripts/worker-proof-guards.py`, `scripts/worker-test-stability.py` - existing worker proof node, Rust module/name selection and five concurrent no-retry copies.
@@ -98,8 +101,10 @@
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs` - independent reviews, cross-host sync and batch receipts.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
+- `cas-cli/src/rapid_response.rs`, `cas-cli/src/cli/qa_rapid_response.rs` - operator-only, time-boxed per-epic rapid-response windows, scaled-down gates and the back-fill ledger.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - local action counts and per-journey traffic shares.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence and successor claims.
+- `crates/cas-store/src/worker_task_queue_store.rs` - persistent per-session worker queues and spawn payload binding.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and indexed QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and temporal memory/search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - startup, selected conversation state and reply grants.
@@ -120,6 +125,7 @@
 - `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media streams, hashed chunks and sandboxed pages.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/context-resize.ts` - pairing, scoped folder grants and remembered layout width.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, isolated previews and real-hub recovery fixtures.
+- `hub-web/e2e/journeys/hub-double-runtime.ts`, `hub-web/preview/hub-double-runtime.ts` - Node and browser adapters for the shared protocol double; the preview build selects browser crypto, time and raw CSP without a test runner.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - routing and daemon entrypoints.
 
 ## Cross-cutting and entrypoints

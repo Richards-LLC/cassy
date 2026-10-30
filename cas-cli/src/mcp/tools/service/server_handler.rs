@@ -429,7 +429,7 @@ impl CasService {
 
     /// The deadline alone, with no early post-commit answer.
     #[cfg(test)]
-    async fn call_with_deadline<F>(
+    pub(crate) async fn call_with_deadline<F>(
         &self,
         tool_name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,

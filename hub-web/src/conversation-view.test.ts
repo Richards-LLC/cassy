@@ -958,14 +958,16 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
   // render ran (the 5 s session heartbeat). It still saw the thread as
   // following its tail, read the unseen position as a re-mount's reset and
   // pinned the reader back to the newest turn.
-  it("when a render runs before the reader's scroll event is dispatched", () => {
+  // cas-eaef: the same ordering must hold while a previous pin is pending;
+  // the render must not acknowledge an offset before its scroll arrives.
+  it.each([false, true])("when a render precedes the reader's scroll event (pin pending: %s)", (pending) => {
     const flush = frames();
     const { history, view, jump } = longThread();
     const content = { height: 1400 };
     layout(view, content);
     for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
     view.update();
-    flush(); flush();
+    if (!pending) { flush(); flush(); }
     expect(view.element.scrollTop).toBe(1200);
     view.element.scrollTop = 0;
     view.update();

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for check-scoped-test-surface.sh, including its no-rg fallback.
+# Self-test for committed scoped-test surface resolution, independent of host rg.
 
 set -euo pipefail
 
@@ -41,10 +41,54 @@ printf '%s\n' 'changed skill' >>"$repo/cas-cli/src/builtins/skills/demo/SKILL.md
 git -C "$repo" add .
 git -C "$repo" commit -qm 'change scoped surfaces'
 
-with_rg_output="$(
-    cd "$repo"
-    bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --
-)"
+# cas-7fd28: a real 160-symbol source and tracked integration corpus expose
+# Git's cost when each symbol gets a separate -e. Keep ample wall-clock slack
+# for the combined-regex scan, while staying below close's 15-second budget.
+python3 - "$checker" "$tmpdir/symbol-heavy" <<'PY_TIMING'
+from pathlib import Path
+import os
+import signal
+import subprocess
+import sys
+import time
+
+checker, location = sys.argv[1:]
+repo = Path(location)
+(repo / "cas-cli/src").mkdir(parents=True)
+(repo / "cas-cli/tests").mkdir()
+(repo / "cas-cli/src/symbol_heavy.rs").write_text(
+    "".join(f"pub fn public_symbol_{i:03}() {{}}\n" for i in range(160))
+)
+(repo / "cas-cli/tests/consumer.rs").write_text(
+    "let keep = unrelated::identifier_with_a_long_nonmatching_prefix;\n" * 100000
+    + "let first = symbol_heavy::public_symbol_000();\n"
+    + "let last = symbol_heavy::public_symbol_159();\n"
+)
+for args in [
+    ["init", "-q", "-b", "main"], ["add", "."],
+    ["-c", "user.name=Scoped fixture", "-c", "user.email=scoped@example.test",
+     "commit", "-qm", "symbol-heavy fixture"],
+]:
+    subprocess.run(["git", *args], cwd=repo, check=True)
+started = time.monotonic()
+process = subprocess.Popen(
+    ["bash", checker, "--resolve-targets", "--paths-from-stdin", "--base", "HEAD", "--"],
+    cwd=repo, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE, start_new_session=True,
+)
+try:
+    output, error = process.communicate("cas-cli/src/symbol_heavy.rs\n", timeout=10)
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.communicate()
+    raise SystemExit("FAIL: 160-symbol proof discovery exceeded its generous 10-second bound")
+assert process.returncode == 0, error
+assert output.strip() == "SCOPED_PROOF_TARGET_ARGS: --lib symbol_heavy --test consumer", output
+print(f"ok   160-symbol proof discovery preserves consumers in {time.monotonic()-started:.3f}s (<10s)")
+PY_TIMING
+
+# Host color configuration must not enter either regex or fixed-path results.
+git -C "$repo" config color.grep always
 
 # Build an isolated PATH containing every command used by the checker except
 # rg. This masks both /usr/bin/rg and /bin/rg on hosts that ship either one.
@@ -59,7 +103,24 @@ without_rg_output="$(
         --resolve-targets --base main --
 )"
 
-[[ "$without_rg_output" == "$with_rg_output" ]]
+# cas-81bc: the proof resolver must not launch a PATH-provided rg. The
+# Codex bundle can stall before main on macOS; an immediately failing stand-in
+# catches that dependency deterministically, without sleeps or host state.
+unusable_rg_bin="$tmpdir/unusable-rg-bin"
+mkdir -p "$unusable_rg_bin"
+cat >"$unusable_rg_bin/rg" <<'EOF'
+#!/bin/sh
+printf '%s\n' invoked >>"$CAS_TEST_RG_CALLS"
+exit 99
+EOF
+chmod +x "$unusable_rg_bin/rg"
+unusable_rg_output="$(
+    cd "$repo"
+    CAS_TEST_RG_CALLS="$tmpdir/rg-calls" PATH="$unusable_rg_bin:$no_rg_bin" \
+        bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --
+)"
+[[ "$unusable_rg_output" == "$without_rg_output" ]]
+[[ ! -e "$tmpdir/rg-calls" ]]
 for expected in \
     '--lib widget' \
     '--test widget_test' \
@@ -67,10 +128,13 @@ for expected in \
     '--test builtin_flavor_drift_test' \
     '--test agent_definition_contract_test' \
     '--test factory_codex_skill_guardrails'; do
-    grep -qF -- "$expected" <<<"$without_rg_output"
+    if ! grep -qF -- "$expected" <<<"$without_rg_output"; then
+        printf 'FAIL: missing target %s with color.grep=always: %s\n' "$expected" "$without_rg_output" >&2
+        exit 1
+    fi
 done
 
-printf 'ok   no-rg backend preserves scoped target mapping\n'
+printf 'ok   committed target mapping never launches host rg\n'
 
 manifest_repo="$tmpdir/manifest-repo"
 mkdir -p "$manifest_repo/cas-cli/tests/hooks_test" "$manifest_repo/scripts"

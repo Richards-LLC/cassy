@@ -38,6 +38,8 @@ export class PreviewRoute {
 }
 
 type Handler = (route: PreviewRoute) => unknown;
+type RoutePattern = string | RegExp;
+type SocketPattern = RegExp | ((url: URL) => boolean);
 
 /** The route side of a socket, shaped like Playwright's WebSocketRoute. */
 export class PreviewSocketRoute {
@@ -107,8 +109,8 @@ function globMatch(pattern: string, url: string): boolean {
 
 /** Minimal Page: enough for HubDouble.install, seedPaired and the push helpers. */
 export class PreviewPage {
-  private routes: Array<{ pattern: string; handler: Handler }> = [];
-  private socketRoutes: Array<{ pattern: RegExp; handler: (ws: PreviewSocketRoute) => unknown }> = [];
+  private routes: Array<{ pattern: RoutePattern; handler: Handler }> = [];
+  private socketRoutes: Array<{ pattern: SocketPattern; handler: (ws: PreviewSocketRoute) => unknown }> = [];
 
   /** Install the routed fetch and socket constructor. Call before HubDouble.install. */
   installTransport(): void {
@@ -118,7 +120,7 @@ export class PreviewPage {
       const url = String(input instanceof Request ? input.url : input);
       if (++fetches > 400) throw new Error(`preview guard: fetch storm ${url}`);
       const absolute = new URL(url, location.href).href;
-      const match = this.routes.find((r) => globMatch(r.pattern, absolute));
+      const match = this.routes.findLast((r) => typeof r.pattern === "string" ? globMatch(r.pattern, absolute) : r.pattern.test(absolute));
       if (!match) return native(input, init);
       let bodyText: string | undefined;
       if (input instanceof Request && !init?.body) bodyText = await input.clone().text();
@@ -135,7 +137,7 @@ export class PreviewPage {
     const Routed = function (this: unknown, url: string | URL, protocols?: string | string[]) {
       const href = new URL(String(url), location.href).href;
       if (++sockets > 200) throw new Error(`preview guard: socket storm ${href}`);
-      const match = page.socketRoutes.find((r) => r.pattern.test(href));
+      const match = page.socketRoutes.findLast((r) => typeof r.pattern === "function" ? r.pattern(new URL(href)) : r.pattern.test(href));
       if (!match) return new NativeSocket(url, protocols);
       const socket = new PreviewSocket(href);
       setTimeout(() => {
@@ -149,9 +151,10 @@ export class PreviewPage {
     window.WebSocket = Routed;
   }
 
-  async addInitScript(script: () => void): Promise<void> { script(); }
+  context(): Pick<PreviewPage, "route"> { return this; }
+  async addInitScript<A>(script: (arg: A) => void, arg?: A): Promise<void> { script(arg as A); }
   async evaluate<T, A>(fn: (arg: A) => T | Promise<T>, arg?: A): Promise<T> { return fn(arg as A); }
-  async route(pattern: string, handler: Handler): Promise<void> { this.routes.push({ pattern, handler }); }
-  async routeWebSocket(pattern: RegExp, handler: (ws: PreviewSocketRoute) => unknown): Promise<void> { this.socketRoutes.push({ pattern, handler }); }
+  async route(pattern: RoutePattern, handler: Handler): Promise<void> { this.routes.push({ pattern, handler }); }
+  async routeWebSocket(pattern: SocketPattern, handler: (ws: PreviewSocketRoute) => unknown): Promise<void> { this.socketRoutes.push({ pattern, handler }); }
   on(): void { /* pageerror listeners are not needed in a preview */ }
 }

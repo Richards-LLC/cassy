@@ -30,14 +30,19 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    message the supervisor once that you are ready, then wait.
 2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
    Successful start accepts the assignment; no prose ACK. Follow task criteria,
-   depth, execution note and project instructions. Checkpoint dirt before
-   `git rebase <target>` in a reused checkout.
+   depth, execution note and project instructions. For queued work and branch
+   reuse, see [recovery](references/recovery.md#queued-successor-and-branch-reuse);
+   when allowed, `git rebase <target>` only after checkpoint.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
 3. Commit scoped work; push once before parking, once per review round, unless
    `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
    `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
-   Park reads the exact-tip fast-rows and capped test receipts, never runs checks.
+   CI owns fast-row proof; local receipts are pre-push feedback. Park reads
+   exact-tip capped test receipts, never runs checks.
    Add milestones with `task action=notes note_type=progress`.
+   Changes to shipped Rust, `hub-web/src`, user-run scripts or builtin skills
+   need a titled `CHANGELOG.md` Unreleased entry
+   ([close-gate.md](references/close-gate.md#changelog-at-park)).
 4. Scaffold with `cas qa ledger init --task <id>`; run
    `cas qa ledger check <path> --task <id>` before close. Follow
    [verify-before-claim](../verify-before-claim/SKILL.md) and
@@ -52,7 +57,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 One event gets one message. A close is the lifecycle report; never send a post-close
 summary or echo the close relay. After a merge request, wait for the supervisor's
-response instead of sending a second update about the same request.
+response; send no follow-up update.
 
 Finish or hand off this task before starting another. Stay available after
 handoff; injected `Message from …` turns are instructions. Start only assignments
@@ -112,6 +117,8 @@ reuse and failure controls.
 
 ## Conditional references
 
+- Returned delivery with a queued successor:
+  [recovery](references/recovery.md#returned-delivery-with-a-queued-successor).
 - Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)
   for the push-first table and cleanup contract.
 - Human-facing output (report, page, chart, notes, UI, CLI, drawing, image):

@@ -19,6 +19,30 @@ A squash/cherry-pick mismatch may need `commit_receipt`; transactional
 for receipt fields. If rejected, forward the exact error and receipt identity;
 never bypass close with `status=closed` or an invented verification record.
 
+## Queued successor and branch reuse
+
+A queued successor may already be started by Cassy on its task branch. Inspect
+its task and branch, then continue that assignment. Checkpoint dirty work before
+changing history. If a task branch has a recorded parked delivery anchor, merge
+the target into it; never rebase it. On other reused checkouts where rebasing is
+allowed, checkpoint before `git rebase <target>`.
+
+### Returned delivery with a queued successor
+
+When the supervisor returns delivery A while queued successor B is running:
+
+1. Checkpoint B's unfinished changes as B's commits.
+2. Run `task action=update id=B status=blocked`; this releases its lease while
+   preserving its current queue slot.
+3. Find A's recorded delivery branch with `task action=show id=A full=true`.
+   Switch to that branch, run `task action=start id=A`, then correct and
+   re-deliver A. Preserve its parked ancestry by merging its target.
+4. After A closes or parks, switch to B's recorded branch, run
+   `task action=update id=B status=open`, then `task action=start id=B`.
+
+Pending work remains behind held B. The start refusal names the exact hold
+command when another queue task is active.
+
 ### While the merge is pending
 
 The supervisor owns the landing signal. Queue attempts take minutes, it sees

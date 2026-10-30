@@ -220,6 +220,17 @@ impl KeyframeIndex {
         self.entries.push(entry);
     }
 
+    fn partition_point_at(
+        &self,
+        target_timestamp_ms: u64,
+        mut inspected: impl FnMut(),
+    ) -> usize {
+        self.entries.partition_point(|entry| {
+            inspected();
+            entry.timestamp_ms <= target_timestamp_ms
+        })
+    }
+
     /// Find the keyframe entry for seeking to the given timestamp.
     ///
     /// Returns the keyframe with the largest timestamp <= target,
@@ -230,9 +241,7 @@ impl KeyframeIndex {
         }
 
         // Binary search for the largest timestamp <= target
-        let idx = self
-            .entries
-            .partition_point(|e| e.timestamp_ms <= target_timestamp_ms);
+        let idx = self.partition_point_at(target_timestamp_ms, || {});
 
         if idx == 0 {
             // Target is before first keyframe, return first
@@ -241,6 +250,13 @@ impl KeyframeIndex {
             // Return the keyframe just before or at the target
             Some(&self.entries[idx - 1])
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_keyframe_comparison_count(&self, target_timestamp_ms: u64) -> usize {
+        let mut comparisons = 0;
+        self.partition_point_at(target_timestamp_ms, || comparisons += 1);
+        comparisons
     }
 
     /// Get the number of keyframes in the index.

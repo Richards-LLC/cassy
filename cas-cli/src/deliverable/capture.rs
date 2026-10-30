@@ -334,7 +334,9 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
     let result = match result {
         Ok(value) => value,
         Err(error) => {
-            if error.downcast_ref::<UsageError>().is_some() {
+            // cas-301e: Git reports an expired budget as a usage error; once
+            // the budget is spent, the private checkout timed out like a server.
+            if error.downcast_ref::<UsageError>().is_some() && !deadline.remaining().is_zero() {
                 return Err(error);
             }
             let code = if deadline.remaining().is_zero() {

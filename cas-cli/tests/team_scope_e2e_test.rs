@@ -28,9 +28,9 @@
 //! Each test requires `CAS_USER_CLOUD_JSON` to point at a tempdir-backed
 //! cloud.json so `active_team_id()` reads from the test fixture rather than
 //! the developer's real `~/.cas/cloud.json`. Access is serialised via
-//! `USER_CLOUD_LOCK`.
+//! the grouped harness TestEnvGuard.
 
-use std::sync::Mutex;
+use crate::test_env_guard::TestEnvGuard;
 
 use cas::cloud::{CloudConfig, SyncQueue, fetch_and_cache_teams_inner};
 use cas::store::open_store;
@@ -38,31 +38,6 @@ use cas::types::{Entry, EntryType, Scope};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// Process-global lock for `CAS_USER_CLOUD_JSON` env-var mutations.
-static USER_CLOUD_LOCK: Mutex<()> = Mutex::new(());
-
-/// RAII guard: sets `CAS_USER_CLOUD_JSON` for the duration of one test, then
-/// removes it.
-struct UserCloudGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl UserCloudGuard {
-    fn set(user_cloud_json: &std::path::Path) -> Self {
-        let lock = USER_CLOUD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: serialised by USER_CLOUD_LOCK; no other test races this.
-        unsafe { std::env::set_var("CAS_USER_CLOUD_JSON", user_cloud_json) };
-        Self { _lock: lock }
-    }
-}
-
-impl Drop for UserCloudGuard {
-    fn drop(&mut self) {
-        // SAFETY: same guard, same token.
-        unsafe { std::env::remove_var("CAS_USER_CLOUD_JSON") };
-    }
-}
 
 /// Count rows in the SyncQueue for a specific team.
 fn team_queue_len(cas_dir: &std::path::Path, team_id: &str) -> usize {
@@ -121,7 +96,8 @@ async fn e2e_single_team_auto_picks_without_team_set() {
 
     // — Point active_team_id() at the test user config ———————————————————————
     let user_cloud_json = user_tmp.path().join("cloud.json");
-    let _guard = UserCloudGuard::set(&user_cloud_json);
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
 
     // — Create project config (no team_id, but with opt-in for user-level fallback) ——
     // After cas-f8e3, team_auto_promote=Some(true) is required for Steps 2-3
@@ -132,6 +108,7 @@ async fn e2e_single_team_auto_picks_without_team_set() {
     pcfg.save_to_cas_dir(project_tmp.path()).unwrap();
 
     // — Remember an entry ———————————————————————————————————————————————————
+    env.set("CAS_ROOT", project_tmp.path());
     let store = open_store(project_tmp.path()).expect("open_store must succeed");
     let entry = Entry {
         id: "e2e-single-team-1".to_string(),
@@ -182,7 +159,8 @@ async fn e2e_multi_team_uses_server_default_team_id() {
     fetch_and_cache_teams_inner(&server.uri(), "test-token", user_tmp.path());
 
     let user_cloud_json = user_tmp.path().join("cloud.json");
-    let _guard = UserCloudGuard::set(&user_cloud_json);
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
 
     // Add opt-in so user-level fallback fires (cas-f8e3 guard).
     let project_tmp = TempDir::new().unwrap();
@@ -190,6 +168,7 @@ async fn e2e_multi_team_uses_server_default_team_id() {
     pcfg.team_auto_promote = Some(true);
     pcfg.save_to_cas_dir(project_tmp.path()).unwrap();
 
+    env.set("CAS_ROOT", project_tmp.path());
     let store = open_store(project_tmp.path()).expect("open_store must succeed");
     let entry = Entry {
         id: "e2e-multi-team-2".to_string(),
@@ -243,7 +222,8 @@ async fn e2e_per_project_override_beats_user_default() {
     fetch_and_cache_teams_inner(&server.uri(), "test-token", user_tmp.path());
 
     let user_cloud_json = user_tmp.path().join("cloud.json");
-    let _guard = UserCloudGuard::set(&user_cloud_json);
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
 
     // Project config has explicit team_id = OVERRIDE_TEAM.
     let project_tmp = TempDir::new().unwrap();
@@ -251,6 +231,7 @@ async fn e2e_per_project_override_beats_user_default() {
     pcfg.set_team(OVERRIDE_TEAM, "override-proj-squad");
     pcfg.save_to_cas_dir(project_tmp.path()).unwrap();
 
+    env.set("CAS_ROOT", project_tmp.path());
     let store = open_store(project_tmp.path()).expect("open_store must succeed");
     let entry = Entry {
         id: "e2e-proj-override-3".to_string(),
@@ -303,13 +284,15 @@ async fn e2e_no_team_personal_only_no_queue_rows() {
     );
 
     let user_cloud_json = user_tmp.path().join("cloud.json");
-    let _guard = UserCloudGuard::set(&user_cloud_json);
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
 
     let project_tmp = TempDir::new().unwrap();
     project_cfg_no_team(&server.uri())
         .save_to_cas_dir(project_tmp.path())
         .unwrap();
 
+    env.set("CAS_ROOT", project_tmp.path());
     let store = open_store(project_tmp.path()).expect("open_store must succeed");
     let entry = Entry {
         id: "e2e-no-team-4".to_string(),

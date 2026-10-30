@@ -39,6 +39,7 @@ pub mod lane_guard;
 pub mod shared_db;
 pub mod task_note_markers;
 pub mod wait_budget;
+pub mod worker_task_queue_store;
 
 mod accepted_proposal_store;
 mod agent_store;
@@ -1172,3 +1173,7 @@ pub trait EntityStore: Send + Sync {
     /// Close the store
     fn close(&self) -> Result<()>;
 }
+
+#[cfg(test)]
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;

@@ -1275,6 +1275,26 @@ override global policy; Commander uses global policy. `accounts.disabled` retain
 the absolute folder list managed by `cas accounts disable` / `enable` in
 `global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
+The hub session catalog reports the supervisor's optional `harness`, `model`
+and `effort`. Model version is part of the reported model ID or display name
+(for example `claude-opus-5-5` or `gpt-6.1-sol`), not the CLI version. The
+additive `agents` array carries `id`, `name`, `role` and the same optional
+identity fields for registered supervisors and workers in that session;
+`workers` remains the existing array of worker names. `/status` uses these
+role-specific identity fields in its `agents` rows too. Absent observations
+are omitted so Commander can show “Not reported”. Neither endpoint borrows the
+hub process's model, worker defaults or another session's metadata.
+
+Factory launch records the model and effort explicitly passed to that pane.
+Claude's native `SessionStart.model`, `PostModelSwitch.to_model` and effective
+hook `effort.level` (or `CLAUDE_EFFORT`) replace launch evidence. Hooks are
+installed by `cas hook configure`; Codex's generated native hook projection
+keeps its supported lifecycle/tool events. A confirmed Codex Commander `/model`
+selection records the model and effort from its fresh native success cell.
+Opening a chooser, navigation, cancellation and failed saves do not change the
+record. A changed model clears an unreported old effort; repeated MCP startup
+and compaction cannot restore the original launch defaults over an observation.
+
 The shared account registry reads Claude email/account/organization metadata
 only from non-secret `.claude.json` `oauthAccount` fields. It never opens
 provider credential files for catalog metadata. Codex email, account and
@@ -1508,6 +1528,53 @@ assignment or lease changes. The original branch is preserved as handoff
 history. Omitting `adopt_branch` keeps the existing assignment-only transfer
 behavior.
 
+### Ordered worker task queues
+
+Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
+Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
+Ordered spawns default to `isolate=true`; explicit `isolate=false` is refused.
+An existing worker also needs its own registered factory checkout for queue assignment.
+The first task controls the spawn base. Provisioning durably binds the queue
+by factory session and worker name. Registration selects its first eligible task;
+a head blocked, closed or assigned elsewhere during boot cannot strand the tail.
+
+For an existing worker, `task action=update assignee=<worker> task_ids=["cas-b","cas-c"]`
+replaces pending work. If `id` is supplied, it must name the first entry. This
+form accepts queue fields only; apply title/status/other task edits separately.
+An idle worker starts the first eligible entry immediately. Future entries
+stay unassigned until selected.
+
+Inspect with `factory action=worker_queue id=<worker>`; `worker_status` also
+shows the current task, ordered pending tasks and last queue decision. Replace
+or reorder with `factory action=worker_queue id=<worker> task_ids=["cas-c","cas-b"]`.
+Clear pending work with `task_ids=[]`. Add `expected_generation=<revision>` to
+reject a stale queue replacement. Queue edits require the worker's live owning
+supervisor in the same factory session; they preserve the current execution.
+
+A successful close or park releases the preceding lease, then starts the next
+eligible task through the normal start gates as that worker. It cuts the next
+task's branch from its own declared target and preserves the previous delivery
+ref. Repeated closes cannot consume another entry. An execution that becomes
+blocked keeps its current slot until it resumes, closes or parks. Reassigned, missing,
+terminal, blocked, foreign-leased and hard-start-gated entries are skipped with a
+durable note. A checkout/start failure retains the selected entry and records a
+deferred reason. The daemon reconciles durable cursors off its control loop,
+retrying after lock contention, restart or an unavailable brief recipient.
+Inspect and resolve the deferred cause; no repeated close is required.
+Queue dispatch never changes process identity or environment variables.
+The single-active-task start gate applies while a worker has a current,
+reserved or pending queue entry; workers without a queue retain their existing
+start API behaviour.
+
+If delivery A is returned while queued successor B is running, checkpoint B's
+unfinished changes, then run `task action=update id=B status=blocked`. This
+releases B's lease and preserves its current queue slot. Switch to A's recorded
+delivery branch (shown by `task action=show id=A full=true`), then run
+`task action=start id=A`. Correct and re-deliver A on that branch. After A closes
+or parks, switch back to B's recorded branch, run
+`task action=update id=B status=open`, then `task action=start id=B`. Pending
+work stays behind held B throughout recovery; B does not need an unfinished park.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured
@@ -1634,11 +1701,13 @@ while lacking the fast-row delegate; inspect them rather than assuming absence.
 Do not copy those guards into the main checkout. A hook-install warning during
 spawn/reuse means enforcement is not proven.
 
-At park, `receipt_scope::park_refusal` reads the exact-tip fast-row receipt and
-passing capped test receipts for every changed Rust crate. Missing fast rows
-produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
-REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
-waive these refusals or the merge queue's final-tree proof.
+At park, `receipt_scope::park_refusal` reads passing capped test receipts for
+every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
+Park executes neither checks nor tests. Local fast-row receipts are not park
+proof because workers can write them, and park reads no fast-row exception
+file. CI runs the fast rows before merge admission; the pre-push hook provides
+early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
+to `overrides.log`.
 
 ## Project capture configuration
 
@@ -2045,15 +2114,16 @@ writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
 attempts print a retained log directory under the Git common directory's
 `cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
 Each attempt has its own directory so a later push preserves the original failure.
-With
-the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
-and no broad Rust tests for factory pushes; unset (the default) the lanes run as
-before, so the switch waits for a runtime with these guards. Park reads, and
-never runs, the exact-tip receipts: the fast-rows PASS and a capped test PASS in
-every workspace crate whose sources or tests changed. A receipt in another
-crate does not count, and a missing receipt is refused with its fix. Pull
-requests without worker receipts keep the lane fast rows and the targeted
-`ci-test-impact.py` fallback. The merge queue is the final-tree integration gate
+With the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs the
+fast rows once in `lane.yml`'s classification job, for both docs and code;
+non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
+queue does not add another fast-row run. CI is authoritative for these checks;
+local PASS receipts are reusable pre-push feedback, never a park requirement.
+Slim lanes omit broad Rust tests for factory pushes. Park reads, and never
+runs, a capped test PASS in every workspace crate whose sources or tests
+changed. A receipt in another crate does not count, and a missing test receipt
+is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
+fallback. The merge queue is the final-tree integration gate
 and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a

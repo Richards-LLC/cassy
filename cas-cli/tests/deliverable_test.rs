@@ -254,58 +254,70 @@ fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
 }
 
 /// cas-301e: on a loaded runner the budget can run out while the shot catalog
-/// is still being validated, before any server starts. That is still a
-/// capture-timeout finding in the JSON receipt, never a bare error with an
-/// empty stdout.
+/// is still being validated, or while Git prepares the private checkout,
+/// before any server starts. Either is still a capture-timeout finding in the
+/// JSON receipt, never a bare error with an empty stdout.
 #[test]
 #[cfg(unix)]
 fn deliverable_capture_budget_spent_before_serving_still_reports_a_timeout_receipt() {
     use std::os::unix::fs::PermissionsExt;
-    let project = TempDir::new().unwrap();
-    let root = project.path();
-    fs::create_dir_all(root.join("docs/qa")).unwrap();
-    fs::write(root.join("docs/qa/shots.json"), r#"[{"id":"goal","path":"/"}]"#).unwrap();
-    git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["add", "docs"]);
-    git(root, &["commit", "-q", "-m", "capture fixture"]);
-    fs::create_dir_all(root.join(".cas")).unwrap();
-    fs::write(
-        root.join(".cas/config.toml"),
-        "[qa.capture]\nserve = 'python3 -m http.server {port}'\ntimeout_secs = 1\n",
+    let real_git = String::from_utf8(
+        ProcessCommand::new("sh").args(["-c", "command -v git"]).output().unwrap().stdout,
     )
     .unwrap();
-    // A capture runtime slower than the whole budget: validation never answers.
-    let slow = root.join(".slow-bin");
-    fs::create_dir_all(&slow).unwrap();
-    fs::write(slow.join("node"), "#!/bin/sh\nexec sleep 30\n").unwrap();
-    fs::set_permissions(slow.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
-    let path = std::env::join_paths(
-        std::iter::once(slow)
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
-    )
-    .unwrap();
-    let output = cas_cmd(root)
-        .env("PATH", path)
-        .args(["--json", "deliverable", "capture", "--task", "cas-fixture", "--target", "main", "--dir"])
-        .arg(root.join("pairs"))
-        .assert()
-        .code(1);
-    let stdout = &output.get_output().stdout;
-    let receipt: Value = serde_json::from_slice(stdout).unwrap_or_else(|error| {
-        panic!(
-            "no JSON receipt ({error}); stderr: {}",
-            String::from_utf8_lossy(&output.get_output().stderr)
+    // Each runtime is slower than the whole budget at one pre-serving stage.
+    for (program, shim) in [
+        ("node", "#!/bin/sh\nexec sleep 30\n".to_string()),
+        (
+            "git",
+            format!("#!/bin/sh\n[ \"$1\" = clone ] && exec sleep 30\nexec {} \"$@\"\n", real_git.trim()),
+        ),
+    ] {
+        let project = TempDir::new().unwrap();
+        let root = project.path();
+        fs::create_dir_all(root.join("docs/qa")).unwrap();
+        fs::write(root.join("docs/qa/shots.json"), r#"[{"id":"goal","path":"/"}]"#).unwrap();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["add", "docs"]);
+        git(root, &["commit", "-q", "-m", "capture fixture"]);
+        fs::create_dir_all(root.join(".cas")).unwrap();
+        fs::write(
+            root.join(".cas/config.toml"),
+            "[qa.capture]\nserve = 'python3 -m http.server {port}'\ntimeout_secs = 2\n",
         )
-    });
-    assert!(
-        receipt["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f["code"] == "capture-timeout"),
-        "{receipt}"
-    );
-    assert!(receipt["elapsed_ms"].as_u64().unwrap() < 8000, "{receipt}");
+        .unwrap();
+        let slow = root.join(".slow-bin");
+        fs::create_dir_all(&slow).unwrap();
+        fs::write(slow.join(program), shim).unwrap();
+        fs::set_permissions(slow.join(program), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(slow)
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
+        let output = cas_cmd(root)
+            .env("PATH", path)
+            .args(["--json", "deliverable", "capture", "--task", "cas-fixture", "--target", "main", "--dir"])
+            .arg(root.join("pairs"))
+            .assert()
+            .code(1);
+        let stdout = &output.get_output().stdout;
+        let receipt: Value = serde_json::from_slice(stdout).unwrap_or_else(|error| {
+            panic!(
+                "slow {program}: no JSON receipt ({error}); stderr: {}",
+                String::from_utf8_lossy(&output.get_output().stderr)
+            )
+        });
+        assert!(
+            receipt["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "capture-timeout"),
+            "slow {program}: {receipt}"
+        );
+        assert!(receipt["elapsed_ms"].as_u64().unwrap() < 8000, "slow {program}: {receipt}");
+    }
 }
 
 /// Pulse Card's shape: DESIGN.md under apps/frontend, SCSS sources (no CSS

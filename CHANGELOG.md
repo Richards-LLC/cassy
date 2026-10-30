@@ -19,6 +19,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Source edits wait for reconnection** — Expanded source evidence names an offline machine and loads when it reconnects, without requesting again on every redraw. Closing an edit disclosure removes its saved entry.
 
+### Fixed — Refused delivery advances
+
+- **Re-parking names work it cannot attribute** — When a pushed branch advances
+  beyond its parked delivery through unowned work, close reports the kept anchor,
+  ignored tip and offending commit instead of returning an ordinary merge request.
+
 ### Fixed — Parked delivery attribution
 
 - **Upkeep excludes later work on a reused lane** — When an integration merge

@@ -2012,7 +2012,8 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
         lifecycle_race_hook::before_start_lease(&manual.id, move || {
             eprintln!("[DEBUG-cas2dc5] entered pre-lease");
             let _ = entered_tx.send(());
-            let _ = resume_rx.recv();
+            let resumed = resume_rx.recv_timeout(std::time::Duration::from_secs(10));
+            eprintln!("[DEBUG-cas2dc5] resumed pre-lease: {resumed:?}");
         });
         let sender = f.worker.clone();
         let request = serde_json::from_value(serde_json::json!({

@@ -1,0 +1,6 @@
+Logging in Claude account config: ~/.claude-b
+Credentials and account identity remain private to this profile.
+STUB_RAN claude auth login
+claude account b already exists at <home>/.claude-a
+Keep the existing account? [y/N] y^D
+✗ Login cancelled; existing account kept

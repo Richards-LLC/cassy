@@ -35,7 +35,33 @@ Distinct provider identities sharing one email receive `email-2`, `email-3`, and
 The shared answer reader supplies the missing line break when stdin reaches
 EOF. The current duplicate-subscription path is reachable for Claude's
 non-secret account metadata; Codex identity remains unknown without reading
-its credential file. Exact-build terminal evidence follows in the task ledger.
+its credential file.
+
+### EOF critique
+
+`terminal-qa: PASS duplicate-eof-treatment · 11 runs · 0 fail · 0 warn · 0 allowed`
+at `<artifacts>/cas-4d78/terminal-treatment/report.json`.
+
+Exact-build comparison `ae0e3c052` → `4953c8fa1`: EOF after unfinished input,
+empty EOF and piped EOF put cancellation on the prompt line before and on its
+own line after. Normal default-no Enter and accepting the existing account keep
+their behavior. Six real-binary fixture cells pass, including the adjacent
+Codex login with unknown identity. Provider executables and Keychain access are
+inert fixture boundaries; live credentials and accounts are untouched.
+
+The [before](captures/duplicate-eof/before.80.txt) and
+[after](captures/duplicate-eof/after.80.txt) captures redact the temporary home
+path. Raw captures and the build receipts remain in the task evidence.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The default-no question remains first; cancellation is a separate verdict line. |
+| Fit | 4 | Both widths fit, and EOF does not echo a made-up answer. |
+| Craft | 5 | The cancellation starts after the unfinished answer's line; Enter answers gain no extra blank line. |
+| Theme safety | 5 | Four palettes, NO_COLOR and the C locale pass without mechanical failures. |
+| Machine contract | 4 | Prompts and cancellation remain on stderr; exit status and stdout are unchanged, and piped EOF gains the same line break. |
+
+Scored by Codex on 2026-10-30 against the managed candidate.
 
 
 ## Critique

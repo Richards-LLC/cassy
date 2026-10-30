@@ -1773,6 +1773,44 @@ A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
+## Cloud coordinator request correlation
+
+`CloudCoordinator` attaches `X-Cas-Attempt-Id` only to GET `/api/agents`,
+GET `/api/agents/tasks/:task/lock` and POST `/api/agents/tasks/:task/claim`.
+Both agent-list entry points are covered; every keyset page gets its own random
+canonical v4 UUID. The ID and a `pre_dispatch` INFO receipt are created before
+ureq dispatch and DNS. These are diagnostic IDs, with no replay or ownership
+meaning. Cloud accept/echo alignment remains a cross-repository follow-up;
+`ATTEMPT_ID_HEADER` and `RESPONSE_REQUEST_ID_HEADERS` in `cloud/coordinator.rs`
+are the single contract owners.
+
+The existing local tracing logger records route templates, method, UTC start,
+configured budget, page ordinal/cursor presence and monotonic elapsed time.
+`response_headers` captures status, the first safe available request ID from
+`X-Cas-Request-Id`, `X-Request-Id`, then `cf-ray`, and separately `x-vercel-id`.
+Response IDs must be 1–128 ASCII letters/digits or `-_.:`; unsafe or oversized
+values are omitted. Only the local generated ID survives without a response.
+`transport_error` records the SDK error kind; `body_complete` records body-read
+and decode completion or failure together, when that body is actually consumed.
+No bodies, raw errors, task IDs, cursors, tokens or full URLs enter these receipts.
+Logging follows the existing logger's enablement and level configuration.
+
+DNS/connect/TLS/TTFB boundaries remain unknown: ureq exposes no boundary to
+this wrapper. Body reading and decoding share one measurement; elapsed to
+headers also includes unobserved transport work. The unchanged ureq 2.12.1
+synchronous resolver has no DNS deadline (`src/stream.rs:364–365`).
+
+One ID means one **explicit application dispatch**, never one wire attempt.
+Pinned ureq 2.12.1 (`src/unit.rs:264–274,300–305`) may retry a recycled
+connection's failed prelude, or a closed recycled connection for an eligible
+idempotent empty-body request, reusing its Unit and headers. Convenience
+`ureq::get/post` constructs a fresh Agent (`src/lib.rs:513–540`), but redirects
+and SDK behavior are still opaque here. No retry, timeout, redirect, auth,
+status, body or ownership policy changes. No automatic claim replay: losing a
+response does not establish rollback; mutation outcome remains unknown until
+authoritative owner-scoped reconciliation. These receipts do not attribute
+previous incidents or establish deployed Cloud instrumentation.
+
 ## QA ledger preflight
 
 `cas qa ledger init --task <id>` writes an honest scaffold in the project's task

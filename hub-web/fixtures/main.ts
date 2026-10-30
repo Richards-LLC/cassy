@@ -15,7 +15,7 @@ export const FIXTURE_NAMES = [
   "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence", "conversation-terminal",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
-  "conversation-code-frames", "conversation-rich-content", "conversation-attachment", "conversation-sent-attachment", "conversation-attachment-failure", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
+  "conversation-code-frames", "conversation-rich-content", "conversation-attachment", "conversation-sent-attachment", "conversation-attachment-failure", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard", "conversation-upload-progress", "conversation-upload-refusal",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
   "conversations-session-ended",
   "conversations-session-end-error",
@@ -197,6 +197,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
   }
   if (view === "launch-account" || view === "launch-account-unavailable" || view === "launch-account-default-out") {
     dialog.querySelector<HTMLInputElement>('[data-launch-list="known"] input[type=radio]')!.click();
+    await settle();
     if (view === "launch-account-unavailable") dialog.querySelector<HTMLInputElement>('input[name="launch-cli"][value="codex"]')!.click();
     else dialog.querySelector<HTMLInputElement>('input[name="launch-account"][value^="customer-success"]')!.click();
     return;

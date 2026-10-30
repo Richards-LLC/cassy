@@ -28,7 +28,13 @@ export interface WorkLifecycle {
   readonly ended_at?: string;
 }
 export interface WorkReasoning { readonly summary: string; readonly source: string }
-export interface WorkChangedFile { readonly path: string; readonly operation: string; readonly source_event_id: string }
+export interface WorkChangedFile {
+  readonly path: string;
+  readonly operation: string;
+  readonly source_event_id: string;
+  /** Counts from this source event's edit, never cumulative or a net Git diff. */
+  readonly line_counts?: { readonly added: number; readonly removed: number };
+}
 export interface WorkChangedFiles {
   readonly files: readonly WorkChangedFile[];
   readonly provenance: string;
@@ -118,7 +124,12 @@ function workChangedFiles(value: unknown): WorkChangedFiles | undefined {
   for (const file of row.files) {
     const item = record(file);
     if (!item || typeof item.path !== "string" || typeof item.operation !== "string" || typeof item.source_event_id !== "string") return undefined;
-    files.push({ path: item.path, operation: item.operation, source_event_id: item.source_event_id });
+    const counts = record(item.line_counts);
+    files.push({
+      path: item.path, operation: item.operation, source_event_id: item.source_event_id,
+      ...(counts && integer(counts.added) && counts.added >= 0 && integer(counts.removed) && counts.removed >= 0
+        ? { line_counts: { added: counts.added, removed: counts.removed } } : {}),
+    });
   }
   return { files, provenance: row.provenance, complete: row.complete };
 }

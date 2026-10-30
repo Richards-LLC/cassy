@@ -162,6 +162,101 @@ const AGENT_PAGE_LIMIT: u32 = 500;
 /// Pages read before giving up on a runaway cursor.
 const MAX_AGENT_PAGES: usize = 20;
 
+/// Diagnostic correlation, never an idempotency or ownership key. Keep the
+/// cross-repo header contract here so Cloud alignment is a one-line change.
+const ATTEMPT_ID_HEADER: &str = "X-Cas-Attempt-Id";
+const RESPONSE_REQUEST_ID_HEADERS: [&str; 3] = ["X-Cas-Request-Id", "X-Request-Id", "cf-ray"];
+
+/// One explicit application dispatch, including any opaque ureq wire retries.
+/// Only the existing local tracing sink receives these bounded receipts.
+struct RequestAttempt {
+    id: String,
+    started: Instant,
+    mutation: bool,
+}
+
+impl RequestAttempt {
+    fn new(
+        method: &'static str,
+        route: &'static str,
+        budget: Duration,
+        page: Option<usize>,
+        cursor: bool,
+    ) -> Self {
+        let attempt = Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            started: Instant::now(),
+            mutation: method == "POST",
+        };
+        // This happens before call/send_json, hence before the SDK resolves DNS.
+        tracing::info!(
+            target: "cas::cloud::request", phase = "pre_dispatch",
+            attempt_id = %attempt.id, method, route,
+            utc_start = %chrono::Utc::now().to_rfc3339(),
+            budget_ms = millis(budget), page, cursor,
+            dns_connect_tls_ttfb = "unknown",
+        );
+        attempt
+    }
+
+    fn response(&self, result: &Result<ureq::Response, ureq::Error>) {
+        let response = match result {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+            Err(ureq::Error::Transport(error)) => {
+                // A missing response cannot prove that a claim was not applied.
+                // Log only the SDK's enum, never its URL-bearing error Display.
+                tracing::info!(
+                    target: "cas::cloud::request", phase = "transport_error",
+                    attempt_id = %self.id, elapsed_ms = millis(self.started.elapsed()),
+                    error_kind = ?error.kind(),
+                    mutation_outcome = if self.mutation { "unknown" } else { "not_applicable" },
+                    dns_connect_tls_ttfb = "unknown",
+                );
+                return;
+            }
+        };
+        let request_id = RESPONSE_REQUEST_ID_HEADERS
+            .iter()
+            .find_map(|name| bounded_response_id(response.header(name)));
+        tracing::info!(
+            target: "cas::cloud::request", phase = "response_headers",
+            attempt_id = %self.id, status = response.status(),
+            elapsed_ms = millis(self.started.elapsed()),
+            request_id = request_id.unwrap_or("unavailable"),
+            vercel_id = bounded_response_id(response.header("x-vercel-id")).unwrap_or("unavailable"),
+            dns_connect_tls_ttfb = "unknown",
+        );
+    }
+
+    fn read_body<T>(&self, read: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+        let started = Instant::now();
+        let result = read();
+        // into_json combines body IO and decoding; do not invent a finer phase.
+        tracing::info!(
+            target: "cas::cloud::request", phase = "body_complete",
+            attempt_id = %self.id, elapsed_ms = millis(self.started.elapsed()),
+            body_read_decode_ms = millis(started.elapsed()),
+            outcome = if result.is_ok() { "ok" } else { "body_or_decode_error" },
+            mutation_outcome = if self.mutation { "not_inferred" } else { "not_applicable" },
+        );
+        result
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn bounded_response_id(value: Option<&str>) -> Option<&str> {
+    value.filter(|id| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    })
+}
+
 /// Response containing a list of locks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocksResponse {
@@ -436,8 +531,16 @@ impl CloudCoordinator {
             self.config.endpoint, task_id
         );
 
+        let attempt = RequestAttempt::new(
+            "POST",
+            "/api/agents/tasks/:task/claim",
+            self.timeout,
+            None,
+            false,
+        );
         let response = ureq::post(&url)
             .timeout(self.timeout)
+            .set(ATTEMPT_ID_HEADER, &attempt.id)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
             .send_json(self.project_scoped(serde_json::json!({
@@ -446,10 +549,11 @@ impl CloudCoordinator {
                 "reason": reason,
             })));
 
+        attempt.response(&response);
         match response {
             Ok(resp) => {
-                let claim_resp: ClaimResponse = resp
-                    .into_json()
+                let claim_resp: ClaimResponse = attempt
+                    .read_body(|| resp.into_json())
                     .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
 
                 if claim_resp.result == Some("claimed".to_string()) {
@@ -470,7 +574,8 @@ impl CloudCoordinator {
                 // when its lock runs out. A missing or unparseable expiry
                 // reads as now: production frees an expired lock, so a 409
                 // never names a past expiry, and callers treat one as unknown.
-                let claim_resp: ClaimResponse = resp.into_json().unwrap_or_default();
+                let claim_resp: ClaimResponse =
+                    attempt.read_body(|| resp.into_json()).unwrap_or_default();
                 let expires_at = claim_resp
                     .expires_at
                     .as_deref()
@@ -490,7 +595,7 @@ impl CloudCoordinator {
             }
             Err(ureq::Error::Status(404, _)) => Ok(ClaimResult::TaskNotFound(task_id.to_string())),
             Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
+                let body = attempt.read_body(|| resp.into_string()).unwrap_or_default();
                 Err(CasError::Other(format!("Claim failed ({code}): {body}")))
             }
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
@@ -616,24 +721,33 @@ impl CloudCoordinator {
     fn get_lock_record(&self, task_id: &str) -> Result<Option<LockInfo>, CasError> {
         let url = format!("{}/api/agents/tasks/{}/lock", self.config.endpoint, task_id);
 
+        let attempt = RequestAttempt::new(
+            "GET",
+            "/api/agents/tasks/:task/lock",
+            self.timeout,
+            None,
+            false,
+        );
         let response = ureq::get(&url)
             .timeout(self.timeout)
+            .set(ATTEMPT_ID_HEADER, &attempt.id)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .call();
 
+        attempt.response(&response);
         match response {
             Ok(resp) => {
                 #[derive(Deserialize)]
                 struct LockResponse {
                     lock: Option<LockInfo>,
                 }
-                let resp: LockResponse = resp
-                    .into_json()
+                let resp: LockResponse = attempt
+                    .read_body(|| resp.into_json())
                     .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
                 Ok(resp.lock)
             }
             Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
+                let body = attempt.read_body(|| resp.into_string()).unwrap_or_default();
                 Err(CasError::Other(format!("Get lock failed ({code}): {body}")))
             }
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
@@ -674,23 +788,26 @@ impl CloudCoordinator {
             url.push_str(&format!("?status={s:?}").to_lowercase());
         }
 
+        let attempt = RequestAttempt::new("GET", "/api/agents", self.timeout, None, false);
         let response = self
             .project_query(
                 ureq::get(&url)
                     .timeout(self.timeout)
+                    .set(ATTEMPT_ID_HEADER, &attempt.id)
                     .set("Authorization", &format!("Bearer {}", self.token())),
             )
             .call();
 
+        attempt.response(&response);
         match response {
             Ok(resp) => {
-                let resp: AgentsResponse = resp
-                    .into_json()
+                let resp: AgentsResponse = attempt
+                    .read_body(|| resp.into_json())
                     .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
                 Ok(resp.agents.into_iter().map(agent_info_to_agent).collect())
             }
             Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
+                let body = attempt.read_body(|| resp.into_string()).unwrap_or_default();
                 Err(CasError::Other(format!(
                     "List agents failed ({code}): {body}"
                 )))
@@ -842,14 +959,22 @@ impl CloudCoordinator {
         let mut agents = Vec::new();
         let mut cursor: Option<(String, String, Option<String>)> = None;
         let deadline = Instant::now() + self.timeout;
-        for _ in 0..MAX_AGENT_PAGES {
+        for page in 0..MAX_AGENT_PAGES {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(CasError::Other("List agents budget exhausted".into()));
             }
+            let attempt = RequestAttempt::new(
+                "GET",
+                "/api/agents",
+                remaining,
+                Some(page + 1),
+                cursor.is_some(),
+            );
             let mut request = self.project_query(
                 ureq::get(&format!("{}/api/agents", self.config.endpoint))
                     .timeout(remaining)
+                    .set(ATTEMPT_ID_HEADER, &attempt.id)
                     .set("Authorization", &format!("Bearer {}", self.token()))
                     .query("limit", &AGENT_PAGE_LIMIT.to_string()),
             );
@@ -859,12 +984,14 @@ impl CloudCoordinator {
                     request = request.query("sort_cursor", sort);
                 }
             }
-            let page: AgentsPage = match request.call() {
-                Ok(resp) => resp
-                    .into_json()
+            let response = request.call();
+            attempt.response(&response);
+            let page: AgentsPage = match response {
+                Ok(resp) => attempt
+                    .read_body(|| resp.into_json())
                     .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?,
                 Err(ureq::Error::Status(code, resp)) => {
-                    let body = resp.into_string().unwrap_or_default();
+                    let body = attempt.read_body(|| resp.into_string()).unwrap_or_default();
                     return Err(CasError::Other(format!(
                         "List agents failed ({code}): {body}"
                     )));

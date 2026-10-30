@@ -478,7 +478,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
 2. The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
-4. Choose the account — every Claude account on the machine is listed with the recommendation preselected and marked with its reset/headroom reason (falling back to the default when no recommendation exists); the operator can select another logged-in account; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
+4. Choose the account — every Claude account on the machine is listed with the selected project’s recommendation preselected and marked with its reset/headroom reason (falling back to the default when no recommendation exists); changing the project refreshes that recommendation using its account selection and threshold settings; the operator can select another logged-in account; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
 5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
 6. The session outlives the tab — after a reload the new session is still running and its conversation reopens
 7. A running project attaches instead of starting again — Attach opens the existing session's conversation
@@ -783,9 +783,9 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 ### HUB-J24 · Paste text, screenshots and files into a supervisor message
 
-- **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
+- **Entry:** A paired conversation at 1440×800 or 390×844, in light or dark.
 - **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with resolvable local paths; sent bubbles show image previews or named file sheets, including after reload and on another paired phone.
-- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-content.css`
+- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/upload-transport.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-content.css`
 - **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
 - **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.
 
@@ -796,6 +796,8 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 3. A connection loss keeps the files visibly, then reuses the upload identity
 4. Sent files show their names and an image preview after reload and on another phone
 5. A missing preview stays on its own file card
+6. A slow 10 MiB photo shows byte progress, then Saving, then Delivered
+7. A refusal names its file and keeps the hub's reason
 
 #### Expected experience
 
@@ -807,7 +809,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 #### Edge paths
 
 - The hub refuses oversized or unsupported bytes, traversal names stay within host storage, and unsigned or unknown-session requests write nothing.
-- A slow 512 kbit/s phone upload budgets the base64 payload size (4 and 10 MiB regression rows); ordinary requests still time out promptly.
+- A slow 512 kbit/s phone upload budgets the base64 payload size with at least 25% margin (4 and 10 MiB regression rows); ordinary requests still time out promptly.
 - A refusal names the failed attachment, keeps all pending files, and gives no reconnect advice for an unsupported type. A missing session shows the hub's own explanation.
 - Phone HEIC, AVIF and MOV containers are identified from their brands and stored with their correct media types, regardless of filename.
 - Reusing an upload identity with different bytes is a conflict; replaying the same bytes returns the same artifact.
@@ -831,6 +833,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
 8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
 9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
+10. Scan tool-reported edits without opening the tool log — the latest cumulative file list appears once per turn; open a path for its recorded unified diff or exact source detail. Card and file expansion survive reload, paths wrap at 390px, and the summary makes no Git or line-count claim.
 
 #### Expected experience
 

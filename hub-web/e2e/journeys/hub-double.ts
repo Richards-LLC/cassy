@@ -159,6 +159,8 @@ export type LaunchWorld = {
   names: string[];
   /** GET /v1/launch/profiles per CLI (cas-7b52); absent lists nothing. */
   profiles?: Record<string, { installed: boolean; profiles: Array<{ name: string; logged_in: boolean; is_default: boolean }>; error?: string }>;
+  /** Project/browse-specific projections keyed by the opaque target id or path. */
+  targetProfiles?: Record<string, NonNullable<LaunchWorld["profiles"]>>;
   /** Session-list fetches after a start before the new session is listed (it is booting). */
   bootPolls?: number;
 };
@@ -1050,7 +1052,11 @@ export class HubDouble {
       this.observed();
       return;
     }
-    if (path === "/v1/launch/profiles") return route.fulfill({ json: this.options.launch?.[machineId]?.profiles ?? {} });
+    if (path === "/v1/launch/profiles") {
+      const world = this.options.launch?.[machineId];
+      const target = JSON.parse(url.searchParams.get("target") ?? "null") as { id?: string; path?: string } | null;
+      return route.fulfill({ json: world?.targetProfiles?.[target?.id ?? target?.path ?? ""] ?? world?.profiles ?? {} });
+    }
     if (path === "/v1/projects") {
       const world = this.options.launch?.[machineId];
       return route.fulfill({ json: { projects: world?.projects ?? [], browse_roots: world?.browse_roots ?? [] } });

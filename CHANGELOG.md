@@ -11,9 +11,35 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Published reasoning stays easy to skim** — Commander shows a folded summary preview with formatted detail and an exact raw-text fallback. Opening or updating it preserves focus and reading position; Thinking and Thought labels require reported lifecycle events.
 
+### Fixed — Merge completion guidance
+
+- **Parked workers wait for the merge verdict** — Recycle briefs, merge alerts
+  and supervisor references consistently let verification close a merged task or
+  return findings, without requesting another close from a worker or supervisor.
+
+### Added — Work-event edit line counts
+
+- **Edit facts can carry per-file additions and removals** — Successful explicit
+  patch records expose optional line counts through the Commander v2 contract
+  and parser. Counts describe each file's latest edit event; missing counts stay
+  unknown. The changed-files card can consume these facts in a follow-up.
+
 ### Fixed — Multi-line shell source
 
 - **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.
+
+### Fixed — Project account recommendations
+
+- **New session follows the selected project's account policy** — Commander
+  applies that project's account selection and usage threshold when recommending
+  an account, and refreshes the recommendation whenever the project changes.
+
+### Added — Turn edit summaries
+
+- **Inspect tool-reported edits per turn** — Commander groups the recorded file
+  paths beneath Show work. Open a file for its recorded unified diff or source
+  edit detail; disclosures stay expanded on this device. The summary reports
+  successful tool calls without inventing Git state or line counts.
 
 ### Fixed — Merge-readiness guidance
 
@@ -22,10 +48,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   requires override authority and a reason. The Codex coordination note now says
   the merge verdict closes or reopens the task, so workers do not re-close it.
 
+### Fixed — Policy commands in quoted substitutions
+
+- **Double-quoted substitutions enforce operator-only commands** — The shell
+  guard inspects executable substitution bodies with the full command tokenizer,
+  including quote-split command names. Single-quoted command text stays data.
+
+### Fixed — Composer file uploads
+
+- **Slow photo uploads show progress and have more time** — File transfers reserve
+  25% margin on a 512 kbit/s link, show their byte progress and storage step, and
+  keep a refusal in one place. Generic HEIF photos retain their image type.
+
 ### Fixed — Release draft linting
 
 - **Unused draft helper removed** — Delete the orphan failure classifier.
   Draft routing, lint failures and posted-receipt matching keep their behavior.
+
+### Added — Cloud request correlation
+
+- **Cloud discovery and claim failures retain a local attempt ID** — Agent lists,
+  lock reads and claim submissions send a fresh diagnostic UUID for each explicit
+  dispatch. Local receipts preserve available server IDs and distinguish response,
+  body/decode and transport failures without recording bodies or credential URLs.
+  A missing claim response still leaves its mutation outcome unknown.
 
 ### Fixed — Factory guidance size
 

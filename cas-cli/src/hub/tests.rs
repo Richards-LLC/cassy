@@ -822,6 +822,66 @@ fn h1_machine_identity_is_stable_on_disk() {
 #[derive(Clone)]
 struct ExactOriginReadAuthorizer(&'static str);
 
+#[cfg(unix)]
+#[tokio::test]
+async fn launch_profiles_follow_the_resolved_projects_account_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.remove("CAS_ROOT");
+    env.remove("CODEX_HOME");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nprintf 'Logged in using ChatGPT'\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let now = chrono::Utc::now();
+    for (name, used, days) in [("soon", 60.0, 1), ("spare", 10.0, 4)] {
+        let folder = home.join(format!(".codex-{name}"));
+        std::fs::create_dir_all(folder.join("sessions")).unwrap();
+        std::fs::write(folder.join("auth.json"), "{}").unwrap();
+        std::fs::write(folder.join("sessions/usage.jsonl"), serde_json::json!({
+            "timestamp": now, "payload": {"rate_limits": {"primary": {
+                "used_percent": used, "window_minutes": 10080,
+                "resets_at": (now + chrono::Duration::days(days)).timestamp()
+            }}}
+        }).to_string()).unwrap();
+    }
+    let project = home.join("project");
+    std::fs::create_dir_all(project.join(".cas")).unwrap();
+    assert!(Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
+    crate::store::known_repos::register_repo_strict(&project).unwrap();
+    let target = super::projects::list_projects(&[]).unwrap().pop().unwrap().target;
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
+        MachineIdentity { id: "recommendations".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ));
+    // Both overrides must change the actual HTTP projection, while no target
+    // retains the global soonest-reset policy.
+    for (query_target, config, expected) in [
+        (None, "[accounts]\nthreshold = 50\n", "soon"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'most-headroom'\n", "spare"),
+    ] {
+        std::fs::write(project.join(".cas/config.toml"), config).unwrap();
+        let query = query_target.map(|target| url::form_urlencoded::Serializer::new(String::new()).append_pair("target", &target).finish());
+        let uri = format!("/v1/launch/profiles{}", query.map(|q| format!("?{q}")).unwrap_or_default());
+        let response = app.clone().oneshot(Request::get(&uri).header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let chosen = body["codex"]["profiles"].as_array().unwrap().iter().find(|row| row.get("recommendation").is_some());
+        assert_eq!(chosen.map(|row| row["name"].as_str().unwrap()), Some(expected), "{body}");
+    }
+    for target in ["not-json", r#"{"kind":"project","id":"missing"}"#, r#"{"kind":"browse","root_id":"missing","path":"../escape"}"#] {
+        let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("target", target).finish();
+        let response = app.clone().oneshot(Request::get(format!("/v1/launch/profiles?{query}")).header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
 impl HubAuthorizer for ExactOriginReadAuthorizer {
     fn authorize(&self, request: &HubRequest) -> AuthorizationDecision {
         if request.action == HubAction::Health

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   LaunchSheet, SessionLaunchGrantError, accountLoginCommand, accountStep, canLaunch, defaultAccount, defaultSupervisorCli, launchSheetMarkup, launchSummary,
-  type LaunchProfiles, commandTokensMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
+  type LaunchProfiles, type LaunchTarget, commandTokensMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
 import { canEnableSessionLaunch, launchDropped, launchDroppedNotice, launchGrantCommand, parseGrantedScopes, repairCommand, repairStatus, scopeChoices, scopeSummary } from "./pairing-scopes";
@@ -116,7 +116,7 @@ function sheet(options: {
   listing?: (root: string, path: string) => BrowseListing;
   result?: LaunchResult;
   listedAfter?: number;
-  profiles?: LaunchProfiles;
+  profiles?: LaunchProfiles | ((target?: LaunchTarget) => Promise<LaunchProfiles>);
   grantError?: SessionLaunchGrantError;
   grantWait?: Promise<void>;
 }): { sheet: LaunchSheet; calls: Calls; dialog: () => HTMLDialogElement } {
@@ -127,7 +127,7 @@ function sheet(options: {
     currentMachineId: () => options.machines[0]?.id,
     origin: "https://hub.example",
     projects: async () => options.catalog ?? { projects: [], browse_roots: [] },
-    profiles: async () => options.profiles ?? {},
+    profiles: async (_machine, _signal, target?: LaunchTarget) => typeof options.profiles === "function" ? options.profiles(target) : options.profiles ?? {},
     browse: async (_machine, root, path) => { calls.browsed.push([root, path]); return options.listing!(root, path); },
     launch: async (machineId, request) => { calls.launches.push({ machineId, request }); return options.result ?? { ok: true, session: "new-otter-1", attached: false }; },
     grant: async (machineId) => { calls.grants.push(machineId); await options.grantWait; if (options.grantError) throw options.grantError; const machine = options.machines.find((entry) => entry.id === machineId); if (machine) machine.scopes = [...machine.scopes, "session-launch"]; },
@@ -380,6 +380,37 @@ const ACCOUNTS: LaunchProfiles = {
 };
 
 describe("accounts (cas-9666)", () => {
+  it("refreshes the selected project's recommendation and ignores an older project's late response", async () => {
+    const recommended = structuredClone(ACCOUNTS);
+    recommended.claude!.profiles[1]!.recommendation = "Project threshold leaves 41% headroom";
+    let release!: (profiles: LaunchProfiles) => void;
+    const pending = new Promise<LaunchProfiles>((resolve) => { release = resolve; });
+    const requests: Array<LaunchTarget | undefined> = [];
+    const { sheet: s, calls, dialog } = sheet({
+      machines: [ATLAS],
+      catalog: { projects: [project("first", "2026-09-27"), project("second", "2026-09-28")], browse_roots: [] },
+      profiles: async (target) => {
+        requests.push(target);
+        if (target?.kind === "project" && target.id === "p-first") return pending;
+        return target ? recommended : ACCOUNTS;
+      },
+    });
+    s.open();
+    await flush();
+    pick(dialog(), 'input[name="launch-project"][value="p-first"]');
+    expect(dialog().querySelector(".launch-account")!.textContent).toContain("Loading accounts");
+    pick(dialog(), 'input[name="launch-project"][value="p-second"]');
+    await flush();
+    expect(requests).toEqual([undefined, { kind: "project", id: "p-first" }, { kind: "project", id: "p-second" }]);
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="support@petrastella.io"]')!.checked).toBe(true);
+    release(ACCOUNTS);
+    await flush();
+    expect(dialog().querySelector(".launch-summary")!.textContent).toContain("second with Claude (support@petrastella.io)");
+    pick(dialog(), 'input[name="launch-account"][value="main"]');
+    dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+    await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-second" }, supervisor_cli: "claude", profile: "main" }));
+  });
+
   it("preselects the logged-in default, else the first logged-in account", () => {
     expect(defaultAccount(ACCOUNTS.claude)).toBe("main");
     expect(defaultAccount({ installed: true, profiles: [{ name: "a", logged_in: false, is_default: true }, { name: "b", logged_in: true, is_default: false }] })).toBe("b");

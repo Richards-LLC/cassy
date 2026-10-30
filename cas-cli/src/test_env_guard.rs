@@ -164,16 +164,12 @@ impl TestEnvGuard {
     /// Restore only its scrubbed credentials, under the guard's existing lock;
     /// ambient Cassy identity, Git selectors and other provider secrets stay isolated.
     pub(crate) fn preserve_claude_credentials(&mut self) {
-        for (key, value) in &self.saved {
-            if key.to_str().is_some_and(|key|
-                key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_"))
-                && let Some(value) = value
-            {
-                // SAFETY: this guard holds the shared process environment lock.
-                // The original values remain saved for ordinary Drop restoration.
-                unsafe { std::env::set_var(key, value); }
-            }
-        }
+        let credentials: Vec<_> = self.saved.iter()
+            .filter(|(key, _)| key.to_str().is_some_and(|key|
+                key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_")))
+            .filter_map(|(key, value)| value.as_ref().map(|value| (key.clone(), value.clone())))
+            .collect();
+        for (key, value) in credentials { self.set(key, value); }
     }
 
     pub(crate) fn new() -> Self {

@@ -396,6 +396,7 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
         &head,
         &head,
         Some(&["README.md".into()]),
+        &head,
         None,
     )
     .unwrap();
@@ -536,7 +537,7 @@ fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case(
     std::fs::remove_file(&object).unwrap();
     let result = check(
         &mut CloseNoteTracker::new(&f.store, &f.task),
-        &mut f.task, f.repo.path(), &f.qa, &f.base, &head, &head, None, None,
+        &mut f.task, f.repo.path(), &f.qa, &f.base, &head, &head, None, &head, None,
     );
     // Restore the isolated fixture before asserting the normal case gate too.
     std::fs::write(&object, bytes).unwrap();

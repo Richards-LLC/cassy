@@ -111,7 +111,7 @@
 - `hub-web/src/supervisor-commands.ts` - slash palette, confirmations, native chooser controls and command receipts.
 - `hub-web/src/live-phase.ts`, `hub-web/src/status-refresh.ts` - measured phase/elapsed view with explicit waiting, stale and unreported states; session-scoped latest status response ownership.
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts` - shared release/task state, lazy Team and receipt trail.
-- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - typed operation disclosures and live work pages.
+- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - typed operation disclosures, folded published-reasoning previews with safe Markdown/raw fallback, and live work pages.
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/conversation-view.ts` - fenced source, native evidence/status tables and two-format copy.
 - `hub-web/src/code-frame.ts`, `hub-web/src/rich-syntax.ts` - reusable Copy/Wrap frame and bounded lazy source color.
 - `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - lazy evidence renderers.

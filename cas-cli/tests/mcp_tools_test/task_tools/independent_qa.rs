@@ -1472,6 +1472,9 @@ async fn task_branch_waiver_cas_3288(origin_only: bool) {
             .id,
     );
     tasks.update(&task).unwrap();
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.deliverables.factory_branch_anchor = Some(git(&repo, &["rev-parse", "factory/test-agent"]));
+    tasks.update(&task).unwrap();
     if origin_only {
         git(&repo, &["switch", "-q", "main"]);
         git(&repo, &["branch", "-D", &branch]);
@@ -1542,6 +1545,7 @@ async fn recorded_qa_branch_waiver_cas_3288() {
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(&task_id).unwrap();
     task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.deliverables.factory_branch_anchor = Some(git(&repo, &["rev-parse", "factory/test-agent"]));
     tasks.update(&task).unwrap();
     let service = CasService::new(supervisor_core(&cas_dir), None);
     let _role = SupervisorRole::enter(&mut test_env);

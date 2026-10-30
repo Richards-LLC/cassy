@@ -175,6 +175,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_rust_and_web_delivery_only_requires_red_for_rust_tests_cas_60a9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = crate::test_env_guard::git_fixture(repo.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::create_dir_all(repo.path().join("hub-web/src")).unwrap();
+        std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(repo.path().join("src/lib.rs"), "#[test] fn changed_rust() { assert!(true); }\n").unwrap();
+        std::fs::write(repo.path().join("hub-web/src/worker.test.ts"),
+            "test('changed web', () => expect('old').toBe('old'));\n").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-qc", "factory/mixed-tests"]);
+        std::fs::write(repo.path().join("src/lib.rs"), "#[test] fn changed_rust() { assert!(false); }\n").unwrap();
+        std::fs::write(repo.path().join("hub-web/src/worker.test.ts"),
+            "test('changed web', () => expect('new').toBe('new'));\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "change both tests"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let rust_id = "src/lib.rs::changed_rust";
+        let web_id = "hub-web/src/worker.test.ts::changed web";
+        let cas_root = tempfile::tempdir().unwrap();
+        crate::factory_worker_check::record_passing_test_for_tests(
+            cas_root.path(), repo.path(), &head, "cas", "test(worker)",
+        );
+        crate::factory_worker_check::record_stability_for_tests(
+            cas_root.path(), repo.path(), &head, &base, "cas", "test(worker)", rust_id,
+        );
+        crate::factory_worker_check::record_web_stability_for_tests(
+            cas_root.path(), repo.path(), &head, &base, "vitest", web_id, false,
+        );
+
+        let evidence = crate::factory_worker_check::PassingTests::new(cas_root.path(), repo.path(), &head);
+        let touched = evaluate(repo.path(), "main", &head, evidence.records(), &[]).unwrap();
+        assert!(touched.unstable.is_empty(), "{touched:?}");
+        assert_eq!(touched.never_red, [rust_id]);
+        assert!(touched.unsupported.is_empty(), "{touched:?}");
+    }
+
+    #[test]
     fn stability_receipt_requires_bound_complete_concurrent_zero_retry_trials() {
         let original = serde_json::json!({
             "version": 1, "base": "base", "head": "head", "tests": ["src/lib.rs::test_case"],

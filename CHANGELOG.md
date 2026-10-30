@@ -33,6 +33,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   guard inspects commands inside heredoc substitutions even when quote splitting
   hides their spelling. Quoted bodies and escaped substitution text remain data.
 
+### Fixed — Duplicate account EOF
+
+- **Login cancellation starts on a new line after EOF** — Was: Ctrl-D at the
+  duplicate-account question left the cancellation notice attached to the
+  prompt. Now: EOF ends the prompt line before the notice; entered answers
+  keep their spacing and the existing account stays intact.
+
 ### Fixed — Shared-file warnings
 
 - **Workers can add their own changelog entries without coordination** — Was:

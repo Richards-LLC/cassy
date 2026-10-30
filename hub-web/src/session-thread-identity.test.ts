@@ -67,8 +67,8 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(details.querySelector(".earlier-label")?.textContent).toMatch(/^Earlier session wise-lion-31, /);
     expect(details.querySelector(".earlier-count")?.textContent).toBe("1 message");
     const time = details.querySelector("time")!;
-    expect(time.textContent).toMatch(/ 21:20$/);
-    expect(time.textContent).not.toBe("21:20");
+    expect(time.textContent).toMatch(/ 9:20 PM$/);
+    expect(time.textContent).not.toBe("9:20 PM");
     // Nothing in an earlier section is an object to act on.
     expect(details.querySelectorAll("button")).toHaveLength(0);
     // The section sits above the thread, and an opened section stays open on repaint.

@@ -1991,7 +1991,7 @@ function openConnectionLog(machineId: string): void {
     const evidence = cause ? `${cause.status === undefined ? "" : ` Measured HTTP status: ${cause.status}.`}${cause.closeCode === undefined ? "" : ` Measured socket close: ${cause.closeCode}.`}${cause.permission === undefined || cause.permission === "unknown" ? "" : ` Measured local-network permission: ${cause.permission}.`}` : "";
     // One plain sentence that names the machine and the next step leads; the
     // layer, measured codes and engineering notes sit behind Technical details.
-    summary.textContent = `${cause ? `${machineLabel}: ${CAUSE_COPY[cause.code].title}. ${CAUSE_COPY[cause.code].action}` : `${machineLabel}: nothing is failing now.`} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+    summary.textContent = `${cause ? `${machineLabel}: ${CAUSE_COPY[cause.code].title}. ${CAUSE_COPY[cause.code].action}` : `${machineLabel}: nothing is failing now.`} ${retry} Last successful connection: ${state?.lastSuccessAt ? clockLabel(state.lastSuccessAt) : "not measured in this visit"}.`;
     const technicalText = cause ? `Layer: ${cause.layer}.${evidence}${CAUSE_COPY[cause.code].detail ? ` ${CAUSE_COPY[cause.code].detail}` : ""}` : "";
     if (technical.textContent !== technicalText) technical.textContent = technicalText;
     technical.hidden = technicalText === "";

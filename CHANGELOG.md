@@ -22,6 +22,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **A refused slash command keeps one row** — Was: each resend of a command the supervisor refused added another row to the conversation and another Attention event, and the rows stayed. Now: one row per command says why it was refused and how many times you tried, it clears once that command is accepted, and a refusal no longer raises Attention. A command that may have run still shows as uncertain.
 - **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages. Each is matched on the whole message, so a typed message that pastes such a block after your own words still reaches Commander.
+- **Times read 12-hour, like the rest of Cassy** — Was: message bubbles, session dividers, the Team trail and Attention's last-event time showed 24-hour clock times such as "19:15", and the connection details showed the browser's default with seconds. → Now: every Commander clock time uses your browser's timezone in 12-hour form with AM/PM, such as "7:15 PM" or "Sep 30, 5:49 PM".
 
 ### Fixed — Forced colors in Commander
 

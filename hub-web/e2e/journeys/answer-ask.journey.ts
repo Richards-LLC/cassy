@@ -36,7 +36,7 @@ function youNow(): string[] {
   // during the send while keeping both anchored to the injected UTC instant.
   return [-60_000, 0, 60_000].map((offset) => {
     const d = new Date(journeyNow() + offset);
-    return `You, ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+    return `You, ${d.getUTCHours() % 12 || 12}:${String(d.getUTCMinutes()).padStart(2, "0")} ${d.getUTCHours() < 12 ? "AM" : "PM"}`;
   });
 }
 

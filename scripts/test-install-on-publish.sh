@@ -46,6 +46,18 @@ EOF
 cat >"$tmp/bin/launchctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'launchctl %s\n' "$*" >>"$FAKE_LOG"
+if [[ "$1" == bootstrap ]]; then
+    if [[ "${FAKE_BOOTSTRAP_FAILS:-}" == always ]] ||
+       [[ "${FAKE_BOOTSTRAP_FAILS:-}" == once && ! -e "$FAKE_LOG.bootstrap-failed" ]]; then
+        touch "$FAKE_LOG.bootstrap-failed"
+        echo 'bootstrap: job is still shutting down' >&2
+        exit 5
+    fi
+fi
+EOF
+cat >"$tmp/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf 'sleep %s\n' "$*" >>"$FAKE_LOG"
 EOF
 cat >"$tmp/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
@@ -133,8 +145,11 @@ mac_home="$tmp/mac home & user"
 plist="$mac_home/Library/LaunchAgents/dev.cassy.install-on-publish.plist"
 : >"$FAKE_LOG"
 if HOME="$mac_home" FAKE_OS=Darwin "$installer" --install >"$tmp/install-out" 2>&1 &&
-   HOME="$mac_home" FAKE_OS=Darwin "$installer" --install >>"$tmp/install-out" 2>&1; then
-    if python3 - "$plist" "$mac_home" "$CAS_BIN" "$GH_BIN" "$XDG_STATE_HOME/cassy/install-on-publish.log" <<'PY_PLIST'
+   HOME="$mac_home" FAKE_OS=Darwin FAKE_BOOTSTRAP_FAILS=once "$installer" --install >>"$tmp/install-out" 2>&1; then
+    check '[[ "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 3 ]] && grep -q "^sleep 1$" "$FAKE_LOG"' 'macOS reinstall recovers after the old job finishes shutting down'
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'skip macOS LaunchAgent plist validation: python3 is unavailable\n'
+    elif ! python3 - "$plist" "$mac_home" "$CAS_BIN" "$GH_BIN" "$XDG_STATE_HOME/cassy/install-on-publish.log" <<'PY_PLIST'
 import plistlib
 import sys
 with open(sys.argv[1], "rb") as f:
@@ -151,19 +166,27 @@ assert agent["StandardOutPath"] == sys.argv[5]
 assert agent["StandardErrorPath"] == sys.argv[5]
 PY_PLIST
     then
-        # The installed copy must work without the source checkout.
-        echo 9.99.3 >"$FAKE_INSTALLED"
-        FAKE_LATEST=v9.99.3 "$mac_home/.local/libexec/cassy/install-on-publish.sh" --once >/dev/null
-        check '! grep -q "systemctl\|cas update\|release edit" "$FAKE_LOG" && grep -q "launchctl bootstrap gui/$(id -u) $plist" "$FAKE_LOG"' 'macOS installs a runnable 60-second LaunchAgent, including paths with XML characters'
-    else
         bad 'macOS LaunchAgent has the required execution and environment contract'
     fi
+    # The installed copy must work without the source checkout, even without Python.
+    echo 9.99.3 >"$FAKE_INSTALLED"
+    FAKE_LATEST=v9.99.3 "$mac_home/.local/libexec/cassy/install-on-publish.sh" --once >/dev/null
+    check '! grep -q "systemctl\|cas update\|release edit" "$FAKE_LOG" && grep -q "launchctl bootstrap gui/$(id -u) $plist" "$FAKE_LOG"' 'macOS installs a runnable LaunchAgent, including paths with XML characters'
 else
     cat "$tmp/install-out"
     bad 'macOS installs and reloads its LaunchAgent'
 fi
 HOME="$mac_home" FAKE_OS=Darwin "$installer" --uninstall >"$tmp/uninstall-out" 2>&1 || true
 check '[[ ! -e "$plist" && ! -e "$mac_home/.local/libexec/cassy/install-on-publish.sh" ]] && grep -q "launchctl bootout gui/$(id -u) $plist" "$FAKE_LOG"' 'macOS uninstall unloads the agent and removes installed files'
+
+# A persistent load error is still reported after one bounded retry.
+: >"$FAKE_LOG"
+set +e
+HOME="$mac_home" FAKE_OS=Darwin FAKE_BOOTSTRAP_FAILS=always "$installer" --install >"$tmp/install-out" 2>&1
+# shellcheck disable=SC2034 # Read by the assertion passed to check below.
+status=$?
+set -e
+check '[[ $status == 5 && "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 2 && "$(grep -c "^sleep " "$FAKE_LOG")" == 1 ]] && grep -q "bootstrap: job is still shutting down" "$tmp/install-out" && ! grep -q "installed .*LaunchAgent" "$tmp/install-out"' 'macOS reports a persistent load failure after one retry'
 
 # 8. Linux keeps the existing systemd units and timer lifecycle.
 linux_home="$tmp/linux-home"

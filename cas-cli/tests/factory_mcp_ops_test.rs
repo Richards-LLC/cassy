@@ -6925,7 +6925,6 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    cleanup.full = Some(true);
     let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
     assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
     let deferred_status: serde_json::Value = serde_json::from_str(deferred.lines()

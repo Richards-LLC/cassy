@@ -38,7 +38,7 @@ fn render(tokens: &[ShellToken]) -> String {
     for (index, token) in tokens.iter().enumerate() {
         let operator = matches!(token, ShellToken::Operator(_));
         // `<<-` is one operator, but the tokenizer leaves its dash on the delimiter
-        // word. A space would turn it into a heredoc delimited by `-EOF`.
+        // word. A space or a quoted dash would make the delimiter `-EOF`.
         let tab_stripping_delimiter = matches!(token, ShellToken::Word(word) if word.starts_with('-'))
             && index >= 2
             && tokens[index - 2..index] == [ShellToken::Operator('<'), ShellToken::Operator('<')];
@@ -46,6 +46,10 @@ fn render(tokens: &[ShellToken]) -> String {
             command.push(' ');
         }
         match token {
+            ShellToken::Word(word) if tab_stripping_delimiter => {
+                command.push('-');
+                command.push_str(&quote(&word[1..]));
+            }
             ShellToken::Word(word) => command.push_str(&quote(word)),
             ShellToken::Operator(ch) => command.push(*ch),
         }

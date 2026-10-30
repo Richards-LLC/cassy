@@ -587,7 +587,8 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             "dropped" | "missing" | "reverted" | "imported baseline" | "rebuilt recreated"
         ) {
             assert!(
-                matches!(result, MergeStateGateOutcome::Reject(_)),
+                matches!(&result, MergeStateGateOutcome::Reject(message)
+                    if message.contains("DELIVERY CONTENT DROPPED")),
                 "{mode}: {result:?}"
             );
         } else {

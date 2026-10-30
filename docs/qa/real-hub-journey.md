@@ -40,6 +40,15 @@ scratch before use, since the assembly's target directory can be rebuilt.
 Install hub-web dependencies with `npm ci` and Chromium with
 `npx playwright install chromium` if needed. Do not build Rust in a worker.
 
+On macOS the fixture allocates its private HOME under `/tmp` (canonicalized to
+`/private/tmp`) with a short `cas-rh-` prefix. The default `/var/folders/...`
+`TMPDIR` otherwise makes the daemon's longer GUI socket path 115 bytes, above
+macOS's 103-byte pathname limit. No `TMPDIR` override is needed; other platforms
+keep using their normal temporary directory. Cleanup still removes only the
+fixture's marked private HOME. The native journey preflight and `npm test` run
+`node --test e2e/journeys/real-hub-home.test.mjs`, which checks the byte budget
+and binds a real Unix socket even with a deliberately long macOS temp base.
+
 Start the fixture through the Cassy server registry (replace paths):
 
 ```json

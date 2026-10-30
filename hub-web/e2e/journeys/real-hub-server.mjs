@@ -7,16 +7,14 @@ import { createServer, request as httpRequest } from "node:http";
 import { createServer as createTlsServer } from "node:https";
 import { connect } from "node:net";
 import {
-  mkdtemp,
   mkdir,
   writeFile,
   readFile,
   rm,
-  realpath,
   readdir,
 } from "node:fs/promises";
 import { existsSync, createWriteStream } from "node:fs";
-import { tmpdir } from "node:os";
+import { createRealHubHome } from "./real-hub-home.mjs";
 import { resolve, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { redactQaText, redactQaValue } from "../../../scripts/visual-qa.mjs";
@@ -213,7 +211,7 @@ function startDaemon() {
 }
 async function reset({ messageControl = false, newSession = false, nativeCommander = false } = {}) {
   await cleanup();
-  const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
+  const home = await createRealHubHome();
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
   const project = join(home, "project"),
     bin = join(home, "bin");

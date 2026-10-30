@@ -958,6 +958,8 @@ journeys:
   - hub-web/src/conversation-list.ts
   - hub-web/e2e/journeys/answer-ask.journey.ts
   - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-home.mjs
+  - hub-web/e2e/journeys/real-hub-home.test.mjs
   - hub-web/e2e/journeys/real-hub-server.mjs
   - hub-web/e2e/journeys/conversation-polish.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
@@ -1184,6 +1186,8 @@ journeys:
   - hub-web/src/deferred-render.ts
   - hub-web/src/browser-support.ts
   - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-home.mjs
+  - hub-web/e2e/journeys/real-hub-home.test.mjs
   - hub-web/e2e/journeys/reconnect.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
   - hub-web/src/app-switcher.ts
@@ -1235,6 +1239,8 @@ journeys:
     follow-up
   additional_specs:
   - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-home.mjs
+  - hub-web/e2e/journeys/real-hub-home.test.mjs
 - id: HUB-J12
   name: Switch networks without losing the conversation
   status: live
@@ -1408,6 +1414,8 @@ journeys:
   - hub-web/src/conversation-shell.ts
   - hub-web/e2e/journeys/launch-session.journey.ts
   - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-home.mjs
+  - hub-web/e2e/journeys/real-hub-home.test.mjs
   - hub-web/e2e/journeys/real-hub-server.mjs
   - cas-cli/src/hub/server.rs
   - cas-cli/src/hub/launch_env.rs
@@ -2119,6 +2127,8 @@ journeys:
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
   - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-home.mjs
+  - hub-web/e2e/journeys/real-hub-home.test.mjs
   - scripts/qa-rig/commander-two-machine/rig.sh
   edge_paths:
   - The real disposable hub loads its generated project config and stores a picked file with byte-for-byte host readback.

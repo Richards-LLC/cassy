@@ -3065,9 +3065,14 @@ async fn handle_client_message(
     }
     if let ClientMessage::SupervisorCommand { command, confirmed, client_ref, .. } = &message {
         let action = format!("supervisor_command_{command:?}").to_ascii_lowercase();
-        store.audit_operation(context, "requested", &action, scope, session,
-            Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string()), now)?;
-        anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
+        let detail = Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string());
+        // A refused unconfirmed command must leave a denied row, not a
+        // dangling "requested" with no outcome.
+        if command.needs_confirmation() && !*confirmed {
+            store.audit_operation(context, "denied", &action, scope, session, detail, now)?;
+            anyhow::bail!("This command needs confirmation.");
+        }
+        store.audit_operation(context, "requested", &action, scope, session, detail, now)?;
     }
     if let Err(error) = connector.send(session, message).await {
         // cas-a0e2: the hub accepted the device and the message, but the

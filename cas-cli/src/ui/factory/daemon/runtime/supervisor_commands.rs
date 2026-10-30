@@ -15,6 +15,16 @@ const RECEIPT_CAP: usize = 256;
 const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
 #[derive(Default)]
 pub(crate) struct CommandState { records: HashMap<Owner, Record> }
+impl CommandState {
+    /// Drop finished receipts past the replay window. An in-flight command or
+    /// open chooser is never evicted, and nothing inside the window is, so a
+    /// replayed reference still returns its stored receipt instead of re-running.
+    fn evict_expired(&mut self) {
+        self.records.retain(|_, record| {
+            record.receipt.phase == Phase::Submitted || record.receipt.interactive || record.started.elapsed() <= REPLAY_WINDOW
+        });
+    }
+}
 struct Record {
     receipt: Receipt,
     started: Instant,
@@ -182,7 +192,8 @@ impl FactoryDaemon {
                 anyhow::ensure!(record.receipt.command == *command, "Command reference already belongs to another command.");
                 return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
             }
-            anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "This session's command receipt limit was reached.");
+            self.supervisor_commands.evict_expired();
+            anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "Too many supervisor commands in the last 10 minutes. Try again shortly.");
             anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
             anyhow::ensure!(!self.supervisor_commands.records.values().any(|r| r.receipt.phase == Phase::Submitted || r.receipt.interactive), "Another supervisor command is awaiting an outcome.");
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;

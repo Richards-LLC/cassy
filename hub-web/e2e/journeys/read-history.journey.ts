@@ -786,7 +786,12 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     await journey.stage(`Choose Dark on a light device and read the page in dark (${name})`, async () => {
       // cas-a4f4: OS emulation alone cannot prove the in-app preference
       // reaches an embedded page's prefers-color-scheme query.
-      await tab.emulateMedia({ colorScheme: "light" });
+      // Playwright's page override also forces cross-origin frame media,
+      // hiding native color-scheme inheritance. Emulate the light device on
+      // the top-level target only; let the embedded page follow its frame.
+      await tab.emulateMedia({ colorScheme: null });
+      const lightDevice = await tab.context().newCDPSession(tab);
+      await lightDevice.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
       const inside = tab.frameLocator('iframe[title="Gate report.html, a page from the supervisor"]');
       await expect(inside.locator("body")).not.toHaveCSS("background-color", "rgb(21, 23, 29)");
@@ -801,6 +806,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     });
 
     await journey.stage(`In dark mode the page sits in the theme, and a dark-capable page renders dark (${name})`, async () => {
+      await tab.emulateMedia({ colorScheme: "light" });
       // Restore System so the separate OS-preference stage still proves its
       // own input, including the plain page's light fallback.
       await showConversationList(tab);

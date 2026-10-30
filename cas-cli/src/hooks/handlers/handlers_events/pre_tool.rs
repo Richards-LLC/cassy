@@ -5660,12 +5660,22 @@ fn cas_invocations(command: &str) -> Vec<Vec<String>> {
 /// `VAR=val`, and `sh -c` / `eval` payloads recursively. Shared with the
 /// worker-denied CLI guard (GH #1219).
 pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
-    let mut found = Vec::new();
-    collect_shell_invocations(command, 0, &mut found);
-    found
+    scan_shell_invocations(command).commands
 }
 
-fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(String, Vec<String>)>) {
+#[derive(Default)]
+struct ShellInvocationScan {
+    commands: Vec<(String, Vec<String>)>,
+    unresolved_heredoc: bool,
+}
+
+fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
+    let mut scan = ShellInvocationScan::default();
+    collect_shell_invocations(command, 0, &mut scan);
+    scan
+}
+
+fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvocationScan) {
     if depth > 3 {
         return;
     }
@@ -5703,7 +5713,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
             "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
             _ => {}
         }
-        found.push((name.to_string(), args.to_vec()));
+        found.commands.push((name.to_string(), args.to_vec()));
     }
 }
 
@@ -5713,7 +5723,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
 fn collect_shell_substitutions(
     command: &str,
     depth: usize,
-    found: &mut Vec<(String, Vec<String>)>,
+    found: &mut ShellInvocationScan,
 ) {
     let bytes = command.as_bytes();
     let mut index = 0;
@@ -5777,7 +5787,7 @@ fn collect_shell_substitutions(
 
 /// Expanding heredoc text is data except for substitutions. Quotes in its
 /// body do not suppress expansion; escaped markers and quoted delimiters do.
-fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut Vec<(String, Vec<String>)>) {
+fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvocationScan) {
     // The shell removes unescaped backslash-newline pairs before expanding
     // the body. Preserve escaped backslashes so marker escaping stays exact.
     let mut logical = String::new();
@@ -5815,7 +5825,10 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut Vec<(Stri
             index += 1;
             continue;
         };
-        let Some(end) = end else { break };
+        let Some(end) = end else {
+            found.unresolved_heredoc = true;
+            break;
+        };
         collect_shell_invocations(&logical[start..end], depth + 1, found);
         index = end + 1;
     }
@@ -5844,7 +5857,11 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// Guardrail-grade: a command hidden in a script file the agent runs, or
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
-    for args in cas_invocations(command) {
+    let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
+    if scan.unresolved_heredoc {
+        return Some("🚫 Cannot inspect an unresolved command substitution in an expanding heredoc.".into());
+    }
+    for (_, args) in scan.commands.into_iter().filter(|(name, _)| name == "cas") {
         // cas-3c26: operator-only actions, judged by the CLI parser.
         if let Some(action) = crate::config::operator_policy::operator_only_cas_invocation(&args) {
             return Some(format!(

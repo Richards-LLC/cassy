@@ -360,7 +360,7 @@ The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud 
 - ❌ Never put light-scheme ink on `--bg-terminal` or wire ANSI colours to application tokens.
 - ✅ Make every `box-shadow` a token (`--lift*`, `--look-shadow-float`, `--shadow-overlay`); `invariants.test.ts` checks it.
 - ❌ Never render conversation content inside `.pane-host`, give it a visible size, or add a second presentation beside Conversations.
-- ❌ Never hand-edit `hub-web/dist`. For exact-tip affected journeys, a factory lane may include a separate final generated build commit; the integration owner supersedes it by rebuilding the merged sources. Follow [the generated-dist workflow](../cas-cli/docs/CONTRIBUTING.md#generated-dist-for-exact-tip-journeys).
+- ❌ Never hand-edit or commit `hub-web/dist` on a factory lane. Journey tooling builds a scratch production snapshot bound to the committed source tip and records its content hash. The integration owner generates the committed release bundle from merged sources. Follow [the scratch-build workflow](../cas-cli/docs/CONTRIBUTING.md#scratch-builds-for-exact-tip-journeys).
 
 ## Behavioural constraints
 <!-- keep -->

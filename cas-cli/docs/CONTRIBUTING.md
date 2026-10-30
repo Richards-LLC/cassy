@@ -3287,23 +3287,31 @@ exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
 
-### Generated dist for exact-tip journeys
+### Scratch builds for exact-tip journeys
 
 When a factory lane changes Commander product inputs, commit the source changes
-first, then run `npm run build` in `hub-web`. If `hub-web/dist` changes, commit
-that generated output in a separate final build commit on the lane before
-running `scripts/journey-eval.sh <task-artifact-dir>`. Review the build diff;
-token-source changes and any regenerated files outside `dist` belong with the
-source changes. Never hand-edit the bundle. If source changes again, rebuild
-and commit the updated output before obtaining a new receipt.
+and run `scripts/journey-eval.sh <task-artifact-dir>`. The runner builds the
+production bundle into a unique `journey-builds/<source-sha>-*/dist` directory
+under those artifacts. No generated `hub-web/dist` commit is needed or allowed
+on a lane. Token generation still belongs with the source changes; if a build
+changes tracked inputs, commit them and run again.
 
-The runner rejects dirty `hub-web` inputs, serves `hub-web/dist`, and records
-`HEAD` plus its committed dist tree in the journey bundles. An uncommitted
-scratch build cannot supply this evidence. Record the final build commit as the
-evaluated delivery tip. The integration owner rebuilds the merged sources and
-commits the generated result when it differs, superseding lane builds. Lane
-receipts prove their recorded inputs; the merge queue proves the integrated
-tree through its existing Commander checks.
+`journey-build.json` records the exact source SHA, scratch path and SHA-256 hash
+of every output filename and byte. The server verifies this manifest before
+listening; receipt writing verifies it again after the run. Bundles retain the
+same source/hash pair. A changed source tip, dirty product/catalog/runner input,
+or altered snapshot refuses proof. Prior attempts and their manifests stay
+archived. An empty affected selection does not build or start browsers.
+
+Standalone named journeys use the same scratch builder, defaulting to ignored
+`target/journey-dist`. A producer may pass its existing manifest through
+`JOURNEY_BUILD_MANIFEST`; an arbitrary dist-directory override is not accepted.
+Background reuse keys include the source/build inputs and retain the original
+build provenance rather than rebinding a snapshot to a different source tip.
+
+The integration owner still rebuilds merged sources into committed dist for the
+release. The merge queue proves that integrated tree through its existing
+Commander checks; this adds no CI stage or duplicate gate.
 
 ### Test shape and runner evidence
 

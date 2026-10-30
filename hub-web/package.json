@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run tokens && vite build",
-    "test": "node scripts/generate-tokens.mjs --check && node scripts/build-cassy-tokens.mjs --check && node --test scripts/operator-inbox-live-safety.test.mjs && node --test e2e/checkout-ports.test.mjs e2e/journeys/real-hub-home.test.mjs e2e/journeys/real-hub-server.test.mjs && npm run tokens && node scripts/run-verified-tests.mjs vitest",
+    "test": "node scripts/generate-tokens.mjs --check && node scripts/build-cassy-tokens.mjs --check && node --test scripts/operator-inbox-live-safety.test.mjs && node --test e2e/checkout-ports.test.mjs e2e/journeys/real-hub-home.test.mjs e2e/journeys/real-hub-server.test.mjs e2e/journeys/serve-dist.test.mjs && npm run tokens && node scripts/run-verified-tests.mjs vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "tokens": "node scripts/generate-tokens.mjs && node scripts/build-cassy-tokens.mjs",
     "visual-qa": "npm exec -- node scripts/visual-qa.mjs",

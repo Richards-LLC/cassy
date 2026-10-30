@@ -163,6 +163,14 @@ export function countUsage(action: UsageAction): void {
   usage.count(action);
 }
 
+/** Count explicit rich-content inspection independently of asynchronous paints. */
+export function bindRichInspectionUsage(root: HTMLElement, counter: Pick<UsageCounter, "count"> = usage): void {
+  root.addEventListener("toggle", event => {
+    const detail = event.target;
+    if (detail instanceof HTMLDetailsElement && detail.open && detail.closest(".rich-diagram, .rich-diff")) counter.count("rich-content.inspect");
+  }, true);
+}
+
 /** Count a delivered notice being retired, once for the still-open group. */
 export function countAttentionDelivery(items: readonly Pick<AttentionItem, "kind" | "acknowledgedAt">[], counter: Pick<UsageCounter, "count"> = usage): void {
   if (items.some(item => item.kind === NOTICE_KIND && !item.acknowledgedAt)) counter.count("attention.delivery");

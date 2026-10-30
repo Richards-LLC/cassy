@@ -5169,6 +5169,7 @@ mod communication_summary_tests {
         agent.role = cas_types::AgentRole::Worker;
         agent.status = cas_types::AgentStatus::Shutdown;
         agent.pid = Some(i32::MAX as u32);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
         agent.metadata.insert("clone_path".into(), root.join("worktrees/idle-cleanup").display().to_string());
         agents.register(&agent).unwrap();
         crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, &agent.name, None).unwrap();

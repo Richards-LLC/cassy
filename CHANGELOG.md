@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Delivery process
+
+- **Capture keeps its receipt when checkouts run out of time** — Was: if the
+  capture budget ran out while Git prepared the private before/after checkouts,
+  `cas deliverable capture` exited with a usage error and printed no receipt.
+  → Now: it prints a receipt with a capture-timeout finding, as it already did
+  for a slow server.
+
+### Fixed — factory reliability
+
+- **A removed Codex worker model stays removed** — Was: a Codex worker launch
+  whose model and effort were removed after setup still passed them to its CAS
+  tools. → Now: only the launch's final model and effort reach the CAS tools.
+
 ## [3.90.0] - 2026-10-29
 
 ### Added — Commander

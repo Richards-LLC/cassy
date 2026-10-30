@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Journey capture
+
+- **Busy pages keep their journey screenshots** — The 250 ms paint-settle
+  deadline returns to screenshot capture when a renderer is busy, while page
+  closure and other errors still fail the journey.
+
 ### Fixed — Conversation keyboard navigation
 
 - **Machine filters keep keyboard focus during catalog refreshes** — An unchanged

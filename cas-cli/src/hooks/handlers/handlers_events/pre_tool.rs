@@ -192,6 +192,9 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
         if relative.is_empty() || relative.starts_with(".cas/") || relative.starts_with("target/") {
             continue;
         }
+        if changelog_append_only_edit(input, &relative, &file) {
+            continue;
+        }
         let crate::cloud::file_leases::FileLease::HeldBy(holder) =
             crate::cloud::file_leases::claim(cas_root, &agent_id, &agent_name, &task.id, &relative)
         else {
@@ -206,6 +209,70 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
         }
     }
     notes
+}
+
+fn changelog_append_only_edit(input: &HookInput, relative: &str, file: &Path) -> bool {
+    if relative != "CHANGELOG.md" {
+        return false;
+    }
+    let Some(tool_input) = input.tool_input.as_ref() else {
+        return false;
+    };
+    let insertion = |edit: &serde_json::Value| {
+        let Some(old) = edit.get("old_string").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(new) = edit.get("new_string").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        !old.is_empty() && new.len() > old.len() && new.contains(old)
+    };
+    match input.tool_name.as_deref() {
+        Some("Edit") => insertion(tool_input),
+        Some("MultiEdit") => tool_input
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|edits| !edits.is_empty() && edits.iter().all(insertion)),
+        Some("Write") => {
+            let Some(new) = tool_input.get("content").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            std::fs::read_to_string(file)
+                .ok()
+                .is_some_and(|old| !old.is_empty() && new.len() > old.len() && new.contains(&old))
+        }
+        Some("apply_patch") => {
+            let Some(patch) = tool_input.get("command").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let mut in_changelog = false;
+            let mut changed_changelog = false;
+            let mut added = false;
+            for line in patch.lines() {
+                if let Some(path) = line.strip_prefix("*** Update File: ") {
+                    in_changelog = path.trim().trim_start_matches("./") == "CHANGELOG.md";
+                    changed_changelog |= in_changelog;
+                    continue;
+                }
+                if line.starts_with("*** Add File: ")
+                    || line.starts_with("*** Delete File: ")
+                    || line.starts_with("*** Move to: ")
+                {
+                    in_changelog = false;
+                    continue;
+                }
+                if !in_changelog {
+                    continue;
+                }
+                if line.starts_with('-') {
+                    return false;
+                }
+                added |= line.starts_with('+') && !line.starts_with("+++");
+            }
+            changed_changelog && added
+        }
+        _ => false,
+    }
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.
@@ -7055,6 +7122,38 @@ mod workspace_contract_tests {
         assert_eq!(worker_edit_targets(&input), ["src/a.rs", "src/b.rs"]);
         let edit = tool_input("Edit", serde_json::json!({"file_path": "/repo/src/c.rs"}), Path::new("/repo"));
         assert_eq!(worker_edit_targets(&edit), ["/repo/src/c.rs"]);
+    }
+
+    #[test]
+    fn changelog_new_bullet_is_append_only() {
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n+\n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
+            }),
+            Path::new("/repo"),
+        );
+        assert!(changelog_append_only_edit(
+            &input,
+            "CHANGELOG.md",
+            Path::new("/repo/CHANGELOG.md")
+        ));
+    }
+
+    #[test]
+    fn changelog_existing_bullet_edit_is_not_append_only() {
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n-- Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
+            }),
+            Path::new("/repo"),
+        );
+        assert!(!changelog_append_only_edit(
+            &input,
+            "CHANGELOG.md",
+            Path::new("/repo/CHANGELOG.md")
+        ));
     }
 
     fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {

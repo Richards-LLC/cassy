@@ -3480,6 +3480,15 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         }
         match quote {
             Some(active) if ch == active => quote = None,
+            Some('"') if ch == '\\'
+                && chars.peek().is_some_and(|(_, next)| matches!(next, '`' | '\\')) =>
+            {
+                // Escaped backticks are data; a doubled backslash leaves the
+                // next backtick executable. Retain the source escape spelling
+                // for consumers that inspect substitutions in dynamic words.
+                word.push(ch);
+                word.push(chars.next().unwrap().1);
+            }
             Some(_) => word.push(ch),
             None => match ch {
                 '\\' => {
@@ -8654,9 +8663,11 @@ mod workspace_contract_tests {
             assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
-        // Arithmetic data still executes nested command substitutions. A
-        // separated closing pair can instead denote a subshell substitution.
+        // Executable backticks and arithmetic data still undergo filesystem
+        // checks. A separated closing pair can denote a subshell substitution.
         for command in [
+            r#"echo "`touch /outside/cas-6e99-must-not-execute`""#,
+            r#"echo "\\`touch /outside/cas-6e99-must-not-execute`""#,
             r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
             r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
             // Rejected review: a nearby final pair does not prove arithmetic.
@@ -8686,6 +8697,8 @@ mod workspace_contract_tests {
             "echo '$(cas config grant-write --task cas-1234 --path /x --reason r)'",
             "echo '`cas config grant-write --task cas-1234 --path /x --reason r`'",
             r#"echo "\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
+            // cas-6e99: escaped backticks in double quotes are literal data.
+            r#"echo "\`cas config gr''ant-write --task cas-1234 --path /x --reason r\`""#,
             "cat <<'EOF'\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",

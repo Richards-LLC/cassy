@@ -17,6 +17,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Tool-reported files show known edit sizes** — Changed-file rows display added and removed line counts when a successful edit reports them, including zeroes. Unknown counts stay absent. Screen readers hear both numbers and their meaning; the counts describe the latest successful edit, not Git or turn totals.
 
+### Fixed — Quoted shell data
+
+- **Escaped backticks stay literal inside double quotes** — Factory workspace
+  checks allow quoted backtick data while still inspecting executable backtick
+  substitutions for filesystem writes and operator-only commands.
+
 ### Fixed — Delivery process
 
 - **Clock-only updates do not strand a ready delivery** — Was: a close-owned

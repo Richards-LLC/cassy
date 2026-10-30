@@ -5674,6 +5674,7 @@ impl CasCore {
         } else {
             cas_types::MergeCiAdmission::Advisory
         };
+        let mut close_gate_held = false;
         let push_note = match (task_id, merge_commit.as_deref()) {
             (Some(task_id), Some(merge_sha))
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
@@ -5690,6 +5691,8 @@ impl CasCore {
                     .close_after_published_merge(task_id, merge_sha, ci_admission, lane)
                     .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
+                close_gate_held = matches!(outcome,
+                    crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::Held(_));
                 format!("{push_note}\nCI admission: {}\n{}", ci_admission.label(), outcome.receipt(task_id))
             }
             _ => push_note,
@@ -5789,25 +5792,40 @@ impl CasCore {
                 .ok()?
                 .get(id)
                 .ok()
-                .map(|task| task.status.to_string())
+                .map(|task| task.status)
         });
-        let next = match (task_id, status.as_deref()) {
-            (_, Some("Closed")) | (None, _) => "none".to_string(),
+        let next = match (task_id, status) {
+            (_, Some(cas_types::TaskStatus::Closed)) | (None, _) => "none".to_string(),
             (Some(id), Some(status)) => format!("review task {id} (status {status})"),
             (Some(id), None) => format!("inspect task {id}"),
         };
+        let ci_sha = match &branch_ci_state {
+            BranchCiState::Green { sha, .. } | BranchCiState::Red { sha, .. }
+            | BranchCiState::Pending { sha, .. } | BranchCiState::CodePending { sha, .. }
+            | BranchCiState::NoChecks { sha, .. } | BranchCiState::GhFailure { sha, .. }
+            | BranchCiState::Unknown { sha, .. } | BranchCiState::UnvalidatedCode { sha, .. }
+            | BranchCiState::CodeValidationUnconfirmed { sha, .. }
+            | BranchCiState::MissingCommit { sha, .. } => sha,
+        };
         let summary = format!(
-            "Merged {} to {}{}; commit {}; CI {}; push {}; next: {next}.",
+            "Merged worktree {} to {}{}; commit {}; CI {}; push {}; next: {next}.\n{}\nCI SHA: {ci_sha}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
             merge_commit.as_deref().unwrap_or("none"),
             ci_admission.label(),
             if push_outcome.is_published() { "published" } else { "not published" },
+            ci_policy_notice.trim(),
         );
+        // Policy and the bound CI SHA belong in routine receipts. Overrides,
+        // unfinished worker deliveries and publication/close failures retain
+        // their complete actionable diagnostics.
         if let Some(task_id) = task_id
             && trunk_notice.is_empty()
-            && ci_policy_notice.is_empty()
+            && !ci_override
+            && unparked_notice.is_empty()
+            && push_outcome.is_published()
+            && !close_gate_held
             && let Ok(compact) = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::compact_receipt(
                 &cas_root,
                 config.factory().artifacts_root.as_deref(),

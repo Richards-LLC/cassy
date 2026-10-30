@@ -12274,10 +12274,16 @@ impl CasCore {
                 .as_deref()
                 .or(delivery_receipt)
                 .unwrap_or("none");
-            let summary = format!(
+            let mut summary = format!(
                 "Closed task: {}; delivery {delivery}; target {resolved_parent_branch}; next: none.",
                 task.id,
             );
+            for note in [verification_note.trim(), worktree_msg.trim()] {
+                if !note.is_empty() {
+                    summary.push('\n');
+                    summary.push_str(note);
+                }
+            }
             if let Ok(compact) = gate_text::compact_receipt(
                 &self.cas_root,
                 configured_artifacts_root.as_deref(),
@@ -29878,6 +29884,9 @@ esac
         let closed = text(response);
         assert!(!is_error, "{closed}");
         assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
+        eprintln!("real close reply: {} chars\n{closed}", closed.chars().count());
+        assert!(closed.contains("Worktree still exists"), "{closed}");
+
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
     }
 

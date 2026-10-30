@@ -21,7 +21,7 @@ fn compact_close_detail(response: &str, task_id: &str, target: &str) -> String {
         .split_once("\nDetails: ")
         .expect("successful close must reference its durable detail receipt");
     assert_eq!(
-        summary,
+        summary.lines().next().unwrap(),
         format!("Closed task: {task_id}; delivery none; target {target}; next: none.")
     );
     let (path, _) = reference
@@ -8023,8 +8023,9 @@ async fn test_close_supervisor_bypass_orphaned_task() {
     // "assignee inactive" phrase that was always emitted regardless of
     // actual assignee state.
     assert!(
-        detail.contains("verification skipped — orphaned task, no assignee"),
-        "detail must carry the orphaned-task bypass marker: {detail}"
+        detail.contains("verification skipped — orphaned task, no assignee")
+            && response_text.contains("verification skipped — orphaned task, no assignee"),
+        "summary and detail must carry the orphaned-task bypass marker: {response_text}"
     );
     assert!(
         !response_text.contains("VERIFICATION REQUIRED"),
@@ -8143,8 +8144,9 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
     // supervisor bypass behavior but cites the real reason.
     let detail = compact_close_detail(&response_text, &id, "");
     assert!(
-        detail.contains("verification skipped — assignee unknown"),
-        "ghost-assignee bypass detail should mark skipped: {detail}"
+        detail.contains("verification skipped — assignee unknown")
+            && response_text.contains("verification skipped — assignee unknown"),
+        "ghost-assignee summary and detail should mark skipped: {response_text}"
     );
 
     let task_after = task_store.get(&id).expect("task should exist");

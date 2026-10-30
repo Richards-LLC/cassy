@@ -6279,11 +6279,23 @@ mod tests {
             crate::github_issue_attach::GH_BIN_ENV,
             repo.path().join("gh-fixture"),
         );
-        let state = super::lookup_branch_ci("factory/ci-fixture", "missing-target", repo.path()).state;
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-        assert!(
-            !describe_branch_ci_state("factory/ci-fixture", &state).contains("CI state: green")
-        );
+        for (branch, target, subcommand) in [
+            ("factory/ci-fixture", "missing-target", "merge-base"),
+            ("missing-branch", "main", "rev-parse"),
+        ] {
+            let lookup = super::lookup_branch_ci(branch, target, repo.path());
+            assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
+            let receipt = super::describe_branch_ci_lookup(branch, &lookup);
+            assert!(!receipt.contains("CI state: green"), "{receipt}");
+            assert!(receipt.contains("gh endpoint not queried: delivery Git inspection failed"), "{receipt}");
+            assert!(receipt.contains(&format!("git {subcommand} failed while inspecting delivery Git range (exit status: 128)")), "{receipt}");
+            assert!(!receipt.contains("repository unresolved"), "{receipt}");
+            assert!(!receipt.contains("fatal:"), "Git stderr must stay private: {receipt}");
+        }
+        let timed_out = super::ci_git(repo.path(), &["status"], crate::bounded_process::Deadline::after(std::time::Duration::ZERO)).unwrap_err();
+        assert!(timed_out.contains("git status timed out"), "{timed_out}");
+        let unavailable = super::ci_git(&repo.path().join("missing-directory"), &["status"], crate::bounded_process::Deadline::after(std::time::Duration::from_secs(2))).unwrap_err();
+        assert!(unavailable.contains("git status could not start or complete"), "{unavailable}");
         assert!(!repo.path().join("gh-requests.log").exists());
     }
 

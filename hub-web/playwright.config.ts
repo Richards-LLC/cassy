@@ -7,14 +7,14 @@ import { JOURNEY_TIMEZONE } from "./e2e/journeys/clock";
 // - fixtures (cas-d7b7 Test Agents spike): specs under e2e/ against the Vite
 //   fixture site, real src/ renderers with fixture data and no hub daemon.
 // - journeys (cas-9be7): one test per user journey in docs/qa/journeys.md,
-//   driving the committed production bundle (dist/) at /commander/ through a
+//   driving a source-bound scratch production build at /commander/ through a
 //   hub protocol double. Receipts: e2e/.results/journeys/<ID>/ or
 //   $JOURNEY_RECEIPTS (scripts/journey-eval.sh).
 //
 // Ports (cas-00ad): HUB_E2E_PORT / HUB_JOURNEY_PORT when set (use a pair in
 // 20000–32767 per concurrent run), else this checkout's own pair from its
 // path. Servers are never reused, so a run always serves this checkout's
-// fixtures and dist; a port someone else holds fails the run loudly.
+// fixtures and scratch build; a port someone else holds fails the run loudly.
 //
 // Readiness is the launched server's own "listening" line, never a probe of the
 // URL: a URL probe cannot tell this run's server from a concurrent caller's on

@@ -2142,6 +2142,7 @@ add_journey_inputs() {
     local worktree="$1"
     mkdir -p "$worktree/scripts"
     cp "$repo_root/scripts/journey-receipt.py" "$worktree/scripts/journey-receipt.py"
+    cp "$repo_root/scripts/journey_dist.py" "$worktree/scripts/journey_dist.py"
     cat >"$worktree/scripts/journeys-for-diff.py" <<'PY'
 import json
 print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J2'}]}))

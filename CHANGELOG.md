@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Journey source snapshots
+
+- **Lanes test their committed source without generated dist commits** — Journey runs build a scratch production snapshot, verify its source revision and content hash when serving and recording evidence, and preserve that provenance in reused receipts. Source-only changes invalidate background evaluations even when committed dist stays unchanged.
+
 ### Fixed — Codex profile listing width
 
 - **Long profile names fit the terminal** — `cas codex --list-profiles` shortens

@@ -115,6 +115,11 @@ def main(argv: list[str]) -> int:
     artifacts, tree, commit, status, hub, pw_version = Path(argv[0]), argv[1], argv[2], int(argv[3]), argv[4], argv[5]
     plan_path = artifacts / "journey-selection.json"
     plan = json.loads(plan_path.read_text()) if plan_path.is_file() else {}
+    receipt_path = artifacts / "journey-receipt.json"
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+    build = receipt.get("build")
+    if (artifacts / "journey-build.json").is_file() and not build:
+        raise ValueError("scratch journey bundles require a validated source/dist receipt")
     # The producer already resolved --task/default/ancestor identity. Retain
     # the old basename fallback only for legacy or standalone ad-hoc bundles.
     task_id = plan.get("task_id") or artifacts.name
@@ -201,7 +206,8 @@ def main(argv: list[str]) -> int:
             # freshness to the executed run (qa_evidence executed_head_sha).
             **({"executed_head_sha": executed} if rebound else {}),
             "hub_web_dist": tree,
-            "build_url": "hub-web/dist at /commander/; transport: " + data["label"],
+            **({"build": build} if build else {}),
+            "build_url": ("source-bound scratch dist" if build else "hub-web/dist") + " at /commander/; transport: " + data["label"],
             "playwright_version": pw_version,
             "created_at": created,
             "visual_change": False,

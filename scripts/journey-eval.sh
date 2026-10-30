@@ -27,7 +27,7 @@ python3 - "$artifacts" <<'PY'
 import datetime, uuid, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-names = ('journeys', 'playwright', 'journey-receipt.json', 'journey-selection.json')
+names = ('journeys', 'playwright', 'journey-receipt.json', 'journey-selection.json', 'journey-build.json')
 existing = [root / name for name in names if (root / name).exists()]
 if existing:
     archive = root / 'journey-runs' / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8])
@@ -50,11 +50,14 @@ if [[ -n "$pattern" ]]; then
         printf 'journey-eval: run `npm ci` in %s first\n' "$hub" >&2
         exit 2
     }
-    tree="$(git -C "$repo" rev-parse HEAD:hub-web/dist)"
+    python3 "$repo/scripts/journey_dist.py" build --repo "$repo" \
+        --plan "$artifacts/journey-selection.json" --artifacts "$artifacts"
+    tree="$(python3 -c 'import json,sys; print("sha256:" + json.load(open(sys.argv[1]))["dist_sha256"])' "$artifacts/journey-build.json")"
     pw_version="$(cd "$hub" && node -p 'require("@playwright/test/package.json").version')"
     args=("--workers=$workers")
     if [[ "$scope" == affected ]]; then args+=(--grep "$pattern"); fi
-    (cd "$hub" && JOURNEY_RECEIPTS="$artifacts/journeys" JOURNEY_OUTPUT="$artifacts/playwright" \
+    (cd "$hub" && JOURNEY_BUILD_MANIFEST="$artifacts/journey-build.json" \
+        JOURNEY_RECEIPTS="$artifacts/journeys" JOURNEY_OUTPUT="$artifacts/playwright" \
         npm run journeys -- "${args[@]}") || status=$?
 else
     printf 'journey-eval: no affected journeys; no browser run\n'

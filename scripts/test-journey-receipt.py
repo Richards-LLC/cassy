@@ -67,6 +67,8 @@ class Tooling(unittest.TestCase):
         (self.repo / 'scripts').mkdir()
         for name in ['journey-eval.sh', 'journey-receipt.py', 'journey-bundles.py']:
             shutil.copyfile(ROOT / 'scripts' / name, self.repo / 'scripts' / name)
+        if (ROOT / 'scripts/journey_dist.py').exists():
+            shutil.copyfile(ROOT / 'scripts/journey_dist.py', self.repo / 'scripts/journey_dist.py')
         # Public selector CLI seam. Deliberately fail on positional diff API,
         # arbitrary selection IDs, wrong reviewed-revision env or bad base.
         (self.repo / 'scripts/journeys-for-diff.py').write_text('''import json, os, sys
@@ -146,6 +148,25 @@ print(json.dumps({'journeys': rows}))
         task = {'id': 'cas-fixture', 'notes': f'JOURNEY_SELECTION: head={head} base={self.base} ids=', 'deliverables': '{}'}
         self.assertEqual(receipt.task_base(self.repo, head, task), self.base)
 
+    def test_full_receipt_preserves_snapshot_source_identity(self):
+        run = json.loads(self.plan('--affected', self.base).stdout)
+        run.update(scope='full', selection_ids=['HUB-J7'],
+                   build={'source_sha': self.base, 'dist_sha256': 'a' * 64})
+        value, status = receipt.fold(run, native(('HUB-J7 main', ['passed'])), 0, '1.63')
+        self.assertEqual(status, 0)
+        self.artifacts.mkdir(parents=True)
+        path = self.artifacts / 'full.json'
+        command = ['python3', self.repo / 'scripts/journey-receipt.py', 'verify-full',
+                   '--repo', self.repo, '--sha', self.base, '--receipt', path]
+        path.write_text(json.dumps(value))
+        out = subprocess.run(command, env=self.env, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        value['build']['source_sha'] = '0' * 40
+        path.write_text(json.dumps(value))
+        out = subprocess.run(command, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('snapshot source/hash', out.stderr)
+
     def test_full_worker_refused_supervisor_allowed(self):
         self.assertIn('supervisor-only', self.plan('--full').stderr)
         self.env['CAS_AGENT_ROLE'] = 'supervisor'
@@ -207,6 +228,10 @@ print(json.dumps({'journeys': rows}))
         (tools / 'node').write_text('#!/bin/sh\nprintf "1.63.0\\n"\n')
         (tools / 'npm').write_text("#!/usr/bin/env python3\n" + "import json, os, sys\n" +
             "from pathlib import Path\n" +
+            "if sys.argv[1:3] == ['run', 'build']:\n" +
+            "    dest=Path(sys.argv[sys.argv.index('--outDir')+1]);dest.mkdir(parents=True)\n" +
+            "    (dest/'index.html').write_text('scratch source: '+Path('src/ask.ts').read_text())\n" +
+            "    sys.exit(0)\n" +
             "Path(os.environ['FIXTURE_ARGS']).write_text(json.dumps(sys.argv[1:]))\n" +
             "code = int(os.environ.get('FIXTURE_NATIVE_EXIT', '0'))\n" +
             "row = {'title':'HUB-J7 main','tests':[{'status':'unexpected' if code else 'expected','expectedStatus':'passed','results':[{'status':'failed' if code else 'passed'}]}]}\n" +
@@ -237,14 +262,39 @@ print(json.dumps({'journeys': rows}))
                     self.assertIn('--grep', args)
                     self.assertRegex('HUB-J7 main', args[-1])
                     value = json.loads((artifacts / 'journey-receipt.json').read_text())
+                    built = value['build']
+                    self.assertEqual(built['source_sha'], self.git('rev-parse', 'HEAD'))
+                    self.assertRegex(built['dist_sha256'], r'^[0-9a-f]{64}$')
+                    self.assertNotEqual(Path(built['dist_path']), self.repo / 'hub-web/dist')
+                    self.assertEqual(Path(built['dist_path'], 'index.html').read_text(), 'scratch source: ask')
+                    self.assertEqual((self.repo / 'hub-web/dist/app.js').read_text(), 'fixture bundle')
+                    self.assertEqual(self.git('status', '--porcelain', '--', 'hub-web'), '')
                     self.assertEqual(value['suite_exit'], code)
                     self.assertEqual(value['results'][0]['failed'], int(code != 0))
                     bundle = json.loads((artifacts / 'journeys/HUB-J7/bundle.json').read_text())
                     self.assertEqual(bundle['task_id'], 'cas-fixture')
                     self.assertEqual(bundle['head_sha'], self.git('rev-parse', 'HEAD'))
                     self.assertEqual(bundle['verdict'], 'FAIL' if code else 'PASS')
+                    self.assertEqual(bundle['build'], built)
                 old = next((artifacts / 'journey-runs').glob('*/journey-receipt.json'))
                 self.assertEqual(json.loads(old.read_text())['suite_exit'], 7)
+        # Receipt writing must refuse mutated bytes and mismatched source tips;
+        # neither may turn the already-executed native report into fresh proof.
+        command = ['python3', self.repo / 'scripts/journey-receipt.py', 'write',
+                   '--plan', artifacts / 'journey-selection.json', '--report', artifacts / 'playwright/report.json',
+                   '--suite-exit', '0', '--tool-version', '1.63', '--output', artifacts / 'rejected.json']
+        index = Path(built['dist_path'], 'index.html')
+        index.write_text('changed after browser execution')
+        out = subprocess.run(command, env=self.env, capture_output=True, text=True)
+        self.assertIn('snapshot bytes changed', out.stderr)
+        self.assertNotEqual(out.returncode, 0)
+        index.write_text('scratch source: ask')
+        built['source_sha'] = self.base
+        (artifacts / 'journey-build.json').write_text(json.dumps(built))
+        out = subprocess.run(command, env=self.env, capture_output=True, text=True)
+        self.assertIn('source does not match', out.stderr)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse((artifacts / 'rejected.json').exists())
 
     def test_writer_recomputes_selection_and_refuses_hand_picked_plan(self):
         (self.repo / 'hub-web/src').mkdir()

@@ -24716,9 +24716,9 @@ pub(crate) fn parked_anchor_advance_is_attributable(
 }
 
 /// cas-9668: an epic sync imports sibling commits without transferring the
-/// task's delivery identity. Only side parents already on the declared target
-/// may bypass the foreign-task check; direct worker commits and lease cutoffs
-/// still apply. The recorded anchor must lie on the first-parent chain, so a
+/// task's delivery identity. Each side parent must belong to the declared
+/// target or released trunk to bypass the foreign-task check; direct commits
+/// and lease cutoffs still apply. The recorded anchor must lie on the first-parent chain, so a
 /// supervisor's integration merge cannot become a worker continuation.
 fn parked_anchor_advance_with_target_is_attributable(
     repo_path: &std::path::Path,
@@ -24782,14 +24782,13 @@ fn parked_anchor_advance_with_target_is_attributable(
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
     }) && commits.iter().all(|(parents, epoch, message)| {
-        let imports_from = |upstream: &str| {
-            parents
-                .iter()
-                .skip(1)
-                .all(|parent| git_commit_is_ancestor(repo_path, parent, upstream))
-        };
         let target_import = parents.len() > 1
-            && (imports_from(target_ref) || released.as_deref().is_some_and(imports_from));
+            && parents.iter().skip(1).all(|parent| {
+                git_commit_is_ancestor(repo_path, parent, target_ref)
+                    || released.as_deref().is_some_and(|upstream| {
+                        git_commit_is_ancestor(repo_path, parent, upstream)
+                    })
+            });
         (target_import
             || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
             && foreign_since
@@ -31667,7 +31666,15 @@ esac
     /// unreleased branch carrying another task's work is still refused.
     #[test]
     fn merging_released_main_into_an_epic_lane_is_upstream_but_unreleased_work_is_foreign_cas_985f() {
-        for (merged, foreign) in [("main", false), ("factory/other-cas-0e2b", true)] {
+        let mut failures = Vec::new();
+        for (merged, foreign, shadow, octopus) in [
+            ("main", false, false, false),
+            ("factory/other-cas-0e2b", true, false, false),
+            // cas-77b81: a branch cannot impersonate the released remote.
+            ("factory/other-cas-0e2b", true, true, false),
+            // Each side parent may independently belong to target or trunk.
+            ("main", false, false, true),
+        ] {
             let dir = init_factory_repo_with_parent("worker", "main");
             let p = dir.path();
             std::fs::create_dir_all(p.join(".cas")).unwrap();
@@ -31688,8 +31695,22 @@ esac
             std::fs::write(p.join("unreleased.rs"), "// unreleased\n").unwrap();
             git(p, &["add", "unreleased.rs"]);
             git(p, &["commit", "-q", "-m", "fix(cas-0e2b): unreleased work"]);
+            if shadow {
+                git(p, &["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+                git(p, &["branch", "origin/main", "factory/other-cas-0e2b"]);
+            }
+            if octopus {
+                git(p, &["checkout", "-q", "epic/next"]);
+                commit_local(p, "epic.rs", "fix(cas-0e3b): integrated epic work");
+            }
             git(p, &["checkout", "-q", "factory/worker-cas-test1"]);
-            git(p, &["merge", "-q", "--no-ff", "--no-edit", merged]);
+            if octopus {
+                git(p, &["merge", "-q", "--no-ff", "--no-edit", "epic/next", "main"]);
+                let parents = git_stdout_lines(p, &["rev-list", "--parents", "-n", "1", "HEAD"]).unwrap();
+                assert_eq!(parents[0].split_whitespace().count(), 4);
+            } else {
+                git(p, &["merge", "-q", "--no-ff", "--no-edit", merged]);
+            }
             let target = cas_types::WorkTarget {
                 repo_selector: "project:cas985f".into(), target_branch: "epic/next".into(),
             };
@@ -31706,9 +31727,15 @@ esac
                 Err(error) if foreign => {
                     assert!(error.contains("foreign commit") && error.contains("cas-0e2b"), "{error}");
                 }
-                other => panic!("merging {merged}: unexpected {:?}", other.map(|d| d.map(|d| d.commits))),
+                other => failures.push(format!("merging {merged}, shadow={shadow}: unexpected {:?}", other.map(|d| d.map(|d| d.commits)))),
+            }
+            if octopus && !parked_anchor_advance_with_target_is_attributable(
+                p, &own, &head_sha(p), &task.id, None, "epic/next",
+            ) {
+                failures.push("mixed epic/main octopus sync must retain the parked delivery identity".into());
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// Without a per-task branch the worker's own branch is measured, as

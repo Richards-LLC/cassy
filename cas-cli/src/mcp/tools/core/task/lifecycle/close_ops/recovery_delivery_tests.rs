@@ -605,54 +605,6 @@ async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
 }
 
 #[tokio::test]
-async fn repark_names_unattributable_advance_without_changing_anchor_cas_a58cc() {
-    let mut env = TestEnvGuard::temp_home();
-    let mut f = fixture(&mut env);
-    let repo = f.dir.path();
-    let cas_dir = repo.join(".cas");
-    let origin = cas_dir.join("origin.git");
-    git(repo, &["init", "--bare", origin.to_str().unwrap()]);
-    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
-    git(repo, &["push", "-q", "origin", "main", BRANCH]);
-    let parked = close(&f).await;
-    let anchor = parked.deliverables.factory_branch_anchor.unwrap();
-
-    // A local-only trunk is not released upstream. The merge is the first
-    // unattributable commit; a later own correction makes it distinct from tip.
-    std::fs::write(repo.join("unreleased.txt"), "local-only sibling work\n").unwrap();
-    git(repo, &["add", "unreleased.txt"]);
-    git(repo, &["commit", "-qm", "fix(cas-other): unreleased sibling work"]);
-    git(&f.worker_path, &["merge", "-q", "--no-ff", "main", "-m", "merge local-only main"]);
-    let offending = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
-    git(&f.worker_path, &["add", "footer.css"]);
-    git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): final correction")]);
-    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(repo, &["push", "-q", "origin", BRANCH]);
-
-    let output = close_output(&f).await;
-    assert!(output.contains("PARK REFUSED"), "{output}");
-    for boundary in [&anchor, &f.final_tip, &offending] {
-        assert!(output.contains(boundary), "missing {boundary}: {output}");
-    }
-    let tasks = open_task_store(&cas_dir).unwrap();
-    let unchanged = tasks.get(TASK).unwrap();
-    assert_eq!(unchanged.status, TaskStatus::AwaitingMerge);
-    assert_eq!(unchanged.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
-    assert_eq!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().len(), 1);
-
-    // Publishing that same trunk makes the advance attributable. Normal
-    // re-park still binds the current tip and a fresh QA round without warning.
-    git(repo, &["push", "-q", "origin", "main"]);
-    let output = close_output(&f).await;
-    assert!(output.contains("MERGE REQUIRED"), "{output}");
-    assert!(!output.contains("PARK REFUSED"), "{output}");
-    let advanced = tasks.get(TASK).unwrap();
-    assert_eq!(advanced.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
-    assert_eq!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().len(), 2);
-}
-
-#[tokio::test]
 async fn recovery_tracked_merge_rejects_old_qa_and_selects_current_tip_cas_c6e1() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);

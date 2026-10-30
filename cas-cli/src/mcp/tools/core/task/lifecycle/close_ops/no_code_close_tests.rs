@@ -1822,10 +1822,20 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "round {round}");
     }
     let parked_anchor = f.task(id).deliverables.factory_branch_anchor;
-    merge_main("three.rs", "fix(cas-0e2b): unreleased, only on local main", false);
+    let offending = merge_main("three.rs", "fix(cas-0e2b): unreleased, only on local main", false);
+    // Keep the offending merge distinct from the ignored current tip.
+    std::fs::write(worker_path.join("own.rs"), "pub fn own() { /* correction */ }\n").unwrap();
+    git(&worker_path, &["add", "own.rs"]);
+    git(&worker_path, &["commit", "-qm", "fix(cas-3d57): final correction"]);
+    git(&worker_path, &["push", "-q", "origin", &lane]);
+    let ignored_tip = git(&worker_path, &["rev-parse", "HEAD"]);
     let refused = call(&f.worker, close).await;
     assert_eq!(f.task(id).deliverables.factory_branch_anchor, parked_anchor,
         "a local main ahead of origin is not released, so the anchor must not advance: {refused}");
+    assert!(refused.contains("PARK REFUSED"), "{refused}");
+    for boundary in [parked_anchor.as_ref().unwrap(), &ignored_tip, &offending] {
+        assert!(refused.contains(boundary), "missing {boundary}: {refused}");
+    }
 }
 /// A queued successor uses its own target, while the delivery just parked or
 /// closed keeps its immutable ref. Replaying that close cannot consume C.

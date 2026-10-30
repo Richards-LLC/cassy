@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  fleet-undo-shell-focus:
+    title: Focused Undo survives structural catalog changes after Raw output closes
+    tasks: [cas-9826]
+    invariants: [HUB-J17-UNDO-SHELL-FOCUS]
+    journeys: [HUB-J17]
   machine-chip-catalog-focus:
     title: Unchanged catalog ticks preserve the focused project machine chip
     tasks: [cas-2e1c]
@@ -77,6 +82,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J17-UNDO-SHELL-FOCUS:
+    statement: A visible focused Undo remains the keyboard target after Raw output closes and a new session rebuilds the phone shell.
+    check: Run the HUB-J17 phone Raw output success cases in fleet-ops.journey.ts; add a session while Undo is focused, read back the updated catalog, and assert Undo retains focus.
+    bug: {task: cas-9826}
   HUB-J3-MACHINE-CHIP-FOCUS:
     statement: An unchanged catalog refresh retains the focused project machine button and its keyboard focus ring.
     check: Run project-navigation.test.ts focus retention through an unchanged catalog tick, then the long-machine-name keyboard stage in find-conversation.journey.ts with ten repeats and four workers.
@@ -1761,6 +1770,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH
   - HUB-J17-SUPERVISOR-SCOPE
   - HUB-J17-FLEET-INVALIDATION

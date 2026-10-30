@@ -31,7 +31,7 @@ The task record names the delivery: `deliverables.files_changed`, `deliverables.
 cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
 ```
 
-The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). Publish durable logs and captures to the task artifacts directory. A verdict or task close reclaims disposable `target/` output once the dispatch is resolved (or a terminal task has no active dispatch), with no lease or live user; existing GC/admission retries deferred cleanup. Source and its Git worktree registration retain the two-hour idle grace period before GC removes them. Checkouts with source changes are kept. This ownership record makes cleanup independent of whether your session exits normally. Diff against the task's own delivery base, never a fixed commit count:
+The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory. Its location and cleanup are in `skills/cas-qa-craft/references/verifier-evidence-gate.md`, under Scratch checkout lifetime. Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)
@@ -119,6 +119,8 @@ verification action=add task_id=<id> status=<approved|rejected|error> confidence
 - **Reject findings rated high or above** (including critical), or any reproduced silent failure of this task's own behaviour under a realistic condition, regardless of its rating. Set `status=rejected`, start the summary with `REJECTED`, and record the finding with `"severity":"blocking"`. Name the condition, command/output or source evidence, and failed outcome. Passing happy-path tests, a filed follow-up, or calling it non-blocking does not override this threshold.
 - **Reject** other unmet acceptance-criteria items or blocking defects by naming the missing functionality, not a marker. For an unimplemented shortcut, add: "Removing or rewording the comment without implementing the functionality will fail re-verification."
 - **Approve** only when every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and no rejection condition remains. Only low or medium findings that do not meet that threshold can be improvements with `"severity":"warning"`; set `status=approved` and start the summary with `APPROVED`.
+- **Improvements stay in this verdict.** List them under `Improvements (non-blocking)` and as `"severity":"warning"` issues, with a one-line summary. Never file or request a task for one: a follow-up needs a reproduced defect affecting someone today, and `task action=create` refuses one without `repro` and `affected`.
+- **Tier 2:** when the task notes record `VERIFICATION TIER 2`, also probe the changed enforcement adversarially: try to get past it with a realistic input, and reject a bypass you reproduce.
 - **Escalate** only when no rejection condition applies (`status=error`, summary starting `SUPERVISOR CALL:`) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
 - For an epic, add `verification_type=epic`.
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.

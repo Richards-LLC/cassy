@@ -25,7 +25,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request and recipe.
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
 - **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
-- **A supervisor restart stops every worker:** load a new binary via MCP reconnect, else [checkpoint them first](references/worker-recovery.md#supervisor-restart).
+- **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
 - **Pane budget:** ~150 words, answer first: findings, rejections, measurements, merge receipts, pointers. Timelines, gates and lane history go to notes/artifacts; no narration/recap.

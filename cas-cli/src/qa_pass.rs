@@ -14,7 +14,7 @@ use crate::config::QaConfig;
 
 pub mod github_gate;
 pub mod preflight;
-pub(crate) mod sync;
+pub mod sync;
 pub use github_gate::{github_merge_refusal, merge_request_qa_hold};
 
 /// Label carried by every Cassy-created QA work item.
@@ -68,11 +68,11 @@ pub fn is_non_surface_path(path: &str) -> bool {
 /// a checker, not a product surface: `scripts/visual-qa-fixtures/clip-box.html`
 /// matched `**/*.html` and gated cas-0d16 behind a QA bundle and an
 /// independent round. Only directory segments count, never the file name.
-fn fixture_directory(lower: &str) -> bool {
+pub(crate) fn fixture_directory(lower: &str) -> bool {
     let mut segments: Vec<&str> = lower.split('/').collect();
     segments.pop();
     segments.iter().any(|segment| {
-        matches!(*segment, "__fixtures__" | "fixture" | "__mocks__")
+        matches!(*segment, "fixtures" | "__fixtures__" | "fixture" | "__mocks__")
             || segment.ends_with("-fixtures")
             || segment.ends_with("_fixtures")
     })
@@ -1067,8 +1067,8 @@ pub fn validate_round_bundle(
 
 /// A `qa_record` issue the reviewer marked `"scope": "pre-existing"`: the base
 /// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
-/// finding 1). Cassy files each one as a follow-up task linked to the
-/// delivery instead of letting it reject a correct, narrow change.
+/// finding 1). It never rejects a correct, narrow change. Cassy files it as a
+/// follow-up linked to the delivery only when it clears the spawn threshold.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreExistingIssue {
     /// The ledger's finding id ("F10"), when the reviewer gave one.
@@ -1080,6 +1080,17 @@ pub struct PreExistingIssue {
     pub suggestion: String,
     /// The screenshot or file the reviewer cited, if any.
     pub evidence: String,
+    /// The steps or command, plus the wrong output observed.
+    pub repro: String,
+    /// Who acts on the wrong output today.
+    pub affected: String,
+}
+
+impl PreExistingIssue {
+    /// cas-0ad8: the spawn threshold. Anything else stays in the verdict.
+    pub fn clears_spawn_threshold(&self) -> bool {
+        !self.repro.is_empty() && !self.affected.is_empty()
+    }
 }
 
 /// One finding line in a ledger's "## Pre-existing" section (cas-2849).
@@ -1242,6 +1253,8 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
                 problem,
                 suggestion: first(&["suggestion", "fix"]),
                 evidence: first(&["file", "evidence"]),
+                repro: text("repro"),
+                affected: text("affected"),
             });
         } else {
             delivery += 1;
@@ -1350,9 +1363,18 @@ pub fn follow_up_task(
     task.scope = crate::types::Scope::Project;
     task.origin_project = delivery.origin_project.clone();
     task.description = follow_up_description(delivery, pass, issue, ledger_path);
+    task.notes = crate::mcp::tools::core::task::lifecycle::review_loop::origin_note(
+        &format!("qa:{}", delivery.id),
+        &issue.repro,
+        &issue.affected,
+    );
     task.priority = follow_up_priority(&issue.severity);
     task.risk = vec![cas_types::TaskRisk::None];
-    task.labels = vec!["qa-follow-up".to_string(), "pre-existing".to_string()];
+    task.labels = vec![
+        "qa-follow-up".to_string(),
+        "pre-existing".to_string(),
+        crate::mcp::tools::core::task::lifecycle::review_loop::FINDING_LABEL.to_string(),
+    ];
     task.external_ref = Some(ledger_path.to_string());
     task.deliverables.work_target = delivery.deliverables.work_target.clone();
     task.delivery_mode = delivery.delivery_mode;
@@ -1415,7 +1437,8 @@ with matchMedia (for example matchMedia('(forced-colors: active)').matches is tr
 - A failure the base build already has is pre-existing only when it falls outside the delivery's stated \
 purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or \
 edits. Record only those findings under Pre-existing in LEDGER.md and pass them to qa_record with \
-\"scope\": \"pre-existing\"; Cassy files them as follow-up tasks linked to the delivery.\n\
+\"scope\": \"pre-existing\". Cassy files one as a follow-up only when it also carries \
+\"repro\" (steps or command, plus the wrong output) and \"affected\" (who acts on it today); the rest stay in the verdict.\n\
 Otherwise approve, and list Normal and Note findings in the summary.";
 
 /// Brief the reviewer reads when it starts the QA work item.

@@ -85,7 +85,33 @@ impl Fixture {
         )
     }
     fn decision(&mut self, body: &str) {
+        // Follow the public refusal command, including its delivery/finding scope.
+        let head = git(self.repo.path(), &["rev-parse", "HEAD"]);
+        let scoped = self.run(&head).err().and_then(|error| {
+            let (token, reason) = body.split_once(':')?;
+            if reason.trim().is_empty() {
+                return None;
+            }
+            let marker = format!("notes=\"{token}:");
+            let command = error.split_once(&marker)?.1.split_once('"')?.0;
+            Some(format!("{token}:{}", command.replace("<reason>", reason.trim())))
+        });
+        let body = scoped.as_deref().unwrap_or(body);
         append_close_decision_note(&self.store, &mut self.task, &format!("✅ DECISION {body}"));
+    }
+    fn duplicate_family() -> Self {
+        let mut f = Self::new(&format!(
+            "{YAML}bug_families:\n  duplicate: {{title: Alternate case, tasks: [cas-5678], invariants: [INV], journeys: [signup]}}\n"
+        ));
+        write(
+            f.repo.path(),
+            "docs/qa/bug-families/duplicate.yaml",
+            "title: Existing case\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n",
+        );
+        f.base = commit(f.repo.path());
+        f.task.task_type = TaskType::Bug;
+        f.task.updated_at = f.store.update(&f.task).unwrap();
+        f
     }
 }
 
@@ -370,6 +396,7 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
         &head,
         &head,
         Some(&["README.md".into()]),
+        &head,
         None,
     )
     .unwrap();
@@ -443,30 +470,55 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
 }
 
 #[test]
-fn registry_upkeep_duplicate_base_family_refuses_with_key_and_file() {
-    const FAMILY_PATH: &str = "docs/qa/bug-families/duplicate.yaml";
-    let family = "title: Existing case\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n";
-    let mut f = Fixture::new(&format!(
-        "{YAML}bug_families:\n  duplicate: {{title: Existing case, tasks: [cas-1234], invariants: [INV], journeys: [signup]}}\n"
-    ));
-    write(f.repo.path(), FAMILY_PATH, family);
-    f.base = commit(f.repo.path());
-    f.task.task_type = TaskType::Bug;
-    f.task.updated_at = f.store.update(&f.task).unwrap();
-    // Repair the delivered registry so only the base has a duplicate key.
-    // The unchanged case must not disable the gate for this bug delivery.
+fn registry_upkeep_repaired_base_duplicate_evaluates_ownership_and_changed_case() {
+    let mut f = Fixture::duplicate_family();
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, YAML);
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    write(f.repo.path(), "src/pages/email.ts", "new entry");
+    let head = commit(f.repo.path());
+    let error = f.run(&head).unwrap_err();
+    assert!(
+        error.contains("base registry duplicate repaired")
+            && error.contains("UNOWNED USER-FACING FILE")
+            && error.contains("BUG FIX WITHOUT A CASE"),
+        "{error}"
+    );
+    // Adding an actual new case and owning the new file must satisfy both gates.
+    let repaired = YAML
+        .replace("check: Read state", "check: Read state, bug: {task: cas-1234}")
+        .replace("'src/pages/signup.ts'", "'src/pages/signup.ts', 'src/pages/email.ts'");
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &repaired);
+    let head = commit(f.repo.path());
+    assert!(f.run(&head).unwrap().join("\n").contains("base registry duplicate repaired"));
+}
+
+#[test]
+fn registry_upkeep_registry_escape_cannot_skip_g3_after_duplicate_repair() {
+    let mut f = Fixture::duplicate_family();
     write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, YAML);
     write(f.repo.path(), "src/pages/signup.ts", "another fix");
     let head = commit(f.repo.path());
+    f.decision("registry unchanged: duplicate repair reviewed");
+    let error = f.run(&head).expect_err("G1 escape cannot skip the unchanged-case gate");
+    assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    f.decision("no case: reviewed copy correction without behavior change");
+    f.run(&head).expect("explicit G3 waiver remains available after evaluation");
+}
 
-    let error = f.run(&head).expect_err("duplicate base keys must refuse, not warn");
+#[test]
+fn registry_upkeep_persistent_duplicate_refuses_even_with_registry_escape() {
+    let mut f = Fixture::duplicate_family();
+    write(f.repo.path(), "src/pages/signup.ts", "another fix");
+    let head = commit(f.repo.path());
+    let error = f.run(&head).expect_err("persistent duplicate must refuse, not warn");
     assert!(
-        error.contains("BASE JOURNEY REGISTRY INVALID")
+        error.contains("DELIVERED JOURNEY REGISTRY INVALID")
             && error.contains("duplicate bug family \"duplicate\"")
-            && error.contains(FAMILY_PATH)
-            && error.contains(crate::qa_registry::DEFAULT_PATH),
+            && error.contains("docs/qa/bug-families/duplicate.yaml"),
         "{error}"
     );
+    f.decision("registry unchanged: existing duplicate reviewed");
+    assert!(f.run(&head).unwrap_err().contains("DELIVERED JOURNEY REGISTRY INVALID"));
 }
 
 #[test]
@@ -485,7 +537,7 @@ fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case(
     std::fs::remove_file(&object).unwrap();
     let result = check(
         &mut CloseNoteTracker::new(&f.store, &f.task),
-        &mut f.task, f.repo.path(), &f.qa, &f.base, &head, &head, None, None,
+        &mut f.task, f.repo.path(), &f.qa, &f.base, &head, &head, None, &head, None,
     );
     // Restore the isolated fixture before asserting the normal case gate too.
     std::fs::write(&object, bytes).unwrap();
@@ -493,6 +545,57 @@ fn registry_upkeep_base_git_read_failure_warns_without_crediting_unchanged_case(
     assert!(warnings.iter().any(|text| text.contains("registry inputs unavailable")), "{warnings:?}");
     assert!(f.store.get(&f.task.id).unwrap().notes.contains("registry inputs unavailable"));
     assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
+}
+
+#[test]
+fn registry_upkeep_waivers_require_delivery_and_finding_cas_b7e7() {
+    for (token, gate, broken) in [("registry unchanged:", "G1", true), ("no case:", "G3", false)] {
+        let mut f = Fixture::new(YAML);
+        if broken {
+            write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "invalid: [\n");
+        } else {
+            f.task.task_type = TaskType::Bug;
+        }
+        write(f.repo.path(), "src/pages/signup.ts", "fixed");
+        let head = commit(f.repo.path());
+        let error = f.run(&head).unwrap_err();
+        let marker = format!("notes=\"{token}");
+        let scope = error.split_once(&marker).unwrap().1.split_once('"').unwrap().0;
+        let current = format!("{token}{}", scope.replace("<reason>", "reviewed finding"));
+        let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+        let wrong_finding = format!("{token} delivery={head} finding={gate}-unrelated reviewed finding");
+        for (stamp, decision) in [
+            ("2000-01-01 00:00", current.clone()),
+            (stamp.as_str(), current.replace(&head, &"0".repeat(40))),
+            (stamp.as_str(), wrong_finding),
+            (stamp.as_str(), current.replace("reviewed finding", "")),
+            (stamp.as_str(), format!("{token} generic legacy reason")),
+        ] {
+            f.task.notes = format!("[{stamp}] ✅ DECISION {decision}");
+            f.task.updated_at = f.store.update(&f.task).unwrap();
+            assert!(f.run(&head).is_err(), "{gate} must refuse stale or mismatched decision: {decision}");
+        }
+        f.decision(&format!("{token} reviewed current finding"));
+        f.run(&head).expect("current delivery and finding with a reason may be waived");
+        git(f.repo.path(), &["checkout", "-qb", "target", &f.base]);
+        write(f.repo.path(), "README.md", "unrelated target work");
+        commit(f.repo.path());
+        git(f.repo.path(), &["merge", "--no-ff", &head, "-m", "integrate delivery"]);
+        f.task.status = TaskStatus::AwaitingMerge;
+        f.task.deliverables.factory_branch_anchor = Some(head.clone());
+        f.task.deliverables.green_merge_commit = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
+        at_park(
+            &mut CloseNoteTracker::new(&f.store, &f.task),
+            &mut f.task, f._db.path(), f.repo.path(), "target", None, Some(&head), None,
+        ).expect("integration must preserve a waiver for the same parked delivery and finding");
+        git(f.repo.path(), &["checkout", "main"]);
+        f.task.status = TaskStatus::Open;
+        f.task.deliverables.factory_branch_anchor = None;
+        f.task.deliverables.green_merge_commit = None;
+        write(f.repo.path(), "src/pages/signup.ts", "revised fix");
+        let later = commit(f.repo.path());
+        assert!(f.run(&later).is_err(), "{gate} waiver must not survive a later delivery");
+    }
 }
 
 #[test]
@@ -702,6 +805,17 @@ fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
             .notes
             .contains("not blocking")
     );
+    // Parse debt may remain a warning for an unrelated feature, but a bug
+    // still needs an evaluated case gate even when it did not edit the registry.
+    let mut bug = Fixture::new("invalid: [");
+    bug.task.task_type = TaskType::Bug;
+    bug.task.updated_at = bug.store.update(&bug.task).unwrap();
+    write(bug.repo.path(), "src/pages/signup.ts", "fixed");
+    let bug_head = commit(bug.repo.path());
+    let result = bug.run(&bug_head);
+    assert!(result.as_ref().is_err_and(|error| {
+        error.contains("BUG FIX WITHOUT A CASE") && error.contains("cannot")
+    }), "untouched broken registry must not silently skip G3: {result:?}");
     write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "still: [");
     let head = commit(f.repo.path());
     assert!(
@@ -752,4 +866,52 @@ fn registry_upkeep_catalog_drift_refuses_with_missing_journey() {
             .notes
             .contains("UPKEEP OBSERVE G1")
     );
+}
+
+#[test]
+fn registry_upkeep_malformed_delivery_g1_escape_preserves_g3() {
+    let mut f = Fixture::new(YAML);
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    f.decision("registry unchanged: historical registry migration reviewed");
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, "invalid: [\n");
+    write(f.repo.path(), "src/pages/signup.ts", "fixed");
+    let head = commit(f.repo.path());
+
+    let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for an unreadable delivery");
+    assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    assert!(error.contains(&format!("note_type=decision notes=\"no case: delivery={head} finding=G3-")),
+        "G3 must print its current delivery-and-finding waiver command: {error}");
+    f.decision("registry unchanged: current registry migration reviewed");
+    assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
+    f.decision("no case: registry migration and copy correction reviewed");
+    f.run(&head).expect("explicit G3 waiver remains separate from G1");
+}
+
+#[test]
+fn registry_upkeep_existing_catalog_drift_g1_escape_preserves_g3() {
+    let mut f = Fixture::new(&format!("selection: legacy_catalog\n{YAML}"));
+    write(
+        f.repo.path(),
+        "scripts/journeys-for-diff.py",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/journeys-for-diff.py")),
+    );
+    write(
+        f.repo.path(),
+        "docs/qa/journeys.md",
+        "## hub-web\n\n### HUB-J99 · Existing drift\n\n- **Touches:** `src/pages/signup.ts`\n",
+    );
+    f.base = commit(f.repo.path());
+    f.task.task_type = TaskType::Bug;
+    f.task.updated_at = f.store.update(&f.task).unwrap();
+    f.decision("registry unchanged: historical catalog drift reviewed");
+    write(f.repo.path(), "src/pages/signup.ts", "fixed");
+    let head = commit(f.repo.path());
+
+    let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for existing catalog drift");
+    assert!(error.contains("BUG FIX WITHOUT A CASE"), "{error}");
+    f.decision("registry unchanged: current catalog drift reviewed");
+    assert!(f.run(&head).unwrap_err().contains("BUG FIX WITHOUT A CASE"));
+    f.decision("no case: copy correction reviewed despite catalog migration");
+    f.run(&head).expect("explicit G3 waiver remains separate from G1");
 }

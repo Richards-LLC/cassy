@@ -1,7 +1,7 @@
 import type { FleetAgent } from "./fleet-ops";
 import { workerProgress, workerState, releaseProgress, taskGroups, statusClass, type ProgressTask, type ReleaseEpic } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
+import { avatarLetters, providerAvatarMarkup, type AvatarState } from "./provider-mark";
 
 export interface TeamSnapshot {
   readonly roster?: readonly string[];
@@ -12,9 +12,14 @@ export interface TeamSnapshot {
   readonly focused: string | null;
   readonly supervisors: readonly string[];
   readonly asks: number;
+  /** The question itself when exactly one is open, so the control names it. */
+  readonly askLabel?: string;
   readonly stale?: string;
   readonly unavailable?: string;
 }
+
+/** The avatar dot repeats the pill's state as a mark; the pill still says it in words. */
+const LANE_DOTS: Readonly<Record<string, AvatarState>> = { Executing: "working", Merged: "working", Waiting: "idle", Stalled: "needs-you", "Budget stopped": "needs-you", "Parked for merge": "needs-you", Offline: "offline" };
 
 const STEPS = [["started", "Started"], ["pushed", "Pushed"], ["ci_green", "CI green"], ["merged", "Merged"], ["verified", "Verified"]] as const;
 
@@ -37,7 +42,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const needs = taskGroups(snapshot.tasks, snapshot.epics, workers.map(worker => worker.name), false, snapshot.supervisors, snapshot.focused)[0].tasks;
   // Heartbeats and raw activity are not rendered. They cannot remount lanes,
   // restart their animation, or replace a control under the pointer.
-  const signature = JSON.stringify([snapshot.asks, snapshot.stale, snapshot.unavailable, release, needs.map(task => [task.id, task.status]),
+  const signature = JSON.stringify([snapshot.asks, snapshot.askLabel, snapshot.stale, snapshot.unavailable, release, needs.map(task => [task.id, task.status]),
     workers.map(worker => [worker.name, worker.work, workerState(worker, snapshot.tasks), worker.agent?.harness, worker.agent?.model, worker.agent?.task_started_at, worker.agent?.recent_trail])]);
   if (root.dataset.signature === signature) { updateTeamElapsed(root); return; }
   root.dataset.signature = signature;
@@ -49,7 +54,8 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const heading = text("h2", "Your team, at a glance.");
   const notice = text("p", snapshot.stale ?? "Live staffing from this supervisor’s session", "team-freshness");
   notice.setAttribute("role", "status");
-  root.replaceChildren(heading, notice);
+  const head = document.createElement("div"); head.className = "team-head"; head.append(heading, notice);
+  root.replaceChildren(head);
   if (snapshot.unavailable) { root.append(text("p", snapshot.unavailable, "team-empty")); return; }
   root.append(releaseHeader(document, release));
   const strip = document.createElement("section"); strip.className = "team-needs"; strip.setAttribute("aria-label", "Needs you");
@@ -57,7 +63,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const action = (label: string, key: string, run: () => void): void => {
     const button = priorButtons.get(key) ?? document.createElement("button"); button.type = "button"; button.textContent = label; button.dataset.teamAction = key; button.onclick = run; strip.append(button);
   };
-  if (snapshot.asks) action(`${snapshot.asks} supervisor ask${snapshot.asks === 1 ? " or blocker" : "s or blockers"}`, "asks", openAttention);
+  if (snapshot.asks) action(snapshot.asks === 1 && snapshot.askLabel ? snapshot.askLabel : `${snapshot.asks} supervisor ask${snapshot.asks === 1 ? " or blocker" : "s or blockers"}`, "asks", openAttention);
   const blockers = needs.filter(task => statusClass(task.status) === "blocked").length;
   const merges = needs.filter(task => statusClass(task.status) === "awaiting-merge").length;
   if (blockers) action(`${blockers} blocker${blockers === 1 ? "" : "s"}`, "blockers", openProgress);
@@ -84,7 +90,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
       item.title = detail; item.setAttribute("aria-label", `${label}: ${detail}`); trail.append(item);
     }
     const avatar = document.createElement("template");
-    avatar.innerHTML = providerAvatarMarkup({ harness: worker.agent?.harness, fallback: avatarLetters(worker.name), size: "lane" });
+    avatar.innerHTML = providerAvatarMarkup({ harness: worker.agent?.harness, fallback: avatarLetters(worker.name), size: "lane", state: LANE_DOTS[state] });
     lane.append(avatar.content, identity, badge, work, elapsed, trail); list.append(lane);
   }
   root.append(list);

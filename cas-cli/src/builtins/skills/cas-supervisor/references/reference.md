@@ -78,7 +78,7 @@ The operator may choose to delete the file after saving (off by default; card ch
 
 **Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
 
-- *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
+- *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `restart_supervisor`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
 - *Servers*: `server_start`, `server_stop`, `server_list`
 - *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`

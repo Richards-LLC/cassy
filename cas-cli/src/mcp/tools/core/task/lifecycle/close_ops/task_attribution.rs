@@ -475,8 +475,8 @@ fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
 }
 
 /// The ref whose history counts as released upstream for a lane bound to
-/// `target`: `origin/<trunk>` when it exists (cas-3d57: a local trunk can be
-/// ahead of origin or moved by hand, so it never vouches for release), else
+/// `target`: `refs/remotes/origin/<trunk>` when it exists (cas-3d57: a local
+/// trunk can be ahead of origin or moved by hand, so it never vouches for release), else
 /// the local trunk in a repository without that remote ref. None when the
 /// trunk is the target itself or unresolvable.
 pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
@@ -485,9 +485,12 @@ pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
     if trunk == target || !is_safe_git_refname(&trunk) {
         return None;
     }
-    [format!("origin/{trunk}"), trunk]
-        .into_iter()
-        .find(|reference| git_ref_exists(repo, reference))
+    [
+        format!("refs/remotes/origin/{trunk}"),
+        format!("refs/heads/{trunk}"),
+    ]
+    .into_iter()
+    .find(|reference| git_ref_exists(repo, reference))
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
@@ -807,6 +810,24 @@ pub(crate) fn paths(
         .ok()?;
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
     paths_from_ranges(repo, ranges)
+}
+
+/// cas-2a65: the (base, tip) bounds of the same task-attributed delivery
+/// ranges, so a gate can judge what this task's own segments introduced
+/// (including a same-task predecessor merge) without crediting target-sync
+/// or another task's merged work.
+pub(crate) fn range_bounds(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<(String, String)>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    Some(ranges.into_iter().map(|range| (range.base, range.tip)).collect())
 }
 
 /// cas-2d27: without a task delivery tip, a no-code supervisor close must

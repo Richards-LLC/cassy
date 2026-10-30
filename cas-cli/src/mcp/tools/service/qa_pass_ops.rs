@@ -22,6 +22,7 @@ impl CasService {
             return Err(reject("requires qa.mode=batch".into()));
         }
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
+            required(req.ledger_author.as_deref(), "ledger_author")?,
             req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
             required(req.staging_sha.as_deref(), "staging_sha")?,
             required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
@@ -29,9 +30,17 @@ impl CasService {
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={}",
-            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id);
+        // cas-6048: the peer machine's close gate learns it through task sync.
+        crate::qa_pass::sync::record_batch(&self.inner.cas_root, &receipt)
+            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;
+        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={} author={} ({})",
+            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
+            receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
         for task_id in receipt.task_heads.keys() {
+            let note = match receipt.author_overrides.get(task_id) {
+                Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
+                None => note.clone(),
+            };
             if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }
@@ -553,6 +562,7 @@ impl CasService {
             }
         };
         let mut tracked = Vec::new();
+        let mut below_threshold = Vec::new();
         for issue in issues {
             // cas-2849: a finding that names its existing follow-up is linked,
             // not filed again.
@@ -564,6 +574,11 @@ impl CasService {
                 let _ = store.add_dependency(&related);
                 let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
                 tracked.push(format!("{label} by {existing}"));
+                continue;
+            }
+            if !issue.clears_spawn_threshold() {
+                let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
+                below_threshold.push(label.to_string());
                 continue;
             }
             let id = match store.generate_id() {
@@ -592,6 +607,9 @@ impl CasService {
         }
         let mut out = String::new();
         if !filed.is_empty() {
+            if let Some(epic) = epic.as_ref() {
+                crate::mcp::tools::core::task::lifecycle::review_loop::notify_when_tripped(&self.inner.cas_root, &epic.id);
+            }
             let note = format!(
                 "[{}] Independent QA round {} recorded {} pre-existing issue(s) as follow-ups: {} (not counted against this delivery; ledger {ledger_path})",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -605,6 +623,12 @@ impl CasService {
             out.push_str(&format!(
                 "\nPre-existing follow-ups filed (related to {delivery_id}): {}.",
                 filed.join(", ")
+            ));
+        }
+        if !below_threshold.is_empty() {
+            out.push_str(&format!(
+                "\nLeft in the verdict, below the spawn threshold (no repro or affected): {}.",
+                below_threshold.join("; ")
             ));
         }
         if !tracked.is_empty() {

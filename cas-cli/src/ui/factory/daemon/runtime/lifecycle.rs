@@ -3642,7 +3642,10 @@ impl FactoryDaemon {
                     let outcome = self.apply_spawn_queue_reset(&request);
                     loop_progress.record_reset(outcome);
                 }
+                self.take_supervisor_restart_request();
+                crate::qa_batch_overdue::tick(self.app.cas_dir());
             }
+            self.advance_supervisor_restart().await;
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
             // Completion-driven acceptance; the ingress owns the 100ms cadence.

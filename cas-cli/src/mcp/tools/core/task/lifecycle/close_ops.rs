@@ -6785,6 +6785,16 @@ impl CasCore {
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
     ) -> Option<i64> {
+        self.sibling_lease_start(task_store, task).map(|(_, claimed)| claimed.timestamp())
+    }
+
+    // Retain the exact claim and task identity for diagnostics; second-rounded
+    // attribution cutoffs cannot distinguish two successive leases that second.
+    fn sibling_lease_start(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+    ) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
         let assignee = task.assignee.as_deref()?;
         let agent_store = self.open_agent_store().ok()?;
         let claims = |task_id: &str| -> Vec<chrono::DateTime<chrono::Utc>> {
@@ -6809,10 +6819,51 @@ impl CasCore {
                         .as_deref()
                         .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
             })
-            .flat_map(|other| claims(&other.id))
-            .filter(|claimed| own_latest.is_none_or(|own| *claimed > own))
-            .min()
-            .map(|claimed| claimed.timestamp())
+            .flat_map(|other| claims(&other.id).into_iter().map(move |claimed| (other.id.clone(), claimed)))
+            .filter(|(_, claimed)| own_latest.is_none_or(|own| *claimed > own))
+            .min_by_key(|(_, claimed)| *claimed)
+    }
+
+    /// Identify next-task work from the rejected boundary's introduced commits
+    /// or the same lease cutoff used by attribution, never from status alone.
+    fn refused_advance_sibling(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        offending: &str,
+        foreign_since: Option<i64>,
+    ) -> Option<String> {
+        let assignee = task.assignee.as_deref()?;
+        let siblings: Vec<_> = task_store.list(None).ok()?.into_iter().filter(|other| {
+            other.id != task.id && other.status != TaskStatus::Closed
+                && other.assignee.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+        }).collect();
+        // Include side-parent work introduced by a foreign merge whose own
+        // subject may contain no task id. Earlier upstream imports are excluded.
+        let messages = git_stdout_lines(repo_path, &[
+            "log", "--format=%B%x1e", &format!("{offending}^1..{offending}"), "--",
+        ]).unwrap_or_default().join("\n");
+        let owners: Vec<_> = siblings.iter().filter(|other| {
+            messages.split('\u{1e}').any(|message| {
+                message_claims_other_task(message, Some(&task.id))
+                    && message_references_task(message, &other.id)
+            }) || other.deliverables.factory_branch_anchor.as_deref() == Some(offending)
+        }).collect();
+        if owners.len() == 1 {
+            return Some(owners[0].id.clone());
+        }
+        if !owners.is_empty() {
+            return None;
+        }
+        let since = foreign_since?;
+        let epoch = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", offending]).ok()?
+            .first()?.parse::<i64>().ok()?;
+        if epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS) {
+            return None;
+        }
+        let (owner, claimed) = self.sibling_lease_start(task_store, task)?;
+        (claimed.timestamp() == since).then_some(owner)
     }
 
     /// cas-00eb (cas-f1f4 regression): a recorded anchor may only move along
@@ -6938,7 +6989,7 @@ impl CasCore {
         )
     }
 
-    fn advance_commit_time_anchor_before_park_with_receipt(
+    pub(crate) fn advance_commit_time_anchor_before_park_with_receipt(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
@@ -6969,21 +7020,21 @@ impl CasCore {
             return parking;
         };
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
+        // GH #1389: a final target-sync merge can add no non-merge task
+        // subjects after the commit-time anchor. A worker's explicit receipt
+        // still identifies that pushed final branch tip; the attribution
+        // checks below must continue to vet its first-parent path, imported
+        // target and sibling lease boundary.
+        let named_final_tip = explicit_receipt
+            .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
+            .is_some_and(|receipt| receipt == tip)
+            && measured_branch.is_some_and(|branch| {
+                task.assignee.as_deref().is_some_and(|assignee| {
+                    branch.strip_prefix("origin/").unwrap_or(branch)
+                        == close_measured_factory_branch(repo_path, task, assignee)
+                })
+            });
         let advance = if git_commit_is_ancestor(repo_path, recorded, &tip) {
-            // GH #1389: a final target-sync merge can add no non-merge task
-            // subjects after the commit-time anchor. A worker's explicit
-            // receipt still identifies that pushed final branch tip; the
-            // attribution check below must continue to vet its first-parent
-            // path, imported target and sibling lease boundary.
-            let named_final_tip = explicit_receipt
-                .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
-                .is_some_and(|receipt| receipt == tip)
-                && measured_branch.is_some_and(|branch| {
-                    task.assignee.as_deref().is_some_and(|assignee| {
-                        branch.strip_prefix("origin/").unwrap_or(branch)
-                            == close_measured_factory_branch(repo_path, task, assignee)
-                    })
-                });
             self.tip_is_own_task_lineage_with_receipt(
                 task_store,
                 task,
@@ -7003,6 +7054,8 @@ impl CasCore {
         } else {
             self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &tip, &target)
                 || self.rebased_tip_supersedes_anchor(task_store, task, repo_path, &tip, &target)
+                || (named_final_tip
+                    && self.receipt_tip_supersedes_foreign_anchor(task_store, task, repo_path, &tip, &target))
         };
         if !advance {
             return parking;
@@ -7123,20 +7176,51 @@ impl CasCore {
         {
             return false;
         }
-        task_store.list(None).is_ok_and(|others| {
-            !others.iter().any(|other| {
-                other.id != task.id
-                    && other.status != TaskStatus::Closed
-                    && other
-                        .deliverables
-                        .factory_branch_anchor
-                        .as_deref()
-                        .is_some_and(|anchor| {
-                            git_commit_is_ancestor(repo_path, anchor, tip)
-                                && !git_commit_is_ancestor(repo_path, anchor, &base)
-                        })
-            })
-        })
+        no_other_open_anchor_between(task_store, task, repo_path, &base, tip)
+    }
+
+    /// cas-3d70: a commit-time anchor stamped from a separate helper branch is
+    /// on neither this task's branch nor origin's copy of it, and stays on that
+    /// helper, so neither recovery above applies. The worker's explicit receipt
+    /// naming the exact current tip of its own measured branch (checked by the
+    /// caller) rebinds to that tip when the tip's first-parent lineage since it
+    /// forked from the target is this task's: each commit is a target sync
+    /// merge or names no other task, none lies after a sibling's lease, and no
+    /// other open task anchors inside it. Otherwise the stale anchor is kept and
+    /// the refusal would repeat the same instruction forever.
+    fn receipt_tip_supersedes_foreign_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        tip: &str,
+        target: &str,
+    ) -> bool {
+        if !is_safe_git_refname(target) || git_commit_is_ancestor(repo_path, tip, target) {
+            return false;
+        }
+        let Some(first_own) = git_stdout_lines(
+            repo_path,
+            &["rev-list", "--first-parent", tip, &format!("^{target}"), "--"],
+        )
+        .ok()
+        .and_then(|commits| commits.last().cloned())
+        else {
+            return false;
+        };
+        let Some(fork) = resolve_branch_sha(repo_path, &format!("{first_own}^1"))
+            .filter(|fork| git_commit_is_ancestor(repo_path, fork, target))
+        else {
+            return false;
+        };
+        parked_anchor_advance_with_target_is_attributable(
+            repo_path,
+            &fork,
+            tip,
+            &task.id,
+            self.sibling_lease_boundary(task_store, task),
+            target,
+        ) && no_other_open_anchor_between(task_store, task, repo_path, &fork, tip)
     }
 
     pub(crate) fn advance_awaiting_merge_anchor(
@@ -9160,6 +9244,44 @@ impl CasCore {
                             }
                         }
                     }
+                    // cas-a58cc: a rejected continuation must not look like
+                    // a successful re-park of the pushed tip. Shared advance
+                    // callers still retain their silent attribution fence.
+                    if task.status == TaskStatus::AwaitingMerge
+                        && let (Some(recorded), Some(tip)) = (
+                            task.deliverables.factory_branch_anchor.as_deref(), anchor.as_deref(),
+                        )
+                        && tip != recorded
+                        && park_anchor.as_deref() == Some(recorded)
+                    {
+                        let foreign_since = self.sibling_lease_boundary(task_store.as_ref(), &task);
+                        let (target, _) = preferred_live_target_ref_for_delivery(
+                            &close_project_root, &resolved_parent_branch, task.delivery_mode,
+                        );
+                        let offending = git_stdout_lines(
+                            &close_project_root,
+                            &["rev-list", "--first-parent", "--reverse", &format!("{recorded}..{tip}")],
+                        ).unwrap_or_default().into_iter().find(|commit| {
+                            // Diagnose history independently of the global
+                            // active-sibling fence on actual anchor advances.
+                            !parked_anchor_advance_with_target_is_attributable(
+                                &close_project_root, recorded, commit, &task.id, foreign_since, &target,
+                            )
+                        }).unwrap_or_else(|| tip.to_string());
+                        let remedy = self.refused_advance_sibling(
+                            task_store.as_ref(), &task, &close_project_root, &offending, foreign_since,
+                        ).map(|sibling| format!(
+                            "The advance belongs to task {sibling}. Deliver that task on its own branch; the parked delivery remains valid."
+                        )).unwrap_or_else(||
+                            "Ask the supervisor to request changes and review the replacement delivery.".to_string()
+                        );
+                        if merge_conflicted && !task.deliverables.merge_conflicted {
+                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                        }
+                        return Ok(Self::tool_error(format!(
+                            "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored pushed tip {tip}. No anchor or QA round changed. {remedy}",
+                        )));
+                    }
                     // Focused-test receipts at this
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
@@ -9167,9 +9289,9 @@ impl CasCore {
                     if (task.status != TaskStatus::AwaitingMerge
                         || park_anchor != task.deliverables.factory_branch_anchor)
                         && let Some(tip) = park_anchor.as_deref()
-                        && let Some(paths) = commit_receipt_window.as_ref().and_then(|window| {
+                        && let Some(window) = commit_receipt_window.as_ref()
+                        && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
-                        })
                         && let Some(refusal) = receipt_scope::park_refusal(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
@@ -9177,6 +9299,9 @@ impl CasCore {
                             &paths,
                             tip,
                             &resolved_parent_branch,
+                            task_attribution::range_bounds(
+                                &close_project_root, &resolved_parent_branch, window, Some(tip),
+                            ).as_deref(),
                         )
                     {
                         return Ok(Self::tool_error(refusal));
@@ -9462,10 +9587,29 @@ impl CasCore {
                     "close verification not sampled (one task in four runs it)",
                 )
             });
+        // cas-5207: a delivery that changes nothing that runs has no independent
+        // verifier. An existing dispatch or verdict keeps its authority, and the
+        // delivery, CI and QA gates all sit outside this decision.
+        let verification_tier = (verification_enabled
+            && !skip_verification
+            && !depth_light
+            && close_disposition.requires_delivery_gates())
+        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
+        .flatten();
+        let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
+            decision.tier == super::review_tier::VerificationTier::Mechanical
+        }) && no_verification_on_record;
+        if let Some(decision) = verification_tier.as_ref()
+            && (decision.tier != super::review_tier::VerificationTier::Mechanical || tier_skips_verifier)
+            && !task.notes.contains(&decision.note())
+        {
+            close_notes.record(&mut task, &decision.note());
+        }
         if verification_enabled
             && !skip_verification
             && !depth_light
             && !rapid_unsampled
+            && !tier_skips_verifier
         {
             let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 
@@ -12130,10 +12274,16 @@ impl CasCore {
                 .as_deref()
                 .or(delivery_receipt)
                 .unwrap_or("none");
-            let summary = format!(
+            let mut summary = format!(
                 "Closed task: {}; delivery {delivery}; target {resolved_parent_branch}; next: none.",
                 task.id,
             );
+            for note in [verification_note.trim(), worktree_msg.trim()] {
+                if !note.is_empty() {
+                    summary.push('\n');
+                    summary.push_str(note);
+                }
+            }
             if let Ok(compact) = gate_text::compact_receipt(
                 &self.cas_root,
                 configured_artifacts_root.as_deref(),
@@ -24605,10 +24755,34 @@ pub(crate) fn parked_anchor_advance_is_attributable(
 }
 
 /// cas-9668: an epic sync imports sibling commits without transferring the
-/// task's delivery identity. Only side parents already on the declared target
-/// may bypass the foreign-task check; direct worker commits and lease cutoffs
-/// still apply. The recorded anchor must lie on the first-parent chain, so a
+/// task's delivery identity. Each side parent must belong to the declared
+/// target or released trunk to bypass the foreign-task check; direct commits
+/// and lease cutoffs still apply. The recorded anchor must lie on the first-parent chain, so a
 /// supervisor's integration merge cannot become a worker continuation.
+/// No other open task's delivery anchor lies in `base..tip`.
+fn no_other_open_anchor_between(
+    task_store: &dyn cas_store::TaskStore,
+    task: &Task,
+    repo_path: &std::path::Path,
+    base: &str,
+    tip: &str,
+) -> bool {
+    task_store.list(None).is_ok_and(|others| {
+        !others.iter().any(|other| {
+            other.id != task.id
+                && other.status != TaskStatus::Closed
+                && other
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .is_some_and(|anchor| {
+                        git_commit_is_ancestor(repo_path, anchor, tip)
+                            && !git_commit_is_ancestor(repo_path, anchor, base)
+                    })
+        })
+    })
+}
+
 fn parked_anchor_advance_with_target_is_attributable(
     repo_path: &std::path::Path,
     recorded: &str,
@@ -24671,14 +24845,13 @@ fn parked_anchor_advance_with_target_is_attributable(
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
     }) && commits.iter().all(|(parents, epoch, message)| {
-        let imports_from = |upstream: &str| {
-            parents
-                .iter()
-                .skip(1)
-                .all(|parent| git_commit_is_ancestor(repo_path, parent, upstream))
-        };
         let target_import = parents.len() > 1
-            && (imports_from(target_ref) || released.as_deref().is_some_and(imports_from));
+            && parents.iter().skip(1).all(|parent| {
+                git_commit_is_ancestor(repo_path, parent, target_ref)
+                    || released.as_deref().is_some_and(|upstream| {
+                        git_commit_is_ancestor(repo_path, parent, upstream)
+                    })
+            });
         (target_import
             || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
             && foreign_since
@@ -29711,6 +29884,9 @@ esac
         let closed = text(response);
         assert!(!is_error, "{closed}");
         assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
+        eprintln!("real close reply: {} chars\n{closed}", closed.chars().count());
+        assert!(closed.contains("Worktree still exists"), "{closed}");
+
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
     }
 
@@ -31556,7 +31732,15 @@ esac
     /// unreleased branch carrying another task's work is still refused.
     #[test]
     fn merging_released_main_into_an_epic_lane_is_upstream_but_unreleased_work_is_foreign_cas_985f() {
-        for (merged, foreign) in [("main", false), ("factory/other-cas-0e2b", true)] {
+        let mut failures = Vec::new();
+        for (merged, foreign, shadow, octopus) in [
+            ("main", false, false, false),
+            ("factory/other-cas-0e2b", true, false, false),
+            // cas-77b81: a branch cannot impersonate the released remote.
+            ("factory/other-cas-0e2b", true, true, false),
+            // Each side parent may independently belong to target or trunk.
+            ("main", false, false, true),
+        ] {
             let dir = init_factory_repo_with_parent("worker", "main");
             let p = dir.path();
             std::fs::create_dir_all(p.join(".cas")).unwrap();
@@ -31577,8 +31761,22 @@ esac
             std::fs::write(p.join("unreleased.rs"), "// unreleased\n").unwrap();
             git(p, &["add", "unreleased.rs"]);
             git(p, &["commit", "-q", "-m", "fix(cas-0e2b): unreleased work"]);
+            if shadow {
+                git(p, &["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+                git(p, &["branch", "origin/main", "factory/other-cas-0e2b"]);
+            }
+            if octopus {
+                git(p, &["checkout", "-q", "epic/next"]);
+                commit_local(p, "epic.rs", "fix(cas-0e3b): integrated epic work");
+            }
             git(p, &["checkout", "-q", "factory/worker-cas-test1"]);
-            git(p, &["merge", "-q", "--no-ff", "--no-edit", merged]);
+            if octopus {
+                git(p, &["merge", "-q", "--no-ff", "--no-edit", "epic/next", "main"]);
+                let parents = git_stdout_lines(p, &["rev-list", "--parents", "-n", "1", "HEAD"]).unwrap();
+                assert_eq!(parents[0].split_whitespace().count(), 4);
+            } else {
+                git(p, &["merge", "-q", "--no-ff", "--no-edit", merged]);
+            }
             let target = cas_types::WorkTarget {
                 repo_selector: "project:cas985f".into(), target_branch: "epic/next".into(),
             };
@@ -31595,9 +31793,15 @@ esac
                 Err(error) if foreign => {
                     assert!(error.contains("foreign commit") && error.contains("cas-0e2b"), "{error}");
                 }
-                other => panic!("merging {merged}: unexpected {:?}", other.map(|d| d.map(|d| d.commits))),
+                other => failures.push(format!("merging {merged}, shadow={shadow}: unexpected {:?}", other.map(|d| d.map(|d| d.commits)))),
+            }
+            if octopus && !parked_anchor_advance_with_target_is_attributable(
+                p, &own, &head_sha(p), &task.id, None, "epic/next",
+            ) {
+                failures.push("mixed epic/main octopus sync must retain the parked delivery identity".into());
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// Without a per-task branch the worker's own branch is measured, as

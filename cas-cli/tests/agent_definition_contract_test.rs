@@ -84,6 +84,10 @@ fn verifier_mirrors_document_the_current_close_contract() {
             "{path} is {} bytes; keep it under 15 KB and move procedure to references",
             body.len()
         );
+        // cas-5207: the operator's spawn threshold has to survive any trim for budget.
+        for rule in ["Never file or request a task", "reproduced defect affecting someone today", "`repro` and `affected`"] {
+            assert!(body.contains(rule), "{path} lost the spawn threshold: {rule}");
+        }
         // Audit L2 P1-59: the verifier reads and records; it never edits.
         let frontmatter = &body[..body[3..].find("---").unwrap() + 3];
         let tools = frontmatter

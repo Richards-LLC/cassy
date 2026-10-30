@@ -14,7 +14,18 @@ const RECEIPT_CAP: usize = 256;
 /// last activity. Commander polls one reference for at most 95 seconds.
 const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
 #[derive(Default)]
-pub(crate) struct CommandState { records: HashMap<Owner, Record> }
+pub(crate) struct CommandState {
+    records: HashMap<Owner, Record>,
+    /// A deliberate restart between the kill and the replacement pane.
+    restart: Option<PendingRestart>,
+}
+struct PendingRestart { killed_at: Instant, exited: bool }
+/// Replace the pane this long after the kill even if no exit was reported: a
+/// descendant holding the PTY open must not leave the factory without a supervisor.
+const RESTART_EXIT_DEADLINE: Duration = Duration::from_secs(10);
+/// PTY silence required before a command is typed. Codex hides its busy text
+/// while it streams a reply, so an idle-looking screen alone is insufficient.
+const COMMAND_SETTLE: Duration = Duration::from_secs(2);
 impl CommandState {
     /// Drop finished receipts past the replay window. An in-flight command or
     /// open chooser is never evicted, and nothing inside the window is, so a
@@ -37,6 +48,86 @@ struct Record {
     last_key: Option<Key>,
 }
 
+impl FactoryDaemon {
+    /// Apply `factory action=restart_supervisor` (cas-b492): the daemon owns the
+    /// supervisor's PTY, so it ends that pane and starts another while the loop
+    /// and worker panes keep running. SIGKILL is deliberate. A SessionEnd hook
+    /// would announce the supervisor's epics as orphaned and race its successor,
+    /// whose registration already records this session's end and retires its row.
+    pub(super) fn take_supervisor_restart_request(&mut self) {
+        let Some(request) = crate::factory_daemon_health::take_supervisor_restart(self.app.cas_dir(), &self.session_name, Utc::now()) else { return };
+        if self.supervisor_commands.restart.is_some() { return; }
+        let name = self.app.supervisor_name().to_string();
+        if let Err(error) = self.app.mux.preflight_supervisor_restart(self.app.worker_names()) {
+            let detail = format!("Supervisor restart refused; this session keeps running: {error}");
+            tracing::warn!(requester = %request.requester, "{detail}");
+            let (root, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+            super::store_worker::submit_write("supervisor restart refusal", move || {
+                let queue = crate::store::open_prompt_queue_store(&root).map_err(|error| error.to_string())?;
+                queue.enqueue_with_session("daemon", &name, &detail, &session).map(|_| ()).map_err(|error| error.to_string())
+            });
+            return;
+        }
+        let Some(pane) = self.app.mux.get_mut(&name).filter(|pane| !pane.has_exited()) else { return };
+        tracing::info!(requester = %request.requester, "Supervisor restart requested; replacing its pane");
+        pane.kill_tree_force();
+        self.supervisor_commands.restart = Some(PendingRestart { killed_at: Instant::now(), exited: false });
+    }
+
+    /// Whether this supervisor exit belongs to a requested restart. An exit that
+    /// does not is the factory's shutdown signal.
+    pub(super) fn absorb_supervisor_restart_exit(&mut self) -> bool {
+        let Some(pending) = self.supervisor_commands.restart.as_mut() else { return false };
+        pending.exited = true;
+        true
+    }
+
+    /// Start the replacement once the old pane has gone. The armed state clears
+    /// first, so any later exit of the new pane is ordinary. If it cannot start,
+    /// the factory stops as for any supervisor death: nothing would drive workers.
+    pub(super) async fn advance_supervisor_restart(&mut self) {
+        let Some(pending) = &self.supervisor_commands.restart else { return };
+        if !pending.exited && pending.killed_at.elapsed() < RESTART_EXIT_DEADLINE { return; }
+        self.supervisor_commands.restart = None;
+        if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) { return; }
+        let name = self.app.supervisor_name().to_string();
+        let lead = uuid::Uuid::new_v4().to_string();
+        if let Some(teams) = &self.teams && let Err(error) = teams.set_lead_session(&lead) {
+            tracing::warn!(%error, "could not record the restarted supervisor as team lead");
+        }
+        match self.app.restart_supervisor_pane(&lead) {
+            Ok(previous) => {
+                // Dropping a PTY can stall on its terminal (GH #1363).
+                if let Some(previous) = previous { tokio::task::spawn_blocking(move || drop(previous)); }
+                self.pane_buffers.remove(&name);
+                self.forget_probe_pane(&name);
+                for record in self.supervisor_commands.records.values_mut() {
+                    if record.receipt.phase == Phase::Submitted || record.receipt.interactive {
+                        record.receipt.phase = Phase::Unconfirmed;
+                        record.receipt.interactive = false;
+                        record.receipt.detail = "The supervisor restarted before this command was confirmed. Do not resend automatically.".into();
+                    }
+                }
+                self.gui_notify_pane_added(&name, cas_mux::PaneKind::Supervisor);
+                self.send_state_update();
+                if self.app.record_enabled() && let Err(error) = self.app.start_recording_for_pane(&name).await {
+                    tracing::error!(%error, "could not start recording the restarted supervisor");
+                }
+                // Building the intro reads the context bundle; keep it off the loop.
+                let (root, cli, workers, session) = (self.app.cas_dir().to_path_buf(), self.app.harness_for(&name), self.app.worker_names().to_vec(), self.session_name.clone());
+                tokio::task::spawn_blocking(move || crate::ui::factory::app::queue_supervisor_restart_prompt(&root, &name, cli, &workers, &lead, &session));
+                tracing::info!(workers = self.app.worker_names().len(), "Supervisor restarted; workers kept running");
+            }
+            Err(error) => {
+                let detail = format!("Supervisor restart could not start its replacement; shutting the factory down: {error}");
+                tracing::error!("{detail}");
+                self.app.set_error(detail);
+                self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 fn screen(pane: &cas_mux::Pane) -> String {
     (0..pane.rows()).filter_map(|row| pane.dump_row(row).ok()).collect::<Vec<_>>().join("\n")
 }
@@ -50,7 +141,7 @@ fn idle_prompt(text: &str) -> bool {
         && !lower.contains("compacting conversation") && !lower.contains("esc to cancel")
         && !text.lines().any(|line| {
             let line = line.trim_start();
-            line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '*'])
+            line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '·', '*'])
                 && (line.contains('…') || line.contains("..."))
         })
         && text.lines().rev().take(12).any(|line| {
@@ -176,6 +267,11 @@ fn hook_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, 
 }
 
 impl FactoryDaemon {
+    /// The poll loop's silence clock, plus no bytes it has not yet sampled.
+    fn output_settled(&self, pane: &cas_mux::Pane) -> bool {
+        self.last_pane_output_bytes.get(pane.id()) == Some(&pane.bytes_received())
+            && self.pane_silent_since.get(pane.id()).is_some_and(|since| since.elapsed() >= COMMAND_SETTLE)
+    }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
         let device = attribution.device_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("missing command owner"))?;
@@ -200,7 +296,7 @@ impl FactoryDaemon {
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
             let before = screen(pane);
             anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
-                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before),
+                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&before) && self.output_settled(pane),
                 "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
             let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
@@ -292,6 +388,12 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The daemon's poll loop samples PTY silence; these fixtures do not run it.
+    fn quiet_for(daemon: &mut FactoryDaemon, name: &str, quiet: Duration) {
+        let bytes = daemon.app.mux.pane_bytes_received(name).unwrap();
+        daemon.last_pane_output_bytes.insert(name.into(), bytes);
+        daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
@@ -301,6 +403,7 @@ mod tests {
         let name = daemon.app.supervisor_name().to_owned();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let request = Request::Run { command: Command::Model, confirmed: false };
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H✢ Flambéing… (7s · ↓ 633 tokens)\r\n❯".as_bytes()).unwrap();
         assert!(daemon.dispatch_supervisor_command(request.clone(), "cmd-model".into(), owner.clone()).await.is_err());
         assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
@@ -342,6 +445,12 @@ mod tests {
         let name = codex.app.supervisor_name().to_owned();
         codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        // Codex streams under an idle-looking prompt with no busy text (cas-1a93).
+        quiet_for(&mut codex, &name, Duration::ZERO);
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert!(codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-streaming".into(), owner.clone()).await.is_err());
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input, "a streaming turn must receive no command");
+        quiet_for(&mut codex, &name, COMMAND_SETTLE);
         let store = crate::store::open_agent_store(codex.app.cas_dir()).unwrap();
         let mut agent = store.get("single-sup").unwrap();
         agent.metadata.insert("supervisor_model".into(), "old-model".into());
@@ -386,6 +495,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture().await;
         let name = daemon.app.supervisor_name().to_owned();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let usage = Request::Run { command: Command::Usage, confirmed: false };
@@ -453,6 +563,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = daemon.app.supervisor_name().to_owned();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1HREADY\r\n›".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let submitted = daemon.dispatch_supervisor_command(
@@ -475,6 +586,7 @@ mod tests {
         assert!(idle_prompt("❯ Try \"fix lint errors\"\n? for shortcuts"));
         assert!(!idle_prompt("✽ Compacting conversation… (14s · ↓ 975 tokens)\n❯"));
         assert!(!idle_prompt("✢ Flambéing… (7s · ↓ 633 tokens)\n❯"));
+        assert!(!idle_prompt("· Flambéing… (8s · ↓ 640 tokens)\n❯"), "Claude's `·` spinner frame is busy (cas-1a93)");
         assert!(idle_prompt("✻ Cooked for 20s · done 11:21 PM\n❯"));
         assert!(!idle_prompt("Working · esc to interrupt\n❯"));
         assert!(!idle_prompt("Select model\n❯"));

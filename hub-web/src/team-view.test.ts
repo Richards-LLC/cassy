@@ -18,6 +18,7 @@ it("joins the selected session to real receipts, keeps focus on live updates and
   expect(root.textContent).toContain("codex · gpt-6.1");
   expect(root.textContent).not.toMatch(/SECRET RAW|outsider/);
   expect(root.querySelectorAll('[data-reported="true"]')).toHaveLength(1);
+  expect(root.querySelector('.team-lane[data-worker="lark"] .supervisor-state')?.classList.contains("working")).toBe(true);
   updateTeamElapsed(root, Date.parse("2026-10-28T12:42:00Z"));
   expect(root.querySelector(".team-elapsed")?.textContent).toBe("42m on task");
   const initialLane = root.querySelector(".team-lane");
@@ -29,6 +30,8 @@ it("joins the selected session to real receipts, keeps focus on live updates and
   expect(root.querySelector(".team-state")?.textContent).toBe("Waiting");
   expect((document.activeElement as HTMLElement).dataset.teamAction).toBe("merges");
   root.querySelector<HTMLButtonElement>('[data-team-action="asks"]')!.click(); expect(questions).toHaveBeenCalledOnce();
+  renderTeam(root, { ...snapshot, askLabel: "Ship it today?" }, questions, progress);
+  expect(root.querySelector('[data-team-action="asks"]')?.textContent).toBe("Ship it today?");
   renderTeam(root, { ...snapshot, asks: 0, tasks: [snapshot.tasks[0]] }, questions, progress);
   expect(document.activeElement).toBe(root);
   root.remove();

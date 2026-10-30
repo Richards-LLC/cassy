@@ -3508,10 +3508,14 @@ pub(crate) fn restart_stale_hub(
     // not running at all, still gets the new policy on this update.
     let transport_mode = host_transport_mode()?;
     let tailscale_serve = transport_mode.publishes();
+    // cas-93356: this update installed a newer release, which supersedes a hotfix pin.
+    let pin_advanced = super::hub_service::advance_managed_hub_pin()
+        .context("cannot advance the hub pin; see `scripts/hub-pin.sh inspect` before retrying `cas update`")?;
     // Never restart through a definition we could not validate or refresh:
     // the manager would simply launch its old candidate again.
     let service_changed = super::hub_service::refresh_installed_service(tailscale_serve)
-        .context("cannot refresh hub service; run `cas hub service install` before retrying `cas update`")?;
+        .context("cannot refresh hub service; run `cas hub service install` before retrying `cas update`")?
+        || pin_advanced;
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
     let holder = paths.lock_holders().into_iter().next();

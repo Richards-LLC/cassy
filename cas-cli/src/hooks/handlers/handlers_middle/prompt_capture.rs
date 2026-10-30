@@ -73,10 +73,28 @@ pub(crate) fn is_harness_prompt(prompt: &str) -> bool {
         "<task-notification",
         "<teammate-message",
         "<system-reminder",
+        // cas-7cd1: Codex records its own launch context as user turns.
+        "<environment_context>",
+        "# AGENTS.md instructions for ",
     ];
     prompt.lines().any(|line| {
         let line = line.trim_start();
         MACHINE_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
+            || is_daemon_pane_delivery(line)
+    })
+}
+
+/// cas-7cd1: the factory daemon types agent messages into a pane as
+/// `Message from <sender>: [cas #…]` (`delivery::attribute_for_pty`), and its
+/// lifecycle wakes as `Message from lifecycle-…: …`. Neither is the operator.
+fn is_daemon_pane_delivery(line: &str) -> bool {
+    line.strip_prefix("Message from ").is_some_and(|rest| {
+        rest.starts_with("lifecycle")
+            || rest.split_once(": ").is_some_and(|(sender, body)| {
+                !sender.is_empty()
+                    && !sender.contains(char::is_whitespace)
+                    && body.starts_with("[cas #")
+            })
     })
 }
 

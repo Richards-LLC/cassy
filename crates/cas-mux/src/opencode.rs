@@ -216,6 +216,16 @@ fn render_agent(role: OpenCodeRole, spec: &OpenCodeProjectionSpec) -> Value {
     ] {
         permission.insert(tool.to_string(), Value::String(decision.to_string()));
     }
+    if role == OpenCodeRole::Worker {
+        // `deny` hides a skill from the listing and the skill tool; its
+        // `--command` route still expands, and `skill action=show` serves it.
+        let mut skill = Map::new();
+        skill.insert("*".to_string(), Value::String("deny".to_string()));
+        for name in cas_pty::WORKER_ROLE_SKILLS {
+            skill.insert((*name).to_string(), Value::String("allow".to_string()));
+        }
+        permission.insert("skill".to_string(), Value::Object(skill));
+    }
     agent.insert(
         "permission".to_string(),
         serde_json::to_value(permission).expect("permission config is serializable"),
@@ -702,6 +712,11 @@ mod tests {
             "bash": "allow", "edit": "allow", "external_directory": "deny", "glob": "allow",
             "grep": "allow", "question": "deny", "read": "allow"
         });
+        // A worker's listing is scoped; the supervisor keeps the full catalog.
+        let mut worker_permissions = json["agent"]["cassy-worker"]["permission"].clone();
+        assert_eq!(worker_permissions["skill"]["*"], "deny");
+        worker_permissions.as_object_mut().unwrap().remove("skill");
+        assert_eq!(worker_permissions, permissions, "worker permissions");
         for agent in ["cassy-worker", "cassy-supervisor"] {
             assert_eq!(json["agent"][agent]["mode"], "primary", "{agent} mode");
             assert_eq!(
@@ -709,10 +724,9 @@ mod tests {
                 "{agent} model"
             );
             assert_eq!(json["agent"][agent]["variant"], "xhigh", "{agent} variant");
-            assert_eq!(
-                json["agent"][agent]["permission"], permissions,
-                "{agent} permissions"
-            );
+            if agent == "cassy-supervisor" {
+                assert_eq!(json["agent"][agent]["permission"], permissions, "{agent} permissions");
+            }
             assert!(
                 !json["agent"][agent]["prompt"]
                     .as_str()

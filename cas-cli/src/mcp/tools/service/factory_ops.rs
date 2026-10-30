@@ -1944,8 +1944,8 @@ fn format_assigned_task_info(
             // relabel any status added to the parked set later.
             let (label, waiting) = match status {
                 cas_types::TaskStatus::AwaitingMerge if parked_merge_already_integrated => (
-                    "delivered-and-merged, awaiting worker re-close",
-                    "WAITING ON WORKER: the assigned worker must retry task close",
+                    "delivered-and-merged, awaiting merge verdict",
+                    "WAITING ON VERDICT: inspect the task's merge and verification state",
                 ),
                 cas_types::TaskStatus::AwaitingMerge => (
                     "finished, awaiting merge",
@@ -4201,6 +4201,51 @@ impl CasService {
              actions that have not run are dropped. You will get a message naming what to \
              re-issue. If the loop is wedged, its watchdog first kills hung git/gh/ssh helper \
              processes; no pane is touched. Check `worker_status` for the result.\n\n{health}"
+        )))
+    }
+
+    /// Ask the daemon to replace only this supervisor's pane (cas-b492). Its
+    /// workers keep running; a plain supervisor exit still stops the factory.
+    pub(super) async fn factory_restart_supervisor(
+        &self,
+        _req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::harness_policy::is_supervisor_from_env;
+
+        if !is_supervisor_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "restart_supervisor rejected: only the supervisor may restart itself",
+            ));
+        }
+        let factory_session = current_factory_session().ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "restart_supervisor requires an active factory session (CAS_FACTORY_SESSION is \
+                 not set)",
+            )
+        })?;
+        let requester = self
+            .inner
+            .get_agent_id()
+            .unwrap_or_else(|_| "supervisor".to_string());
+        crate::factory_daemon_health::request_supervisor_restart(
+            &self.inner.cas_root,
+            &factory_session,
+            &requester,
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Could not record the supervisor restart request: {error}"),
+            )
+        })?;
+        Ok(Self::success(format!(
+            "Supervisor restart requested for factory session '{factory_session}'. Within about \
+             a second the daemon ends this session and starts a new one with the factory's boot \
+             harness, model and effort. Workers keep their tasks, panes and leases. If this \
+             session is still running after 10 seconds, the restart did not happen: a refusal \
+             arrives as a message, and silence means the running daemon predates this action."
         )))
     }
 
@@ -7562,6 +7607,9 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
+            report.push_str(&gain.status_line());
+        }
         // cas-fd4c: a successor stacked on an open predecessor epic must not
         // silently fall behind it until the predecessor lands.
         if let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
@@ -9812,7 +9860,7 @@ fn task_branch_affinity(
 /// reachable from the task's real integration target.
 ///
 /// `AwaitingMerge` normally means the supervisor still has to land the branch,
-/// but a worker can go idle after that landing and before its required re-close.
+/// but a worker can go idle after that landing while its verdict is pending.
 /// Reporting the normal merge instruction in that state sends the supervisor
 /// back to an action that is already complete. This is best-effort status
 /// evidence only: unknown Git state retains the conservative normal wording.
@@ -17677,7 +17725,7 @@ effort = "high"
             assert!(!out.contains("WAITING ON WORKER"), "{out}");
             assert!(!out.contains("re-close"), "{out}");
         }
-        // Without a live dispatch the merged delivery keeps its re-close row.
+        // Without a live dispatch the verdict still owns merged completion.
         let legacy = format_assigned_task_info(
             None,
             None,
@@ -17685,7 +17733,9 @@ effort = "high"
             true,
             None,
         );
-        assert!(legacy.contains("awaiting worker re-close"), "{legacy}");
+        // pin: merged status never tells a worker to close again.
+        assert!(legacy.contains("awaiting merge verdict"), "{legacy}");
+        assert!(!legacy.contains("retry task close"), "{legacy}");
     }
 
     /// The actionable half: quiet WITH undelivered mail means the worker was

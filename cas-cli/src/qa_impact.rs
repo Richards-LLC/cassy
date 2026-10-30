@@ -147,6 +147,11 @@ pub fn impact_for_changes(
     impact_for_selected_changes(registry, qa, changes, codemap, None)
 }
 
+fn journey_input(path: &str) -> bool {
+    // Test-side suites and shared inputs still carry explicit journey coverage.
+    !crate::qa_pass::fixture_directory(&path.to_ascii_lowercase())
+}
+
 /// Selection never grants ownership. Some(empty) authoritatively selects none.
 fn impact_for_selected_changes(
     registry: Option<&crate::qa_registry::Registry>,
@@ -187,7 +192,9 @@ fn impact_for_selected_changes(
         .collect();
     let mut remaining = Vec::new();
     for file in files {
-        if registry.is_some_and(|r| matches_path(r.ignore.iter().map(String::as_str), file)) {
+        if registry.is_some_and(|r| {
+            !journey_input(file) || matches_path(r.ignore.iter().map(String::as_str), file)
+        }) {
             report.ignored.push(file.to_owned());
         } else {
             remaining.push(file);
@@ -315,7 +322,8 @@ fn impact_for_selected_changes(
         }
         report.unowned.push(Unowned {
             file: file.into(),
-            surface: matches_path(surfaces.iter().copied(), file),
+            surface: !crate::qa_pass::is_non_surface_path(file)
+                && matches_path(surfaces.iter().copied(), file),
             codemap: label,
         });
     }

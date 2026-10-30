@@ -36,6 +36,32 @@ factory branch owners and exact Git actors on delivery anchor history also
 count as implementers after reassignment. Integration and verification alone
 do not count as implementation.
 
+QA and closes can run on different machines. Recording a receipt adds a
+reserved `QA_BATCH_RECEIPT_PROOF:` line to each listed task, and task sync
+copies it into the other machine's receipt store, so either machine's close
+gate and `verification show id=<qab-id>` accept it. The ledger file stays on
+the machine that recorded it: the peer accepts the SHA-256 and size checked
+there, and still byte-checks a ledger that is published locally. The
+independent-author check runs against the closing machine's own record of who
+implemented each task.
+
+Name who walked the ledger in `ledger_author` (agent id or name). For every
+listed tier 1 or tier 2 task, that author must be outside the same
+implementation lineage: a QA reviewer, a verifier, or a worker on this or
+another machine that did not deliver it. An unregistered author is recorded
+with role `external`. The receipt stores the author's id and role, and close
+rechecks them, so an author who later joins the lineage no longer satisfies
+it. A worker's own tests and captures remain its proof but never count as
+independent QA; a passed QA round whose reviewer joins the lineage is refused
+the same way. Tier 0 deliveries (docs and tests only) are not gated. Only the
+operator overrides, from their own terminal, with
+`cas qa author-override <task> --note "<why>"`. The command refuses agent
+sessions, the PreToolUse hook refuses agent shells that run it, and the record
+lives in `.cas/operator/qa-author-overrides.toml`, which agents may not write.
+A task note never overrides, because the delivering worker can write notes on
+its own task. The receipt keeps the operator's words and the task gets an audit
+note.
+
 Use the verification MCP tool:
 
 ```json
@@ -44,7 +70,8 @@ Use the verification MCP tool:
   "task_ids": ["cas-a123", "cas-b456", "cas-c789"],
   "staging_sha": "<full 40-hex deployed staging commit>",
   "ledger_artifact_id": "art-1234abcd",
-  "ledger_path": "/absolute/path/STAGING-LEDGER.md"
+  "ledger_path": "/absolute/path/STAGING-LEDGER.md",
+  "ledger_author": "qa-reviewer-name"
 }
 ```
 

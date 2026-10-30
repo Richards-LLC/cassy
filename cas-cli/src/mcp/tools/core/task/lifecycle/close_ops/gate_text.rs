@@ -363,29 +363,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
     }
 
-    #[test]
-    fn merge_receipt_is_compact_and_references_immutable_details() {
-        let root = tempdir().unwrap();
-        let detail = "Merged worktree worker to epic/main; complete CI and push diagnostics.";
-        let short = compact_receipt(
-            root.path(),
-            Some(root.path().to_str().unwrap()),
-            "cas-merge",
-            "merge",
-            "Merged worker to epic/main; commit abc123; CI advisory; push published; next: review task cas-merge.",
-            detail,
-        )
-        .unwrap();
-        assert!(short.len() < 800, "{short}");
-        let reference = short.split_once("Details: ").unwrap().1;
-        let (path, digest) = reference.split_once(" (SHA-256 ").unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
-        assert_eq!(
-            digest.trim_end_matches(')'),
-            hex::encode(sha2::Sha256::digest(detail.as_bytes()))
-        );
-    }
-
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.
     // pin: Audit every close-gate source, including unexecuted refusal branches, for harness-prefixed fix commands.

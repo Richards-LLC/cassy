@@ -269,6 +269,20 @@ pub enum MuxEvent {
     PaneRemoved { pane_id: PaneId },
 }
 
+/// What the factory launches its supervisor pane from. Kept so a deliberate
+/// `factory action=restart_supervisor` relaunches the boot recipe.
+#[derive(Debug, Clone)]
+pub struct SupervisorLaunch {
+    pub name: String,
+    pub cwd: PathBuf,
+    pub cas_root: Option<PathBuf>,
+    pub cli: SupervisorCli,
+    pub worker_cli: SupervisorCli,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub teams: Option<TeamsSpawnConfig>,
+}
+
 /// The main terminal multiplexer
 pub struct Mux {
     /// All panes, keyed by ID (insertion order preserved)
@@ -294,6 +308,8 @@ pub struct Mux {
     supervisor_cli: SupervisorCli,
     /// Factory session propagated into dynamically spawned agents.
     factory_session: Option<String>,
+    /// The supervisor's launch recipe; `None` outside a factory.
+    supervisor_launch: Option<SupervisorLaunch>,
     /// Urgent injects waiting for their pane to settle (cas-786a6).
     pending_injects: Vec<PendingInject>,
     next_inject_ticket: u64,
@@ -317,6 +333,7 @@ impl Mux {
             worker_specs: HashMap::new(),
             supervisor_cli: SupervisorCli::Claude,
             factory_session: None,
+            supervisor_launch: None,
             pending_injects: Vec::new(),
             next_inject_ticket: 0,
             held_input: std::sync::Mutex::new(HashMap::new()),
@@ -568,6 +585,16 @@ impl Mux {
             requester_secure_storage_dir: None,
         });
         mux.supervisor_cli = config.supervisor_cli;
+        mux.supervisor_launch = Some(SupervisorLaunch {
+            name: config.supervisor_name.clone(),
+            cwd: config.cwd.clone(),
+            cas_root: config.cas_root.clone(),
+            cli: config.supervisor_cli,
+            worker_cli: config.worker_cli,
+            model: config.supervisor_model.clone(),
+            effort: config.supervisor_effort.clone(),
+            teams: config.teams_configs.get(&config.supervisor_name).cloned(),
+        });
 
         // Populate per-worker specs from the cascade resolver output so that
         // subsequent `add_worker` calls (dynamic spawns) inherit the same
@@ -1035,6 +1062,89 @@ impl Mux {
         self.worker_specs.insert(name.to_string(), effective);
         self.add_pane(pane);
         Ok(id)
+    }
+
+    /// Replace the supervisor's launch recipe.
+    pub fn set_supervisor_launch(&mut self, launch: SupervisorLaunch) {
+        self.supervisor_launch = Some(launch);
+    }
+
+    /// Refuse a restart that cannot relaunch, while the supervisor still runs.
+    pub fn preflight_supervisor_restart(&self, worker_names: &[String]) -> Result<()> {
+        let launch = self
+            .supervisor_launch
+            .as_ref()
+            .ok_or_else(|| Error::pty("this factory recorded no supervisor launch recipe"))?;
+        if !launch.cwd.is_dir() {
+            return Err(Error::pty(format!(
+                "the supervisor's directory {} does not exist",
+                launch.cwd.display()
+            )));
+        }
+        launch.cli.backend().prepare_workdir(&launch.cwd, None)?;
+        let config = Pane::build_supervisor_config(
+            &launch.name,
+            launch.cwd.clone(),
+            launch.cas_root.as_ref(),
+            launch.cli,
+            launch.worker_cli,
+            worker_names,
+            launch.model.as_deref(),
+            launch.effort.as_deref(),
+            launch.teams.as_ref(),
+        );
+        let command = config.effective_command();
+        if !command_resolves(command) {
+            return Err(Error::pty(format!(
+                "the supervisor's harness command '{command}' was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Start a new supervisor pane from the recorded recipe and swap it in.
+    ///
+    /// The replacement spawns first, so a failed spawn leaves the mux as it was.
+    /// `lead_session_id` replaces the team lead's session id: Claude's
+    /// `--session-id` names a new session and cannot reuse the previous one.
+    /// Returns the previous pane for the caller to drop off its control loop.
+    pub fn restart_supervisor(
+        &mut self,
+        worker_names: &[String],
+        lead_session_id: Option<&str>,
+    ) -> Result<Option<Pane>> {
+        let mut launch = self
+            .supervisor_launch
+            .clone()
+            .ok_or_else(|| Error::pty("this factory recorded no supervisor launch recipe"))?;
+        if let (Some(teams), Some(lead)) = (launch.teams.as_mut(), lead_session_id)
+            && teams.lead_session_id.is_some()
+        {
+            teams.lead_session_id = Some(lead.to_string());
+        }
+        let replacement = Pane::supervisor(
+            &launch.name,
+            launch.cwd.clone(),
+            launch.cas_root.as_ref(),
+            self.rows,
+            self.cols,
+            launch.cli,
+            launch.worker_cli,
+            worker_names,
+            launch.model.as_deref(),
+            launch.effort.as_deref(),
+            launch.teams.as_ref(),
+            self.factory_session.as_deref(),
+        )?;
+        let name = launch.name.clone();
+        self.supervisor_launch = Some(launch);
+        let was_focused = self.focused.as_deref() == Some(name.as_str());
+        let previous = self.remove_pane(&name);
+        self.add_pane(replacement);
+        if was_focused {
+            self.focus(&name);
+        }
+        Ok(previous)
     }
 
     /// Add a new shell pane to the mux.
@@ -2242,6 +2352,16 @@ impl Mux {
             pane.kill_tree_force();
         }
     }
+}
+
+/// Whether `command` names an executable file, directly or through `PATH`.
+fn command_resolves(command: &str) -> bool {
+    let path = std::path::Path::new(command);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
 }
 
 #[cfg(test)]

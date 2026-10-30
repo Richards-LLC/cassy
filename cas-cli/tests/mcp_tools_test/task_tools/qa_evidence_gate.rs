@@ -1725,8 +1725,8 @@ async fn batch_squash_receipt_still_requires_own_ui_bundle_cas_e5b1() {
 
 /// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the
 /// same lane and commits B's work. A pre-merge retry must not move A's anchor
-/// onto B's commit, and once X merges A's plain re-close judges X — not the
-/// lane tip — so it closes without an override.
+/// onto B's commit and names the ignored advance. Once X merges, A's plain
+/// re-close judges X — not the lane tip — so it closes without an override.
 #[tokio::test]
 async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_lane_cas_ba4a() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -1749,7 +1749,14 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
         let lane_tip =
             start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
         let retry = close_text(&fx.core, TASK).await;
-        assert!(retry.contains("MERGE REQUIRED"), "{status:?}: {retry}");
+        assert!(retry.contains("PARK REFUSED"), "{status:?}: {retry}");
+        assert!(retry.contains("cas-b0b1") && retry.contains("own branch")
+            && !retry.contains("request changes"),
+            "the first untagged next-task lease must supply the remedy: {status:?}: {retry}");
+        for boundary in [&parked_at, &lane_tip] {
+            assert!(retry.contains(boundary), "missing {boundary}: {retry}");
+        }
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{retry}");
         assert!(!retry.contains("stale"), "{status:?}: {retry}");
         assert_eq!(
             anchor(&fx).as_deref(),

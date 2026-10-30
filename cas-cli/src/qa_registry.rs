@@ -11,8 +11,8 @@ pub const DEFAULT_PATH: &str = "docs/qa/journeys.yaml";
 #[derive(Debug, thiserror::Error)]
 #[error("duplicate bug family {key:?} in {path}; family keys must be unique across inline and file entries")]
 pub(crate) struct DuplicateBugFamily {
-    key: String,
-    path: String,
+    pub(crate) key: String,
+    pub(crate) path: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -21,7 +21,7 @@ fn compact_close_detail(response: &str, task_id: &str, target: &str) -> String {
         .split_once("\nDetails: ")
         .expect("successful close must reference its durable detail receipt");
     assert_eq!(
-        summary,
+        summary.lines().next().unwrap(),
         format!("Closed task: {task_id}; delivery none; target {target}; next: none.")
     );
     let (path, _) = reference
@@ -1027,6 +1027,55 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
             .expect("close after the verdict"),
     );
     assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+/// Deliver one file, merged to main, and close through the real close path with
+/// the delivery's start and anchor recorded. Returns the close's text and notes.
+async fn close_delivery_of(path: &str, branch: &str) -> (String, String, bool) {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, branch).await;
+    let start = head_of(worker_dir.path());
+    let file = worker_dir.path().join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "delivered\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", path]);
+    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "deliver one path"]);
+    let tip = head_of(worker_dir.path());
+    proof_boundary_git(temp.path(), &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+        assignee: "worker".into(),
+        branch: branch.into(),
+        base_sha: start,
+    });
+    tasks.update(&task).unwrap();
+
+    let mut request = close_request(&task_id, "delivered");
+    request.commit_receipt = Some(tip);
+    let text = extract_text(service.cas_task_close(Parameters(request)).await.expect("close"));
+    let notes = tasks.get(&task_id).unwrap().notes;
+    let dispatched = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().is_some();
+    (text, notes, dispatched)
+}
+
+/// cas-5207: docs close with no independent verifier and say so on the task;
+/// anything that can change behavior still gets one.
+#[tokio::test]
+async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
+    let (text, notes, dispatched) = close_delivery_of("docs/guide.md", "factory/tier-zero").await;
+    assert!(text.contains("Closed task:"), "{text}");
+    assert!(!dispatched, "{text}");
+    assert!(notes.contains("VERIFICATION TIER 0"), "{notes}");
+
+    let (text, notes, dispatched) = close_delivery_of("src/lib.rs", "factory/tier-one").await;
+    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
+    assert!(dispatched, "{text}");
+    assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
 }
 
 /// cas-5200 negative: a receipt that is NOT on the target keeps today's
@@ -7974,8 +8023,9 @@ async fn test_close_supervisor_bypass_orphaned_task() {
     // "assignee inactive" phrase that was always emitted regardless of
     // actual assignee state.
     assert!(
-        detail.contains("verification skipped — orphaned task, no assignee"),
-        "detail must carry the orphaned-task bypass marker: {detail}"
+        detail.contains("verification skipped — orphaned task, no assignee")
+            && response_text.contains("verification skipped — orphaned task, no assignee"),
+        "summary and detail must carry the orphaned-task bypass marker: {response_text}"
     );
     assert!(
         !response_text.contains("VERIFICATION REQUIRED"),
@@ -8094,8 +8144,9 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
     // supervisor bypass behavior but cites the real reason.
     let detail = compact_close_detail(&response_text, &id, "");
     assert!(
-        detail.contains("verification skipped — assignee unknown"),
-        "ghost-assignee bypass detail should mark skipped: {detail}"
+        detail.contains("verification skipped — assignee unknown")
+            && response_text.contains("verification skipped — assignee unknown"),
+        "ghost-assignee summary and detail should mark skipped: {response_text}"
     );
 
     let task_after = task_store.get(&id).expect("task should exist");

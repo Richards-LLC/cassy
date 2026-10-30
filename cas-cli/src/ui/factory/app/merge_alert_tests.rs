@@ -748,10 +748,16 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     f.app.merge_alert_retries.now = Some(minute);
     let retries = f.app.merge_alert_retry_events_at(minute);
     assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
+    assert!(f.app.revalidate_and_prompt_for_delivery(&retries).1.is_empty(),
+        "cas-0ea7: a wait ending a minute after the alert does not repeat it");
+    let quiet = now + chrono::Duration::minutes(11);
+    f.app.merge_alert_retries.now = Some(quiet);
+    let retries = f.app.merge_alert_retry_events_at(quiet);
     assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
-        "after the wake ends, an idle worker must still alert without a new detector event");
+        "after the quiet window, an idle worker must still alert without a new detector event");
     // A same-SHA rerun is visible when the settled-failure backoff expires.
-    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    let later = now + chrono::Duration::minutes(12);
+    f.app.merge_alert_retries.now = Some(later);
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
     assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
@@ -771,6 +777,32 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
+
+    // cas-0ea7: a changed condition always relays; only an identical repeat is
+    // held, and only the worker's latest no-need status for this task holds it.
+    let cas_dir = f.app.cas_dir.clone();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let message = |at: chrono::DateTime<Utc>, text: &str| {
+        let id = queue.enqueue("merge-w", "test-supervisor", text).unwrap();
+        rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2", rusqlite::params![at.to_rfc3339(), id])
+            .unwrap();
+    };
+    let status = crate::prompt_revalidation::attach_worker_action_envelope(
+        "status: in_progress\nneed: nothing. Not blocked; tests rerunning.",
+        crate::prompt_revalidation::WorkerActionKind::Status, "merge-w", Some("cas-9efb-test"),
+    );
+    let at = |minutes| later + chrono::Duration::minutes(minutes);
+    message(at(1), &status);
+    f.app.merge_alert_retries.now = Some(at(2));
+    f.ci(Some("failure"));
+    assert_eq!(f.relay().len(), 1, "a changed condition alerts at once, even after a status");
+    f.app.merge_alert_retries.waiting("merge-w");
+    message(at(6), &status);
+    f.app.merge_alert_retries.now = Some(at(13));
+    assert!(f.relay().is_empty(), "a no-need status quiets the identical repeat");
+    message(at(7), "Blocked: need a supervisor decision on the failing check.");
+    assert_eq!(f.relay().len(), 1, "a later blocker never mutes the alert");
 }
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
@@ -1055,6 +1087,7 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
         &f.app.director_data,
         f.repo.path(),
         now + chrono::Duration::minutes(11),
+        "test-supervisor",
     );
     assert!(ready.is_none() && wait.is_none(), "held delivery must not reuse READY");
 

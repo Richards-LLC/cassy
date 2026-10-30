@@ -6506,6 +6506,8 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     let project = env.home().join("model-project");
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);
+    // A Claude host's own effort would otherwise answer for an unreported one.
+    env.remove("CLAUDE_EFFORT");
     let store = crate::store::open_agent_store(&root).unwrap();
     let session = SessionInfo { name: "model-session".into(),
         metadata: create_metadata("model-session", std::process::id(), "lead", &["helper".into()], None, project.to_str(), Some(4173)),
@@ -6562,4 +6564,53 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     let missing = serde_json::to_value(hub_session(&SessionInfo { name:"unreported".into(), ..session })).unwrap();
     assert!(missing.get("model").is_none());
     assert!(missing.get("effort").is_none());
+}
+
+/// cas-8125: the catalog never borrows another session's, worker's, or hub's version.
+#[test]
+fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
+    use crate::factory_binary_skew::{ServerVersion, Snapshot};
+    use crate::store::{AgentStore, init_cas_dir};
+    use cas_types::{Agent, AgentRole};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = init_cas_dir(project.path()).unwrap();
+    let mut supervisor = Agent::new_with_role("lead-id".into(), "lead".into(), AgentRole::Supervisor);
+    supervisor.factory_session = Some("badge-session".into());
+    crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let session = SessionInfo {
+        name: "badge-session".into(),
+        metadata: crate::ui::factory::create_metadata("badge-session", std::process::id(), "lead", &[], None, project.path().to_str(), Some(4173)),
+        is_running: true, socket_exists: true,
+    };
+    let observed = ServerVersion { name: "lead".into(), role: AgentRole::Supervisor,
+        session: Some("badge-session".into()), pid: 42, version: Some("9.99.1".into()), older: true };
+    for (name, role, owner, version, duplicate, live, expected) in [
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, Some("9.99.1")),
+        ("lead", AgentRole::Supervisor, "another-session", Some("9.99.1"), None, true, None),
+        ("another-lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Worker, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", None, None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), Some("9.99.2"), true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, false, None),
+    ] {
+        let model = LocalSessionReadModel::default();
+        let mut servers = vec![ServerVersion { name: name.into(), role, session: Some(owner.into()),
+            version: version.map(str::to_owned), ..observed.clone() }];
+        if let Some(version) = duplicate {
+            servers.push(ServerVersion { pid: 43, version: Some(version.into()), ..observed.clone() });
+        }
+        // Inject the already independently tested Factory MCP snapshot boundary;
+        // exercise the real registry/session projection and wire omission below.
+        model.versions.lock().unwrap().insert(root.clone(), CachedVersions {
+            read_at: std::time::Instant::now(),
+            snapshot: Some(Snapshot { installed: "9.99.2".into(), servers }),
+        });
+        let row = model.project(&[SessionInfo { is_running: live, ..session.clone() }]).remove(0);
+        let wire = serde_json::to_value(row).unwrap();
+        assert_eq!(wire.get("mcp_version").and_then(|value| value.as_str()), expected, "{name}/{role:?}/{owner}/{live}");
+        if expected.is_some() {
+            assert_eq!(wire["installed_version"], "9.99.2");
+        }
+    }
 }

@@ -9000,6 +9000,7 @@ EOF
             "[[ x -eq 0 ]]",
             "[[ 0 -ge x ]]",
             "[[ 1 -eq 1 && x -ne 0 ]]",
+            "test x -eq 0",
             "echo \"${b[x]}\"",
             "echo \"${s:x}\"",
             "echo \"${s:0:x}\"",
@@ -9015,6 +9016,7 @@ EOF
         }
         for allowed in [
             "[[ 1 -eq 1 ]]",
+            "test 1 -eq 1",
             "echo \"${b[0]}\"",
             "echo \"${s:0:2}\"",
             "cat <<EOF\n${s:0:2}\nEOF",

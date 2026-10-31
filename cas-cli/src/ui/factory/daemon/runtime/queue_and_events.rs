@@ -21837,9 +21837,7 @@ mod stall_nudge_rework_tests {
         let pane = cas_mux::Pane::with_pty("worker-a", cas_mux::PaneKind::Worker,
             pty, 24, 80, harness).unwrap();
         daemon.app.adopt_worker_pane_for_test(pane);
-        tokio::time::sleep(Duration::from_millis(5100)).await;
-        for pane in daemon.app.mux.panes_mut() { pane.drain_output(); }
-        let bytes = daemon.app.mux.pane_bytes_received("worker-a").unwrap();
+        let bytes = super::super::provisioning_tests::await_ready_fixture_pane(daemon, "worker-a").await;
         assert!(bytes > 0);
         daemon.last_pane_output_bytes.insert("worker-a".into(), bytes);
         daemon.pane_silent_since.insert("worker-a".into(), Instant::now() - Duration::from_secs(46));

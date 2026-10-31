@@ -95,11 +95,7 @@ pub(super) async fn peer_fixture() -> (tempfile::TempDir, FactoryDaemon) {
         "exercise Teams delivery, never its missing-tree PTY fallback"
     );
     daemon.teams = Some(teams);
-    tokio::time::sleep(Duration::from_millis(5100)).await;
-    for pane in daemon.app.mux.panes_mut() {
-        pane.drain_output();
-    }
-    let bytes = daemon.app.mux.pane_bytes_received(&name).unwrap();
+    let bytes = super::provisioning_tests::await_ready_fixture_pane(&mut daemon, &name).await;
     assert!(bytes > 0);
     daemon.last_pane_output_bytes.insert(name.clone(), bytes);
     daemon

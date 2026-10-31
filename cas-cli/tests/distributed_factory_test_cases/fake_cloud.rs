@@ -97,7 +97,7 @@ impl FakeCloud {
                     }
                 };
                 drop(state);
-                let response = tiny_http::Response::from_string(reply.to_string())
+                let mut response = tiny_http::Response::from_string(reply.to_string())
                     .with_status_code(status)
                     .with_header(
                         tiny_http::Header::from_bytes(
@@ -106,6 +106,13 @@ impl FakeCloud {
                         )
                         .unwrap(),
                     );
+                if status == 429 {
+                    // Clients honour Retry-After; zero keeps a test's retries
+                    // without the default backoff.
+                    response.add_header(
+                        tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"0"[..]).unwrap(),
+                    );
+                }
                 let _ = request.respond(response);
             }
         });

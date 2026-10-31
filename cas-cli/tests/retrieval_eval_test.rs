@@ -295,10 +295,10 @@ fn the_fixture_carries_the_real_tier_skew_it_claims_to_measure() {
 // and keeps the Basic selector as the labelled fallback control.
 // --------------------------------------------------------------------------
 
-#[test]
-fn the_production_selector_is_measured_and_gated_in_every_mode() {
-    let fixture = fixture();
-    let (metrics, _) = run(&fixture);
+fn the_production_selector_is_measured_and_gated_in_every_mode(
+    fixture: &EvalFixture,
+    metrics: &[retrieval_eval::SelectorMetrics],
+) {
 
     for tier in [TierMode::Live, TierMode::AllWorking] {
         for query_mode in QueryMode::ALL {
@@ -324,7 +324,7 @@ fn the_production_selector_is_measured_and_gated_in_every_mode() {
     // not actually cover the new selector.
     let baseline =
         Baseline::load(&EvalFixture::committed_baseline_path()).expect("baseline loads");
-    for row in &metrics {
+    for row in metrics {
         assert!(
             baseline.get(&row.key()).is_some(),
             "{} is measured but not baselined — it would not be gated",
@@ -680,15 +680,29 @@ fn the_fixture_seeds_none_of_the_unreplicated_production_inputs() {
     }
 }
 
+/// The harness's expensive runs (two full `run_all`s), shared by every check
+/// that reads a full run. Nextest gives each test its own process, so the
+/// checks share one run only by living in one test.
 #[test]
-fn the_full_harness_has_a_named_sixty_second_budget() {
+fn the_full_harness_run_is_bounded_deterministic_gated_and_explained() {
+    let fixture = fixture();
+    // The full harness has a named sixty-second budget.
     let started = Instant::now();
-    let _ = run(&fixture());
+    let (metrics, _) = run(&fixture);
     assert!(
         started.elapsed() <= HARNESS_RUNTIME_BUDGET,
         "full retrieval harness exceeded its 60s budget: {:?}",
         started.elapsed()
     );
+    // Two runs of the harness produce identical metrics. Without this, every
+    // gate failure would be indistinguishable from noise.
+    assert_eq!(metrics, run(&fixture).0, "the harness must be deterministic");
+
+    harness_reports_precision_and_recall_and_holds_the_committed_baseline(&fixture, &metrics);
+    the_production_selector_is_measured_and_gated_in_every_mode(&fixture, &metrics);
+    the_two_tier_modes_agree_today_and_the_harness_says_why(&fixture, &metrics);
+    an_unchanged_corpus_does_not_trip_the_gate(&fixture, &metrics);
+    the_gate_fires_on_a_deliberate_corpus_regression(&fixture, &metrics);
 }
 
 #[test]
@@ -883,8 +897,10 @@ fn helpful_memories_returns_the_same_ranking_for_every_prompt_context() {
     }
 }
 
-#[test]
-fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
+fn the_two_tier_modes_agree_today_and_the_harness_says_why(
+    fixture: &EvalFixture,
+    metrics: &[retrieval_eval::SelectorMetrics],
+) {
     // Both tier rows in the committed baseline are currently identical, and a
     // reader is right to suspect a copy-paste. They are not:
     //
@@ -896,10 +912,8 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
     //
     // The mode still earns its place: it is the only way a future ranking
     // change can show up as movement rather than be swallowed by the tier
-    // filter. This test asserts the *reason*, so if the coincidence ever ends
+    // filter. This check asserts the *reason*, so if the coincidence ever ends
     // the baseline diff is explained rather than mysterious.
-    let fixture = fixture();
-    let (metrics, _) = run(&fixture);
 
     for selector in [
         SELECTOR_HELPFUL_MEMORIES,
@@ -947,10 +961,10 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
 // Acceptance criterion 2 + 3: report the metrics, gate on the baseline.
 // --------------------------------------------------------------------------
 
-#[test]
-fn harness_reports_precision_and_recall_and_holds_the_committed_baseline() {
-    let fixture = fixture();
-    let (metrics, _details) = run(&fixture);
+fn harness_reports_precision_and_recall_and_holds_the_committed_baseline(
+    fixture: &EvalFixture,
+    metrics: &[retrieval_eval::SelectorMetrics],
+) {
 
     println!(
         "\nretrieval eval — fixture {} ({} cases, {} entries)\n{}",
@@ -974,7 +988,7 @@ fn harness_reports_precision_and_recall_and_holds_the_committed_baseline() {
                    protected curated memories are now eligible for SessionStart recall. See \
                    the test module header for the re-baseline procedure and metric definitions."
                 .to_string(),
-            selectors: metrics.clone(),
+            selectors: metrics.to_vec(),
         };
         baseline.save(&baseline_path).expect("write baseline");
         println!("re-baselined {}", baseline_path.display());
@@ -998,7 +1012,7 @@ fn harness_reports_precision_and_recall_and_holds_the_committed_baseline() {
         "a baseline with no positive metric cannot detect a regression"
     );
 
-    let (regressions, missing) = retrieval_eval::compare(&baseline, &metrics, REGRESSION_TOLERANCE);
+    let (regressions, missing) = retrieval_eval::compare(&baseline, metrics, REGRESSION_TOLERANCE);
     assert!(
         missing.is_empty(),
         "baselined selectors were not measured: {missing:?}"
@@ -1016,33 +1030,22 @@ fn harness_reports_precision_and_recall_and_holds_the_committed_baseline() {
     );
 }
 
-#[test]
-fn two_runs_of_the_harness_produce_identical_metrics() {
-    // Without this, every gate failure would be indistinguishable from noise.
-    let fixture = fixture();
-    let run = || {
-        run(&fixture).0
-    };
-    assert_eq!(run(), run(), "the harness must be deterministic");
-}
-
 // --------------------------------------------------------------------------
 // Acceptance criterion 3: the failure path is proven, not assumed.
 // --------------------------------------------------------------------------
 
-#[test]
-fn the_gate_fires_on_a_deliberate_corpus_regression() {
-    let fixture = fixture();
-
+fn the_gate_fires_on_a_deliberate_corpus_regression(
+    fixture: &EvalFixture,
+    clean: &[retrieval_eval::SelectorMetrics],
+) {
     // Baseline: the real corpus, captured in-test so this proof does not depend
     // on the committed numbers staying still.
-    let (clean, _) = run(&fixture);
     let reference = Baseline {
         version: retrieval_eval::BASELINE_VERSION,
         fixture_id: fixture.fixture_id.clone(),
         captured_at: "in-test".to_string(),
         note: "in-test reference".to_string(),
-        selectors: clean.clone(),
+        selectors: clean.to_vec(),
     };
 
     // The perturbation is a real data regression, not a doctored number: half
@@ -1107,7 +1110,7 @@ fn the_gate_fires_on_a_deliberate_corpus_regression() {
         !regressions.is_empty(),
         "archiving half the labeled-relevant corpus must trip the gate; it did not.\n\
          clean:\n{}\ndamaged:\n{}",
-        retrieval_eval::render_table(&clean),
+        retrieval_eval::render_table(clean),
         retrieval_eval::render_table(&damaged)
     );
 
@@ -1127,21 +1130,21 @@ fn the_gate_fires_on_a_deliberate_corpus_regression() {
     );
 }
 
-#[test]
-fn an_unchanged_corpus_does_not_trip_the_gate() {
+fn an_unchanged_corpus_does_not_trip_the_gate(
+    fixture: &EvalFixture,
+    metrics: &[retrieval_eval::SelectorMetrics],
+) {
     // The converse guard: a gate that always fires is as useless as one that
     // never does.
-    let fixture = fixture();
-    let (metrics, _) = run(&fixture);
     let reference = Baseline {
         version: retrieval_eval::BASELINE_VERSION,
         fixture_id: fixture.fixture_id.clone(),
         captured_at: "in-test".to_string(),
         note: "in-test reference".to_string(),
-        selectors: metrics.clone(),
+        selectors: metrics.to_vec(),
     };
     let (regressions, missing) =
-        retrieval_eval::compare(&reference, &metrics, REGRESSION_TOLERANCE);
+        retrieval_eval::compare(&reference, metrics, REGRESSION_TOLERANCE);
     assert!(regressions.is_empty(), "{regressions:?}");
     assert!(missing.is_empty(), "{missing:?}");
 }

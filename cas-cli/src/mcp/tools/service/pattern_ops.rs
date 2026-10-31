@@ -663,7 +663,7 @@ impl CasService {
                 .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing auth token"))?;
 
             let url = format!("{}{}", cloud_config.endpoint, path);
-            let timeout = std::time::Duration::from_secs(30);
+            let timeout = pattern_api_timeout();
             let pattern_write = method == "POST"
                 && matches!(path, "/api/patterns" | "/api/patterns/adopt-rule");
             let mut body_started = false;
@@ -975,6 +975,23 @@ fn format_suggestion_summary(s: &serde_json::Value) -> String {
     format!("[P{priority}] [{category}] [{user_response}] {id} — {truncated}{rec}")
 }
 
+/// Client deadline for every Cloud pattern request.
+const PATTERN_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(test)]
+thread_local! {
+    static PATTERN_API_TIMEOUT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn pattern_api_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(timeout) = PATTERN_API_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return timeout;
+    }
+    PATTERN_API_TIMEOUT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,6 +1164,10 @@ mod tests {
     #[tokio::test]
     async fn pattern_post_send_timeouts_are_uncertain_without_retry_cas_5818() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        // pin: the injected test deadline must not lower the production 30 s one.
+        assert_eq!(PATTERN_API_TIMEOUT, std::time::Duration::from_secs(30));
+        // The request runs synchronously on this thread, so the override reaches it.
+        PATTERN_API_TIMEOUT_OVERRIDE.with(|t| t.set(Some(std::time::Duration::from_secs(1))));
         let mut results = Vec::new();
         for (action, path, key, value) in [
             ("create", "/api/patterns", "content", "Fixture guidance"),
@@ -1163,7 +1184,7 @@ mod tests {
             assert_eq!(request.url(), path);
             let body: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
             assert_eq!(body[key], value);
-            // Hold the fully read write until the production 30-second deadline.
+            // Hold the fully read write past the client deadline (1 s here).
             // A channel releases the request after the client returns; no sleeps.
             held.recv_timeout(std::time::Duration::from_secs(40)).unwrap();
         });

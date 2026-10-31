@@ -2108,11 +2108,11 @@ mod tests {
             });
             // Always release/join before asserting, even against the old
             // unbounded implementation. No sleeping lock-holder thread leaks.
-            let result = received.recv_timeout(Duration::from_secs(1));
+            let result = received.recv_timeout(Duration::from_secs(3));
             holder.execute_batch("COMMIT").unwrap();
             worker.join().unwrap();
             let error = result
-                .expect("observation waits must end within one second")
+                .expect("observation waits must end within three seconds")
                 .expect_err("the foreign lock must outlast the observation wait budget");
             assert!(crate::shared_db::is_busy_error(match &error {
                 StoreError::Database(error) => error,

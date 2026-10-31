@@ -666,7 +666,7 @@ async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -706,7 +706,7 @@ async fn test_worktree_list_no_disabled_message_when_no_factory_worktrees() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -764,7 +764,7 @@ async fn test_worktree_list_honors_configured_base_path() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     // Reclaim external worktree before asserts so a failure still cleans up.
@@ -803,7 +803,7 @@ async fn test_worktree_list_surfaces_unregistered_epic_worktree_outside_cas_dir(
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -835,7 +835,7 @@ async fn test_worktree_list_ignores_unrelated_git_worktrees() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -867,7 +867,7 @@ async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -992,7 +992,7 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     let result = svc
         .factory(Parameters(req))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -2283,7 +2283,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
         let result = svc
             .factory(Parameters(req))
             .await
-            .expect("coordination call should succeed");
+            .expect("factory call should succeed");
         let text = get_text(&result);
 
         assert!(
@@ -5069,7 +5069,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     let result = svc
         .factory(Parameters(req))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(

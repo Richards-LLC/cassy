@@ -4616,7 +4616,7 @@ async fn test_standard_agent_can_start_task_assigned_to_other_worker() {
 //
 // Reproduces the factory-session friction described in
 // docs/requests/BUG-factory-session-observations-2026-04-22.md §1: after
-// `coordination spawn_workers` + `task update assignee=<worker-name>`, a
+// `factory spawn_workers` + `task update assignee=<worker-name>`, a
 // freshly-spawned worker's first `action=mine` call was returning "no open
 // tasks" even when `task show` on the supervisor side immediately confirmed
 // the assignment.

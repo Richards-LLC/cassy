@@ -1,6 +1,6 @@
 //! Factory MCP Tool E2E Tests (Claude Session)
 //!
-//! Tests that Claude can discover and use factory MCP tools (`mcp__cas__coordination`)
+//! Tests that Claude can discover and use factory and messaging MCP tools (`mcp__cas__factory`, `mcp__cas__coordination`)
 //! in a real session. Verifies tool discovery, parameter passing, and response
 //! interpretation.
 //!
@@ -34,10 +34,10 @@ async fn test_claude_spawn_without_epic_error() {
             .mcp_config(env.mcp_config_path())
             .env_var("CAS_FACTORY_BUILD_GUARD", "off")
             .max_turns(3)
-            .allow_tool("mcp__cas__coordination"),
+            .allow_tool("mcp__cas__factory"),
         |mut sess| async move {
             sess.send(
-                "Use mcp__cas__coordination with action='spawn_workers' and count=2. \
+                "Use mcp__cas__factory with action='spawn_workers' and count=2. \
                 Report exactly what error you get.",
             )
             .await?;
@@ -87,13 +87,13 @@ async fn test_claude_spawn_with_epic() {
             .mcp_config(env.mcp_config_path())
             .env_var("CAS_FACTORY_BUILD_GUARD", "off")
             .max_turns(6)
-            .allow_tool("mcp__cas__coordination")
+            .allow_tool("mcp__cas__factory")
             .allow_tool("mcp__cas__task"),
         |mut sess| async move {
             // Step 1: Create an epic
             sess.send(
                 "First, use mcp__cas__task with action='create', title='Factory Test Epic', \
-                and task_type='epic'. Then use mcp__cas__coordination with action='spawn_workers', \
+                and task_type='epic'. Then use mcp__cas__factory with action='spawn_workers', \
                 count=2, and worker_names='alpha,beta'. Report the results of both operations.",
             )
             .await?;
@@ -161,10 +161,10 @@ async fn test_claude_worker_status() {
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
             .max_turns(3)
-            .allow_tool("mcp__cas__coordination"),
+            .allow_tool("mcp__cas__factory"),
         |mut sess| async move {
             sess.send(
-                "Use mcp__cas__coordination with action='worker_status'. \
+                "Use mcp__cas__factory with action='worker_status'. \
                 Report exactly what workers are listed.",
             )
             .await?;
@@ -284,10 +284,10 @@ async fn test_claude_gc_report() {
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
             .max_turns(3)
-            .allow_tool("mcp__cas__coordination"),
+            .allow_tool("mcp__cas__factory"),
         |mut sess| async move {
             sess.send(
-                "Use mcp__cas__coordination with action='gc_report'. \
+                "Use mcp__cas__factory with action='gc_report'. \
                 Report exactly what the tool returned.",
             )
             .await?;

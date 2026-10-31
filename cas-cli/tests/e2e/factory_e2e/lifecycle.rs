@@ -54,13 +54,13 @@ async fn test_supervisor_creates_epic_and_spawns_workers() {
             .mcp_config(env.mcp_config_path())
             .env_var("CAS_FACTORY_BUILD_GUARD", "off")
             .max_turns(6)
-            .allow_tool("mcp__cas__coordination")
+            .allow_tool("mcp__cas__factory")
             .allow_tool("mcp__cas__task"),
         |mut sess| async move {
             sess.send(
                 "Do two things in sequence:\n\
                 1. Use mcp__cas__task with action='create', title='Lifecycle Test Epic', task_type='epic'.\n\
-                2. Use mcp__cas__coordination with action='spawn_workers', count=2, worker_names='alpha,beta'.\n\
+                2. Use mcp__cas__factory with action='spawn_workers', count=2, worker_names='alpha,beta'.\n\
                 Report the results of both operations.",
             )
             .await?;
@@ -437,10 +437,10 @@ async fn test_worker_status_reflects_registered_agents() {
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
             .max_turns(3)
-            .allow_tool("mcp__cas__coordination"),
+            .allow_tool("mcp__cas__factory"),
         |mut sess| async move {
             sess.send(
-                "Use mcp__cas__coordination with action='worker_status'. \
+                "Use mcp__cas__factory with action='worker_status'. \
                 Report exactly how many workers are listed and their names.",
             )
             .await?;
@@ -500,10 +500,10 @@ async fn test_supervisor_shutdown_workers() {
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
             .max_turns(4)
-            .allow_tool("mcp__cas__coordination"),
+            .allow_tool("mcp__cas__factory"),
         |mut sess| async move {
             sess.send(
-                "Use mcp__cas__coordination with action='shutdown_workers', \
+                "Use mcp__cas__factory with action='shutdown_workers', \
                 worker_names='alpha'. Report what happened.",
             )
             .await?;

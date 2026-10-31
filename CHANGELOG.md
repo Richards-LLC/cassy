@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Parallel resting captures** — Visual QA now captures up to three pages at once in one Chromium process, preserving report order, deduplication and strict failures. Set `VISUAL_QA_CONCURRENCY=1` to run captures sequentially; journeys keep their existing sequence.
 
+### Removed — Ambient memory recall
+
+- **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

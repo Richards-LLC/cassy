@@ -983,56 +983,56 @@ async fn test_start_on_closed_message_is_worker_appropriate() {
 /// does not silently reopen), but the message is the supervisor-appropriate
 /// variant that does not carry the worker refusal wording.
 #[tokio::test]
-async async fn test_start_on_closed_message_is_supervisor_appropriate() {
-async     let mut test_env = TestEnvGuard::temp_home();
-async     let (temp, core) = setup_cas(&mut test_env);
+async fn test_start_on_closed_message_is_supervisor_appropriate() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
-async     let id =
-async         create_started_and_closed_light_task(&core, "start-on-closed supervisor message").await;
+    let id =
+        create_started_and_closed_light_task(&core, "start-on-closed supervisor message").await;
 
-async     let agents = cas::store::open_agent_store(&temp.path().join(".cas")).unwrap();
-async     let agent_id = format!("test-session-{}", std::process::id());
-async     let mut agent = agents.get(&agent_id).unwrap();
-async     agent.metadata.insert("halt_task_work".into(), "1".into());
-async     agent
-async         .metadata
-async         .insert("halt_task_work_gen".into(), "42".into());
-async     agents.update(&agent).unwrap();
+    let agents = cas::store::open_agent_store(&temp.path().join(".cas")).unwrap();
+    let agent_id = format!("test-session-{}", std::process::id());
+    let mut agent = agents.get(&agent_id).unwrap();
+    agent.metadata.insert("halt_task_work".into(), "1".into());
+    agent
+        .metadata
+        .insert("halt_task_work_gen".into(), "42".into());
+    agents.update(&agent).unwrap();
 
-async     let result = {
-async         test_env.set("CAS_AGENT_ROLE", "supervisor");
-async         let r = core
-async             .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-async             .await;
-async         test_env.remove("CAS_AGENT_ROLE");
-async         r
-async     };
+    let result = {
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
+        let r = core
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await;
+        test_env.remove("CAS_AGENT_ROLE");
+        r
+    };
 
-async     let persisted = agents.get(&agent_id).unwrap();
-async     assert_eq!(
-async         persisted.metadata.get("halt_task_work").map(String::as_str),
-async         Some("1")
-async     );
-async     assert_eq!(
-async         persisted
-async             .metadata
-async             .get("halt_task_work_gen")
-async             .map(String::as_str),
-async         Some("42")
-async     );
+    let persisted = agents.get(&agent_id).unwrap();
+    assert_eq!(
+        persisted.metadata.get("halt_task_work").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        persisted
+            .metadata
+            .get("halt_task_work_gen")
+            .map(String::as_str),
+        Some("42")
+    );
 
-async     let _ = temp; // keep tempdir alive for the duration of the call above
-async     match result {
-async         Err(e) => {
-async             let msg = e.message.to_string();
-async             assert!(
-async                 !msg.contains("do not reopen"),
-async                 "supervisor-facing message should not use the worker refusal wording: {msg}"
-async             );
-async         }
-async         Ok(ok) => panic!(
-async             "expected start-on-closed to fail, got: {}",
-async             extract_text(ok)
-async         ),
-async     }
-async }
+    let _ = temp; // keep tempdir alive for the duration of the call above
+    match result {
+        Err(e) => {
+            let msg = e.message.to_string();
+            assert!(
+                !msg.contains("do not reopen"),
+                "supervisor-facing message should not use the worker refusal wording: {msg}"
+            );
+        }
+        Ok(ok) => panic!(
+            "expected start-on-closed to fail, got: {}",
+            extract_text(ok)
+        ),
+    }
+}

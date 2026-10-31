@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Verification
+
+- **Supervisor questions keep their dispatch** — Was: Scope questions were
+  recorded as verifier errors and spent the dispatch. → Now: `supervisor_call`
+  retains the question so a supervisor can answer with a final verdict on that
+  same dispatch, without re-dispatching a verifier.
+- **Waiting for review is pending** — Was: Dispatch-request markers inflated
+  verifier error counts. → Now: New markers are pending, and historical backfill
+  excludes old synthetic markers while retaining real failed checks.
+
 ### Fixed — CLI security
 
 - **Secret environment values stay out of help** — Was: Login and bridge server

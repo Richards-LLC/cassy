@@ -486,3 +486,57 @@ fn line_digest(line: &str) -> String {
     line.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gate(root: &Path, key: &str, outcome: CheckOutcome) {
+        check_run(root, Check {
+            natural_key: key.to_string(),
+            check_id: MERGE_GATE_CHECK,
+            stage: CheckStage::Lane,
+            outcome,
+            task_id: Some("cas-1"),
+            sha: Some("HEAD"),
+            minutes: None,
+            link: None,
+            actor: None,
+        });
+    }
+
+    fn hand_merges(root: &Path) -> usize {
+        cas_store::quality_interventions_since(
+            root,
+            InterventionKind::HandMerge,
+            Utc::now() - Duration::minutes(5),
+        )
+        .unwrap()
+        .len()
+    }
+
+    /// A close counts as a hand merge only when the tool's last word was a refusal.
+    #[test]
+    fn close_after_an_unresolved_refusal_is_a_hand_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        gate(root, "refused", CheckOutcome::Fail);
+        gate(root, "merged", CheckOutcome::Pass);
+        task_closed(root, "cas-1", None, false, None);
+        assert_eq!(hand_merges(root), 0, "refused, then merged by the tool");
+
+        gate(root, "refused again", CheckOutcome::Fail);
+        task_closed(root, "cas-1", None, false, None);
+        assert_eq!(hand_merges(root), 1);
+    }
+
+    /// The 10/31 numbers: 283 injected and none used is noise, not a win.
+    #[test]
+    fn measured_verdict_needs_a_sample_and_real_use() {
+        assert_eq!(measured_verdict(283, 0), FeedbackVerdict::Noise);
+        assert_eq!(measured_verdict(283, 1), FeedbackVerdict::Noise);
+        assert_eq!(measured_verdict(100, 5), FeedbackVerdict::Helped);
+        assert_eq!(measured_verdict(5, 0), FeedbackVerdict::Unused);
+        assert_eq!(measured_verdict(5, 1), FeedbackVerdict::Helped);
+    }
+}

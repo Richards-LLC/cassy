@@ -480,3 +480,118 @@ fn render(report: &LedgerReport) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cas_store::{InterventionKind, NewQualityEvent};
+    use chrono::TimeZone;
+
+    fn git_in(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.test")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.test")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// The train's receipt becomes a release event, and the report for that
+    /// release shows its speed, the window's interventions and the fleet's rows.
+    #[test]
+    fn receipt_becomes_a_release_and_the_report_reads_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let cas_root = repo.join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        git_in(repo, &["init", "-q", "-b", "main"]);
+        for (tag, date) in [("v1.0.0", "2026-10-01T12:00:00Z"), ("v1.1.0", "2026-10-02T12:00:00Z")] {
+            let commit = Command::new("git")
+                .current_dir(repo)
+                .args(["commit", "-q", "--allow-empty", "-m", tag])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.test")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.test")
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .status()
+                .unwrap();
+            assert!(commit.success());
+            git_in(repo, &["tag", tag]);
+        }
+
+        let at = |day, hour| Utc.with_ymd_and_hms(2026, 10, day, hour, 0, 0).unwrap();
+        let intervention = |key: &str, occurred_at| {
+            let mut event = NewQualityEvent::new(
+                key,
+                QualityPayload::Intervention {
+                    intervention: InterventionKind::Rebind,
+                    minutes: None,
+                },
+            );
+            event.occurred_at = occurred_at;
+            crate::quality_ledger::emit(&cas_root, &event);
+        };
+        intervention("before the window", at(1, 6));
+        intervention("in the window", at(2, 6));
+        intervention("after the window", at(3, 6));
+        let other_project = cas_store::QualityEventWire {
+            id: "qe-other".into(),
+            kind: "feature_feedback".into(),
+            occurred_at: at(2, 7),
+            task_id: None,
+            release_version: None,
+            actor: None,
+            title: None,
+            link: None,
+            payload: QualityPayload::FeatureFeedback {
+                feature: "ambient_recall".into(),
+                verdict: FeedbackVerdict::Noise,
+                source: FeedbackSource::Measured,
+                injected: Some(283),
+                opened: Some(1),
+                used: Some(0),
+            },
+            project_id: Some("acme/other".into()),
+        };
+        cas_store::import_quality_events(&cas_root, &[other_project], "acme/this").unwrap();
+
+        let receipt = repo.join("release-latency.receipt");
+        std::fs::write(
+            &receipt,
+            "TAG=v1.1.0\nMAIN_LANDED_AT=2026-10-02T12:00:00Z\n\
+             PUBLISHED_AT=2026-10-02T12:09:00Z\nINTERVENTIONS=2\n",
+        )
+        .unwrap();
+        assert_eq!(record_release(&cas_root, repo, &receipt).unwrap(), "v1.1.0");
+        record_release(&cas_root, repo, &receipt).unwrap();
+
+        let report = build_report(&cas_root, repo, Some("v1.1.0")).unwrap();
+        assert_eq!(report.interventions.get("rebind"), Some(&1), "{report:?}");
+        assert_eq!(report.main_to_published_minutes, Some(9.0));
+        assert_eq!(report.commit_to_main_minutes, Some(0.0));
+        assert_eq!(report.projects.len(), 2, "{report:?}");
+        let text = render(&report);
+        for expected in [
+            "Friction ledger: v1.1.0",
+            "Interventions: 1",
+            "main to publish 9 min",
+            "ambient_recall: measured noise 1 (283 injected, 1 opened, 0 used)",
+        ] {
+            assert!(text.contains(expected), "missing {expected}:\n{text}");
+        }
+
+        let unreleased = build_report(&cas_root, repo, None).unwrap();
+        assert!(!unreleased.published);
+        assert_eq!(unreleased.interventions.get("rebind"), Some(&1), "{unreleased:?}");
+    }
+}

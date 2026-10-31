@@ -2438,6 +2438,17 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
         }))))
         .await
         .expect("real supervisor rebind succeeds");
+    let ledger = cas_store::quality_events_for_task(&cas_root, &task.id).unwrap();
+    assert!(
+        ledger.iter().any(|event| matches!(
+            event.payload,
+            cas_store::QualityPayload::Intervention {
+                intervention: cas_store::InterventionKind::Rebind,
+                ..
+            }
+        ) && event.local_note.as_deref().is_some_and(|note| note.contains("Approve"))),
+        "{ledger:?}"
+    );
     assert_eq!(
         tasks
             .get(&task.id)
@@ -2883,6 +2894,22 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             .expect("merge remote delivery through normal handler");
         let text = get_text(&merged);
         assert!(text.contains("Merged worktree"), "{text}");
+        // Refused on red, then merged by the tool: the last gate row is a pass,
+        // so the close that follows is no hand merge.
+        let gate: Vec<_> = cas_store::quality_events_for_task(&cas_root, &task.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                cas_store::QualityPayload::CheckRun { check_id, outcome, .. }
+                    if check_id == "worktree_merge" => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            gate,
+            [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass],
+            "{branch}"
+        );
         let target = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
         assert_eq!(
             target,

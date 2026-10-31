@@ -297,3 +297,7 @@ fn quality_http(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "quality_events_tests.rs"]
+mod tests;

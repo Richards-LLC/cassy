@@ -774,6 +774,7 @@ impl CasCore {
                 .and_then(|cfg| cfg.active_team_id())
         };
 
+        let handoff_content = handoff_role.as_ref().map(|_| req.content.clone());
         let entry = Entry {
             origin_project: None,
             source_ids: Vec::new(),
@@ -854,7 +855,7 @@ impl CasCore {
             let verdicts = crate::quality_ledger::handoff_saved(
                 &self.cas_root,
                 &id,
-                &req.content,
+                handoff_content.as_deref().unwrap_or_default(),
                 self.get_agent_id().ok().as_deref(),
             );
             if verdicts > 0 {

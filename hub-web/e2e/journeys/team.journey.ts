@@ -9,7 +9,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
     test(`HUB-J26 see live staffing without opening output ${width}`, journeyPart, async ({ page, journey }) => {
       const names = ["swift-lark-3", "quiet-owl-7", "brisk-wren-9", "calm-heron-5"];
       const fleet: FleetWorld = {
-        agents: names.map((name, i) => ({ name, generation: 1, status: "active", current_task: `task-${i}`, liveness: i === 0 ? "executing" : i === 3 ? "offline" : "waiting_for_input",
+        agents: names.map((name, i) => ({ name, generation: 1, status: "active", current_task: `task-${i}`, liveness: i === 0 ? "executing" : "waiting_for_input",
           harness: "codex", model: i === 2 ? undefined : "gpt-6.1", task_started_at: new Date(journeyNow() - 42 * 60_000).toISOString(),
           recent_trail: [{ step: "started", reference: "event:1" }], latest_activity: { summary: "RAW TOOL OUTPUT MUST STAY PRIVATE" } })),
         tasks: names.map((name, i) => ({ id: `task-${i}`, title: ["Build the Team view", "Review the delivery", "Write the notes", "Check the release"][i], status: i === 1 ? "awaiting_merge" : "in_progress", epic_id: "release", assignee: name, updated_at: new Date(journeyNow()).toISOString() })),
@@ -27,7 +27,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await tab.focus(); await page.keyboard.press("ArrowRight");
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeFocused();
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
-        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 1 waiting, 1 parked, 1 offline. 1 needs you.");
+        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 2 waiting, 1 parked. 1 needs you.");
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
         // The whole team fits above the fold, and the release block has one home.
@@ -51,11 +51,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
         // Working and waiting differ by color and mark, not just by the word.
         const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => { const s = getComputedStyle(node); return [s.color, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius].join(" "); }));
-        const [working, waiting, offline] = [await look("swift-lark-3"), await look("brisk-wren-9"), await look("calm-heron-5")];
-        expect(waiting[0]).not.toBe(offline[0]);
+        const [working, waiting] = [await look("swift-lark-3"), await look("brisk-wren-9")];
         expect(working[1]).not.toBe(waiting[1]);
-        expect(waiting[1]).not.toBe(offline[1]);
-        for (const [worker, label] of [["swift-lark-3", "Working"], ["brisk-wren-9", "Idle"], ["calm-heron-5", "Offline"]]) {
+        for (const [worker, label] of [["swift-lark-3", "Working"], ["brisk-wren-9", "Idle"]]) {
           await expect(panel.locator(`.team-lane[data-worker="${worker}"]`).getByRole("img", { name: label, exact: true })).toHaveAttribute("title", label);
         }
         // The track is an outline, so a release at zero cannot read as a full bar.
@@ -75,9 +73,17 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
       await journey.stage("A lifecycle event updates staffing without reloading", async () => {
         fleet.agents[0].liveness = "stalled";
+        fleet.agents[3].liveness = "offline";
         const started = performance.now();
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
         await expect(page.locator('.team-lane[data-worker="swift-lark-3"] .team-state')).toHaveText("Stalled", { timeout: 5_000 });
+        const waiting = page.locator('.team-lane[data-worker="brisk-wren-9"]');
+        const offline = page.locator('.team-lane[data-worker="calm-heron-5"]');
+        await expect(offline.getByRole("img", { name: "Offline", exact: true })).toHaveAttribute("title", "Offline");
+        const look = (lane: typeof waiting) => lane.evaluate(node => { const pill = getComputedStyle(node.querySelector(".team-state")!); const dot = getComputedStyle(node.querySelector(".supervisor-state")!); return [pill.color, `${dot.backgroundColor} ${dot.outlineColor} ${dot.outlineWidth}`]; });
+        const [waitingLook, offlineLook] = [await look(waiting), await look(offline)];
+        expect(waitingLook[0]).not.toBe(offlineLook[0]);
+        expect(waitingLook[1]).not.toBe(offlineLook[1]);
         expect(performance.now() - started).toBeLessThan(5_000);
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toHaveAttribute("aria-selected", "true");
       });

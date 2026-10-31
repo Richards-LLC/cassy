@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander status indicators
+
+- **Live idle supervisors stay green** — Working supervisors have solid green dots, idle supervisors have hollow green dots, and offline alone keeps the neutral dot. Each dot names its state on hover and to screen readers; forced colors also distinguish the shapes. Team's Waiting and Offline pills now have explicit live-green and offline-gray treatments.
+
 ## [3.92.0] - 2026-10-31
 
 ### Changed — Team leads with what your team is doing

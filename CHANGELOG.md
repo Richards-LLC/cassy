@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Parallel resting captures** — Visual QA now captures up to three pages at once in one Chromium process, preserving report order, deduplication and strict failures. Set `VISUAL_QA_CONCURRENCY=1` to run captures sequentially; journeys keep their existing sequence.
 
+### Fixed — Commander connection replacement
+
+- **Stopped connections cancel pending catalog reads** — Replacing or stopping a live connection now cancels its startup and heartbeat catalog reads, including a request still signing its proof, so the retired connection cannot send that read afterward. Lifecycle tests await catalog delivery before measuring heartbeat and event refresh requests.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

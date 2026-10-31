@@ -424,6 +424,7 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(latest).toBe("catalog-1"));
 
     // Freeze the heartbeat's response at the HTTP boundary, before Stop changes
     // the catalog. Signing, event delivery and refresh coalescing stay real.
@@ -527,10 +528,13 @@ describe("Commander live connection lifecycle", () => {
     vi.stubGlobal("WebSocket", TransportSocket);
     let latest: string | undefined;
     const events: Record<string, unknown>[] = [];
-    const connection = supervisor(await storedMachine("rate-cap"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    const onSessions = vi.fn<HubCallbacks["onSessions"]>(sessions => { latest = sessions[0]?.name; });
+    const connection = supervisor(await storedMachine("rate-cap"), () => {}, event => events.push(event), onSessions);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    // Exclude the startup catalog from the event refresh budget.
+    await waitFor(() => expect(onSessions).toHaveBeenCalledOnce());
     let socket: TransportSocket | undefined;
     if (multiplex) {
       const attached = connection.attach("session-a");
@@ -881,14 +885,22 @@ describe("Commander live connection lifecycle", () => {
     old.start();
     await waitFor(() => expect(old.snapshot().phase).toBe("live"));
     await waitFor(() => expect(oldCatalog).toHaveBeenCalledOnce());
+    const replacement = await storedMachine("replacement");
+    const oldRequests = hub.requests.filter(request => request.authorization === hub.streams[0]!.credential).length;
+    // Stop while the old heartbeat's catalog proof is still being signed.
+    const releaseSigning = pauseSigning();
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await waitFor(() => expect(crypto.subtle.sign).toHaveBeenCalled());
     const replacementCatalog = vi.fn();
-    const installed = replaceMachineConnection(await storedMachine("replacement"), connections, new Map(), (machine) => supervisor(machine, () => {}, () => {}, replacementCatalog));
-    await waitFor(() => expect(installed.snapshot().phase).toBe("live"));
+    const installed = replaceMachineConnection(replacement, connections, new Map(), (machine) => supervisor(machine, () => {}, () => {}, replacementCatalog));
     expect(hub.streams[0]!.signal.aborted).toBe(true);
+    releaseSigning();
+    await waitFor(() => expect(installed.snapshot().phase).toBe("live"));
     expect(hub.streams[1]!.signal.aborted).toBe(false);
     // Live precedes the signed startup catalog read. Await this supervisor's
     // catalog delivery so neither startup read is counted as heartbeat traffic.
     await waitFor(() => expect(replacementCatalog).toHaveBeenCalledOnce());
+    expect(hub.requests.filter(request => request.authorization === hub.streams[0]!.credential)).toHaveLength(oldRequests);
     const boundary = hub.requests.length;
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await waitFor(() => expect(installed.snapshot().latencyMs).toBe(24));
@@ -966,7 +978,7 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("event-catalog"), () => {}, () => {}, sessions => { listed = sessions[0]?.name; });
     connection.start();
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    expect(listed).toBe("catalog-1");
+    await waitFor(() => expect(listed).toBe("catalog-1"));
     await connection.attach("healthy");
     const socket = TransportSocket.instances[0]!;
     socket.open(); socket.receive({ Welcome: { state: { panes: [] } } });
@@ -975,7 +987,7 @@ describe("Commander live connection lifecycle", () => {
     hub.catalogRevision(2);
     await vi.advanceTimersByTimeAsync(1_000);
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    expect(listed).toBe("catalog-2");
+    await waitFor(() => expect(listed).toBe("catalog-2"));
     expect(TransportSocket.instances).toHaveLength(1);
     expect(socket.readyState).toBe(TransportSocket.OPEN);
   });

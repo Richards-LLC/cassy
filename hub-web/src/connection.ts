@@ -1052,7 +1052,11 @@ export class HubConnectionSupervisor {
   }
 
   private refreshCatalog(): void {
-    void this.refreshSessions(AbortSignal.timeout(3_000)).catch(error => {
+    const stream = this.eventAbort;
+    if (!stream) return;
+    // A signed catalog read belongs to this live transport, including while
+    // native signing is pending. Stop/replacement must cancel it before fetch.
+    void this.refreshSessions(anySignal([stream.signal, AbortSignal.timeout(3_000)])).catch(error => {
       if (error instanceof AuthenticationError && this.desired && this.lifecycle.phase === "live") {
         this.blockAuthentication(error.kind, error.message);
       }

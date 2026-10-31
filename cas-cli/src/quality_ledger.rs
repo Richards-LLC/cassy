@@ -17,6 +17,8 @@ use chrono::{DateTime, Duration, Utc};
 /// Check id of the `worktree_merge` admission gate; its last row for a task tells
 /// a tool merge from a hand merge.
 pub(crate) const MERGE_GATE_CHECK: &str = "worktree_merge";
+/// Check id of a delivery PR's merge-queue result.
+pub(crate) const MERGE_QUEUE_CHECK: &str = "merge_queue";
 /// A spawn this soon after a force shutdown is the replacement for that worker.
 const RESPAWN_WINDOW_HOURS: i64 = 2;
 
@@ -113,7 +115,7 @@ pub(crate) fn intervention(
 }
 
 /// Every successful task close. An override is an intervention, and a close whose
-/// last merge-gate row is a refusal landed some way other than the tool.
+/// last merge row is a refusal or an ejection landed some way other than the tools.
 pub(crate) fn task_closed(
     cas_root: &Path,
     task_id: &str,
@@ -137,7 +139,9 @@ pub(crate) fn task_closed(
         .into_iter()
         .rev()
         .find_map(|event| match event.payload {
-            QualityPayload::CheckRun { check_id, outcome, .. } if check_id == MERGE_GATE_CHECK => {
+            QualityPayload::CheckRun { check_id, outcome, .. }
+                if check_id == MERGE_GATE_CHECK || check_id == MERGE_QUEUE_CHECK =>
+            {
                 Some(outcome)
             }
             _ => None,

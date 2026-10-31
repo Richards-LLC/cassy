@@ -642,7 +642,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
 
     crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
         natural_key: format!("merge_queue|{task_id}|{pr_number}|{occurrence}"),
-        check_id: "merge_queue",
+        check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
         stage: cas_store::CheckStage::Queue,
         outcome: cas_store::CheckOutcome::Fail,
         task_id: Some(task_id),
@@ -844,7 +844,7 @@ fn enqueue_delivery_pr_merged_wake(
 
     crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
         natural_key: format!("merge_queue|{task_id}|{pr_number}|{merge_commit}"),
-        check_id: "merge_queue",
+        check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
         stage: cas_store::CheckStage::Queue,
         outcome: cas_store::CheckOutcome::Pass,
         task_id: Some(task_id),

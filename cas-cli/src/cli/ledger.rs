@@ -291,7 +291,20 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
     if from.is_some() && from == to {
         bail!("release {name} has an empty window");
     }
-    let events = cas_store::quality_events_between(cas_root, from, to)?;
+    let mut events = cas_store::quality_events_between(cas_root, from, to)?;
+    // An escape belongs to the release it escaped into, however much later it was
+    // found. Work in progress has no such release, so it lists what its window found.
+    if published {
+        let is_escape = |event: &QualityEvent| matches!(event.payload, QualityPayload::Escape { .. });
+        events.retain(|event| !is_escape(event));
+        events.extend(
+            cas_store::quality_events_between(cas_root, None, None)?
+                .into_iter()
+                .filter(|event| {
+                    matches!(&event.payload, QualityPayload::Escape { found_in, .. } if *found_in == name)
+                }),
+        );
+    }
     Ok(aggregate(name, published, from, to, &events))
 }
 
@@ -544,6 +557,13 @@ mod tests {
         intervention("before the window", at(1, 6));
         intervention("in the window", at(2, 6));
         intervention("after the window", at(3, 6));
+        // Found two days after the release, it still counts against that release.
+        let mut escape = NewQualityEvent::new(
+            "late escape",
+            QualityPayload::Escape { found_in: "v1.1.0".into(), missed_stage: None },
+        );
+        escape.occurred_at = at(4, 6);
+        crate::quality_ledger::emit(&cas_root, &escape);
         let other_project = cas_store::QualityEventWire {
             id: "qe-other".into(),
             kind: "feature_feedback".into(),
@@ -580,6 +600,7 @@ mod tests {
         assert_eq!(report.main_to_published_minutes, Some(9.0));
         assert_eq!(report.commit_to_main_minutes, Some(0.0));
         assert_eq!(report.projects.len(), 2, "{report:?}");
+        assert_eq!(report.escapes.len(), 1, "{report:?}");
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",

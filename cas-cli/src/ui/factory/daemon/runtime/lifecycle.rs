@@ -2992,24 +2992,6 @@ mod worker_attention_tests {
             first,
             WorkerAttentionRelayOutcome::Persisted { .. }
         ));
-        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234").unwrap();
-        // A replayed ejection is one failure; the later merge is the pass.
-        let outcomes: Vec<_> = cas_store::quality_events_for_task(&cas_dir, "cas-fc35")
-            .unwrap()
-            .into_iter()
-            .map(|event| match event.payload {
-                cas_store::QualityPayload::CheckRun {
-                    stage: cas_store::CheckStage::Queue,
-                    outcome,
-                    ..
-                } => outcome,
-                other => panic!("not a queue check: {other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            outcomes,
-            [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass]
-        );
         assert!(matches!(
             replay,
             WorkerAttentionRelayOutcome::Persisted { .. }
@@ -3039,6 +3021,24 @@ mod worker_attention_tests {
                 .matches("merge-queue-ejection occurrence=merge-group-run:32386300052")
                 .count(),
             1
+        );
+        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234").unwrap();
+        // A replayed ejection is one failure; the later merge is the pass.
+        let outcomes: Vec<_> = cas_store::quality_events_for_task(&cas_dir, "cas-fc35")
+            .unwrap()
+            .into_iter()
+            .map(|event| match event.payload {
+                cas_store::QualityPayload::CheckRun {
+                    stage: cas_store::CheckStage::Queue,
+                    outcome,
+                    ..
+                } => outcome,
+                other => panic!("not a queue check: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass]
         );
     }
 

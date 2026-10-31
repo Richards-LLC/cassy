@@ -65,6 +65,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   second search scorer and two search metrics stores were compiled into every
   build without being called. → Now: They are removed, with no change in behavior.
 
+### Fixed — Cloud
+
+- **Cloud login instructions** — Was: Missing or expired authentication and team
+  membership errors, plus the Violet contract, suggested an unavailable login
+  subcommand. → Now: Every affected remedy names `cas login`, which opens the
+  existing Cloud authentication flow.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

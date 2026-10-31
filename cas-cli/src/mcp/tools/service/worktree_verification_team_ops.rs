@@ -182,7 +182,7 @@ impl CasService {
             if !cloud_config.is_logged_in() {
                 return Ok(Self::success(
                     "Not logged in to Cassy Cloud.\n\n\
-                 Use `cas cloud login` to connect to your account and access team features.",
+                 Use `cas login` to connect to your account and access team features.",
                 ));
             }
 
@@ -389,7 +389,7 @@ impl CasService {
 
             if !cloud_config.is_logged_in() {
                 return Ok(Self::success(
-                    "Not logged in to Cassy Cloud. Use `cas cloud login` first.",
+                    "Not logged in to Cassy Cloud. Use `cas login` first.",
                 ));
             }
 

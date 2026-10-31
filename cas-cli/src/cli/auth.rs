@@ -36,7 +36,7 @@ pub enum AuthCommands {
 #[derive(Parser, Clone)]
 pub struct LoginArgs {
     /// API token (skip device flow, use direct token)
-    #[arg(long, env = "CAS_CLOUD_TOKEN")]
+    #[arg(long, env = "CAS_CLOUD_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
 
     /// Cloud API endpoint

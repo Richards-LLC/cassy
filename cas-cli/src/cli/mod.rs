@@ -1190,6 +1190,7 @@ mod tests {
 
         for (command, variable) in [
             (vec!["cas", "login"], "CAS_CLOUD_TOKEN"),
+            (vec!["cas", "auth", "login"], "CAS_CLOUD_TOKEN"),
             (vec!["cas", "setup"], "CAS_CLOUD_TOKEN"),
             (vec!["cas", "bridge", "serve"], "CAS_SERVE_TOKEN"),
         ] {

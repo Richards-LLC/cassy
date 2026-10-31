@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — CLI security
+
+- **Secret environment values stay out of help** — Was: Login and bridge server
+  help printed exported authentication tokens. → Now: Help lists the environment
+  variable names while hiding their values, matching the setup command.
+
 ### Added — Friction ledger, phase 1
 
 - **Every check and supervisor rescue is measured** — Was: Interventions, escapes

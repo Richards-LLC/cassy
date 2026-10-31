@@ -4978,11 +4978,44 @@ pub fn execute_team_push(
     cas_root: &Path,
     cli: &Cli,
 ) -> anyhow::Result<()> {
-    execute_team_push_with_output(cloud_config, cas_root, cli, true).map(|_| ())
+    execute_team_push_with_config(
+        cloud_config,
+        crate::cloud::CloudSyncerConfig::default(),
+        cas_root,
+        cli,
+    )
+}
+
+/// [`execute_team_push`] with an explicit syncer config, so tests can drive
+/// the retry path without the production backoff. Internal; no stable API.
+#[doc(hidden)]
+pub fn execute_team_push_with_config(
+    cloud_config: &CloudConfig,
+    syncer_config: crate::cloud::CloudSyncerConfig,
+    cas_root: &Path,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    execute_team_push_inner(cloud_config, syncer_config, cas_root, cli, true).map(|_| ())
 }
 
 fn execute_team_push_with_output(
     cloud_config: &CloudConfig,
+    cas_root: &Path,
+    cli: &Cli,
+    emit_output: bool,
+) -> anyhow::Result<Option<SyncSummary>> {
+    execute_team_push_inner(
+        cloud_config,
+        crate::cloud::CloudSyncerConfig::default(),
+        cas_root,
+        cli,
+        emit_output,
+    )
+}
+
+fn execute_team_push_inner(
+    cloud_config: &CloudConfig,
+    syncer_config: crate::cloud::CloudSyncerConfig,
     cas_root: &Path,
     cli: &Cli,
     emit_output: bool,
@@ -5050,7 +5083,7 @@ fn execute_team_push_with_output(
     let syncer = crate::cloud::CloudSyncer::new_for_project(
         std::sync::Arc::new(queue),
         cloud_config.clone(),
-        crate::cloud::CloudSyncerConfig::default(),
+        syncer_config,
         project_id,
         cas_root,
     );

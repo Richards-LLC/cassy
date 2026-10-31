@@ -145,10 +145,6 @@ mod cached_task;
 pub mod detect;
 pub mod foreign_project_guard;
 pub mod known_repos;
-mod notifying_entry;
-mod notifying_rule;
-mod notifying_skill;
-mod notifying_task;
 mod quarantine_task;
 // `cli/memory.rs` (T5 cas-07d7) and the syncing-store wrappers all
 // call the predicate directly — keeping it in one `pub(crate)` module
@@ -173,10 +169,6 @@ pub use detect::{
     open_verification_store, open_worktree_store,
 };
 pub(crate) use detect::find_cas_root_ignoring_env;
-pub use notifying_entry::NotifyingEntryStore;
-pub use notifying_rule::NotifyingRuleStore;
-pub use notifying_skill::NotifyingSkillStore;
-pub use notifying_task::NotifyingTaskStore;
 pub use quarantine_task::QuarantineFilteringTaskStore;
 pub use syncing::SyncingRuleStore;
 pub use syncing_entry::SyncingEntryStore;

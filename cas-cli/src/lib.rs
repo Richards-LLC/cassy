@@ -91,7 +91,6 @@ pub mod logging;
 pub mod maintenance_jobs;
 pub mod memory_migration;
 pub mod migration;
-pub mod notifications;
 pub mod orchestration;
 pub mod otel;
 pub(crate) mod ops;

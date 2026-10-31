@@ -56,7 +56,7 @@
 - `cas-cli/src/claude_credentials.rs` - shared Keychain service identity; native capacity does not read its secrets.
 - `cas-cli/src/cli/hook.rs`, `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/` - hooks, native dispatch, generation and policy.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/hooks/handlers/handlers_events/codemap.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
-- `cas-cli/src/cloud/`, `cas-cli/src/coordination/`, `cas-cli/src/notifications/` - sync/presence, binding intake, ownership and notification queues.
+- `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync/presence, binding intake and ownership.
 - `cas-cli/src/worktree/`, `cas-cli/src/store/`, `cas-cli/src/migration/migrations/` - Git lifecycle, store decorators and numbered migrations.
 - `cas-cli/src/artifacts/`, `cas-cli/src/artifacts/qa.rs` - portable proofs and task-bound QA file export/recovery.
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/`, `cas-cli/src/hybrid_search/` - distillation, background indexing and composed retrieval.

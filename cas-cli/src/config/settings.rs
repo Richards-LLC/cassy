@@ -1510,40 +1510,12 @@ impl Default for CodeConfig {
     }
 }
 
-/// Notification configuration for TUI alerts and hook notifications
+/// Notification configuration for hook notifications
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationConfig {
     /// Master switch for notifications
     #[serde(default = "default_true")]
     pub enabled: bool,
-
-    /// Play terminal bell on new notifications
-    #[serde(default = "default_true")]
-    pub sound_enabled: bool,
-
-    /// How long to display notifications (seconds)
-    #[serde(default = "default_display_duration")]
-    pub display_duration_secs: u64,
-
-    /// Maximum notifications to display at once
-    #[serde(default = "default_max_visible")]
-    pub max_visible: usize,
-
-    /// Task notification settings
-    #[serde(default)]
-    pub tasks: TaskNotifications,
-
-    /// Entry/memory notification settings
-    #[serde(default)]
-    pub entries: EntryNotifications,
-
-    /// Rule notification settings
-    #[serde(default)]
-    pub rules: RuleNotifications,
-
-    /// Skill notification settings
-    #[serde(default)]
-    pub skills: SkillNotifications,
 
     // === Hook notification settings (for Notification hook) ===
     /// Notify on permission prompts (Claude needs user approval)
@@ -1561,142 +1533,62 @@ pub struct NotificationConfig {
     /// Optional webhook URL for Slack/Discord integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
-}
 
-/// Task-specific notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskNotifications {
-    /// Notify when a task is created
-    #[serde(default = "default_true")]
-    pub on_created: bool,
-
-    /// Notify when a task is started
-    #[serde(default = "default_true")]
-    pub on_started: bool,
-
-    /// Notify when a task is closed
-    #[serde(default = "default_true")]
-    pub on_closed: bool,
-
-    /// Notify when a task is updated (off by default - too noisy)
-    #[serde(default)]
-    pub on_updated: bool,
-}
-
-impl Default for TaskNotifications {
-    fn default() -> Self {
-        Self {
-            on_created: true,
-            on_started: true,
-            on_closed: true,
-            on_updated: false,
-        }
-    }
-}
-
-/// Entry/memory notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntryNotifications {
-    /// Notify when an entry is added
-    #[serde(default = "default_true")]
-    pub on_added: bool,
-
-    /// Notify when an entry is updated (off by default)
-    #[serde(default)]
-    pub on_updated: bool,
-
-    /// Notify when an entry is deleted
-    #[serde(default = "default_true")]
-    pub on_deleted: bool,
-}
-
-impl Default for EntryNotifications {
-    fn default() -> Self {
-        Self {
-            on_added: true,
-            on_updated: false,
-            on_deleted: true,
-        }
-    }
-}
-
-/// Rule notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleNotifications {
-    /// Notify when a rule is created
-    #[serde(default = "default_true")]
-    pub on_created: bool,
-
-    /// Notify when a rule is promoted to Proven
-    #[serde(default = "default_true")]
-    pub on_promoted: bool,
-
-    /// Notify when a rule is demoted (off by default)
-    #[serde(default)]
-    pub on_demoted: bool,
-}
-
-impl Default for RuleNotifications {
-    fn default() -> Self {
-        Self {
-            on_created: true,
-            on_promoted: true,
-            on_demoted: false,
-        }
-    }
-}
-
-/// Skill notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillNotifications {
-    /// Notify when a skill is created
-    #[serde(default = "default_true")]
-    pub on_created: bool,
-
-    /// Notify when a skill is enabled
-    #[serde(default = "default_true")]
-    pub on_enabled: bool,
-
-    /// Notify when a skill is disabled (off by default)
-    #[serde(default)]
-    pub on_disabled: bool,
-}
-
-impl Default for SkillNotifications {
-    fn default() -> Self {
-        Self {
-            on_created: true,
-            on_enabled: true,
-            on_disabled: false,
-        }
-    }
-}
-
-fn default_display_duration() -> u64 {
-    5 // 5 seconds
-}
-
-fn default_max_visible() -> usize {
-    3
+    /// Retired TUI pop-up keys. The pop-up pipeline that read them never ran
+    /// (no notifier was ever installed), so they were removed. They are still
+    /// accepted so older config files load: they are ignored, noted once by
+    /// `Config::load`, and dropped on the next save.
+    #[serde(default, rename = "sound_enabled", skip_serializing)]
+    pub(crate) retired_sound_enabled: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "display_duration_secs", skip_serializing)]
+    pub(crate) retired_display_duration_secs: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "max_visible", skip_serializing)]
+    pub(crate) retired_max_visible: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "tasks", skip_serializing)]
+    pub(crate) retired_tasks: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "entries", skip_serializing)]
+    pub(crate) retired_entries: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "rules", skip_serializing)]
+    pub(crate) retired_rules: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "skills", skip_serializing)]
+    pub(crate) retired_skills: Option<serde::de::IgnoredAny>,
 }
 
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            sound_enabled: true,
-            display_duration_secs: default_display_duration(),
-            max_visible: default_max_visible(),
-            tasks: TaskNotifications::default(),
-            entries: EntryNotifications::default(),
-            rules: RuleNotifications::default(),
-            skills: SkillNotifications::default(),
             // Hook notification settings (disabled by default)
             on_permission_prompt: false,
             on_idle_prompt: false,
             on_auth_success: false,
             webhook_url: None,
+            retired_sound_enabled: None,
+            retired_display_duration_secs: None,
+            retired_max_visible: None,
+            retired_tasks: None,
+            retired_entries: None,
+            retired_rules: None,
+            retired_skills: None,
         }
+    }
+}
+
+impl NotificationConfig {
+    /// Retired `[notifications]` keys this config file still carries.
+    pub(crate) fn retired_keys(&self) -> Vec<&'static str> {
+        [
+            ("sound_enabled", self.retired_sound_enabled.is_some()),
+            ("display_duration_secs", self.retired_display_duration_secs.is_some()),
+            ("max_visible", self.retired_max_visible.is_some()),
+            ("tasks", self.retired_tasks.is_some()),
+            ("entries", self.retired_entries.is_some()),
+            ("rules", self.retired_rules.is_some()),
+            ("skills", self.retired_skills.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect()
     }
 }
 

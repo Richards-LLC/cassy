@@ -191,10 +191,6 @@ where
     result
 }
 
-/// Shown when a config file still has the `[jev]` section, which was removed with Jev (cas-4971).
-const RETIRED_JEV_SECTION_NOTE: &str =
-    "Note: the [jev] config section is retired and ignored; remove it from config.toml.";
-
 fn empty_qa_table() -> toml::Value {
     toml::Value::Table(Default::default())
 }
@@ -449,10 +445,6 @@ impl Config {
     fn note_retired_sections(&self, cas_dir: &Path) {
         if super::notices::defer_retired_config(cas_dir, self) {
             return;
-        }
-        static NOTED: std::sync::Once = std::sync::Once::new();
-        if self.retired_jev.is_some() {
-            NOTED.call_once(|| eprintln!("{RETIRED_JEV_SECTION_NOTE}"));
         }
         // cas-fd0a: one line naming the retired [factory] sweep keys.
         static NOTED_FACTORY: std::sync::Once = std::sync::Once::new();

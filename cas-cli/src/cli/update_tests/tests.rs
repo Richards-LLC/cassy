@@ -3443,7 +3443,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         "[factory.merge_sweep_env] # former environment\n",
         "TOKEN = 'fixture-only-token'\n",
         "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
-        "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
+        "[notifications] # retired pop-up\nsound_enabled = true\n",
         "[project]\ncanonical_id = 'retirement-fixture'\n",
         // Explicit stages opt out of the upkeep adoption window (covered by
         // the native sweep test), so only retirement changes this config.
@@ -3480,8 +3480,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         });
         #[cfg(unix)]
         assert!(
-            !output.contains("ignored and dropped on the next save")
-                && !output.contains("[jev] config section is retired"),
+            !output.contains("ignored and dropped on the next save"),
             "raw startup notice escaped structured maintenance: {output}"
         );
         result
@@ -3499,10 +3498,10 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
         assert!(parsed["factory"].get("merge_sweep").is_none(), "update must retire the ignored sweep key");
         assert!(parsed["factory"].get("merge_sweep_env").is_none());
-        assert!(parsed.get("jev").is_none());
+        assert!(parsed["notifications"].get("sound_enabled").is_none());
         assert!(parsed["code_review"].get("owner").is_none());
         assert_eq!(parsed["code_review"]["future_owner"].as_str(), Some("keep this too"));
-        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "old integration"] {
+        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "retired pop-up"] {
             assert!(raw.contains(comment), "lost operator comment {comment}");
         }
         let after: crate::config::Config = toml::from_str(&raw).unwrap();
@@ -3568,7 +3567,7 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
     std::fs::create_dir_all(&root).unwrap();
     env.set("CAS_ROOT", &root);
     let path = root.join("config.toml");
-    let original = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n";
+    let original = "[factory]\nmerge_sweep = true\n[notifications]\nsound_enabled = true\n";
     std::fs::write(&path, original).unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_readonly(true);
@@ -3644,7 +3643,7 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     let host = crate::store::init_cas_dir(&home).unwrap();
     let global = crate::config::global_cas_dir().unwrap();
     std::fs::create_dir_all(&global).unwrap();
-    let retired = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n[code_review]\nowner = 'worker'\n";
+    let retired = "[factory]\nmerge_sweep = true\n[notifications]\nsound_enabled = true\n[code_review]\nowner = 'worker'\n";
     std::fs::write(global.join("config.toml"), retired).unwrap();
     let readonly_config = readonly.join(".cas/config.toml");
     std::fs::write(&readonly_config, retired).unwrap();

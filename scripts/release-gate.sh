@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mechanical, fail-closed release train for an assembled epic worktree.
+# Mechanical, fail-closed validation gate for an assembled epic worktree.
 #
 # The version bump, Cargo.lock refresh, CHANGELOG section, and Slack draft must
 # already be committed on the source branch. This gate proves the tree before
@@ -17,7 +17,7 @@ cd "$repo_root"
 
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
-    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
+    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
@@ -840,19 +840,6 @@ check_failure_log() {
     printf 'failure-log: %d entries enforced; %d entries with no executable check (explicit manual markers); %d invalid\n' \
         "$enforced" "$manual" "$invalid"
     [[ "$entries" -gt 0 && "$invalid" -eq 0 ]]
-}
-
-check_assemble_stale_base() {
-    local fixture="scripts/test-release-integration.py"
-    [[ -f "$fixture" ]] || {
-        printf 'assemble-stale-base: missing %s\n' "$fixture"
-        return 1
-    }
-    # Recovery launches factory sweep children.  Keep the supervisor's
-    # identity out of this process boundary so the executable fixture proves
-    # the GH #901 regression cannot be hidden by the invoking shell.
-    release_test_child env \
-        python3 "$fixture"
 }
 
 # NUL-separated candidate files for the version-literals row: tracked files in
@@ -2350,9 +2337,6 @@ gate_row publish-toolchain \
 gate_row failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log
-gate_row assemble-stale-base \
-    'python3 scripts/test-release-integration.py (stale origin/main recovery and identity-safe base-only heal)' \
-    check_assemble_stale_base excl=host-tests
 gate_row ancestor-proxy-config \
     'no populated .cas/proxy.toml above this worktree that ancestor-walking tests could read' \
     check_ancestor_proxy_config

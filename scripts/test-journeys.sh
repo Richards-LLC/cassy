@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Self-test for the user-journey tooling:
 #   scripts/journeys-for-diff.py   catalog parsing, --check, diff → journeys
-#   scripts/check-journey-evaluation.sh   the release-train prep gate
-# Also checks that the real catalog validates and that prep still calls the gate.
+#   scripts/check-journey-evaluation.sh   the journey evaluation gate
+# Also checks that the real catalog validates.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,8 +25,6 @@ assert parse(legacy) == parse(headings)
 assert parse(headings)[1][0]["blocks"]["Steps"] == ["Send — it lands"]
 PY
 then ok "Markdown subheadings preserve legacy catalog blocks"; else bad "catalog subheading parser"; fi
-grep -q 'check-journey-evaluation.sh' "$repo/scripts/release-train.d/prep.sh" \
-    && ok "release-train prep calls the journey gate" || bad "prep.sh no longer calls check-journey-evaluation.sh"
 
 if out="$(python3 "$repo/scripts/test-journey-selection.py" 2>&1)"; then
     ok "source/import/CSS/fixture selection regressions: $out"

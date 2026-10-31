@@ -127,15 +127,6 @@ class Selection(unittest.TestCase):
                       selected[0][1])
         self.assertEqual(SELECTOR.select(TIER, ["hub-web/src/app.ts"]), [])
 
-    def test_release_train_sources_select_release_portability_tests(self):
-        selected = SELECTOR.select(TIER, [
-            "scripts/release-train.sh",
-            "scripts/release-train.d/post-publication.sh",
-        ])
-        self.assertEqual(selected, [
-            ("scripts/test-release-portable.py", "python3 scripts/test-release-portable.py")
-        ])
-
 
 if __name__ == "__main__":
     unittest.main()

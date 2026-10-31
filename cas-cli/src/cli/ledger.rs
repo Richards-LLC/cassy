@@ -21,7 +21,7 @@ pub struct LedgerArgs {
 enum LedgerCommand {
     /// Print interventions, speed, escapes and feature verdicts for a release
     Report {
-        /// Release tag, for example v3.93.0. Omit for work since the last release.
+        /// Release tag, vX.Y.Z. Omit for work since the last release.
         #[arg(long)]
         release: Option<String>,
         /// Read local rows only; do not pull from Cloud first
@@ -263,7 +263,7 @@ fn release_window(
     let wanted = release
         .map(|raw| {
             cas_store::normalize_release_version(raw)
-                .with_context(|| format!("--release must look like v3.93.0, got {raw}"))
+                .with_context(|| format!("--release must look like vX.Y.Z, got {raw}"))
         })
         .transpose()?;
     let end_of = |version: &str| {

@@ -371,7 +371,7 @@ pub fn sanitize_quality_link(raw: &str) -> Option<String> {
     .then(|| link.to_string())
 }
 
-/// `v3.93.0` and `3.93.0` name one release.
+/// `vX.Y.Z` and `X.Y.Z` name one release.
 pub fn normalize_release_version(raw: &str) -> Option<String> {
     let raw = raw.trim();
     is_version(raw).then(|| format!("v{}", raw.strip_prefix('v').unwrap_or(raw)))

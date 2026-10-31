@@ -24,7 +24,7 @@ async fn bug_tagged_with_a_release_is_an_escape() {
     let (temp, service) = setup_cas(&mut test_env);
 
     service
-        .cas_task_create(Parameters(bug("Tagged at create", "found-in:v3.93.0,missed-by:qa")))
+        .cas_task_create(Parameters(bug("Tagged at create", "found-in:v9.99.1,missed-by:qa")))
         .await
         .unwrap();
     let created = service
@@ -36,7 +36,7 @@ async fn bug_tagged_with_a_release_is_an_escape() {
     let text = extract_text(created);
     let id = text.split_whitespace().nth(2).unwrap();
     let update: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-        "id": id, "labels": "found-in:3.92.0",
+        "id": id, "labels": "found-in:9.99.0",
     }))
     .unwrap();
     service.cas_task_update(Parameters(update)).await.unwrap();
@@ -51,7 +51,7 @@ async fn bug_tagged_with_a_release_is_an_escape() {
         .collect();
     assert_eq!(
         found,
-        [("v3.93.0", Some(cas_store::CheckStage::Qa)), ("v3.92.0", None)]
+        [("v9.99.1", Some(cas_store::CheckStage::Qa)), ("v9.99.0", None)]
     );
     assert_eq!(events[1].title.as_deref(), Some("Tagged later"));
 }

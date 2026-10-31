@@ -27,6 +27,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
 
+### Fixed — Commander connection replacement
+
+- **Stopped connections cancel pending catalog reads** — Replacing or stopping a live connection now cancels its startup and heartbeat catalog reads, including a request still signing its proof, so the retired connection cannot send that read afterward. Lifecycle tests await catalog delivery before measuring heartbeat and event refresh requests.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

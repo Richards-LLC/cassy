@@ -146,7 +146,7 @@ impl SqliteCodeStore {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
-        Utc::now().timestamp_nanos_opt().hash(&mut hasher);
+        crate::hash_id::timestamp_nanos().hash(&mut hasher);
         std::process::id().hash(&mut hasher);
         let hash = hasher.finish();
         Ok(format!("{}-{:08x}", prefix, hash as u32))

@@ -9878,7 +9878,10 @@ impl CasCore {
                         )));
                     }
                     Ok(Some(ref v))
-                        if matches!(v.status, VerificationStatus::Error | VerificationStatus::Pending)
+                        if matches!(
+                            v.status,
+                            VerificationStatus::Error | VerificationStatus::Pending
+                        )
                             && v.summary.starts_with(DISPATCH_SUMMARY_PREFIX)
                             && typed_dispatch.is_none()
                             && (chrono::Utc::now() - v.created_at).num_seconds()

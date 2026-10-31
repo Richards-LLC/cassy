@@ -695,8 +695,9 @@ impl CasCore {
 
         // Supervisor-direct calls can be retried after a lost response or a
         // process restart. The exact dispatch remains the authorization
-        // boundary: only an identical verdict from the same registered
-        // supervisor is idempotent. A conflicting retry fails closed.
+        // boundary: an identical verdict from the same registered supervisor
+        // is idempotent. Only a supervisor-call question allows a new answer;
+        // a conflicting terminal retry fails closed.
         if supervisor_direct {
             verification.set_agent(caller_id.clone());
             verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
@@ -757,9 +758,9 @@ impl CasCore {
             }
         }
 
-        // Atomically persist the verdict, resolve any active exact-task
-        // dispatch, and clear that task's pending transition. If any step
-        // fails, all authority and lifecycle writes roll back.
+        // Atomically persist the review record and authority. A terminal
+        // verdict also resolves the exact dispatch and pending task transition.
+        // If any step fails, all authority and lifecycle writes roll back.
         {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {

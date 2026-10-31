@@ -423,7 +423,10 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
     for verification in verifications.iter().filter(|row| row.created_at >= since) {
         // Old close flows wrote descriptive dispatch markers as Error rows.
         // Keep that audit history, but do not invent an executed failed check.
-        if matches!(verification.provenance, cas_types::VerificationProvenance::System | cas_types::VerificationProvenance::Legacy)
+        if matches!(
+            verification.provenance,
+            cas_types::VerificationProvenance::System | cas_types::VerificationProvenance::Legacy
+        )
             && verification.status == cas_types::VerificationStatus::Error
             && verification.summary.starts_with("Dispatch requested")
         {

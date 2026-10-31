@@ -6052,27 +6052,19 @@ async fn test_my_context_shows_agent_info() {
 // gc_report tests
 // =============================================================================
 
-/// cas-8563b (D2): fleet actions moved to the `factory` tool. For one release
-/// `coordination` still runs them, with a deprecation note naming the new
-/// call; `factory` rejects the messaging actions that stay on `coordination`.
+/// Retired factory aliases fail before dispatch and name the live route.
 #[tokio::test]
-async fn coordination_runs_moved_factory_actions_as_deprecated_aliases() {
+async fn coordination_rejects_retired_factory_actions() {
     let env = FactoryTestEnv::new();
     let gc_report: CoordinationRequest =
         serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
 
-    let via_alias = env
+    let refused = env
         .service
         .coordination(Parameters(gc_report.clone()))
         .await
-        .expect("the alias still runs the action");
-    let alias_text = get_text(&via_alias);
-    assert!(alias_text.contains("Stale agents: 0"), "{alias_text}");
-    assert!(
-        alias_text.contains("Deprecated: `coordination action=gc_report` moved")
-            && alias_text.contains("factory action=gc_report`"),
-        "{alias_text}"
-    );
+        .expect_err("retired alias must not run the action");
+    assert!(refused.message.contains("factory action=gc_report"), "{}", refused.message);
 
     let direct = env
         .service

@@ -27,6 +27,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
 
+### Removed — Dead subsystems
+
+- **TUI pop-up notification settings retired** — Was: `cas config` listed 16
+  `notifications.*` settings (sound, display duration, maximum visible, and the
+  task, entry, rule and skill events) that changed nothing, because the pop-up
+  pipeline they configured never ran. → Now: Those settings are gone. A config
+  file that still sets them loads normally, prints one note naming them, and
+  drops them on the next save or `cas update`. `notifications.enabled`,
+  `webhook_url` and the permission, idle and sign-in prompt settings are unchanged.
+- **Unused recording index tables dropped** — Was: Every store carried six
+  empty recording index tables, and nightly maintenance scanned them. → Now: A
+  schema migration drops the tables once. Factory session recordings are files
+  and are unaffected.
+- **Unused internal code removed** — Was: A second factory session manager, a
+  second search scorer and two search metrics stores were compiled into every
+  build without being called. → Now: They are removed, with no change in behavior.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

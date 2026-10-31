@@ -4783,7 +4783,6 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     Ok(())
 }
 
-#[cfg(test)]
 fn build_post_swap_command(
     installed_binary: &Path,
     previous_version: &str,

@@ -3084,9 +3084,9 @@ async fn test_task_close_blocked_without_verification() {
         .unwrap()
         .expect("dispatch-request verification row should exist after close");
     assert_eq!(
-        latest.status,
-        cas::types::VerificationStatus::Error,
-        "Dispatch-request row should have Error status until the subagent writes a verdict"
+        latest.status.to_string(),
+        "pending",
+        "Dispatch markers are pending work, not failed checks"
     );
     assert!(
         latest.summary.contains("Dispatch requested"),
@@ -8366,9 +8366,9 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         .expect("verification lookup should not error")
         .expect("alive-assignee close should persist a dispatch-request row");
     assert_eq!(
-        verification_row.status,
-        cas::types::VerificationStatus::Error,
-        "dispatch-request row should have Error status until a verdict lands"
+        verification_row.status.to_string(),
+        "pending",
+        "Dispatch markers are pending work, not failed checks"
     );
 }
 // =============================================================================

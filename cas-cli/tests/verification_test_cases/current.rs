@@ -253,3 +253,91 @@ async fn verification_refuses_missing_rows_and_invalid_status_without_writing() 
             .is_none()
     );
 }
+
+/// A question is durable review evidence, but does not reject the delivery or
+/// spend the dispatch. The supervisor answers with a verdict on that same id.
+#[tokio::test]
+async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let supervisor_id = "question-supervisor";
+    let mut supervisor = Agent::new(supervisor_id.into(), supervisor_id.into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    for (index, mode) in ["supervisor", "capability", "handoff"].into_iter().enumerate() {
+        let task_id = format!("cas-question-{index}");
+        let mut task = Task::new(task_id.clone(), "Question during review".into());
+        task.status = TaskStatus::InProgress;
+        task.pending_verification = true;
+        open_task_store_local(&fixture.root).unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &fixture.root, &task_id, supervisor_id, supervisor_id,
+            &VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let mut capability = None;
+        let caller = if mode == "supervisor" {
+            supervisor_id.to_string()
+        } else {
+            let child_id = format!("question-verifier-{index}");
+            agents.register(&Agent::new_sub_agent(
+                child_id.clone(), "task-verifier".into(), supervisor_id.into(),
+            )).unwrap();
+            if mode == "capability" {
+                let issued = cas_store::issue_verifier_capability(&fixture.root, &task_id, supervisor_id).unwrap();
+                cas_store::bind_verifier_capability(&fixture.root, &issued.token, &child_id).unwrap();
+                cas_store::claim_verification_dispatch(
+                    &fixture.root, &task_id, supervisor_id, &child_id, &issued.capability.id,
+                ).unwrap();
+                capability = Some(issued.token);
+            } else {
+                cas_store::issue_server_verifier_handoff(
+                    &fixture.root, &task_id, &dispatch.id, supervisor_id, &format!("question-tool-{index}"),
+                ).unwrap();
+                cas_store::bind_server_verifier_handoff(&fixture.root, supervisor_id, &child_id).unwrap();
+            }
+            child_id
+        };
+        fixture.service.inner.set_agent_id_for_testing(caller);
+        let question = "Does the recorded scope split cover the unexercised Accounts row?";
+        text(fixture.verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"supervisor_call", "summary":question, "verifier_capability":capability,
+        })).await.expect("a scope question is accepted"));
+        let history = open_verification_store(&fixture.root).unwrap();
+        let call = history.get_latest_for_task(&task_id).unwrap().unwrap();
+        assert_eq!(call.status.to_string(), "supervisor_call");
+        assert_eq!(call.summary, question);
+        assert!(open_task_store_local(&fixture.root).unwrap().get(&task_id).unwrap().pending_verification);
+        let waiting = cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap();
+        assert!(matches!(waiting.state, cas::types::VerificationDispatchState::Pending | cas::types::VerificationDispatchState::Claimed));
+        assert!(cas_store::quality_events_between(&fixture.root, None, None).unwrap().is_empty(), "a question ran no check");
+
+        // A worker cannot turn the question into an approval.
+        let worker_id = format!("question-worker-{index}");
+        agents.register(&Agent::new(worker_id.clone(), worker_id.clone())).unwrap();
+        fixture.service.inner.set_agent_id_for_testing(worker_id);
+        assert!(fixture.verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"approved", "summary":"unauthorized answer",
+        })).await.is_err());
+
+        fixture.service.inner.set_agent_id_for_testing(supervisor_id.into());
+        let answer = json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"approved", "summary":"Yes. The recorded scope split is accepted; review passes.",
+        });
+        text(fixture.verification(answer.clone()).await.expect("supervisor answers the existing dispatch"));
+        text(fixture.verification(answer).await.expect("lost-response retry is idempotent"));
+        assert_eq!(history.get(&call.id).unwrap().summary, question, "retain the original question");
+        let verdict = cas_store::get_verification_for_dispatch(&fixture.root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(verdict.status, VerificationStatus::Approved);
+        assert!(!open_task_store_local(&fixture.root).unwrap().get(&task_id).unwrap().pending_verification);
+        assert_eq!(cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap().state, cas::types::VerificationDispatchState::Resolved);
+        assert!(fixture.verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"rejected", "summary":"conflicting replay",
+        })).await.is_err(), "terminal verdict remains single use");
+    }
+}

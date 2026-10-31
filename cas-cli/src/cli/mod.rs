@@ -1181,6 +1181,34 @@ mod tests {
     }
 
     #[test]
+    fn help_never_displays_secret_environment_values() {
+        let sentinel = "cas-help-secret-sentinel-not-a-real-token";
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_CLOUD_TOKEN", sentinel),
+            ("CAS_SERVE_TOKEN", sentinel),
+        ]);
+
+        for (command, variable) in [
+            (vec!["cas", "login"], "CAS_CLOUD_TOKEN"),
+            (vec!["cas", "auth", "login"], "CAS_CLOUD_TOKEN"),
+            (vec!["cas", "setup"], "CAS_CLOUD_TOKEN"),
+            (vec!["cas", "bridge", "serve"], "CAS_SERVE_TOKEN"),
+        ] {
+            for flag in ["-h", "--help"] {
+                let mut args = command.clone();
+                args.push(flag);
+                let error = Cli::try_parse_from(args)
+                    .err()
+                    .expect("help exits through clap before dispatch");
+                assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+                let help = error.to_string();
+                assert!(!help.contains(sentinel), "{command:?} {flag} leaks a secret");
+                assert!(help.contains(variable), "help retains the env variable name");
+            }
+        }
+    }
+
+    #[test]
     fn release_report_help_fits_80_and_120_columns_without_losing_detail() {
         let details = [
             "Output in JSON format",

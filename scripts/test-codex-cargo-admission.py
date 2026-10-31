@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise installed Codex admission with scripted local responses and fake Cargo.
 
-No model, credentials, live MCP server or Rust compiler is used. Pass --codex
-explicitly to run the native boundary; ordinary CI without Codex records skips.
+No model, credentials, live MCP server or Rust compiler is used. Uses installed
+Codex or --codex; CI without Codex records an explicit native-boundary skip.
 The mitigation budget is read from the shipped hooks config. The one-second
 control intentionally documents the native fail-open behavior; no policy or
 account projection is installed.
@@ -133,7 +133,7 @@ supports_websockets = false
 class NativeCargoAdmission(unittest.TestCase):
     def setUp(self):
         if CODEX is None:
-            self.skipTest("native Codex boundary requires explicit --codex path")
+            self.skipTest("Codex is not installed; native boundary requires codex on PATH or --codex")
 
     def test_generous_budget_survives_delay_exceeding_old_timeout(self):
         result = native_admission("rewrite", generous_budget=True)
@@ -150,7 +150,7 @@ class NativeCargoAdmission(unittest.TestCase):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--codex", type=Path)
+    parser.add_argument("--codex", type=Path, default=shutil.which("codex"))
     args, rest = parser.parse_known_args()
-    CODEX = args.codex.resolve() if args.codex else None
+    CODEX = Path(args.codex).resolve() if args.codex else None
     unittest.main(argv=[__file__] + rest)

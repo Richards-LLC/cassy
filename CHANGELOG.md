@@ -11,6 +11,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Retired local release train** — Removed the unused release train, its lane checkers and train-only tests. Release lessons now follow `scripts/release.sh`; CI and the factory pre-push gate keep their shared fast-row catalog.
 
+### Fixed — CLI security
+
+- **Secret environment values stay out of help** — Was: Login and bridge server
+  help printed exported authentication tokens. → Now: Help lists the environment
+  variable names while hiding their values, matching the setup command.
+
 ### Added — Friction ledger, phase 1
 
 - **Every check and supervisor rescue is measured** — Was: Interventions, escapes
@@ -100,6 +106,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Release gate cancellation
 
 - **Aborted rows finish child cleanup** — Was: The gate could report cancellation while Cargo descendants kept running. → Now: It freezes the row tree, waits for descendants to terminate, and kills children that outlast the graceful shutdown window before releasing row resources.
+
+### Fixed — Release quality recording
+
+- **Published receipts feed the friction ledger** — Was: Release events were recorded only by the retired train. → Now: The existing published-receipt step records actual landing and publication timings with current tag history. A recording failure warns and preserves the verified receipt and draft.
 
 ## [3.93.0] - 2026-10-31
 

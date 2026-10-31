@@ -13,6 +13,7 @@
 - `.cargo/`, `.config/` - Cargo settings and nextest profiles.
 - `.claude/`, `.codex/` - instructions, harness projections and working context.
 - `.githooks/`, `.github/` - Git policy hooks, CI workflows and issue templates.
+- `.github/actions/run-script-suite-tests/` - path-scoped script and visual QA dependencies/execution shared by PR, slim-lane and assembly jobs.
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, tooling and toolchain roots.
 - `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policy.
 - `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` - design, standards and release/system references.

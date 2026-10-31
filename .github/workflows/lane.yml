@@ -60,6 +60,7 @@ jobs:
       bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
       fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
       fast-admission-reason: ${{ steps.classify-diff.outputs.fast-admission-reason }}
+      script-tests-needed: ${{ steps.script-tests.outputs.needed }}
     steps:
       # Classification needs the merge base with the epic parent, so history
       # stays complete; a warm self-hosted workspace fetches incrementally.
@@ -76,6 +77,16 @@ jobs:
 
       - name: Check Violet references before queue admission
         run: bash scripts/test-no-mecha-references.sh
+
+      - id: script-tests
+        name: Classify script suite inputs
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+        run: |
+          comparison=(--all)
+          if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+          python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" \
+            --provisioned --github-output "$GITHUB_OUTPUT"
 
       # Local pre-push feedback is worker-writable. CI owns the proof: run
       # once for every slim factory diff before downstream admission jobs.
@@ -133,17 +144,27 @@ jobs:
 
   scoped-validation-fast:
     name: Scoped Validation (fast)
-    if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only'
+    if: >-
+      vars.CAS_LANE_SLIM == 'true' && (needs.ci-diff.outputs.class != 'docs-only' || needs.ci-diff.outputs.script-tests-needed == 'true')
     needs: ci-diff
     runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
+    env:
+      LEGACY_SCOPED: ${{ vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - uses: ./.github/actions/run-script-suite-tests
+        if: needs.ci-diff.outputs.script-tests-needed == 'true'
+        with:
+          base-sha: ${{ needs.ci-diff.outputs.comparison-base }}
+
       - name: Detect runner lock fixture changes
+        if: >-
+          env.LEGACY_SCOPED == 'true'
         id: runner-lock-diff
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
@@ -163,15 +184,18 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
       - name: Test runner cache job lock lifecycle
-        if: steps.runner-lock-diff.outputs.changed == 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.runner-lock-diff.outputs.changed == 'true')
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
 
       - name: Test runner repository registration arguments
-        if: steps.runner-lock-diff.outputs.changed == 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.runner-lock-diff.outputs.changed == 'true')
         run: ./scripts/test-cassy-actions-runner-registration.sh
 
       - name: Report full-tier routing
-        if: needs.ci-diff.outputs.fast-admission != 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission != 'true')
         env:
           FAST_ADMISSION_REASON: ${{ needs.ci-diff.outputs.fast-admission-reason }}
         run: >-
@@ -180,8 +204,7 @@ jobs:
 
       - name: Typecheck and test Commander web assets
         if: >-
-          needs.ci-diff.outputs.fast-admission == 'true'
-          && needs.ci-diff.outputs.web-check-needed == 'true'
+          env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission == 'true' && needs.ci-diff.outputs.web-check-needed == 'true')
         working-directory: hub-web
         run: |
           npm ci
@@ -190,8 +213,7 @@ jobs:
 
       - name: Build and test the Slack bridge
         if: >-
-          needs.ci-diff.outputs.fast-admission == 'true'
-          && needs.ci-diff.outputs.bridge-check-needed == 'true'
+          env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission == 'true' && needs.ci-diff.outputs.bridge-check-needed == 'true')
         working-directory: slack-bridge
         run: |
           npm ci
@@ -199,6 +221,8 @@ jobs:
           npm run build
 
       - name: Report Rust test ownership
+        if: >-
+          env.LEGACY_SCOPED == 'true'
         run: >-
           echo "No Rust tests ran here: worker focused-test receipts at this
           SHA (checked at park) and the merge-queue full suite own them."

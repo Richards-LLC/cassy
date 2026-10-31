@@ -87,6 +87,7 @@ jobs:
       rust-unaffected: ${{ steps.classify-diff.outputs.rust-unaffected }}
       web-check-needed: ${{ steps.classify-diff.outputs.web-check-needed }}
       bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
+      script-tests-needed: ${{ steps.script-tests.outputs.needed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +100,16 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
+      - id: script-tests
+        name: Classify script suite inputs
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+        run: |
+          comparison=(--all)
+          if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+          python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" \
+            --provisioned --github-output "$GITHUB_OUTPUT"
+
       # Move the repository scan out of the expensive queue script tier. This
       # existing admission job covers factory and direct epic pushes plus PRs
       # (including release branches) before a merge-group can be admitted.
@@ -109,7 +120,8 @@ jobs:
   # Docs-only changes keep the existing branch-protection contexts satisfiable without
   # paying for Rust, web, or Darwin work. The full validation jobs remain the
   # required path for mixed and code changes; this is the only job that does
-  # work for a docs-only PR, push, or merge-group tree.
+  # work for a docs-only PR, push, or merge-group tree, except named script-suite
+  # inputs which select their own scoped checks.
   docs-lint:
     name: Docs Lint
     if: >-
@@ -333,9 +345,13 @@ jobs:
   scoped-validation-fast:
     name: Scoped Validation (fast)
     if: >-
-      needs.ci-diff.outputs.class != 'docs-only'
-      && github.event_name == 'push'
-      && startsWith(github.ref, 'refs/heads/factory/')
+      (needs.ci-diff.outputs.class != 'docs-only' && github.event_name == 'push'
+      && startsWith(github.ref, 'refs/heads/factory/'))
+      || (needs.ci-diff.outputs.script-tests-needed == 'true'
+      && (github.event_name == 'pull_request'
+      || (github.event_name == 'push' && github.ref != 'refs/heads/main'
+      && !startsWith(github.ref, 'refs/tags/'))
+      || needs.ci-diff.outputs.rust-unaffected == 'true'))
     needs: ci-diff
     permissions:
       contents: read
@@ -344,15 +360,24 @@ jobs:
       group: scoped-validation-fast-${{ github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    env:
+      LEGACY_SCOPED: ${{ needs.ci-diff.outputs.class != 'docs-only' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') }}
     steps:
       - uses: actions/checkout@v4
         with:
           # A slim factory push builds nothing that needs the submodules.
           submodules: ${{ vars.CAS_LANE_SLIM == 'true' && 'false' || 'recursive' }}
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: ./.github/actions/run-script-suite-tests
+        if: needs.ci-diff.outputs.script-tests-needed == 'true'
+        with:
+          base-sha: ${{ needs.ci-diff.outputs.comparison-base }}
 
       - id: classify-diff
+        if: >-
+          env.LEGACY_SCOPED == 'true'
         uses: ./.github/actions/classify-required-diff
         with:
           base-sha: ${{ github.event.before }}
@@ -360,7 +385,8 @@ jobs:
 
       # This cheap step runs even when builds route to the full tier or a PR.
       - name: Run no-build release gate rows
-        if: vars.CAS_LANE_SLIM != 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (vars.CAS_LANE_SLIM != 'true')
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -374,6 +400,8 @@ jobs:
           ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
 
       - name: Detect runner lock fixture changes
+        if: >-
+          env.LEGACY_SCOPED == 'true'
         id: runner-lock-diff
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
@@ -394,15 +422,18 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
       - name: Test runner cache job lock lifecycle
-        if: steps.runner-lock-diff.outputs.changed == 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.runner-lock-diff.outputs.changed == 'true')
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
 
       - name: Test runner repository registration arguments
-        if: steps.runner-lock-diff.outputs.changed == 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.runner-lock-diff.outputs.changed == 'true')
         run: ./scripts/test-cassy-actions-runner-registration.sh
 
       - name: Report full-tier routing
-        if: steps.classify-diff.outputs.fast-admission != 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission != 'true')
         env:
           FAST_ADMISSION_REASON: ${{ steps.classify-diff.outputs.fast-admission-reason }}
         run: >-
@@ -413,8 +444,7 @@ jobs:
       # Both scoped tiers consume the path signal before accepting a lane.
       - name: Typecheck and test Commander web assets
         if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.web-check-needed == 'true'
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission == 'true' && steps.classify-diff.outputs.web-check-needed == 'true')
         working-directory: hub-web
         run: |
           npm ci
@@ -423,8 +453,7 @@ jobs:
 
       - name: Build and test the Slack bridge
         if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.bridge-check-needed == 'true'
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission == 'true' && steps.classify-diff.outputs.bridge-check-needed == 'true')
         working-directory: slack-bridge
         run: |
           npm ci
@@ -433,24 +462,18 @@ jobs:
 
       - uses: ./.github/actions/setup-rust-linux
         if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && vars.CAS_LANE_SLIM != 'true'
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission == 'true' && steps.classify-diff.outputs.rust-unaffected != 'true' && vars.CAS_LANE_SLIM != 'true')
         with:
           cache-key: scoped-validation-fast
 
       - name: Install nextest
         if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && vars.CAS_LANE_SLIM != 'true'
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission == 'true' && steps.classify-diff.outputs.rust-unaffected != 'true' && vars.CAS_LANE_SLIM != 'true')
         uses: taiki-e/install-action@nextest
 
       - name: Run change-scoped tests with impact evidence
         if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && vars.CAS_LANE_SLIM != 'true'
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission == 'true' && steps.classify-diff.outputs.rust-unaffected != 'true' && vars.CAS_LANE_SLIM != 'true')
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -468,7 +491,8 @@ jobs:
           fi
 
       - name: Publish CI impact evidence
-        if: always()
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (always())
         uses: actions/upload-artifact@v4
         with:
           name: ci-test-impact-${{ github.run_id }}-scoped-fast
@@ -477,9 +501,7 @@ jobs:
 
       - name: Test snapshot-pinned CLI output surfaces
         if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && vars.CAS_LANE_SLIM != 'true'
+          env.LEGACY_SCOPED == 'true' && (steps.classify-diff.outputs.fast-admission == 'true' && steps.classify-diff.outputs.rust-unaffected != 'true' && vars.CAS_LANE_SLIM != 'true')
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -487,8 +509,7 @@ jobs:
 
       - name: Report Rust test ownership
         if: >-
-          vars.CAS_LANE_SLIM == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          env.LEGACY_SCOPED == 'true' && (vars.CAS_LANE_SLIM == 'true' && steps.classify-diff.outputs.rust-unaffected != 'true')
         run: >-
           echo "No Rust tests ran here: worker focused-test receipts at this
           SHA (checked at park) and the merge-queue full suite own them."
@@ -496,7 +517,8 @@ jobs:
 
       - name: Report sccache stats
         # A slim factory push compiles nothing; there is no cache to report.
-        if: always() && vars.CAS_LANE_SLIM != 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (always() && vars.CAS_LANE_SLIM != 'true')
         run: |
           if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
             ./scripts/ci-sccache-summary.sh "Scoped Validation (fast)"
@@ -879,6 +901,23 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
 
+      # Reuse the binary this lane just built. Script-only PR checks never
+      # compile Rust or download a previous release to claim current coverage.
+      - name: Test factory terminal restoration with the source-built CLI
+        if: >-
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && success() }}
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+        run: |
+          export CAS_TEST_BINARY="${CARGO_TARGET_DIR:-target}/debug/cas"
+          test -x "$CAS_TEST_BINARY"
+          comparison=(--all)
+          if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+          python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" \
+            --only scripts/test-factory-client-terminal.py
+
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
         run: |
@@ -913,6 +952,10 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: ./.github/actions/run-script-suite-tests
+        with:
+          full-tier: 'true'
 
       - name: Test release publication guards
         run: |
@@ -1556,7 +1599,8 @@ jobs:
   fast-validation:
     name: Fast Validation
     if: >-
-      always() && (needs.ci-diff.outputs.class != 'docs-only' || needs.ci-diff.result != 'success')
+      always() && (needs.ci-diff.outputs.class != 'docs-only'
+      || needs.ci-diff.outputs.script-tests-needed == 'true' || needs.ci-diff.result != 'success')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'
@@ -1566,6 +1610,7 @@ jobs:
       || startsWith(github.ref, 'refs/tags/'))))
     needs:
       - ci-diff
+      - scoped-validation-fast
       - fast-validation-main-push-dedupe
       - fast-validation-preflight
       - fast-validation-ci-tiers
@@ -1591,6 +1636,16 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
+      - name: Require selected script suites
+        if: always()
+        env:
+          SCOPED: ${{ needs.scoped-validation-fast.result }}
+        run: |
+          case "$SCOPED" in
+            success|skipped) ;;
+            *) echo "::error::Selected script suites did not pass: $SCOPED"; exit 1 ;;
+          esac
+
       - name: Admit protected PR to merge-queue validation
         if: github.event_name == 'pull_request' || needs.ci-diff.result != 'success'
         env:

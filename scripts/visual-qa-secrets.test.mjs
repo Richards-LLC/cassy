@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,7 +47,7 @@ test('signed-in trace and in-flight route teardown contain no seeded credentials
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
       const url = 'http://127.0.0.1:' + server.address().port;
       const { playwright } = await qa.resolvePlaywright();
-      const browser = await playwright.chromium.launch({ headless: true });
+      const browser = await playwright.chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH });
       try {
         const context = await browser.newContext({ extraHTTPHeaders: { Authorization: 'Bearer ' + tokens.idToken } });
         await context.addCookies([{ name: 'app-session', value: tokens.cookie, url }]);
@@ -85,17 +85,18 @@ test('signed-in trace and in-flight route teardown contain no seeded credentials
       console.log('fixture completed');
     `;
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 45000 });
-    // Decompress every archive entry; scanning compressed ZIP bytes is insufficient.
-    const trace = execFileSync('unzip', ['-p', join(dir, 'trace.zip')], { maxBuffer: 16 * 1024 * 1024 }).toString();
     assert.equal(forbidden.test(child.stdout + child.stderr), false, 'credential reached teardown output');
+    assert.equal(child.status, 0, `teardown child failed: ${child.stderr}`);
+    // Decompress every archive entry; scanning compressed ZIP bytes is insufficient.
+    const entries = await zipEntries(join(dir, 'trace.zip'));
+    assert.ok(entries.size > 0, 'the trace must contain readable entries');
+    const trace = [...entries.values()].join('\n');
     assert.equal(forbidden.test(trace), false, 'credential reached trace entry');
-    assert.equal(child.status, 0, 'teardown child failed');
     assert.match(trace, /Authenticated fixture/);
-    execFileSync('unzip', ['-t', join(dir, 'trace.zip')]);
     const { readdir, readFile } = await import('node:fs/promises');
     for (const name of await readdir(join(dir, 'report'))) {
       if (name.endsWith('.zip')) {
-        const content = execFileSync('unzip', ['-p', join(dir, 'report', name)], { maxBuffer: 16 * 1024 * 1024 }).toString();
+        const content = [...(await zipEntries(join(dir, 'report', name))).values()].join('\n');
         assert.equal(forbidden.test(content), false, 'credential reached visual-qa signed-in trace');
       } else if (/\.(json|md)$/.test(name)) {
         assert.equal(forbidden.test(await readFile(join(dir, 'report', name), 'utf8')), false, 'credential reached visual-qa report');
@@ -200,7 +201,9 @@ async function zipEntries(path) {
   while (zip.readUInt32LE(end) !== 0x06054b50) end--;
   let cursor = zip.readUInt32LE(end + 16);
   for (let index = 0; index < zip.readUInt16LE(end + 10); index++) {
+    assert.equal(zip.readUInt32LE(cursor), 0x02014b50, 'trace ZIP central directory');
     const method = zip.readUInt16LE(cursor + 10), size = zip.readUInt32LE(cursor + 20), nameLength = zip.readUInt16LE(cursor + 28);
+    assert.ok(method === 0 || method === 8, `unsupported trace ZIP compression: ${method}`);
     const name = zip.subarray(cursor + 46, cursor + 46 + nameLength).toString();
     const local = zip.readUInt32LE(cursor + 42);
     const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);

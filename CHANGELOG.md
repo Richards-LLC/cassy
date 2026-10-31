@@ -46,6 +46,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Factory merge admission
 
 - **Factory merges report missing code validation accurately** — Was: a failed change classifier with every validation job skipped appeared as failed code CI after a documentation repair. Now: admission reports unconfirmed code validation with the classifier run link and requires code CI or a supervisor-reviewed local receipt. Target-only imports are excluded from delivery classification; lane-owned code and merge resolutions still require validation.
+- **Pending tip CI holds a code merge when the code commit has no runs** — Was: when code commits were pushed together with later documentation commits, the code commit had no CI runs of its own, so admission called the delivery advisory and merged it while the tip's run was still in progress. Now: the newest run that includes the code decides, so a pending run refuses the merge and a documentation-only run requires code validation. Admission stays advisory only when no run covers the code.
 
 ### Removed — Dead subsystems
 

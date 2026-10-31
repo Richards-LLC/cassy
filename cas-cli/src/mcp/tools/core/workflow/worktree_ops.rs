@@ -445,8 +445,9 @@ pub(crate) fn epic_tip_ci_proof(sha: &str, cwd: &Path) -> Result<String, String>
 }
 
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
-/// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
-/// the tip for a pure docs delivery. Both lookups are bounded and never poll.
+/// Otherwise query the latest code commit in merge-base..tip, falling back to
+/// the newest run that includes it when it has none of its own, or Docs Lint
+/// at the tip for a pure docs delivery. All lookups are bounded and never poll.
 fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     cas_store::lane_guard::note_blocking_call(
         cas_store::lane_guard::BlockingKind::Command,
@@ -503,7 +504,14 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                         })
                     })
                     .flatten();
-                settled.unwrap_or_else(|| classify_code_ci_response(branch, &code_sha, output))
+                let own = settled
+                    .unwrap_or_else(|| classify_code_ci_response(branch, &code_sha, output));
+                if matches!(own, BranchCiState::NoChecks { .. }) {
+                    covering_code_ci(branch, &code_sha, &tip, tip_state, cwd, &repo, &binary)
+                        .unwrap_or(own)
+                } else {
+                    own
+                }
             };
             require_code_validation(state)
         }
@@ -513,6 +521,49 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
         repo: Some(repo),
         repository_lookup_attempted: true,
     }
+}
+
+/// Bound on the descendant commits searched for a run covering the code commit.
+const COVERING_CI_MAX_DESCENDANTS: usize = 8;
+
+/// cas-e0509: CI runs on pushed tips only, so a code commit pushed together
+/// with later commits has no runs of its own. The newest run that includes it
+/// decides: the tip's, else the newest earlier-pushed descendant's. `None`
+/// when no run covers the code, which stays advisory.
+fn covering_code_ci(
+    branch: &str,
+    code_sha: &str,
+    tip: &str,
+    tip_state: BranchCiState,
+    cwd: &Path,
+    repo: &str,
+    binary: &Path,
+) -> Option<BranchCiState> {
+    let covers = |state: &BranchCiState| {
+        !matches!(
+            state,
+            BranchCiState::NoChecks { .. }
+                | BranchCiState::GhFailure { .. }
+                | BranchCiState::Unknown { .. }
+                | BranchCiState::MissingCommit { .. }
+        )
+    };
+    if covers(&tip_state) {
+        return Some(tip_state);
+    }
+    let deadline = crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT);
+    let range = format!("{code_sha}..{tip}");
+    let descendants =
+        ci_git(cwd, &["rev-list", "--topo-order", "--ancestry-path", &range], deadline).ok()?;
+    String::from_utf8_lossy(&descendants)
+        .lines()
+        .filter(|commit| *commit != tip)
+        .take(COVERING_CI_MAX_DESCENDANTS)
+        .map(|commit| {
+            let output = fetch_branch_ci(commit, cwd, repo, binary);
+            classify_code_ci_response(branch, commit, output)
+        })
+        .find(|state| covers(state))
 }
 
 /// cas-c59e: the lane's concurrency group cancels a commit's run when a newer push
@@ -6410,6 +6461,70 @@ mod tests {
                     "{receipt}"
                 );
                 assert!(!receipt.contains("CI state: green"), "{receipt}");
+            }
+        }
+    }
+
+    /// Incident shape: code commits, then changelog-only commits pushed with
+    /// them. CI runs on pushed tips only, so the latest code commit has no runs
+    /// of its own; the newest run that includes it decides. Advisory remains
+    /// only when no run covers the code anywhere.
+    #[cfg(unix)]
+    #[test]
+    fn code_without_own_runs_follows_the_newest_covering_run_cas_e0509() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, _) = delivery_ci_fixture(false, None);
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(["-c", "user.name=CI fixture", "-c", "user.email=ci@example.test"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let commit = |path: &str, message: &str| {
+            std::fs::write(repo.path().join(path), format!("{message}\n")).unwrap();
+            git(&["add", path]);
+            git(&["commit", "-qm", message]);
+            git(&["rev-parse", "HEAD"])
+        };
+        commit("store.rs", "delete the dead store");
+        let code_sha = commit("search.rs", "delete the dead search modules");
+        let mid = commit("CHANGELOG.md", "note the removal");
+        let tip = commit("CHANGELOG.md", "reword the note");
+        let pending = r#"{"check_runs":[{"name":"Classify CI diff","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/cas/actions/runs/7"}]}"#;
+        let docs_only = r#"{"check_runs":[{"name":"Classify CI diff","status":"completed","conclusion":"success"},{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
+        let none = r#"{"check_runs":[]}"#;
+        // A failed tip lookup must not hide an earlier covering run either.
+        let outage = "outage";
+        let fake_gh = repo.path().join("gh-fixture");
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        for (tip_runs, mid_runs, expected) in [
+            (pending, none, "CI PENDING"),
+            (docs_only, none, "CODE CI REQUIRED"),
+            (none, pending, "CI PENDING"),
+            (outage, pending, "CI PENDING"),
+            (none, none, "advisory"),
+        ] {
+            let tip_arm = if tip_runs == outage {
+                "echo 'HTTP 502: Bad Gateway' >&2; exit 1".to_string()
+            } else {
+                format!("printf '%s\\n' '{tip_runs}'")
+            };
+            crate::test_paths::warm_stub(&fake_gh, &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) {tip_arm} ;;\n*/{mid}/check-runs) printf '%s\\n' '{mid_runs}' ;;\n*) printf '%s\\n' '{none}' ;;\nesac\n"
+            ));
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            match admit_branch_ci(&state, false, None) {
+                Err(refusal) => assert!(refusal.starts_with(expected), "{expected}: {refusal}"),
+                Ok(_) => {
+                    assert_eq!(expected, "advisory", "{state:?}");
+                    let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+                    assert!(
+                        receipt.contains(&format!("code validation not confirmed for {code_sha}")),
+                        "{receipt}"
+                    );
+                }
             }
         }
     }

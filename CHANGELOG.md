@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Visual QA
+
+- **Parallel resting captures** — Visual QA now captures up to three pages at once in one Chromium process, preserving report order, deduplication and strict failures. Set `VISUAL_QA_CONCURRENCY=1` to run captures sequentially; journeys keep their existing sequence.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

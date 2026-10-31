@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readFile, mkdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
+import { readFile, mkdir, writeFile, rm, mkdtemp, rename } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -1283,7 +1283,10 @@ async function capturePage(page, path, timeoutMs, recordFinding) {
  * the shell and image decode waits (default 5000 ms each). Undecoded images fail
  * every capture; a loader/empty resting page always fails readiness.
  * Declared journey states may intentionally exercise loading after startup.
- * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object, readySelector?: string, readyTimeoutMs?: number}} options
+ * Resting captures use at most concurrency contexts (default 3, overridable via
+ * VISUAL_QA_CONCURRENCY). Findings and screenshots merge in input order;
+ * journeys still run sequentially after resting captures.
+ * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object, readySelector?: string, readyTimeoutMs?: number, concurrency?: number}} options
  */
 export async function runVisualQa(options) {
   try { return await inspectVisualQa(options); }
@@ -1302,6 +1305,8 @@ async function inspectVisualQa(options) {
   const schemes = options.schemes || DEFAULT_SCHEMES;
   const viewports = (options.viewports || DEFAULT_VIEWPORTS).map(normalizeViewport);
   if (!schemes.length || !viewports.length) throw new Error('No captures requested: at least one color scheme and viewport are required.');
+  const concurrency = options.concurrency ?? Number(process.env.VISUAL_QA_CONCURRENCY ?? 3);
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('VISUAL_QA_CONCURRENCY / concurrency must be a positive safe integer.');
   const readyTimeoutMs = options.readyTimeoutMs ?? 5000;
   if (!Number.isFinite(readyTimeoutMs) || readyTimeoutMs <= 0) throw new Error('readyTimeoutMs must be a positive finite number.');
   if (options.readySelector !== undefined && (typeof options.readySelector !== 'string' || !options.readySelector.trim())) throw new Error('readySelector must be a nonempty CSS selector.');
@@ -1309,7 +1314,8 @@ async function inspectVisualQa(options) {
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
   const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
-  const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
+  const captureDir = await mkdtemp(join(artifactDir, '.visual-qa-'));
+  let browser;
   const findings = [];
   const infoFindings = [];
   const suppressed = [];
@@ -1320,90 +1326,118 @@ async function inspectVisualQa(options) {
   const seen = new Set();
   let warnedUnownedTrace = false;
   try {
-    for (const [urlIndex, url] of urls.entries()) {
-      const source = inputUrls[urlIndex];
-      for (const scheme of schemes) {
-        for (const viewport of viewports) {
-          const context = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
-          const page = await context.newPage();
-          try {
-            await page.goto(url, { waitUntil: 'load' });
-            let measured = await waitForPageReadiness(page, readinessOptions);
-            await settlePage(page);
-            // Settling can finish an animation whose callback replaces the shell.
-            measured = measured.ready ? await page.evaluate(PAGE_READINESS, readinessOptions) : measured;
-            readiness.push({ ...measured, url: source, scheme, viewport, readySelector: options.readySelector, timeoutMs: readyTimeoutMs });
-            if (!measured.ready) findings.push({ type: 'page-not-ready', selector: options.readySelector || 'body', elementPath: options.readySelector || 'body',
-              reason: `${measured.reason}; readiness was not reached within ${readyTimeoutMs} ms`, url: source, scheme, viewport });
-            const recordFinding = (finding, informational = false) => {
-              const enriched = { ...finding, url: source, scheme, viewport };
-              const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
-              if (seen.has(key)) return;
-              seen.add(key);
-              const exception = enriched.type === 'image-not-decoded' ? null : enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
-                (entry.type === '*' || entry.type === enriched.type)
-                && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
-              if (exception) suppressed.push({ ...enriched, reason: exception.reason });
-              else if (informational) infoFindings.push(enriched);
-              else findings.push(enriched);
-            };
-            const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
-            for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
-            for (const finding of inspection.findings) recordFinding(finding);
+    browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
+    // Contexts remain isolated per capture, within a single Chromium process.
+    // Stage screenshots by index so even colliding output names merge in order.
+    const tasks = urls.flatMap((url, urlIndex) => schemes.flatMap((scheme) => viewports.map((viewport) => ({ url, source: inputUrls[urlIndex], scheme, viewport }))));
+    const capture = async ({ url, source, scheme, viewport }, index) => {
+      const captured = { findings: [], readiness: [], pageDeclarations: [], screenshots: [], events: [] };
+      const { findings, readiness, pageDeclarations, screenshots } = captured;
+      const recordFinding = (finding, informational = false) => captured.events.push({ finding, informational });
+      let requiresJavaScript;
+      let screenText;
+      const context = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
+      try {
+        const page = await context.newPage();
+        await page.goto(url, { waitUntil: 'load' });
+        let measured = await waitForPageReadiness(page, readinessOptions);
+        await settlePage(page);
+        // Settling can finish an animation whose callback replaces the shell.
+        measured = measured.ready ? await page.evaluate(PAGE_READINESS, readinessOptions) : measured;
+        readiness.push({ ...measured, url: source, scheme, viewport, readySelector: options.readySelector, timeoutMs: readyTimeoutMs });
+        if (!measured.ready) findings.push({ type: 'page-not-ready', selector: options.readySelector || 'body', elementPath: options.readySelector || 'body',
+          reason: `${measured.reason}; readiness was not reached within ${readyTimeoutMs} ms`, url: source, scheme, viewport });
+        const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
+        for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
+        for (const finding of inspection.findings) recordFinding(finding);
 
-            // A reviewed application declaration exempts only the no-JS
-            // comparison. All visual and print checks still apply. Undeclared
-            // pages, including reports, retain the default no-JS requirement.
-            const requirement = await page.evaluate(() => {
-              const declarations = document.querySelectorAll('head meta[name="visual-qa:requires-javascript"]');
-              if (!declarations.length) return null;
-              return { count: declarations.length, reason: declarations[0].getAttribute('content')?.trim() ?? '' };
-            });
-            const requiresJavaScript = requirement?.count === 1 && Boolean(requirement.reason);
-            if (requirement && !requiresJavaScript) {
-              recordFinding({ type: 'invalid-javascript-requirement', selector: 'meta[name="visual-qa:requires-javascript"]',
-                elementPath: 'head > meta', reason: 'declare-one-javascript-requirement-with-a-nonempty-reason' });
-            }
-            if (requiresJavaScript && !pageDeclarations.some((page) => page.url === source)) {
-              pageDeclarations.push({ url: source, requiresJavaScript: true, reason: requirement.reason });
-            }
+        // A reviewed application declaration exempts only the no-JS
+        // comparison. All visual and print checks still apply. Undeclared
+        // pages, including reports, retain the default no-JS requirement.
+        const requirement = await page.evaluate(() => {
+          const declarations = document.querySelectorAll('head meta[name="visual-qa:requires-javascript"]');
+          if (!declarations.length) return null;
+          return { count: declarations.length, reason: declarations[0].getAttribute('content')?.trim() ?? '' };
+        });
+        requiresJavaScript = requirement?.count === 1 && Boolean(requirement.reason);
+        if (requirement && !requiresJavaScript) {
+          recordFinding({ type: 'invalid-javascript-requirement', selector: 'meta[name="visual-qa:requires-javascript"]',
+            elementPath: 'head > meta', reason: 'declare-one-javascript-requirement-with-a-nonempty-reason' });
+        }
+        if (requiresJavaScript && !pageDeclarations.some((page) => page.url === source)) {
+          pageDeclarations.push({ url: source, requiresJavaScript: true, reason: requirement.reason });
+        }
 
-            const screenText = await page.locator('body').innerText().catch(() => '');
-            await page.emulateMedia({ media: 'print' });
-            const printText = await page.locator('body').innerText().catch(() => '');
-            if (screenText.trim().length > 20 && printText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
-              recordFinding({ type: 'print-loss', selector: 'body', elementPath: 'body', textSample: printText.trim().slice(0, 96), reason: 'print-media-hides-content', screenCharacters: screenText.trim().length, printCharacters: printText.trim().length });
-            }
-            await page.emulateMedia({ media: 'screen' });
+        screenText = await page.locator('body').innerText().catch(() => '');
+        await page.emulateMedia({ media: 'print' });
+        const printText = await page.locator('body').innerText().catch(() => '');
+        if (screenText.trim().length > 20 && printText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
+          recordFinding({ type: 'print-loss', selector: 'body', elementPath: 'body', textSample: printText.trim().slice(0, 96), reason: 'print-media-hides-content', screenCharacters: screenText.trim().length, printCharacters: printText.trim().length });
+        }
+        await page.emulateMedia({ media: 'screen' });
 
-            const screenshotBuffer = await capturePage(page, join(artifactDir, `${slug(source)}-${scheme}-${viewport.name}.png`), readyTimeoutMs, recordFinding);
-            for (const info of inspection.infos) {
-              const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
-              const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
-              recordFinding({ ...info, sampledBackground, sampledRatio }, true);
-            }
-
-            if (!requiresJavaScript) {
-              const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
-              const noScriptPage = await noScriptContext.newPage();
-              try {
-                await noScriptPage.goto(url, { waitUntil: 'load' });
-                const noScriptText = await noScriptPage.locator('body').innerText().catch(() => '');
-                if (screenText.trim().length > 20 && noScriptText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
-                  recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
-                }
-              } finally {
-                await closeQaContext(noScriptContext);
-              }
-            }
-
-            const filename = `${slug(source)}-${scheme}-${viewport.name}.png`;
-            screenshots.push({ path: filename, url: source, scheme, viewport });
-          } finally {
-            await closeQaContext(context);
+        const screenshotBuffer = await capturePage(page, join(captureDir, `${index}.png`), readyTimeoutMs, recordFinding);
+        for (const info of inspection.infos) {
+          const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
+          const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
+          recordFinding({ ...info, sampledBackground, sampledRatio }, true);
+        }
+      } finally {
+        await closeQaContext(context);
+      }
+      // Release the JS context before probing no-JS, keeping the total at N.
+      if (!requiresJavaScript) {
+        const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
+        try {
+          const noScriptPage = await noScriptContext.newPage();
+          await noScriptPage.goto(url, { waitUntil: 'load' });
+          const noScriptText = await noScriptPage.locator('body').innerText().catch(() => '');
+          if (screenText.trim().length > 20 && noScriptText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
+            recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
           }
+        } finally {
+          await closeQaContext(noScriptContext);
         }
       }
+
+      screenshots.push({ path: `${slug(source)}-${scheme}-${viewport.name}.png`, url: source, scheme, viewport });
+      return captured;
+    };
+    const results = new Array(tasks.length);
+    let next = 0;
+    let failure;
+    await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+      while (!failure && next < tasks.length) {
+        const index = next++;
+        try { results[index] = await capture(tasks[index], index); }
+        catch (error) { failure ??= error; }
+      }
+    }));
+    // Drain every in-flight capture before closing Chromium on failure.
+    if (failure) throw failure;
+    for (const [index, captured] of results.entries()) {
+      const { source, scheme, viewport } = tasks[index];
+      findings.push(...captured.findings);
+      readiness.push(...captured.readiness);
+      for (const declaration of captured.pageDeclarations) {
+        if (!pageDeclarations.some((page) => page.url === declaration.url)) pageDeclarations.push(declaration);
+      }
+      const recordFinding = (finding, informational = false) => {
+        const enriched = { ...finding, url: source, scheme, viewport };
+        const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
+        if (seen.has(key)) return;
+        seen.add(key);
+        const exception = enriched.type === 'image-not-decoded' ? null : enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+          (entry.type === '*' || entry.type === enriched.type)
+          && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
+        if (exception) suppressed.push({ ...enriched, reason: exception.reason });
+        else if (informational) infoFindings.push(enriched);
+        else findings.push(enriched);
+      };
+      // Replay findings in capture order: first URL wins the existing seen key.
+      for (const { finding, informational } of captured.events) recordFinding(finding, informational);
+      await rename(join(captureDir, `${index}.png`), join(artifactDir, captured.screenshots[0].path));
+      screenshots.push(...captured.screenshots);
     }
     if (journey) {
       const source = journey.url ?? inputUrls[0];
@@ -1498,7 +1532,8 @@ async function inspectVisualQa(options) {
       }
     }
   } finally {
-    await browser.close();
+    try { await browser?.close(); }
+    finally { await rm(captureDir, { recursive: true, force: true }); }
   }
   if (!screenshots.length) throw new Error('No captures produced; visual QA cannot pass without screenshots.');
   const result = redactQaValue({

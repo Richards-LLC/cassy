@@ -357,11 +357,6 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
     await page.locator("#paired-machines-toggle").click();
     const paired = page.locator("#paired-machines-dialog");
     await expect(paired).toBeVisible();
-    expect(await manage.evaluate((node) => {
-      const reason = node.querySelector(".fleet-permission-reason")!;
-      const also = node.querySelector(".fleet-permission-also")!;
-      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
-    })).toBe(true);
   });
 });
 

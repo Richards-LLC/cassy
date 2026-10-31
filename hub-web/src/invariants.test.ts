@@ -400,12 +400,6 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 });
 
-describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
-});
-
-describe("3.30.0 journey polish (cas-b128)", () => {
-});
-
 /**
  * cas-d636: on soundwave a phone's proofs were signed before it slept and sent
  * when it woke, 266 s later; the hub refused them and every 401 read as a

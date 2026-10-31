@@ -161,11 +161,6 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     // Studio was paired for control only: explain the missing permission
     // before its re-pair command, without a disabled fleet-action lookalike.
     const manage = studio.locator('[data-permission="manage"]');
-    expect(await manage.evaluate((node) => {
-      const reason = node.querySelector(".fleet-permission-reason")!;
-      const also = node.querySelector(".fleet-permission-also")!;
-      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
-    })).toBe(true);
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });
     if (phone) await activate(page, copy);

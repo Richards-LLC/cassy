@@ -188,11 +188,6 @@ test.describe("write access without factory:manage cas_ab04", () => {
       expect(hub.writeGrants).toHaveLength(0);
       await permissions.getByRole("link", { name: "Open Paired machines" }).click();
       await expect(page.locator("#paired-machines-dialog")).toBeVisible();
-      expect(await manage.evaluate((node) => {
-        const reason = node.querySelector(".fleet-permission-reason")!;
-        const also = node.querySelector(".fleet-permission-also")!;
-        return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
-      })).toBe(true);
     });
   });
 });

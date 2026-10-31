@@ -866,9 +866,6 @@ describe("ConversationView (Pebble thread)", () => {
   });
 });
 
-describe("coalesced status lines under forced colours (journey F11)", () => {
-});
-
 describe("earlier reply context (cas-7cb3)", () => {
   it("quotes the question when its history arrives, without opening the earlier session", () => {
     const history = new ConversationHistory(); history.currentSession = "acct-now";

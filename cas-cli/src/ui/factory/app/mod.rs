@@ -3346,16 +3346,11 @@ Current workers: {worker_list}",
         ) {
             use crate::hooks::handlers::session_budget::SessionContextAssembler;
 
-            let mut assembler =
-                SessionContextAssembler::new(format!("{prompt}\n\n<cas-queued-session-start>"))
-                    .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
-            let tool_prefix = supervisor_cli.backend().capabilities().tool_prefix;
-            assembler.append_degradable(
-                context,
-                format!(
-                    "[session-start context omitted to fit the queued launch payload — run `{tool_prefix}search action=context`]"
-                ),
-            );
+            // Preserve the normal per-section budget and the current-handoff
+            // pointer when a queued launch needs to compact its context.
+            let mut assembler = SessionContextAssembler::new(context)
+                .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
+            assembler.prepend_protected(format!("{prompt}\n\n<cas-queued-session-start>"));
             assembler.append_protected("</cas-queued-session-start>".to_string());
             prompt = assembler.render();
         }

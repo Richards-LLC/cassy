@@ -2258,6 +2258,17 @@ Entries that take over 20 seconds alone are reported as deferred to the full
 row. A changed `hub-web/package.json` runs the one named worker-memory weight
 assertion (0.001 s) rather than the full worker-memory suite.
 
+The provisioned script cohort in `scripts/ci-script-tests-for-diff.py` runs
+inside the existing classification jobs in both `ci.yml` and slim `lane.yml`.
+The shared `run-script-suite-tests` action installs only selected suites'
+dependencies; unrelated inputs run no suite, Node setup, pip or npm install.
+These suites are deferred out of the bounded fast rows, then included in the
+exhaustive `test-ci-tiers` assembly target. Visual QA uses the locked web
+Playwright package; the PDF renderer checks receive pinned PyMuPDF. The terminal
+PTY suite reuses the CLI already built by full-lane preflight, with no additional
+Rust build. Script-only contexts log its missing source binary explicitly;
+native Codex cases likewise report explicit skips when Codex is unavailable.
+
 Fast rows include the no-build checks below. The factory pre-push hook, or lane
 CI for a pull request, selects each row when its inputs change; the merge queue
 runs its required fast-row job on the final tree:

@@ -482,16 +482,20 @@ test('JavaScript requirement needs a reason and cannot waive print loss', async 
 test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
   const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
-  for (const name of exemplarNames) {
-    const result = await acceptanceRender(
-      join(repoRoot, 'cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars', name),
-      join(artifactDir, `exemplar-${name}`),
-    );
-    assert.equal(result.status, 'PASS', `${name} should pass: ${JSON.stringify(result.counts)}`);
-  }
-
-  const cleanReview = await acceptanceRender(await revisionFixture('2420a246'), join(artifactDir, 'review-2420a246'));
-  assert.equal(cleanReview.status, 'PASS', `2420a246 should pass: ${JSON.stringify(cleanReview.counts)}`);
+  // Use the runner's bounded capture pool for the independent clean pages.
+  // This keeps all 20 clean captures while avoiding five serial browsers.
+  const cleanPages = exemplarNames.map((name) =>
+    join(repoRoot, 'cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars', name));
+  cleanPages.push(await revisionFixture('2420a246'));
+  const clean = await runVisualQa({
+    urls: cleanPages, artifactDir: join(artifactDir, 'clean'),
+    schemes: ['light', 'dark'], viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  });
+  assert.equal(clean.status, 'PASS', JSON.stringify(clean.findings));
+  assert.equal(clean.screenshots.length, cleanPages.length * 4);
 
   const defectiveReview = await acceptanceRender(await revisionFixture('cbac967b'), join(artifactDir, 'review-cbac967b'));
   assert.equal(defectiveReview.status, 'FAIL');

@@ -29,6 +29,16 @@ dependency there and puts that venv first on `PATH` before
 pinned markdownlint-cli2 that `scripts/markdownlint.py` resolves. System Python
 packages are never modified.
 
+The shared `.github/actions/run-script-suite-tests` action also provisions the
+16 registered script/visual QA suites. PRs and factory pushes select each suite
+from its own test and input paths in `ci-script-tests-for-diff.py`, inside the
+existing classification job. An unrelated diff installs nothing and runs no
+suite. Assembly retains every row in `test-ci-tiers`. Browser suites use the
+locked `hub-web` dependencies and Chromium; PDF checks use pinned PyMuPDF in a
+venv. The native terminal suite runs against the CLI the full lane already
+built. Binary absence is logged explicitly in script-only contexts; native
+Codex cases report their missing installed client as explicit unittest skips.
+
 ## Platform behavior
 
 The runner cache pruning, mount-guard and job-lifetime lock fixtures exercise

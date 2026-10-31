@@ -77,6 +77,11 @@ jobs:
       - name: Check Violet references before queue admission
         run: bash scripts/test-no-mecha-references.sh
 
+      # Same selected cohort as PR CI, without allocating another job/stage.
+      - uses: ./.github/actions/run-script-suite-tests
+        with:
+          base-sha: ${{ steps.classify-diff.outputs.comparison-base }}
+
       # Local pre-push feedback is worker-writable. CI owns the proof: run
       # once for every slim factory diff before downstream admission jobs.
       - name: Run no-build release gate rows

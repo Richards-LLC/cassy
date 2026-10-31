@@ -157,6 +157,19 @@ fn idle_prompt(text: &str) -> bool {
         })
 }
 
+/// Claude's Usage tab varies with account/quota state. Recognize either the
+/// quota sections or the session-cost table, using several native fields and
+/// whole heading lines rather than requiring one account-dependent label.
+fn claude_usage_view(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let heading = |label: &str| lower.lines().any(|line| line.trim() == label);
+    let field = |label: &str| lower.lines().any(|line| line.trim_start().starts_with(label));
+    let quotas = heading("current session") && (field("current week") || field("resets "));
+    let costs = (heading("session") || heading("current session"))
+        && field("total cost:") && field("total duration (") && field("usage by model:");
+    !idle_prompt(text) && (quotas || costs)
+}
+
 /// `output` is what the pane emitted since the command was typed. A repeat
 /// Codex /status can leave the screen unchanged while its old copy scrolls
 /// away, so a marker it printed again is fresh even when the screen had it.
@@ -174,7 +187,7 @@ fn native_observation(command: Command, before: &str, current: &str, output: &st
         Command::Model if fresh("select model") || fresh("select a model")
             || fresh("select reasoning effort") || fresh("select reasoning level") => Some(("Model chooser opened in the supervisor's harness.".into(), true)),
         Command::Model if codex_model_selection(before, current).is_some() || fresh("set model to") || fresh("model changed to") => Some(("The harness confirmed a model selection.".into(), false)),
-        Command::Usage if fresh("current session") && (lower.contains("current week") || lower.contains("resets"))
+        Command::Usage if claude_usage_view(current) && !claude_usage_view(before)
             || command == Command::Usage && fresh("context window") && lower.contains("model:") =>
                 Some(("Usage displayed by the supervisor's harness.".into(), !idle_prompt(current))),
         _ => None,
@@ -375,7 +388,11 @@ impl FactoryDaemon {
         let record = self.supervisor_commands.records.get_mut(&owner).ok_or_else(|| anyhow::anyhow!("The original command receipt is unavailable. Do not resend an uncertain command."))?;
         let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor is unavailable; use the session-ended receipt."))?;
         if let Request::Step { key } = request {
-            anyhow::ensure!(record.receipt.interactive && matches!(record.receipt.command, Command::Model | Command::Usage), "No native command chooser is open.");
+            // A timeout is uncertain execution, not evidence that Usage closed.
+            // Recovery only permits Close, and still checks the live view below.
+            let recover_usage = record.receipt.command == Command::Usage
+                && record.receipt.phase == Phase::Unconfirmed && key == Key::Cancel;
+            anyhow::ensure!((record.receipt.interactive || recover_usage) && matches!(record.receipt.command, Command::Model | Command::Usage), "No native command chooser is open.");
             anyhow::ensure!(record.receipt.command == Command::Model || key == Key::Cancel, "Usage only supports Close.");
             // Navigation remains scoped to the observed native dialog. A stale
             // browser cannot send a key after that dialog disappeared.
@@ -394,7 +411,8 @@ impl FactoryDaemon {
             record.receipt.interactive = false;
             record.receipt.detail = "Selection submitted; awaiting the harness's response.".into();
         }
-        if record.receipt.phase == Phase::Submitted || record.receipt.interactive {
+        if record.receipt.phase == Phase::Submitted || record.receipt.interactive
+            || record.receipt.phase == Phase::Unconfirmed && record.receipt.command == Command::Usage {
             let current = screen(pane);
             if pane.has_exited() && matches!(record.receipt.command, Command::Exit | Command::Finish) {
                 record.receipt.phase = Phase::Observed;
@@ -687,6 +705,7 @@ mod tests {
     }
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
+        assert!(native_observation(Command::Usage, "❯", "Current session\nCurrent week (all models)\nResets tomorrow", "").is_some_and(|(_, open)| open));
         assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯", "").is_none());
         assert!(native_observation(Command::Compact, "›", "• Context compacted · 44s\n›", "").is_some());
         assert!(native_observation(Command::Model, "Set model to Sonnet\n❯", "Set model to Sonnet\n❯ /model", "").is_none());
@@ -728,6 +747,7 @@ mod tests {
         let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "usage-capture".into())).unwrap();
         record.receipt.phase = Phase::Unconfirmed;
         record.receipt.interactive = false;
+        assert!(daemon.dispatch_supervisor_command(Request::Step { key: Key::Next }, "usage-capture".into(), owner.clone()).await.is_err());
         daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "usage-capture".into(), owner.clone()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\x1b") { tokio::task::yield_now().await; }
@@ -737,6 +757,10 @@ mod tests {
         assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && !receipt.interactive));
         let input = std::fs::read(root.path().join("input")).unwrap();
         assert_eq!(String::from_utf8_lossy(&input).matches("/usage").count(), 1, "Close must not replay the uncertain command");
+        // A stale recovery control must not send Escape to the idle prompt.
+        daemon.supervisor_commands.records.get_mut(&("device-a".into(), "usage-capture".into())).unwrap().receipt.phase = Phase::Unconfirmed;
+        daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "usage-capture".into(), owner.clone()).await.unwrap();
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "usage-next".into(), owner).await.unwrap();
     }
     #[tokio::test(flavor = "current_thread")]

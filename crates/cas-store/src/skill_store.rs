@@ -3,14 +3,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// Per-process counter mixed into `generate_hash_id` so that two back-to-back
-/// calls within the same nanosecond (same `timestamp_nanos + pid`) always
-/// produce different hashes and therefore different candidate IDs. Fixes the
-/// UNIQUE-constraint flake in `test_skill_search` (cas-6c0a).
-static SKILL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::error::StoreError;
 use crate::version_store::{
@@ -148,44 +141,6 @@ impl SqliteSkillStore {
         } else {
             serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
         }
-    }
-
-    /// Generate a hash-based ID like cas-sk01
-    fn generate_hash_id(&self) -> Result<String> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        // Mix a monotonically-increasing counter so that two back-to-back calls
-        // within the same nanosecond (same timestamp + same pid) produce a
-        // different hash and therefore a different candidate ID (cas-6c0a).
-        let seq = SKILL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-        let mut hasher = DefaultHasher::new();
-        Utc::now().timestamp_nanos_opt().hash(&mut hasher);
-        std::process::id().hash(&mut hasher);
-        seq.hash(&mut hasher);
-
-        let hash = hasher.finish();
-        let chars: Vec<char> = format!("{hash:016x}").chars().collect();
-
-        // Try sk + 2-char, then sk + 3-char, then sk + 4-char IDs
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        for len in 2..=4 {
-            let id = format!("cas-sk{}", chars[..len].iter().collect::<String>());
-            let exists: bool = conn
-                .query_row("SELECT 1 FROM skills WHERE id = ?", params![&id], |_| {
-                    Ok(true)
-                })
-                .optional()?
-                .unwrap_or(false);
-
-            if !exists {
-                return Ok(id);
-            }
-        }
-
-        // Fallback to longer hash
-        Ok(format!("cas-sk{}", &chars[..6].iter().collect::<String>()))
     }
 
     fn parse_hooks(s: &str) -> Option<SkillHooks> {
@@ -450,7 +405,8 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        self.generate_hash_id()
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::hash_id::generate_hash_id(&conn, crate::hash_id::IdKind::Skill)
     }
 
     fn add(&self, skill: &Skill) -> Result<()> {

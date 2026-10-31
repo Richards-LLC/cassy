@@ -140,18 +140,6 @@ impl SqliteCodeStore {
         None
     }
 
-    /// Generate a hash-based ID with the given prefix.
-    fn generate_hash_id(&self, prefix: &str) -> Result<String> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        crate::hash_id::timestamp_nanos().hash(&mut hasher);
-        std::process::id().hash(&mut hasher);
-        let hash = hasher.finish();
-        Ok(format!("{}-{:08x}", prefix, hash as u32))
-    }
-
     /// Normalize a file path for consistent ID generation.
     /// Strips leading `./`, converts to forward slashes, and removes redundant components.
     ///

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Store IDs
+
+- **Rapid creates use one collision-resistant generator** — Tasks, skills, specs and indexed code now share the counter mixed into generated IDs. Creates during the same clock tick no longer reuse identical candidates, and occupied fallback IDs are retried. Existing ID prefixes and lengths stay unchanged.
+
 ### Changed — Test-hygiene rules in the shipped test guidance
 
 - **Builtin test guidance names six measured bad-test patterns** — Was: The

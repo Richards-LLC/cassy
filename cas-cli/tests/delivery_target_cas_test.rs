@@ -1344,7 +1344,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
     assert!(!merged.contains("Unsupported parameter(s)"), "{merged}");
     assert!(!merged.starts_with("MCP_ERROR"), "{merged}");
     assert!(
-        merged.contains("docs-only code CI was explicitly overridden by a registered supervisor"),
+        merged.contains("unconfirmed code CI was explicitly overridden by a registered supervisor"),
         "{merged}"
     );
     assert!(
@@ -1361,7 +1361,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
         .get(&fixture.task_id)
         .expect("task")
         .notes;
-    assert!(notes.contains("overrode docs-only lane CI"), "{notes}");
+    assert!(notes.contains("overrode unconfirmed lane code CI"), "{notes}");
     assert!(notes.contains("supervisor reviewed delivery"), "{notes}");
     assert!(notes.contains(&fixture.receipt.commit_sha), "{notes}");
 }

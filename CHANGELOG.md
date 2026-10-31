@@ -37,7 +37,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory merge admission
 
-- **Documentation repairs use current CI** — Was: syncing a worker lane with its target could make a later documentation fix inherit the sync commit's old red CI. Now: target code already integrated by that sync is excluded from delivery classification, so the fixed documentation tip's green checks admit the merge while actual code changes still require code CI.
+- **Factory merges report missing code validation accurately** — Was: a failed change classifier with every validation job skipped appeared as failed code CI after a documentation repair. Now: admission reports unconfirmed code validation with the classifier run link and requires code CI or a supervisor-reviewed local receipt. Target-only imports are excluded from delivery classification; lane-owned code and merge resolutions still require validation.
 
 ## [3.93.0] - 2026-10-31
 

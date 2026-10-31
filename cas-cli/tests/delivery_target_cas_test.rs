@@ -1144,6 +1144,17 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
         merged.contains("red CI was explicitly overridden by a registered supervisor"),
         "{merged}"
     );
+    let overrides = cas_store::quality_interventions_since(
+        &fixture.cas_root,
+        cas_store::InterventionKind::OverrideMerge,
+        chrono::Utc::now() - chrono::Duration::minutes(5),
+    )
+    .unwrap();
+    assert_eq!(overrides.len(), 1, "{overrides:?}");
+    assert!(
+        overrides[0].local_note.as_deref().is_some_and(|note| note.contains("flaky runner")),
+        "{overrides:?}"
+    );
     assert!(
         matches!(
             delivery_state(&fixture),

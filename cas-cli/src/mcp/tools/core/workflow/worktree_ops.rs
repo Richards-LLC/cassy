@@ -78,7 +78,7 @@ const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because C
 const CI_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
 const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: docs-only code CI was explicitly overridden by a registered supervisor.\n\n";
+    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
@@ -104,7 +104,7 @@ fn admit_branch_ci(
     if let BranchCiState::UnvalidatedCode { sha, reason } = state {
         if !override_requested {
             return Err(format!(
-                "CODE CI REQUIRED: refusing worktree_merge for {sha}: {reason}. Documentation-only success does not validate a code delivery. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted."
+                "CODE CI REQUIRED: refusing worktree_merge for {sha}: {reason}. Require code CI or a local validation receipt for this code delivery. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted."
             ));
         }
         return Ok(true);
@@ -141,7 +141,7 @@ fn ci_override_note(
             url.as_deref().unwrap_or("unavailable"),
         ),
         BranchCiState::UnvalidatedCode { sha, reason } => {
-            format!("docs-only lane CI for {branch} (sha {sha}, {reason})")
+            format!("unconfirmed lane code CI for {branch} (sha {sha}, {reason})")
         }
         _ => unreachable!("override note requires gated CI"),
     };
@@ -199,9 +199,9 @@ fn delivery_ci_commit(
         deadline,
     )?;
     let tip = String::from_utf8_lossy(&tip).trim().to_string();
-    let base = ci_git(cwd, &["merge-base", target, &tip], deadline)?;
-    let base = String::from_utf8_lossy(&base);
-    let range = format!("{}..{tip}", base.trim());
+    let delivery_base_bytes = ci_git(cwd, &["merge-base", target, &tip], deadline)?;
+    let delivery_base = String::from_utf8_lossy(&delivery_base_bytes);
+    let range = format!("{}..{tip}", delivery_base.trim());
     let commits = ci_git(cwd, &["rev-list", "--topo-order", "--parents", &range], deadline)?;
     for line in String::from_utf8_lossy(&commits).lines() {
         let mut fields = line.split_whitespace();
@@ -211,9 +211,9 @@ fn delivery_ci_commit(
             // on the target. Compare with its common target ancestor instead,
             // keeping actual merge resolutions (including discarded target
             // edits) in the delivery's code-validation requirement.
-            let base = ci_git(cwd, &["merge-base", target, commit], deadline)?;
-            let base = String::from_utf8_lossy(&base);
-            ci_git(cwd, &["diff", "--name-only", "--no-renames", "-z", base.trim(), commit], deadline)?
+            let target_ancestor_bytes = ci_git(cwd, &["merge-base", target, commit], deadline)?;
+            let target_ancestor = String::from_utf8_lossy(&target_ancestor_bytes);
+            ci_git(cwd, &["diff", "--name-only", "--no-renames", "-z", target_ancestor.trim(), commit], deadline)?
         } else {
             ci_git(
                 cwd,
@@ -264,6 +264,54 @@ fn has_code_check_runs(output: &GhApiOutput) -> bool {
                     })
             })
         })
+}
+
+/// A failed/skipped routing job can prevent every validation job from
+/// running. It proves no code failure: retain the run link and require code
+/// evidence or a supervisor's explicit review of a local validation receipt.
+/// This classification applies only to deliveries with code in their history.
+fn classify_code_ci_response(branch: &str, sha: &str, output: GhApiOutput) -> BranchCiState {
+    let unexecuted = || {
+        if !output.success { return None; }
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let (runs, superseded) = select_latest_check_runs(parsed.get("check_runs")?.as_array()?);
+        if superseded { return None; }
+        let is_classifier = |run: &serde_json::Value| {
+            run.get("name").and_then(serde_json::Value::as_str) == Some("Classify CI diff")
+        };
+        let classifier = runs.iter().copied().find(|run| is_classifier(run))?;
+        if check_run_unfinished(classifier) || !matches!(
+            classifier.get("conclusion").and_then(serde_json::Value::as_str),
+            Some("failure" | "skipped")
+        ) { return None; }
+        let code_check = |run: &serde_json::Value| {
+            run.get("name").and_then(serde_json::Value::as_str).is_some_and(|name| {
+                (is_test_check_run(run, name) && is_code_check_name(name)) || name == "Full lane"
+            })
+        };
+        // An executed code check (successful or failed), or any other failed
+        // job, keeps its existing verdict. Do not disguise genuine failures.
+        if runs.iter().any(|run| {
+            (!is_classifier(run) && check_run_failed(run))
+                || (code_check(run) && !check_run_unfinished(run) && !matches!(
+                    run.get("conclusion").and_then(serde_json::Value::as_str),
+                    Some("skipped" | "neutral")
+                ))
+        }) { return None; }
+        let url = classifier.get("html_url").and_then(serde_json::Value::as_str);
+        if runs.iter().any(|run| code_check(run) && check_run_unfinished(run)) {
+            return Some(BranchCiState::CodePending { sha: sha.to_string(), url: url.map(str::to_string) });
+        }
+        if runs.iter().any(|run| check_run_unfinished(run)) { return None; }
+        Some(BranchCiState::UnvalidatedCode {
+            sha: sha.to_string(),
+            reason: format!(
+                "lane code never ran code CI (classifier failed/skipped); run: {}",
+                url.unwrap_or("unavailable")
+            ),
+        })
+    };
+    unexecuted().unwrap_or_else(|| classify_branch_ci_response(branch, sha, output))
 }
 
 fn require_code_validation(state: BranchCiState) -> BranchCiState {
@@ -434,7 +482,11 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     };
     let tip_output = fetch_branch_ci(&tip, cwd, &repo, &binary);
     let tip_has_code_checks = has_code_check_runs(&tip_output);
-    let tip_state = classify_branch_ci_response(branch, &tip, tip_output);
+    let tip_state = if code_sha.is_some() {
+        classify_code_ci_response(branch, &tip, tip_output)
+    } else {
+        classify_branch_ci_response(branch, &tip, tip_output)
+    };
     let state = match code_sha {
         // An older green code receipt cannot publish a missing docs tip.
         _ if matches!(&tip_state, BranchCiState::MissingCommit { .. }) => tip_state,
@@ -451,7 +503,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                         })
                     })
                     .flatten();
-                settled.unwrap_or_else(|| classify_branch_ci_response(branch, &code_sha, output))
+                settled.unwrap_or_else(|| classify_code_ci_response(branch, &code_sha, output))
             };
             require_code_validation(state)
         }
@@ -963,8 +1015,8 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
         ),
         BranchCiState::UnvalidatedCode { sha, reason } => (
             sha,
-            format!("CI state: unvalidated code for {sha}: {reason}."),
-            "docs-only code CI (merge gated; supervisor override available)",
+            format!("CI state: unconfirmed code validation for {sha}: {reason}."),
+            "unconfirmed code CI (merge gated; supervisor override available)",
             "unavailable",
         ),
         BranchCiState::CodeValidationUnconfirmed { sha, reason } => (
@@ -983,7 +1035,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
          Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
-         Merge policy: missing commits must be pushed first and cannot be overridden; a code delivery is refused while its CI is pending; red CI and documentation-only success for code deliveries require an explicit supervisor override; unavailable and no-checks receipts remain advisory.\n\n",
+         Merge policy: missing commits must be pushed first and cannot be overridden; a code delivery is refused while its CI is pending; red CI and unexecuted validation for code deliveries require an explicit supervisor override; unavailable and no-checks receipts remain advisory.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
 }

@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Task close
+
+- **Renumbered migrations close normally** — Was: Adding a migration and then
+  renaming and renumbering it in the delivery's merge commit could falsely
+  report dropped content. → Now: Close proves the final migration against the
+  delivery's base and still refuses content lost after integration.
+
 ### Fixed — CLI security
 
 - **Secret environment values stay out of help** — Was: Login and bridge server

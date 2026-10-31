@@ -1123,6 +1123,8 @@ async fn cas_cfe6_local_transfer_classifies_the_current_cloud_holder() {
 #[tokio::test]
 async fn a_restart_during_a_timed_out_rollback_keeps_its_fresh_claim_cas_da31() {
     let mut env = TestEnvGuard::temp_home();
+    // Real claim timeouts, shortened from 5 s; nextest gives each test its own process.
+    cas::cloud::peer_claims::set_claim_timeout_for_tests(std::time::Duration::from_secs(1));
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let cloud = FakeCloud::start();
     let alpha = machine(&cloud.url, PROJECT, "restart-worker");
@@ -1181,6 +1183,8 @@ async fn a_restart_during_a_timed_out_rollback_keeps_its_fresh_claim_cas_da31() 
 #[tokio::test]
 async fn delayed_retry_and_focus_releases_keep_same_agent_restart_cas_0760() {
     let mut env = TestEnvGuard::temp_home();
+    // Real claim timeouts, shortened from 5 s; nextest gives each test its own process.
+    cas::cloud::peer_claims::set_claim_timeout_for_tests(std::time::Duration::from_secs(1));
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let mut lost = Vec::new();
     for (entry, timeout) in [("retry", false), ("retry", true), ("focus", true)] {

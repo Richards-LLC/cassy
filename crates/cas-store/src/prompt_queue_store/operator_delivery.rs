@@ -285,7 +285,6 @@ impl SqlitePromptQueueStore {
             }
             conn.execute("UPDATE prompt_queue SET acked_at = ?, acked_via = 'explicit_ack' WHERE id = ? AND acked_at IS NULL", params![created_at, ack_id])?;
         }
-        let _ = capture_message_event(conn, turn.source, turn.target);
         Ok(EnqueueOutcome::Created(id))
     }
 

@@ -8,20 +8,18 @@ use std::sync::Arc;
 
 use super::{
     AgentStore, CodeStore, CommitLinkStore, EntityStore, EventStore, FileChangeStore, LoopStore,
-    MarkdownRuleStore, MarkdownStore, NotifyingEntryStore, NotifyingRuleStore, NotifyingSkillStore,
-    NotifyingTaskStore, PromptQueueStore, PromptStore, RecordingStore, ReminderStore, RuleStore,
+    MarkdownRuleStore, MarkdownStore, PromptQueueStore, PromptStore, ReminderStore, RuleStore,
     SkillStore, SpawnQueueStore, SpecStore, SqliteAgentStore, SqliteCodeStore,
     SqliteCommitLinkStore, SqliteEntityStore, SqliteEventStore, SqliteFileChangeStore,
-    SqliteLoopStore, SqlitePromptQueueStore, SqlitePromptStore, SqliteRecordingStore,
-    SqliteReminderStore, SqliteRuleStore, SqliteSkillStore, SqliteSpawnQueueStore, SqliteSpecStore,
-    SqliteStore, SqliteSupervisorQueueStore, SqliteTaskStore, SqliteVerificationStore,
-    SqliteWorktreeStore, Store, SupervisorQueueStore, TaskStore, VerificationStore, WorktreeStore,
+    SqliteLoopStore, SqlitePromptQueueStore, SqlitePromptStore, SqliteReminderStore,
+    SqliteRuleStore, SqliteSkillStore, SqliteSpawnQueueStore, SqliteSpecStore, SqliteStore,
+    SqliteSupervisorQueueStore, SqliteTaskStore, SqliteVerificationStore, SqliteWorktreeStore,
+    Store, SupervisorQueueStore, TaskStore, VerificationStore, WorktreeStore,
 };
 use crate::cloud::{CloudConfig, SyncQueue};
 use crate::config::Config;
 use crate::error::CasError;
 use crate::migration::run_migrations;
-use crate::notifications::has_notifier;
 use crate::store::{SyncingEntryStore, SyncingRuleStore, SyncingSkillStore, SyncingTaskStore};
 
 /// Result type for detect functions (uses CasError for richer error handling)
@@ -489,11 +487,10 @@ pub fn detect_store_type(cas_dir: &Path) -> StoreType {
     StoreType::Sqlite
 }
 
-/// Open base entry store (sqlite/markdown + optional notifier).
+/// Open base entry store (sqlite/markdown).
 /// Never wraps with [`SyncingEntryStore`] — safe for pull/apply-remote.
 fn open_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn Store>> {
     let store_type = detect_store_type(cas_dir);
-    let config = Config::load(cas_dir).unwrap_or_default();
 
     let base_store: Arc<dyn Store> = match store_type {
         StoreType::Sqlite => {
@@ -511,15 +508,7 @@ fn open_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn Store>>
         }
     };
 
-    // Wrap with notifying store if TUI notifier is active
-    if has_notifier() && config.notifications_enabled() {
-        Ok(Arc::new(NotifyingEntryStore::new(
-            base_store,
-            config.notifications(),
-        )))
-    } else {
-        Ok(base_store)
-    }
+    Ok(base_store)
 }
 
 /// Open the appropriate store based on what exists.
@@ -555,10 +544,8 @@ pub fn open_store_local(cas_dir: &Path) -> Result<Arc<dyn Store>> {
     open_store_base(cas_dir, false)
 }
 
-/// Open base task store (+ optional notifier). No SyncingTaskStore.
+/// Open base task store. No SyncingTaskStore.
 fn open_task_store_base(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
-    let config = Config::load(cas_dir).unwrap_or_default();
-
     let origin_project = crate::cloud::resolve_canonical_id(cas_dir);
     let store = SqliteTaskStore::open_with_origin_project(cas_dir, origin_project.as_deref())?;
     store.init()?;
@@ -582,14 +569,7 @@ fn open_task_store_base(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
         }
     }
 
-    if has_notifier() && config.notifications_enabled() {
-        Ok(Arc::new(NotifyingTaskStore::new(
-            base_store,
-            config.notifications(),
-        )))
-    } else {
-        Ok(base_store)
-    }
+    Ok(base_store)
 }
 
 /// Open the task store (cloud-sync wrap when logged in).
@@ -625,22 +605,13 @@ pub fn open_task_store_local(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     open_task_store_base(cas_dir)
 }
 
-/// Open base skill store (+ optional notifier). No SyncingSkillStore.
+/// Open base skill store. No SyncingSkillStore.
 fn open_skill_store_base(cas_dir: &Path) -> Result<Arc<dyn SkillStore>> {
-    let config = Config::load(cas_dir).unwrap_or_default();
-
     let store = SqliteSkillStore::open(cas_dir)?;
     store.init()?;
     let base_store: Arc<dyn SkillStore> = Arc::new(store);
 
-    if has_notifier() && config.notifications_enabled() {
-        Ok(Arc::new(NotifyingSkillStore::new(
-            base_store,
-            config.notifications(),
-        )))
-    } else {
-        Ok(base_store)
-    }
+    Ok(base_store)
 }
 
 /// Open the skill store (cloud-sync wrap when logged in).
@@ -700,13 +671,6 @@ pub fn open_verification_store(cas_dir: &Path) -> Result<Arc<dyn VerificationSto
 /// Open the worktree store for tracking git worktrees
 pub fn open_worktree_store(cas_dir: &Path) -> Result<Arc<dyn WorktreeStore>> {
     let store = SqliteWorktreeStore::open(cas_dir)?;
-    store.init()?;
-    Ok(Arc::new(store))
-}
-
-/// Open the recording store for terminal recording metadata
-pub fn open_recording_store(cas_dir: &Path) -> Result<Arc<dyn RecordingStore>> {
-    let store = SqliteRecordingStore::open(cas_dir)?;
     store.init()?;
     Ok(Arc::new(store))
 }
@@ -781,10 +745,9 @@ pub fn open_spec_store(cas_dir: &Path) -> Result<Arc<dyn SpecStore>> {
     Ok(Arc::new(store))
 }
 
-/// Open base rule store (+ optional notifier). No SyncingRuleStore / SyncQueue.
+/// Open base rule store. No SyncingRuleStore / SyncQueue.
 fn open_rule_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn RuleStore>> {
     let store_type = detect_store_type(cas_dir);
-    let config = Config::load(cas_dir).unwrap_or_default();
 
     let base_store: Arc<dyn RuleStore> = match store_type {
         StoreType::Sqlite => {
@@ -802,14 +765,7 @@ fn open_rule_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn Ru
         }
     };
 
-    if has_notifier() && config.notifications_enabled() {
-        Ok(Arc::new(NotifyingRuleStore::new(
-            base_store,
-            config.notifications(),
-        )))
-    } else {
-        Ok(base_store)
-    }
+    Ok(base_store)
 }
 
 /// Open the appropriate rule store (file + cloud sync wrappers when enabled).

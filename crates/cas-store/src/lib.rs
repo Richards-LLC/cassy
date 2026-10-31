@@ -70,8 +70,6 @@ mod prompt_queue_store;
 mod prompt_store;
 mod qa_batch_store;
 mod qa_pass_store;
-mod recording_store;
-mod recording_text_store;
 mod reminder_store;
 pub mod retention;
 mod retrieval_store;
@@ -270,15 +268,6 @@ pub use worktree_store::{SqliteWorktreeStore, WORKTREE_SCHEMA, WorktreeStore};
 mod known_repo_store;
 pub use known_repo_store::{KnownRepo, KnownRepoBinding, KnownRepoStore, SqliteKnownRepoStore};
 
-// Recording store for terminal recording metadata
-pub use recording_store::{
-    RecordingStore, SqliteRecordingStore, capture_agent_event, capture_memory_event,
-    capture_message_event, capture_recording_event, capture_task_event,
-    get_active_recording_with_conn, get_any_active_recording_with_conn,
-    record_agent_event_with_conn, record_memory_event_with_conn, record_message_event_with_conn,
-    record_recording_event_with_conn, record_task_event_with_conn,
-};
-
 // Supervisor queue store for factory sessions
 pub use supervisor_queue_store::{
     AlarmClass, NotificationPriority, NotifyIdempotentResult, SqliteSupervisorQueueStore,
@@ -350,12 +339,6 @@ pub use file_change_store::{
 pub use commit_link_store::{
     COMMIT_LINK_LINK_METHOD_STATEMENTS, COMMIT_LINK_SCHEMA, CommitLinkStore, SqliteCommitLinkStore,
     add_commit_link_with_conn,
-};
-
-// Recording text store for full-text search in factory recordings
-pub use recording_text_store::{
-    RecordingSearchResult, RecordingTextEntry, RecordingTextStore, SqliteRecordingTextStore,
-    format_timestamp,
 };
 
 // Core stores

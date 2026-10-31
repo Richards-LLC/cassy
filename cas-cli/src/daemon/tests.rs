@@ -690,19 +690,15 @@ fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_en
 }
 
 #[test]
-fn test_maintenance_archives_old_events_and_recordings() {
-    use crate::store::{init_cas_dir, open_event_store, open_recording_store};
-    use cas_types::{
-        Event, EventEntityType, EventType, Recording, RecordingAgent, RecordingEvent,
-        RecordingEventType,
-    };
+fn test_maintenance_archives_old_events() {
+    use crate::store::{init_cas_dir, open_event_store};
+    use cas_types::{Event, EventEntityType, EventType};
     use std::io::Read;
     use tempfile::TempDir;
 
     let temp = TempDir::new().unwrap();
     let cas_root = init_cas_dir(temp.path()).unwrap();
     let event_store = open_event_store(&cas_root).unwrap();
-    let recording_store = open_recording_store(&cas_root).unwrap();
     let old = Utc::now() - Duration::days(31);
 
     let mut event = Event::new(
@@ -713,29 +709,6 @@ fn test_maintenance_archives_old_events_and_recordings() {
     );
     event.created_at = old;
     event_store.record(&event).unwrap();
-
-    let mut recording = Recording::new("/tmp/cas-62a6.trace".to_string());
-    recording.created_at = old;
-    let recording_id = recording.id.clone();
-    recording_store.add(&recording).unwrap();
-    recording_store
-        .add_agent(&RecordingAgent::new(
-            recording_id.clone(),
-            "old-worker".to_string(),
-            "worker".to_string(),
-            "/tmp/old-worker.trace".to_string(),
-        ))
-        .unwrap();
-    recording_store
-        .add_event(&RecordingEvent::new(
-            recording_id.clone(),
-            42,
-            RecordingEventType::TaskStarted,
-        ))
-        .unwrap();
-    recording_store
-        .add_fts_content(&recording_id, "old transcript", "output", 42)
-        .unwrap();
 
     let config = DaemonConfig {
         cas_root: cas_root.clone(),
@@ -751,9 +724,7 @@ fn test_maintenance_archives_old_events_and_recordings() {
 
     let result = run_once(&config).expect("maintenance cycle should succeed");
     assert_eq!(result.events_pruned, 1);
-    assert_eq!(result.recordings_pruned, 1);
     assert!(event_store.list_recent(10).unwrap().is_empty());
-    assert!(recording_store.get(&recording_id).is_err());
 
     let archive_dir = cas_root.join("archive");
     let archive_names: Vec<String> = std::fs::read_dir(archive_dir)
@@ -764,14 +735,11 @@ fn test_maintenance_archives_old_events_and_recordings() {
         })
         .unwrap_or_default();
     assert!(archive_names.iter().any(|name| name.starts_with("events-")));
-    assert!(archive_names
-        .iter()
-        .any(|name| name.starts_with("recordings-")));
 
     let listed =
         crate::store::list_archived_traces(&cas_root, old - Duration::seconds(1), Utc::now())
             .unwrap();
-    assert_eq!(listed.len(), 2);
+    assert_eq!(listed.len(), 1);
     assert!(listed.iter().all(|trace| trace.archive_path.exists()));
     let sample =
         crate::store::sample_archived_traces(&cas_root, old - Duration::seconds(1), Utc::now(), 1)
@@ -793,11 +761,6 @@ fn test_maintenance_archives_old_events_and_recordings() {
     };
     let event_archive = read_archive("events-");
     assert_eq!(event_archive["summary"], "old event");
-    let recording_archive = read_archive("recordings-");
-    assert_eq!(recording_archive["recording"]["id"], recording_id);
-    assert_eq!(recording_archive["agents"].as_array().unwrap().len(), 1);
-    assert_eq!(recording_archive["events"].as_array().unwrap().len(), 1);
-    assert_eq!(recording_archive["fts"][0]["content"], "old transcript");
 }
 
 #[test]

@@ -75,12 +75,10 @@ pub use code::{CasCodeSearch, code_search_available, open_code_search, open_code
 pub use entity_search::{EntityQuery, EntitySearch, EntitySearchResult};
 
 pub mod hybrid;
-pub mod metrics;
 pub mod scorer;
 pub mod semantic;
 
 pub use hybrid::{HistoryFilter, HybridSearch, HybridSearchOptions};
-pub use metrics::{LatencyTimer, MetricsStore, SearchEvent, SearchMethod, generate_event_id};
 pub use semantic::{SemanticChannel, open_semantic_channel};
 
 pub mod filter_grammar;

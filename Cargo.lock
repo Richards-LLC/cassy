@@ -984,7 +984,6 @@ dependencies = [
  "grep-searcher",
  "heed",
  "ignore",
- "rusqlite",
  "serde",
  "serde_json",
  "tantivy",

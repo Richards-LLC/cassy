@@ -138,6 +138,14 @@ pub(super) fn defer_retired_config(root: &Path, config: &Config) -> bool {
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(notifications) = &config.notifications {
+            keys.extend(
+                notifications
+                    .retired_keys()
+                    .into_iter()
+                    .map(|key| format!("notifications.{key}")),
+            );
+        }
         if config.retired_jev.is_some() {
             keys.insert("jev".into());
         }

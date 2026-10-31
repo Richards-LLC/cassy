@@ -469,6 +469,20 @@ impl Config {
                 )
             });
         }
+        static NOTED_NOTIFICATIONS: std::sync::Once = std::sync::Once::new();
+        let retired = self
+            .notifications
+            .as_ref()
+            .map(NotificationConfig::retired_keys)
+            .unwrap_or_default();
+        if !retired.is_empty() {
+            NOTED_NOTIFICATIONS.call_once(|| {
+                eprintln!(
+                    "note: config.toml [notifications] {} retired (the TUI pop-up notifications they configured were removed); ignored and dropped on the next save.",
+                    retired.join(", ")
+                )
+            });
+        }
     }
 
     /// Load project config with host-level `~/.cas/config.toml` staging defaults.

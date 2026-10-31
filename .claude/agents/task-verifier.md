@@ -85,7 +85,7 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 - A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
 - Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
 - Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
-- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`.
+- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`, as is a "full suite" claim that ran fewer files or tests than the suite runs.
 
 ### Step 7: Honor the task's `execution_note`
 
@@ -111,7 +111,8 @@ Compare the change with how neighbouring code solves the same problem (`rg '<pat
 - correctness: edge cases, error propagation, races;
 - design: follows existing patterns, sensible abstraction;
 - performance: redundant work, unbounded queries, quadratic loops;
-- security: input validation at boundaries, parameterized queries, secrets.
+- security: input validation at boundaries, parameterized queries, secrets;
+- tests: each added or changed test against cas-tdd's `Test hygiene` rules: a CSS or source-text assertion, a real sleep or back-off, a dynamic `import()` in a test body, expensive setup rebuilt per test, a screenshot-only end-to-end test, or a deleted "duplicate" that another test imports.
 
 Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.
 

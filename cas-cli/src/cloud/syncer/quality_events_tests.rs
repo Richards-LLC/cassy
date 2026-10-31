@@ -35,13 +35,20 @@ impl Respond for MockCloud {
         if request.method.as_str() == "GET" {
             state.gets += 1;
             let query: HashMap<_, _> = request.url.query_pairs().into_owned().collect();
-            let start: usize = query.get("cursor").and_then(|c| c.parse().ok()).unwrap_or(0);
+            let cursor = query.get("cursor");
+            let start: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
             let limit: usize = query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(500);
             let page: Vec<_> = state.rows.iter().skip(start).take(limit).cloned().collect();
-            let next = start + page.len();
+            // Always resumable: the last row's seq, the request's cursor echoed
+            // on an empty page, and null only with no cursor and no rows.
+            let next = if page.is_empty() {
+                cursor.cloned()
+            } else {
+                Some((start + page.len()).to_string())
+            };
             return ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "events": page,
-                "next_cursor": next.to_string(),
+                "next_cursor": next,
             }));
         }
         let mut body = String::new();
@@ -61,6 +68,7 @@ impl Respond for MockCloud {
         state.posts.push(events.len());
         let (mut accepted, mut duplicates) = (0, 0);
         for event in events {
+            assert!(event["project_id"].is_string(), "project_id is required on every event");
             if state.rows.iter().any(|row| row["id"] == event["id"]) {
                 duplicates += 1;
             } else {

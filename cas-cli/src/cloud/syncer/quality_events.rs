@@ -268,7 +268,7 @@ impl CloudSyncer {
                 return Ok(false);
             };
             self.queue().set_metadata(PULL_CURSOR_KEY, next)?;
-            if page_len == 0 {
+            if page_len < PULL_PAGE_LIMIT {
                 return Ok(false);
             }
         }

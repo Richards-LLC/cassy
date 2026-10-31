@@ -187,7 +187,7 @@ invariants:
     check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
   HUB-J4-TWELVE-HOUR-TIMES:
     statement: Every Commander clock time (message groups, session dividers, other-day stamps, Team trail, Attention, Last seen, connection details) reads 12-hour with AM/PM in the viewer's locale and timezone, never a 24-hour clock.
-    check: 'Run thread-model.test.ts and attention-view.test.ts (cas-0cd1, cas-73dd9 case), and the HUB-J4/HUB-J7/HUB-J14/HUB-J15 journeys that assert "Sep 29, 5:20 PM", "You, h:mm AM/PM" and "Sep 29, 9:41 PM" in the UTC journey timezone. On the real hub, a bubble sent at 7:15 PM reads "7:15 PM".'
+    check: 'Run thread-model.test.ts and attention-view.test.ts (cas-0cd1, cas-73dd9 case), and the HUB-J4/HUB-J7/HUB-J9/HUB-J14/HUB-J15 journeys that assert "Sep 29, 5:20 PM", "You, h:mm AM/PM", Last seen "· h:mm AM/PM" and "Sep 29, 9:41 PM" in the UTC journey timezone; no journey may forbid AM/PM on a surface that shows a clock (cas-2021). On the real hub, a bubble sent at 7:15 PM reads "7:15 PM".'
     bug: {task: cas-73dd9}
   HUB-J5-GOAL:
     statement: my message reaches the supervisor and I see its answer

@@ -898,9 +898,14 @@ mod tests {
 
         provider.blocked.store(true, SeqCst);
         tokio::time::pause();
-        let started = tokio::time::Instant::now();
-        assert_eq!(poll_due_watches(root.path(), &engine).await.unwrap(), 0);
-        assert_eq!(started.elapsed(), std::time::Duration::from_secs(20));
+        let stalled = poll_due_watches(root.path(), &engine);
+        tokio::pin!(stalled);
+        assert!(futures::poll!(&mut stalled).is_pending());
+        tokio::time::advance(std::time::Duration::from_millis(19_999)).await;
+        assert!(futures::poll!(&mut stalled).is_pending());
+        // Tokio's timer wheel rounds deadlines up to the next millisecond.
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        assert_eq!(futures::poll!(&mut stalled), std::task::Poll::Ready(Ok(0)));
         assert_eq!(
             provider.calls.load(SeqCst),
             33,
@@ -932,15 +937,19 @@ mod tests {
 
         provider.blocked.store(true, SeqCst);
         tokio::time::pause();
-        let started = tokio::time::Instant::now();
-        let error = discover_originated_messages(root.path(), &engine)
-            .await
-            .unwrap_err();
+        let stalled = discover_originated_messages(root.path(), &engine);
+        tokio::pin!(stalled);
+        assert!(futures::poll!(&mut stalled).is_pending());
+        tokio::time::advance(std::time::Duration::from_millis(3_999)).await;
+        assert!(futures::poll!(&mut stalled).is_pending());
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        let std::task::Poll::Ready(Err(error)) = futures::poll!(&mut stalled) else {
+            panic!("discovery must cancel the stalled provider at its deadline");
+        };
         assert!(
             error.contains("exhausted its 4s wall-clock budget"),
             "{error}"
         );
-        assert_eq!(started.elapsed(), std::time::Duration::from_secs(4));
         assert_eq!(provider.calls.load(SeqCst), 6);
         tokio::time::resume();
         engine.shutdown().await;

@@ -48,6 +48,15 @@ and JSON document contracts apply; no new terminal PASS is claimed here.
 
 ## Rendering decisions
 
+### ASCII status words (cas-506d)
+
+The existing verdict, grouped rows and JSON shape stay intact. In a non-UTF-8
+locale the shared Formatter renders `[OK]`, `[WARN]`, `[ERROR]` and `[INFO]` in
+bold terminal foreground: these are words, requiring text contrast rather than
+the lower contrast floor for a small Unicode mark. UTF-8 status glyphs retain
+semantic color, and NO_COLOR continues to select plain output. Evidence covers
+both the normal palette matrix and LANG=C crossed with every palette.
+
 - The verdict word is the count of findings (`2 warnings`, `1 error`, `healthy`); the healthy
   count, project, and version are the detail.
 - Colour touches marks only. The old renderer painted every line in its status colour, which
@@ -85,6 +94,72 @@ operator to move detail into `cas-supervisor/references/`; its status and messag
 by the existing `--json` check object.
 
 ## Critique
+
+### Reverted task receipts (cas-0048)
+
+The backlog summary counts delivered tasks and reverted tasks separately. A
+`delivered then reverted` entry names the task and commit evidence and asks for
+review, without a close call or commit receipt. Normal deliveries retain their
+existing close call. Unavailable or budget-limited tree checks are stated as
+unknown and withhold delivery suggestions. The existing JSON check object
+carries the same message; palettes, grouping and the 80-column renderer stay
+unchanged. Review text avoids the shared `". Review "` remediation delimiter,
+so subsequent backlog sections stay in the JSON diagnostic message.
+
+Exact-build comparison: `d8d1b862` → `1d7e501a4`, against identical isolated
+Git/task inputs. The historical main snapshot reproduces the unsafe
+`e696570f0` receipt before, then shows the task as reverted without that receipt
+after. Committed captures redact local artifact paths; raw captures remain
+with the task evidence. The source task is now cancelled; only the disposable snapshot's
+lifecycle was restored to open for this historical reproduction. No candidate
+accessed the live main store.
+
+`terminal-qa: PASS cas-doctor-reverted-final · 12 runs · 0 fail · 4 warn · 0 allowed`
+at `<artifacts>/cas-0048/terminal-final/report.json`. The four warnings flag the
+120-column whitespace wrap between the complete words `delivered` and `then`;
+there is no split token. The baseline matrix also passes, with zero warnings.
+The [before](captures/backlog-hygiene/before.80.txt) and
+[after](captures/backlog-hygiene/after.80.txt) captures use the same control
+fixture: normal deliveries keep receipts while the reverted task is counted
+separately. The artifact ledger records seven passing real-build cells,
+including unnamed tree restoration, later re-delivery, empty state and missing
+Git history. JSON remains one document with all backlog sections in `message`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Verdict remains first; the backlog summary distinguishes delivered and reverted counts. |
+| Fit | 4 | The grouped row stays bounded and the existing verbose escape exposes the complete evidence. |
+| Craft | 4 | Both widths preserve hanging alignment and whole-word wrapping; reverted entries carry no close call. |
+| Theme safety | 5 | Four palettes, NO_COLOR and the C locale pass without contrast, control or glyph failures. |
+| Machine contract | 5 | One JSON document retains subsequent sections; normal receipts survive and reverted receipts are absent. |
+
+Scored by Codex on 2026-10-30. Candidate receipt and the private-input safety
+record are retained with the task's selected proof artifacts.
+
+### ASCII status contrast (cas-506d)
+
+Exact-build comparison, `e5d99081` → `47c23acbc`, using the same initialized
+fixture and terminal-qa commands:
+
+- UTF-8: `terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 0 warn · 0 allowed`.
+- `LANG=C` across four palettes: 152 contrast failures before; after,
+  `terminal-qa: PASS cas-doctor-lang-c · 12 runs · 0 fail · 4 warn · 0 allowed`.
+- The four unchanged warnings are unconfirmed word-split heuristics: an
+  intentionally truncated path ends in `...`; the next line starts a new
+  sentence, `Will be created`. No token continues across that boundary.
+- An explicit real PTY confirms `NO_COLOR=1` emits zero SGR, and `LANG=C`
+  alone emits ASCII status words. NO_COLOR needed no production repair.
+
+Captures and candidate receipt: `<artifacts>/cas-506d/terminal-green/`,
+`terminal-lang-c-green/`, and `candidate/RECEIPT.json`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | After the existing consent prompt, the verdict gives four warnings and 31 healthy checks. |
+| Fit | 4 | Healthy checks share grouped rows; findings expand with the existing verbose escape. |
+| Craft | 4 | Both widths fit; ASCII words keep their alignment, with hanging cause lines. |
+| Theme safety | 5 | Four-palette C and UTF-8 matrices pass; status words use terminal foreground. |
+| Machine contract | 5 | Piped output stays plain; JSON remains one checks array; NO_COLOR has zero SGR. |
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.
 

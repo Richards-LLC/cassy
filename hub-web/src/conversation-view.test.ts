@@ -5,6 +5,7 @@ import { ConversationView, registerTurnRenderer, renderBody } from "./conversati
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import { livePhase } from "./live-phase";
+import { clockLabel } from "./thread-model";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
 function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to: number | null = null): OperatorReply {
@@ -125,13 +126,13 @@ describe("ConversationView (Pebble thread)", () => {
     expect(groups).toHaveLength(2);
     expect(groups[0]?.className).toBe("turn you");
     expect(groups[0]?.querySelector<HTMLElement>(".bub")?.dataset.state).toBe("replied");
-    expect(groups[0]?.querySelector("time")?.textContent).toBe("09:41");
+    expect(groups[0]?.querySelector("time")?.textContent).toBe("9:41 AM");
     const sup = groups[1]!;
     const bubbles = sup.querySelectorAll(".bub");
     expect(bubbles[0]?.classList.contains("group-first")).toBe(true); expect(bubbles[0]?.classList.contains("group-last")).toBe(false);
     expect(bubbles[1]?.classList.contains("group-first")).toBe(false); expect(bubbles[1]?.classList.contains("group-last")).toBe(true);
     expect(bubbles[1]?.classList.contains("receipt")).toBe(true); expect(bubbles[1]?.querySelector(".tick")).not.toBeNull();
-    expect(sup.querySelectorAll("time")).toHaveLength(1); expect(sup.querySelector("time")?.textContent).toBe("09:47");
+    expect(sup.querySelectorAll("time")).toHaveLength(1); expect(sup.querySelector("time")?.textContent).toBe("9:47 AM");
     vi.useRealTimers();
   });
   it("re-derives grouping on incremental updates so a later turn tightens the earlier outer corner", () => {
@@ -233,7 +234,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(1, "answer", "Reply"), at(9, 1), "factory-old");
     view.update();
     expect(view.element.querySelector(".history-end")?.textContent).toBe("No earlier history");
-    expect(view.element.querySelector(".session-divider")?.textContent).toBe("session factory-old started 09:00");
+    expect(view.element.querySelector(".session-divider")?.textContent).toBe("session factory-old started 9:00 AM");
   });
   it("shows the empty state instead of the history marker for an empty loaded page", () => {
     const history = new ConversationHistory();
@@ -694,7 +695,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(3, "status", "gate 1 of 3"), at(12, 46)); history.reply(reply(4, "status", "gate 2 of 3"), at(12, 46));
     view.update();
     const groups = [...view.element.querySelectorAll<HTMLElement>('.msgs [role="group"]')];
-    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
+    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}\s[AP]M/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });
@@ -791,7 +792,7 @@ describe("ConversationView (Pebble thread)", () => {
     const view = new ConversationView(document, history, { supervisor: "calm-otter-4" }); document.body.replaceChildren(view.element); view.update();
     expect([...view.element.querySelectorAll(".day")].map((day) => day.textContent)).toEqual(["Today"]);
     const group = view.element.querySelector<HTMLElement>('.turn.sup[role="group"]')!;
-    const clock = `${String(new Date(now).getHours()).padStart(2, "0")}:${String(new Date(now).getMinutes()).padStart(2, "0")}`;
+    const clock = clockLabel(now);
     expect(group.getAttribute("aria-label")).toBe(`calm-otter-4, ${clock}, machine clock ahead`);
     const time = group.querySelector<HTMLElement>(":scope > time")!;
     expect(time.textContent).toBe(`${clock} · machine clock ahead`);
@@ -938,7 +939,7 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
 
   // The content grew after the last pin without a scroll event (late layout),
   // so the reader's first scroll up was read as layout and pinned back.
-  it("after the content grew without a scroll of its own", () => {
+  it.each(["wheel", "keyboard", "touch"])("after the content grew without a scroll of its own (%s)", async (input) => {
     const flush = frames();
     const { history, view, jump } = longThread();
     const content = { height: 1400 };
@@ -947,7 +948,17 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     view.update();
     flush(); flush();
     content.height = 1460;
-    readTop(view);
+    if (input === "wheel") view.element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    if (input === "keyboard") view.element.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp" }));
+    if (input === "touch") {
+      view.element.dispatchEvent(new TouchEvent("touchstart", { touches: [{ clientY: 100 } as Touch] }));
+      view.element.dispatchEvent(new TouchEvent("touchmove", { touches: [{ clientY: 200 } as Touch] }));
+    }
+    view.element.scrollTop = 0;
+    // Preview mutation delivery may precede the reader's queued scroll.
+    view.element.querySelector('[role="log"]')!.setAttribute("data-layout", "late");
+    await Promise.resolve();
+    view.element.dispatchEvent(new Event("scroll"));
     flush(); flush();
     expect(view.element.scrollTop).toBe(0);
     expect(jump.hidden).toBe(false);
@@ -1013,5 +1024,26 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     history.reply(reply(15, "answer", "Build finished"), at(10, 15));
     view.update();
     expect(view.element.scrollTop).toBe(1300);
+  });
+
+  it.each(["deferred pin", "browser clamp"] as const)("keeps following when content shrinks in a %s and grows before its scroll event", (shrink) => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    // An attachment preview shrinks before the frame-late pin. The browser
+    // queues that layout scroll, then more content grows before delivery.
+    content.height = 1000;
+    if (shrink === "deferred pin") flush();
+    else view.element.scrollTop = view.element.scrollTop;
+    expect(view.element.scrollTop).toBe(800);
+    content.height = 1500;
+    view.element.dispatchEvent(new Event("scroll"));
+    flush();
+    view.update();
+    expect(view.element.scrollTop).toBe(1300);
+    expect(jump.hidden).toBe(true);
   });
 });

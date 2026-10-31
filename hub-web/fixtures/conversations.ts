@@ -1,3 +1,4 @@
+import { bindEmojiComposer } from "../src/emoji-composer";
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { fleetControlGate } from '../src/fleet-permissions';
 import type { Scope } from '../src/types';
@@ -17,6 +18,7 @@ import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
 import { inlineAttachment } from '../src/rich-attachment';
 import { sentAttachmentReference } from '../src/sent-attachments';
+import { ComposerUploads } from '../src/composer-uploads';
 import evidenceImage from '../e2e/media/evidence.png?url';
 import { WorkEventStream, workEventsPage } from '../src/work-events';
 import type { WorkRowsContext } from '../src/work-rows-view';
@@ -444,7 +446,17 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  bindEmojiComposer(slot.querySelector<HTMLTextAreaElement>('#message-text')!, slot.querySelector<HTMLButtonElement>('#message-emoji')!);
   applyDraftNote(slot, state === 'conversation-draft-too-long' ? 'too-long' : state === 'conversation-draft-not-saved' ? 'not-saved' : false);
+  if (state === 'conversation-upload-progress' || state === 'conversation-upload-refusal') {
+    const uploads = new ComposerUploads(); uploads.bind(slot);
+    uploads.add([new File([new Uint8Array(10 * 1024 * 1024)], 'holiday-photo.heif', { type: 'image/heif' })]);
+    void uploads.prepare('', async (_id, _name, _data, report) => {
+      if (state === 'conversation-upload-refusal') throw new Error('This file type is not supported.');
+      report?.(0.42);
+      return new Promise(() => {});
+    }).catch(() => {}); // The production component owns this refusal status.
+  }
   // The dismissed-messages chip sits at the top of the composer region, as main.ts places it.
   if (!view.unsent.hidden) slot.prepend(view.unsent);
   if (state === 'conversation-keyboard') {

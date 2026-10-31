@@ -235,6 +235,14 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
     "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
 
+fn commander_alias_reply_hint() -> String {
+    format!(
+        "Reply once in this pane; completed supervisor answers mirror to Commander. \
+         Use explicit routing only for disabled or unmirrored delivery.\n\
+         {COMMANDER_REPLY_CONTRACT_POINTER}"
+    )
+}
+
 /// A verified question needs one answer. Completed supervisor pane replies
 /// already enter the durable Commander lane, including offline catch-up.
 /// Keep the explicit-routing exception in the shared reference, rather than
@@ -345,6 +353,45 @@ pub(crate) fn operator_turn_waiting_for_commander(
         // An unreadable binding is unknown, not absent.
         .unwrap_or(true);
     !cloud_feed
+}
+
+/// cas-fc42: record a worker's typed ready message on its own task as a
+/// progress note, so the director's pre-park readiness check (which reads
+/// task notes) sees the claim. Only a message whose first line is the
+/// `status: ready` return contract counts; the reader binds its `tip:` to
+/// the pushed lane tip, accepting an unambiguous short SHA.
+fn record_worker_ready_contract(
+    cas_root: &std::path::Path,
+    sender: &cas_types::Agent,
+    task_id: &str,
+    message: &str,
+) {
+    let body = message.trim_start();
+    let body = match body.split_once('\n') {
+        Some((first, rest)) if first.starts_with("[CAS reply:") => rest.trim_start(),
+        _ => body,
+    };
+    if body.lines().next().map(str::trim_end) != Some("status: ready") {
+        return;
+    }
+    let Ok(store) = crate::store::open_task_store_local(cas_root) else {
+        return;
+    };
+    let Ok(task) = store.get(task_id) else {
+        return;
+    };
+    if !task
+        .assignee
+        .as_deref()
+        .is_some_and(|assignee| assignee == sender.name || assignee == sender.id)
+    {
+        return;
+    }
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    let note = format!("[{timestamp}] 📝 PROGRESS {}", body.trim_end());
+    if let Err(error) = store.append_note(task_id, &note) {
+        tracing::warn!(task_id, %error, "could not record the worker's ready contract");
+    }
 }
 
 #[cfg(test)]
@@ -1484,10 +1531,9 @@ impl CasService {
                     Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "target='commander:{selector}' requires an active factory session; \
-                             once a verified Commander message exists, call `coordination \
-                             action=message target=operator in_reply_to=<notification_id> \
-                             summary=\"...\" message=\"...\"`"
+                            "target='commander:{selector}' requires an active factory session. \
+                             Once a verified Commander message exists:\n{}",
+                            commander_alias_reply_hint()
                         ),
                     )
                 })?;
@@ -1522,9 +1568,8 @@ impl CasService {
                         ErrorCode::INVALID_PARAMS,
                         format!(
                             "No verified Commander message from '{selector}' is addressed to \
-                             this supervisor. Reply with `coordination action=message \
-                             target=operator in_reply_to=<notification_id> summary=\"...\" \
-                             message=\"...\"` after a verified Commander row arrives."
+                             this supervisor. After a verified Commander row arrives:\n{}",
+                            commander_alias_reply_hint()
                         ),
                     )
                 })?;
@@ -1535,9 +1580,8 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "target='commander:{selector}' resolves to notification_id={} \
-                         (not in_reply_to={explicit}); use `coordination action=message \
-                         target=operator in_reply_to={} summary=\"...\" message=\"...\"`",
-                        prior.id, prior.id
+                         (not in_reply_to={explicit}).\n{}",
+                        prior.id, commander_alias_reply_hint()
                     ),
                 ));
             }
@@ -1561,15 +1605,27 @@ impl CasService {
                 "receipt" => crate::ui::factory::OperatorTurnKind::Receipt,
                 "ask" => crate::ui::factory::OperatorTurnKind::Ask,
                 "blocker" => crate::ui::factory::OperatorTurnKind::Blocker,
+                "secret" => crate::ui::factory::OperatorTurnKind::Secret,
                 other => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "invalid operator kind '{other}'; expected answer, status, receipt, ask, or blocker"
+                            "invalid operator kind '{other}'; expected answer, status, receipt, ask, blocker, or secret"
                         ),
                     ));
                 }
             };
+            // cas-1996: a secret request names the credential in `summary`,
+            // which becomes its file name. Commander saves the pasted value
+            // on this machine and replies with the path only.
+            if kind == crate::ui::factory::OperatorTurnKind::Secret
+                && !crate::ui::factory::valid_secret_name(summary.trim())
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "kind=secret needs summary=<NAME>: 1-64 letters, digits, '_', '.' or '-', not starting with '.' (it becomes the file name); put what it is for and how to create it in message",
+                ));
+            }
             // cas-207e: an ask may carry a deadline (remind_delay_secs) and the
             // default action it proceeds with (remind_message). At the
             // deadline a blocker-class wake tells the supervisor to proceed.
@@ -1806,6 +1862,20 @@ impl CasService {
                 })?;
             let reply_id = reply.id();
             crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
+            // cas-2f55: replying to the hub's "saved" message confirms use of
+            // a secret the operator chose to delete after use.
+            let used = match req.in_reply_to.map(|answered| {
+                crate::hub::secret_auto_delete::confirm_use(&self.inner.cas_root, factory_session, answered)
+            }) {
+                Some(Ok(removed)) if !removed.is_empty() => {
+                    format!("\nSecret deleted after use: {}", removed.join(", "))
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "cas-2f55: after-use secret deletion failed");
+                    "\nSecret deletion after use failed; tell the operator to delete the file".to_string()
+                }
+                _ => String::new(),
+            };
             let deadline = match ask_deadline {
                 Some((secs, default)) => {
                     let id =
@@ -1822,7 +1892,7 @@ impl CasService {
                 ("queued", "", "queued for")
             };
             return Ok(Self::success(format!(
-                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}",
+                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}{used}",
                 kind.as_str(),
                 req.in_reply_to
                     .map_or_else(|| "none".to_string(), |id| id.to_string())
@@ -2025,6 +2095,11 @@ impl CasService {
         } else {
             None
         };
+        // cas-fc42: the worker's own words, before the wake envelope, so a
+        // ready return contract can be recorded on its task below.
+        let ready_contract = (worker_action_kind
+            == Some(crate::prompt_revalidation::WorkerActionKind::Ready))
+        .then(|| message.clone());
         if let Some(kind) = worker_action_kind {
             message = crate::prompt_revalidation::attach_worker_action_envelope(
                 &message,
@@ -2950,6 +3025,16 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        // cas-fc42: a worker's typed ready message is its completion claim;
+        // record it on its own task, where the director reads readiness.
+        if let (false, Some(contract), Some(task_id), Some(sender)) = (
+            duplicate_suppressed,
+            ready_contract.as_deref(),
+            req.task_id.as_deref(),
+            agent_from_store.as_ref(),
+        ) {
+            record_worker_ready_contract(&self.inner.cas_root, sender, task_id, contract);
+        }
         // Only an explicit answer or a direct reply to the worker's blocker
         // owns that wait. Status pings and replies elsewhere in the thread do
         // not answer it. Automatic verdict/merge notices bypass this path.
@@ -6560,6 +6645,30 @@ mod cas_89e1_post_merge_message_type_tests {
             );
         }
 
+        // cas-fc42: a typed ready message with a short SHA is recorded on the
+        // worker's own task, and the director's readiness accepts that SHA as
+        // the pushed tip it prefixes, never another tip.
+        let tip = "abcdef1234567890abcdef1234567890abcdef12";
+        let tasks = core.open_task_store().expect("task store");
+        let mut task = Task::new("cas-fc42-test".to_string(), "ready by message".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).expect("add worker task");
+        let mut ready = message_request_to("supervisor");
+        ready.kind = Some("ready".to_string());
+        ready.task_id = Some(task.id.clone());
+        ready.message = Some(format!(
+            "status: ready\ntip: {} on factory/worker-a-cas-fc42; worktree: clean\nproof: named tests pass",
+            &tip[..9]
+        ));
+        service.message_send(ready).await.expect("ready message is queued");
+        let task = tasks.get("cas-fc42-test").expect("task");
+        assert!(crate::ui::factory::delivery_marked_ready(&task, tip), "{}", task.notes);
+        assert!(!crate::ui::factory::delivery_marked_ready(
+            &task,
+            "abcdef1299999990abcdef1234567890abcdef12"
+        ));
+
         for (kind,wake,body) in [
             ("receipt",None,"The delivery was received."),
             ("answer",Some(false),"A field report that can wait."),
@@ -7426,7 +7535,7 @@ mod cas_89e1_post_merge_message_type_tests {
             .id();
 
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        core.set_agent_id_for_testing(supervisor.id);
+        core.set_agent_id_for_testing(supervisor.id.clone());
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -7455,6 +7564,41 @@ mod cas_89e1_post_merge_message_type_tests {
             serde_json::from_str(&reply.prompt).expect("operator reply payload");
         assert_eq!(payload.reply_to, Some(commander));
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
+
+        for (selector, in_reply_to, sessionless, cause) in [
+            ("Daniel@Soundwave", Some(commander + 1), false, "resolves to notification_id="),
+            ("unknown-device", None, false, "No verified Commander message"),
+            ("Daniel@Soundwave", None, true, "requires an active factory session"),
+        ] {
+            let caller = if sessionless {
+                let mut sessionless_supervisor = supervisor.clone();
+                sessionless_supervisor.id = "sessionless-supervisor-id".into();
+                sessionless_supervisor.name = "sessionless-supervisor".into();
+                sessionless_supervisor.factory_session = None;
+                agents.register(&sessionless_supervisor).expect("register sessionless sender");
+                sessionless_supervisor.id
+            } else {
+                supervisor.id.clone()
+            };
+            let error_core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            error_core.set_agent_id_for_testing(caller);
+            #[cfg(feature = "mcp-proxy")]
+            let error_service = CasService::new(error_core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let error_service = CasService::new(error_core);
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": format!("commander:{selector}"),
+                "in_reply_to": in_reply_to, "summary": "refused alias", "message": "Status response.",
+            })).unwrap();
+            let error = error_service.message_send(request).await.expect_err("invalid alias reply must be refused");
+            assert!(error.message.contains(cause), "{selector}: {error:?}");
+            assert!(error.message.contains("Reply once in this pane"), "{selector}: {error:?}");
+            assert!(error.message.contains("disabled or unmirrored delivery"), "{selector}: {error:?}");
+            assert!(error.message.contains(COMMANDER_REPLY_CONTRACT_POINTER), "{selector}: {error:?}");
+            assert!(!error.message.contains("coordination action=message target=operator"), "no second-send command for mirrored replies: {error:?}");
+        }
+        assert_eq!(queue.peek_operator_replies("factory-commander-alias", 10).unwrap().len(), 1,
+            "error guidance must not queue another answer");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7577,6 +7721,13 @@ mod cas_89e1_post_merge_message_type_tests {
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
+        // cas-2f55: a secret saved to delete after use, bound to this
+        // Commander message, is removed by the supervisor's reply to it.
+        let secret = temp.path().join("DEPLOY_KEY");
+        std::fs::write(&secret, "dk-value").unwrap();
+        let after_use = crate::hub::secret_auto_delete::AutoDelete::AfterUse;
+        crate::hub::secret_auto_delete::schedule(&cas_root, "DEPLOY_KEY", &secret, "factory-operator", commander - 1, after_use).unwrap();
+        crate::hub::secret_auto_delete::bind_reply(&cas_root, commander - 1, commander).unwrap();
         let request: AgentRequest = serde_json::from_value(serde_json::json!({
             "action": "message",
             "target": "operator",
@@ -7593,6 +7744,10 @@ mod cas_89e1_post_merge_message_type_tests {
                 .expect("supervisor reply queues successfully"),
         );
         assert!(response.contains("held for delivery to phone-7"), "{response}");
+        assert!(response.contains("Secret deleted after use: DEPLOY_KEY"), "{response}");
+        assert!(!secret.exists(), "the reply confirmed use");
+        let receipts = std::fs::read_to_string(cas_root.join("secret-receipts.jsonl")).unwrap();
+        assert!(receipts.contains("\"trigger\":\"after_use\"") && !receipts.contains("dk-value"), "{receipts}");
 
         let rows = queue
             .peek_operator_replies("factory-operator", 10)

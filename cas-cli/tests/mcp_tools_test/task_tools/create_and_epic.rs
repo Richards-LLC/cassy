@@ -859,6 +859,10 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
     cas::store::known_repos::ensure_host_schema().unwrap();
     // Pin a SHA with letters in SHA[..9]; decimal-only prefixes are treated as run IDs.
     std::fs::write(repo.join(".gitignore"), "/.cas/\n").unwrap();
+    test_env.set("GIT_AUTHOR_NAME", "Test");
+    test_env.set("GIT_AUTHOR_EMAIL", "test@test.com");
+    test_env.set("GIT_COMMITTER_NAME", "Test");
+    test_env.set("GIT_COMMITTER_EMAIL", "test@test.com");
     test_env.set("GIT_AUTHOR_DATE", "1700000192 +0000");
     test_env.set("GIT_COMMITTER_DATE", "1700000192 +0000");
     init_repo_with_commit(repo);

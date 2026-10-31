@@ -1,7 +1,7 @@
 import type { FleetAgent } from "./fleet-ops";
 import { workerProgress, workerState, releaseProgress, taskGroups, statusClass, type ProgressTask, type ReleaseEpic } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
+import { avatarLetters, providerAvatarMarkup, type AvatarState } from "./provider-mark";
 
 export interface TeamSnapshot {
   readonly roster?: readonly string[];
@@ -12,11 +12,27 @@ export interface TeamSnapshot {
   readonly focused: string | null;
   readonly supervisors: readonly string[];
   readonly asks: number;
+  /** The question itself when exactly one is open, so the control names it. */
+  readonly askLabel?: string;
   readonly stale?: string;
   readonly unavailable?: string;
 }
 
+/** The avatar dot repeats the pill's state as a mark; the pill still says it in words. */
+const LANE_DOTS: Readonly<Record<string, AvatarState>> = { Executing: "working", Merged: "working", Waiting: "idle", Stalled: "needs-you", "Budget stopped": "needs-you", "Parked for merge": "needs-you", Offline: "offline" };
+
 const STEPS = [["started", "Started"], ["pushed", "Pushed"], ["ci_green", "CI green"], ["merged", "Merged"], ["verified", "Verified"]] as const;
+
+const FINDING_GROUPS: ReadonlyArray<readonly [string, string]> = [["Executing", "working"], ["Waiting", "waiting"], ["Parked for merge", "parked"], ["Merged", "merged"], ["Stalled", "stalled"], ["Budget stopped", "stopped"], ["Offline", "offline"]];
+
+/** The sentence Team leads with: only what this session reports, never a guess at health. */
+export function teamFinding(states: readonly string[], decisions: number): string {
+  const parts = FINDING_GROUPS.map(([state, word]) => [states.filter(item => item === state).length, word] as const).filter(([count]) => count > 0).map(([count, word]) => `${count} ${word}`);
+  const other = states.filter(state => !FINDING_GROUPS.some(([known]) => known === state)).length;
+  if (other) parts.push(`${other} not reported`);
+  const staffing = parts.length ? `${parts.join(", ")}.` : "No workers reporting.";
+  return decisions ? `${staffing} ${decisions}\u00a0${decisions === 1 ? "needs" : "need"}\u00a0you.` : staffing;
+}
 
 /** Display clock only; this component has no connection or polling authority. */
 export function updateTeamElapsed(root: HTMLElement, now = Date.now()): void {
@@ -37,7 +53,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const needs = taskGroups(snapshot.tasks, snapshot.epics, workers.map(worker => worker.name), false, snapshot.supervisors, snapshot.focused)[0].tasks;
   // Heartbeats and raw activity are not rendered. They cannot remount lanes,
   // restart their animation, or replace a control under the pointer.
-  const signature = JSON.stringify([snapshot.asks, snapshot.stale, snapshot.unavailable, release, needs.map(task => [task.id, task.status]),
+  const signature = JSON.stringify([snapshot.asks, snapshot.askLabel, snapshot.stale, snapshot.unavailable, release, needs.map(task => [task.id, task.status]),
     workers.map(worker => [worker.name, worker.work, workerState(worker, snapshot.tasks), worker.agent?.harness, worker.agent?.model, worker.agent?.task_started_at, worker.agent?.recent_trail])]);
   if (root.dataset.signature === signature) { updateTeamElapsed(root); return; }
   root.dataset.signature = signature;
@@ -46,10 +62,12 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   };
   const priorStates = new Map([...root.querySelectorAll<HTMLElement>(".team-lane")].map(lane => [lane.dataset.worker, lane.querySelector(".team-state")?.textContent]));
   const priorButtons = new Map([...root.querySelectorAll<HTMLButtonElement>("[data-team-action]")].map(button => [button.dataset.teamAction, button]));
-  const heading = text("h2", "Your team, at a glance.");
+  const finding = teamFinding(workers.map(worker => workerState(worker, snapshot.tasks)), snapshot.asks + needs.length);
+  const heading = text("h2", snapshot.unavailable ? "Team status unavailable." : snapshot.stale ? `Last reported: ${finding}` : finding);
   const notice = text("p", snapshot.stale ?? "Live staffing from this supervisor’s session", "team-freshness");
   notice.setAttribute("role", "status");
-  root.replaceChildren(heading, notice);
+  const head = document.createElement("div"); head.className = "team-head"; head.append(heading, notice);
+  root.replaceChildren(head);
   if (snapshot.unavailable) { root.append(text("p", snapshot.unavailable, "team-empty")); return; }
   root.append(releaseHeader(document, release));
   const strip = document.createElement("section"); strip.className = "team-needs"; strip.setAttribute("aria-label", "Needs you");
@@ -57,12 +75,12 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const action = (label: string, key: string, run: () => void): void => {
     const button = priorButtons.get(key) ?? document.createElement("button"); button.type = "button"; button.textContent = label; button.dataset.teamAction = key; button.onclick = run; strip.append(button);
   };
-  if (snapshot.asks) action(`${snapshot.asks} supervisor ask${snapshot.asks === 1 ? " or blocker" : "s or blockers"}`, "asks", openAttention);
+  if (snapshot.asks) action(snapshot.asks === 1 && snapshot.askLabel ? snapshot.askLabel : `${snapshot.asks} supervisor ask${snapshot.asks === 1 ? " or blocker" : "s or blockers"}`, "asks", openAttention);
   const blockers = needs.filter(task => statusClass(task.status) === "blocked").length;
   const merges = needs.filter(task => statusClass(task.status) === "awaiting-merge").length;
   if (blockers) action(`${blockers} blocker${blockers === 1 ? "" : "s"}`, "blockers", openProgress);
   if (merges) action(`${merges} merge${merges === 1 ? "" : "s"} waiting`, "merges", openProgress);
-  if (!snapshot.asks && !needs.length) strip.append(text("p", "No decisions waiting."));
+  if (!snapshot.asks && !needs.length) strip.append(text("p", "Nothing needs you."));
   root.append(strip);
   const list = document.createElement("ul"); list.className = "team-lanes"; list.setAttribute("aria-label", "Worker lanes");
   for (const worker of workers) {
@@ -80,11 +98,11 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
       const evidence = worker.agent?.recent_trail?.find(item => item.step === step && item.reference);
       const item = text("li", label); item.dataset.reported = String(Boolean(evidence));
       const time = evidence?.at ? new Date(evidence.at) : undefined;
-      const detail = evidence ? `Reported${time && Number.isFinite(time.getTime()) ? ` at ${time.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : ""}: ${evidence.reference}` : "Not reported";
+      const detail = evidence ? `Reported${time && Number.isFinite(time.getTime()) ? ` at ${time.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : ""}${evidence.reference.startsWith("event:") ? "" : `: ${evidence.reference}`}` : "Not reported";
       item.title = detail; item.setAttribute("aria-label", `${label}: ${detail}`); trail.append(item);
     }
     const avatar = document.createElement("template");
-    avatar.innerHTML = providerAvatarMarkup({ harness: worker.agent?.harness, fallback: avatarLetters(worker.name), size: "lane" });
+    avatar.innerHTML = providerAvatarMarkup({ harness: worker.agent?.harness, fallback: avatarLetters(worker.name), size: "lane", state: LANE_DOTS[state] });
     lane.append(avatar.content, identity, badge, work, elapsed, trail); list.append(lane);
   }
   root.append(list);

@@ -1,3 +1,4 @@
+import { clockLabel } from "./thread-model";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import {
   attachElapsedSeconds,
@@ -101,7 +102,7 @@ export function connectionTimeline(snapshot: ConnectionSnapshotView): Connection
     entries.push({ label: "Connection cause", detail: `${CAUSE_COPY[cause.code].title} · ${cause.layer}${cause.status === undefined ? "" : ` · HTTP ${cause.status}`}${cause.closeCode === undefined ? "" : ` · socket ${cause.closeCode}`}`, tone: "evidence" });
     entries.push({ label: "Recovery action", detail: CAUSE_COPY[cause.code].action, tone: "evidence" });
   }
-  entries.push({ label: "Last successful connection", detail: snapshot.lastSuccessAt ? new Date(snapshot.lastSuccessAt).toLocaleTimeString() : "Not measured in this visit", tone: "evidence" });
+  entries.push({ label: "Last successful connection", detail: (snapshot.lastSuccessAt && clockLabel(snapshot.lastSuccessAt)) || "Not measured in this visit", tone: "evidence" });
   if (retrying && snapshot.retryInMs !== undefined) {
     const seconds = Math.max(0, Math.ceil((snapshot.nextRetryAt === undefined ? snapshot.retryInMs : snapshot.nextRetryAt - Date.now()) / 1_000));
     entries.push({

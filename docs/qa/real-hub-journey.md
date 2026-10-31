@@ -1,13 +1,35 @@
 # Real disposable hub recovery
 
-`HUB-J11` has a separate real-hub part. It serves the committed Commander
-bundle, pairs a real browser, and runs a real `cas factory daemon` and
+## Native recording chapters
+
+Use `showRecordingChapter` from
+`hub-web/e2e/journeys/receipt-directory.mjs` for chapter labels in Commander
+recordings. The shared journey fixture and real-hub recording use this helper.
+It draws a temporary caption with a constructed stylesheet, uses the page's
+theme tokens, preserves focus and pointer input, and removes the caption before
+the next stage. Titles are plain text and long titles wrap within the viewport.
+
+Playwright 1.64.1's direct `page.screencast.showChapter` injects an inline
+`style` element. Native Commander's `style-src 'self'` refuses it; serving static
+dist files without that header hides the problem. Keep the production policy
+and vendor unchanged. Do not enable `bypassCSP` for a recording.
+
+The native HUB-J24 part records a visible helper caption, checks its removal and
+zero style-policy events, then continues the actual image upload. Its binary
+comes from `cas qa candidate path --task <task-id>`, and the recording is
+`native-chapter.webm` in that part's Playwright output directory.
+
+`HUB-J11` has a separate real-hub part. It serves only the Commander assets
+embedded in `CAS_BIN`, pairs a real browser, and runs a real `cas factory daemon` and
 `cas hub serve` in a new private HOME and Git project for every repetition.
 The supervisor provider is an inert local executable: the real daemon owns
 the operator queue, conversation history and WebSocket protocol. No hosted
 model, production hub or existing browser pairing is used.
 
-The fixture's HTTPS listener only forwards bytes to the actual local hub.
+Both the fixture's `/commander` route and HTTPS listener forward bytes to the
+actual local hub, including missing-asset responses and security headers. Neither
+serves files from `hub-web/dist`. `REAL_HUB_DIST` is refused; external-dist
+previews cannot be used as embedded-candidate evidence.
 `journey-hub.ts.net` resolves to loopback in Chromium; a disposable certificate
 and public address-space override make Chromium enforce actual Local Network
 Access. The journey uses CDP to deny and then grant both `local-network` and
@@ -20,6 +42,19 @@ Use a supervisor-built binary from the commit being evaluated. Copy it to
 scratch before use, since the assembly's target directory can be rebuilt.
 Install hub-web dependencies with `npm ci` and Chromium with
 `npx playwright install chromium` if needed. Do not build Rust in a worker.
+
+On macOS the fixture allocates its private HOME under `/tmp` (canonicalized to
+`/private/tmp`) with a short `cas-rh-` prefix. The default `/var/folders/...`
+`TMPDIR` otherwise makes the daemon's longer GUI socket path 115 bytes, above
+macOS's 103-byte pathname limit. No `TMPDIR` override is needed; other platforms
+keep using their normal temporary directory. Cleanup still removes only the
+fixture's marked private HOME. The native journey preflight and `npm test` run
+`node --test e2e/journeys/real-hub-home.test.mjs e2e/journeys/real-hub-server.test.mjs`.
+The HOME check binds a real Unix socket even with a deliberately long macOS temp
+base. The asset check runs the actual helper against a disposable HTTP upstream:
+a missing embedded stylesheet remains 404 even when external dist contains it,
+and the document retains the upstream security policy. This boundary regression
+does not substitute for a journey against the exact candidate binary.
 
 Start the fixture through the Cassy server registry (replace paths):
 
@@ -85,13 +120,13 @@ The journey proves:
   history were exercised again on recovery. No observed connection state
   said Needs pairing.
 
-For a negative control, extract the committed `hub-web/dist` from pre-fix
-`5eaba13da` into scratch and start a second registered fixture with
-`REAL_HUB_DIST=/absolute/pre-fix/hub-web/dist` and a different port triple.
-Run the same journey against that control port. Keep the same tip-built hub
-binary to isolate the browser reconnect fix; record both revisions, the failing
-stage, and the visible Needs pairing or failure to recover. Do not weaken the
-assertions to turn an unexpected passing baseline into a failure.
+For a negative control, ask the supervisor for a baseline candidate binary
+that embeds the pre-fix Commander bundle, then copy it to scratch and start a
+second registered fixture with that `CAS_BIN` and a different port triple.
+Run the same journey against that control port. Record both candidate revisions,
+any backend differences, the failing stage, and the visible Needs pairing or
+failure to recover. A loose dist directory cannot prove the baseline candidate
+embeds those assets. Do not weaken assertions to force a baseline failure.
 
 ## Real New session launch (HUB-J13)
 
@@ -112,10 +147,25 @@ npm run journeys:real-hub -- real-hub.journey.ts --grep 'HUB-J13 real hub'
 ```
 
 Only OS service placement and the provider executable are test boundaries.
+The fixture sets `SHELL` to a private adapter that executes `-lc` probes without
+loading host login profiles. This keeps its `HOME/bin/claude` first even when
+macOS `path_helper` or a profile would prepend Homebrew; no host provider or
+account credentials are used. The preflight regression plants a fake host
+provider in a login profile and requires lookup and the login probe to use the
+disposable provider instead.
+
 The fixture's local `systemd-run` adapter executes the real reaper/daemon under
 its private HOME and registered containment, instead of the operator's user
-manager. Its recorded process group and start fingerprint bound cleanup to the
-owned launch. This does not prove host systemd/cgroup placement or model action.
+manager on Linux. Its recorded process group and start fingerprint bound cleanup
+to the owned launch. On macOS the hub uses its native direct process-session
+launch, so that Linux adapter and its `/proc` fingerprint are not invoked.
+Cleanup captures that owned hub's descendant PIDs and `ps` start fingerprints
+before stopping it, retaining those identities across reparenting. It never
+scans host command arguments or environments to establish ownership.
+The inert provider consumes actual bracketed-paste frames and CR submissions
+without canonical terminal buffering; only a submitted `/exit` command ends it,
+so startup prose mentioning that command cannot terminate the provider.
+This does not prove host systemd/cgroup placement or model action.
 The installed official provider and login remain a separate bounded live check;
 never use an existing hub or read/copy credentials into this fixture.
 

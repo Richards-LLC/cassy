@@ -1,5 +1,19 @@
 # Operator reply held during Commander reconnect
 
+## Commander alias refusal guidance
+
+**First two lines:** Keep the exact alias refusal cause, then say to reply once
+in the pane because completed supervisor answers mirror to Commander.
+**Scannable:** All three alias errors use the same hint and existing reply-contract pointer.
+**Readable:** Explicit routing is only for disabled or unmirrored delivery; the
+error never suggests sending a second answer alongside a mirrored pane reply.
+**Machine output:** Existing MCP error codes and reply routing remain unchanged.
+**Omitted:** No new mirroring, identity, active-session, verified-row or delivery policy.
+
+The existing alias test exercises all three real handler refusals and verifies
+that they do not enqueue another answer. Live terminal presentation remains
+unexercised pending integrated batch QA.
+
 Design: DESIGN.md (Cassy voice, inherited Commander roles); plain MCP tool text.
 
 | Field | Contract |

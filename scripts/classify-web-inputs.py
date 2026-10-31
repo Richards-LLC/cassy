@@ -35,6 +35,11 @@ WEB_INPUTS = (
     'scripts/visual-qa.mjs',
     # Run inside the CI Commander step.
     'scripts/test-ci-journey-evidence-upload.sh',
+    # Runs each CI Commander journey shard (queue retry and quarantine).
+    'scripts/ci-queue-flakes.py',
+    # Builds and verifies the journey dist hub-web/e2e/journeys/serve-dist.mjs
+    # serves.
+    'scripts/journey_dist.py',
     # The decision itself. The workflow that runs the step is not an input
     # (cas-c846).
     'scripts/classify-web-inputs.py',

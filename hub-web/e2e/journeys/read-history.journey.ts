@@ -4,10 +4,131 @@ import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
 import { journeyDay } from "./clock";
 import { ATLAS, PELICAN } from "./world";
+import { openConversation, showConversationList } from "./responsive-goals";
 
 const you = (id: number, text: string, at: string) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at });
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
+
+test("HUB-J4 inspect images in a turn without leaving the conversation", journeyPart, async ({ page, journey }, testInfo) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const imageBytes = readFileSync("e2e/media/evidence.png");
+  await page.route("https://atlas.test/v1/sessions/*/artifacts/*/content?*", route => route.request().url().includes("gallery-missing")
+    ? route.fulfill({ status: 404 }) : route.fulfill({ contentType: "image/png", body: imageBytes }));
+  await page.context().route("https://store.test/**", route => route.fulfill({ contentType: "image/png", body: imageBytes }));
+  await journey.open(); await openConversation(page, "cas-src");
+  const images = ["First screenshot.png", "Second screenshot.png", "Missing screenshot.png"].map((name, index) => ({ ...file(["gallery-first", "gallery-second", "gallery-missing"][index]!, name), mime: "image/png" }));
+  hub.supervisorSays(PELICAN, "Compare these screenshots.", { attachments: images });
+  hub.supervisorSays(PELICAN, "This image belongs to another turn.", { attachments: [{ ...images[0], artifact_id: "gallery-other", name: "Other turn.png" }] });
+  const first = page.getByRole("log").getByRole("link", { name: /^First screenshot.png/ });
+  await expect(first.locator("img")).toBeVisible();
+  const captures = testInfo.outputPath("image-viewer"); mkdirSync(captures, { recursive: true });
+  await journey.stage("Read the image cards in the conversation", async () => {
+    for (const width of [390, 1440]) for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: 844 }); await page.emulateMedia({ colorScheme });
+      await first.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `${captures}/conversation-${width}-${colorScheme}.png` });
+    }
+  });
+  await journey.stage("Repeated viewer load failures leave one note", async () => {
+    const chunk = /\/chunk-image-viewer-[^/]+\.js$/;
+    await page.route(chunk, route => route.abort("failed"));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await first.click();
+      await expect(first).toContainText("Image viewer unavailable. Try again.");
+      expect.soft(await first.locator(".preview-note").count()).toBe(1);
+    }
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme });
+      await page.screenshot({ path: `${captures}/unavailable-390-${colorScheme}.png` });
+    }
+    await page.unroute(chunk);
+    await page.reload(); await openConversation(page, "cas-src");
+    await expect(first.locator("img")).toBeVisible();
+  });
+  const dialog = page.getByRole("dialog", { name: "Image viewer" });
+  await journey.stage("Expand an image and keep keyboard focus inside", async () => {
+    await first.focus(); await first.press("Enter");
+    await expect(dialog).toBeVisible();
+    await expect(page.locator("body")).toHaveCSS("margin", "0px");
+    await expect(dialog.locator(".image-viewer-canvas")).toHaveCSS("display", "grid");
+    await expect(dialog.getByRole("button", { name: "Close image viewer" })).toBeFocused();
+    await expect(dialog).toContainText("1 of 3");
+    await expect(dialog.locator("img")).toHaveAttribute("alt", "First screenshot.png");
+    await expect(dialog).toHaveAttribute("data-state", "ready");
+    await page.keyboard.press("Shift+Tab");
+    await expect(dialog.getByRole("button", { name: "Fit image" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByRole("button", { name: "Close image viewer" })).toBeFocused();
+    for (const width of [390, 1440]) for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: 844 }); await page.emulateMedia({ colorScheme });
+      await page.screenshot({ path: `${captures}/expanded-${width}-${colorScheme}.png` });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    for (const [name, query, media] of [
+      ["forced-colors", "(forced-colors: active)", { forcedColors: "active" }],
+      ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }],
+      ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }],
+    ] as const) {
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+      await page.emulateMedia(media);
+      expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
+      await expect(dialog).toBeVisible();
+      await page.screenshot({ path: `${captures}/a11y-${name}.png` });
+    }
+    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+  });
+  await journey.stage("Zoom and pan with keyboard, mouse and touch", async () => {
+    // At 1440 the 640 px fixture still fits at 1.5×, so it has nothing to pan.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const canvas = dialog.locator(".image-viewer-canvas");
+    await page.keyboard.press("+");
+    await expect(dialog.locator("output")).toHaveText("1.5×");
+    await page.keyboard.press("Shift+ArrowRight");
+    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toContain("translate(0px, 0px)");
+    await canvas.hover(); await page.mouse.wheel(0, -200);
+    await expect(dialog.locator("output")).not.toHaveText("1.5×");
+    const beforeDrag = await dialog.locator("img").evaluate(image => image.style.transform);
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2); await page.mouse.up();
+    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toBe(beforeDrag);
+    const beforePinch = await dialog.locator("output").textContent();
+    await canvas.evaluate(canvas => {
+      const box = canvas.getBoundingClientRect();
+      const fire = (type: string, id: number, x: number) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "touch", pointerId: id, clientX: box.left + x, clientY: box.top + box.height / 2 }));
+      fire("pointerdown", 1, 70); fire("pointerdown", 2, 170); fire("pointermove", 2, 210); fire("pointerup", 1, 70); fire("pointerup", 2, 210);
+    });
+    await expect(dialog.locator("output")).not.toHaveText(beforePinch!);
+    await dialog.getByRole("button", { name: "Fit image" }).click();
+    await expect(dialog.locator("output")).toHaveText("Fit");
+  });
+  await journey.stage("Compare the turn's images and name a load failure", async () => {
+    await page.keyboard.press("ArrowRight");
+    await expect(dialog.locator("h2")).toHaveText("Second screenshot.png");
+    await expect(dialog).toHaveAttribute("data-state", "ready");
+    await dialog.getByRole("button", { name: "Next image" }).click();
+    await expect(dialog.getByRole("status", { name: "Image load" })).toContainText("Couldn't load Missing screenshot.png");
+    const retry = dialog.getByRole("button", { name: "Try image again" });
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme });
+      await expect(retry).toBeInViewport({ ratio: 1 });
+      expect(await dialog.evaluate(node => node.scrollTop)).toBe(0);
+      await page.screenshot({ path: `${captures}/failed-390-${colorScheme}.png` });
+      await retry.click();
+      await expect(dialog.getByRole("status", { name: "Image load" })).toContainText("Couldn't load Missing screenshot.png");
+      await expect(dialog.getByRole("status", { name: "Image load" })).toHaveCount(1);
+    }
+    await expect(dialog.getByRole("button", { name: "Next image" })).toBeDisabled();
+    await page.keyboard.press("ArrowLeft");
+    await expect(dialog).toHaveAttribute("data-state", "ready");
+    const reading = page.locator(".conversation-reading.thread");
+    const scroll = await reading.evaluate(node => node.scrollTop);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0); await expect(first).toBeFocused();
+    expect(await reading.evaluate(node => node.scrollTop)).toBe(scroll);
+  });
+});
 
 test("HUB-J4 prose tables keep words readable and render inline markdown", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
@@ -304,6 +425,25 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // ResizeObserver and the view's deferred pin settle independently of a
     // fixed frame count. Wait for the same visible tail outcome as on entry.
     await expect.poll(atTail, { message: "late layout growth keeps the thread at its latest turn" }).toBe(true);
+    await expect(newest).toBeInViewport();
+    await expect(jump).toBeHidden();
+    // A preview can collapse and grow again between scroll deliveries. Force
+    // that real layout ordering: the browser clamps at the smaller height,
+    // then queues a scroll which will see the larger content, without input.
+    const clamp = await log.evaluate(node => {
+      const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
+      const content = node as HTMLElement;
+      // Hide and restore the preview-bearing message list. The browser sees
+      // the smaller intermediate layout; both final heights are identical.
+      const display = content.style.display;
+      const before = thread.scrollTop;
+      content.style.display = "none";
+      const clamped = thread.scrollTop; // force the collapsed layout
+      content.style.display = display;
+      return { before, clamped };
+    });
+    expect(clamp.clamped, "the collapsed layout actually clamps the scroll position").toBeLessThan(clamp.before);
+    await expect.poll(atTail, { message: "a layout clamp followed by growth keeps following the latest turn" }).toBe(true);
     await expect(newest).toBeInViewport();
     await expect(jump).toBeHidden();
     // The rest of the journey reads the thread at its normal size.
@@ -763,12 +903,45 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await expect(tab.locator("iframe[srcdoc]")).toHaveCount(0);
     });
 
+    await journey.stage(`Choose Dark on a light device and read the page in dark (${name})`, async () => {
+      // cas-a4f4: OS emulation alone cannot prove the in-app preference
+      // reaches an embedded page's prefers-color-scheme query.
+      // Playwright's page override also forces cross-origin frame media,
+      // hiding native color-scheme inheritance. Emulate the light device on
+      // the top-level target only; let the embedded page follow its frame.
+      await tab.emulateMedia({ colorScheme: null });
+      const lightDevice = await tab.context().newCDPSession(tab);
+      await lightDevice.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
+      const inside = tab.frameLocator('iframe[title="Gate report.html, a page from the supervisor"]');
+      await expect(inside.locator("body")).not.toHaveCSS("background-color", "rgb(21, 23, 29)");
+      await showConversationList(tab);
+      await tab.getByRole("button", { name: "Appearance & commands", exact: true }).click();
+      await tab.getByRole("button", { name: /^Appearance · Dark/ }).click();
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
+      await openConversation(tab, "cas-src");
+      // Re-entry recreates lazy page cards; scroll the card before its iframe exists.
+      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
+      await log.getByTitle("Gate report.html, a page from the supervisor").scrollIntoViewIfNeeded();
+      expect(await tab.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches), "the device preference stays light").toBe(false);
+      await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
+    });
+
     await journey.stage(`In dark mode the page sits in the theme, and a dark-capable page renders dark (${name})`, async () => {
+      await tab.emulateMedia({ colorScheme: "light" });
+      // Restore System so the separate OS-preference stage still proves its
+      // own input, including the plain page's light fallback.
+      await showConversationList(tab);
+      await tab.getByRole("button", { name: "Appearance & commands", exact: true }).click();
+      await tab.getByRole("button", { name: /^Appearance · System/ }).click();
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
+      await openConversation(tab, "cas-src");
       // cas-2326: the frame chrome follows Commander's scheme and hands it to
       // the page (the iframe's color-scheme); a page without dark styles gets
       // the browser's own opaque backdrop, so it stays legible.
       await tab.emulateMedia({ colorScheme: "dark" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
+      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
       const card = log.locator('a.sheet[data-artifact-id="art-report"]');
       const frame = log.locator('.visual-page[data-artifact-id="art-report"] .visual-frame');
       await expect(frame).toHaveCSS("background-color", await card.evaluate((node) => getComputedStyle(node).backgroundColor));
@@ -779,8 +952,13 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       const plain = log.getByTitle("Flagged page.html, a page from the supervisor");
       await plain.scrollIntoViewIfNeeded();
       await expect(tab.frameLocator('iframe[title="Flagged page.html, a page from the supervisor"]').getByRole("heading", { name: "Hostile page" })).toBeVisible();
-      const box = (await plain.boundingBox())!;
-      expect(Math.min(...await paintedPixel(tab, Math.round(box.x + box.width - 6), Math.round(box.y + box.height - 6))), "the plain page is legible on a light backdrop").toBeGreaterThan(200);
+      // A tall frame can extend below the scrollable thread and behind the composer.
+      const probe = await plain.evaluate((element) => {
+        const frame = element.getBoundingClientRect();
+        const thread = element.closest(".conversation-reading.thread")!.getBoundingClientRect();
+        return { x: Math.round(Math.min(frame.right, thread.right) - 6), y: Math.round(Math.min(frame.bottom, thread.bottom) - 6) };
+      });
+      expect(Math.min(...await paintedPixel(tab, probe.x, probe.y)), "the plain page is legible on a light backdrop").toBeGreaterThan(200);
       await tab.emulateMedia({ colorScheme: "light" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
     });

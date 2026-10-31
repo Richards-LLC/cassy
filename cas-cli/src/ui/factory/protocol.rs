@@ -139,6 +139,10 @@ pub enum OperatorTurnKind {
     Receipt,
     Ask,
     Blocker,
+    /// A request for a credential. The row names it (`summary`) and says what
+    /// it is for (`message`); the value is answered over the hub's secrets
+    /// route and never travels in any turn (cas-1996).
+    Secret,
 }
 
 impl Default for OperatorTurnKind {
@@ -155,8 +159,19 @@ impl OperatorTurnKind {
             Self::Receipt => "receipt",
             Self::Ask => "ask",
             Self::Blocker => "blocker",
+            Self::Secret => "secret",
         }
     }
+}
+
+/// A secret request's name, which is also its file name in the destination
+/// folder: 1-64 of `[A-Za-z0-9_.-]`, not starting with a dot (cas-1996).
+pub fn valid_secret_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 /// Durable supervisor-to-Commander reply payload. The device id is included
@@ -337,10 +352,19 @@ pub struct WorkReasoning {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLineCounts {
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkChangedFile {
     pub path: String,
     pub operation: String,
     pub source_event_id: String,
+    /// The source event's edit counts, never cumulative or a net Git diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_counts: Option<WorkLineCounts>,
 }
 
 /// A cumulative per-turn snapshot of successful explicit edit calls, not Git state.

@@ -1,3 +1,4 @@
+import { bindEmojiComposer } from "./emoji-composer";
 import { StatusRefresh } from "./status-refresh";
 import { SlashCommands, SupervisorCommandSession } from "./supervisor-commands";
 import { avatarLetters, providerAvatarMarkup } from "./provider-mark";
@@ -35,14 +36,15 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
+import { sentAttachments } from "./sent-attachments";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, schemePreference, setScheme, type SchemePreference } from "./scheme";
-import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, machineEventRaisesAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
-import { HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
+import { AuthenticationError, HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, fatalConnectionRecovery, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
@@ -96,7 +98,7 @@ import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, typ
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
-import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ArtifactRef, AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
 
@@ -243,7 +245,8 @@ installAttachmentSheet((sheet, file, context) => {
   const thread = threadOf(context);
   if (!thread) return sheet;
   const available = () => connectionStates.get(thread.machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
+  const fetchImage = async (image: ArtifactRef) => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, image.artifact_id) : undefined;
+  return inlineAttachment(sheet, file, () => fetchImage(file), { machineId: thread.machineId, available, gallery: context.reply.attachments, fetchImage });
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
@@ -519,7 +522,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
     conversation = new ConversationView(document, history, {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
-      project: projectTitle(hubSession?.project_dir),
+      project: hubSession?.project_name?.trim() || projectTitle(hubSession?.project_dir),
       header: false,
       sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
       // Older daemons can establish activity but cannot name its phase/time.
@@ -535,12 +538,39 @@ function mountConversation(key: string, mount: HTMLElement): void {
         const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
         if (!composer || composer.dataset.threadKey !== threadKey) return;
         if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
-        composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
-        editingRefused = { threadKey, id: send.id };
+        if (composerUploads?.draftFor(threadKey).hasFiles()) { showComposerStatus("Your draft already has files. Remove them before editing the refused message.", "info"); composer.focus(); return; }
+        const restore = (draftText: string) => {
+          if (!composer.isConnected || composer.value.trim()) return;
+          composer.value = draftText; composer.dispatchEvent(new Event("input")); composer.focus();
+          editingRefused = { threadKey, id: send.id };
+        };
+        // cas-a4c4: a refused send's files come back as their cards, already
+        // on the machine; the host path never enters the composer's text.
+        if (!sentAttachments(text).attachments.length) { restore(text); return; }
+        if (pendingSubmissions.has(threadKey)) { showComposerStatus("Wait for this send before editing the refused message.", "info"); return; }
+        void loadComposerUploads().then(module => {
+          const draft = module.draftFor(threadKey);
+          const root = composer.closest<HTMLElement>(".message");
+          if (root?.isConnected) draft.bind(root);
+          restore(draft.restoreSent(text));
+        }).catch(() => showComposerStatus("Couldn't reopen the files of the refused message. Try Edit again.", "error"));
       },
       // A quick-reply chip answers the ask through the same leased path as
       // the composer, with in_reply_to = the ask's notification id.
       respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
+      // cas-1996: a secret goes straight to the hub's secrets route, never
+      // through submitSupervisorMessage, the journal or the history.
+      answerSecret: async (request, answer) => {
+        const connection = connections.get(threadMachineId);
+        if (!connection) throw new Error("The machine is disconnected. Reconnect, then save again.");
+        try {
+          return await connection.answerSecret(threadSession, request.notification_id, answer);
+        } catch (error) {
+          if (error instanceof HubRequestError && error.detail) throw new Error(error.detail);
+          if (error instanceof AuthenticationError && error.kind === "scope-mismatch") throw new Error("This device cannot save secrets: its pairing needs factory:manage.");
+          throw error;
+        }
+      },
       // Retry sends the refused text again through the same leased path,
       // keeping its original in_reply_to; the refused bubble leaves the
       // thread only once the new send is actually on the wire.
@@ -996,7 +1026,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
-      if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
+      if ((["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined)
+        && machineEventRaisesAttention(kind, event.payload ?? event.diagnostic)) {
         void upsertMachineEventAttention(machine, event);
       }
       // A retained peer-session burst does not change this conversation's
@@ -1259,7 +1290,7 @@ const launchSheet = new LaunchSheet({
   currentMachineId: () => selectedMachineId,
   origin: location.origin,
   projects: (machineId, signal) => launchConnection(machineId).projects(signal),
-  profiles: (machineId, signal) => launchConnection(machineId).launchProfiles(signal),
+  profiles: (machineId, signal, target) => launchConnection(machineId).launchProfiles(signal, target),
   browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
   launch: (machineId, request) => launchConnection(machineId).launchSession(request),
   grant: async (machineId) => {
@@ -1960,7 +1991,7 @@ function openConnectionLog(machineId: string): void {
     const evidence = cause ? `${cause.status === undefined ? "" : ` Measured HTTP status: ${cause.status}.`}${cause.closeCode === undefined ? "" : ` Measured socket close: ${cause.closeCode}.`}${cause.permission === undefined || cause.permission === "unknown" ? "" : ` Measured local-network permission: ${cause.permission}.`}` : "";
     // One plain sentence that names the machine and the next step leads; the
     // layer, measured codes and engineering notes sit behind Technical details.
-    summary.textContent = `${cause ? `${machineLabel}: ${CAUSE_COPY[cause.code].title}. ${CAUSE_COPY[cause.code].action}` : `${machineLabel}: nothing is failing now.`} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+    summary.textContent = `${cause ? `${machineLabel}: ${CAUSE_COPY[cause.code].title}. ${CAUSE_COPY[cause.code].action}` : `${machineLabel}: nothing is failing now.`} ${retry} Last successful connection: ${state?.lastSuccessAt ? clockLabel(state.lastSuccessAt) : "not measured in this visit"}.`;
     const technicalText = cause ? `Layer: ${cause.layer}.${evidence}${CAUSE_COPY[cause.code].detail ? ` ${CAUSE_COPY[cause.code].detail}` : ""}` : "";
     if (technical.textContent !== technicalText) technical.textContent = technicalText;
     technical.hidden = technicalText === "";
@@ -3265,6 +3296,8 @@ function bindSpeechComposer(): void {
   // Deferred: focus passing to Send or the mic and straight back must not flicker the question open.
   composer.onblur = () => { window.setTimeout(syncComposing, COMPOSING_BLUR_MS); };
   mic.onclick = () => speechController?.toggle();
+  const emojiTrigger = document.querySelector<HTMLButtonElement>("#message-emoji");
+  if (emojiTrigger) bindEmojiComposer(composer, emojiTrigger);
   bindSlashCommands(composer);
   syncSpeechComposer();
   if (speechDetectionStarted) return;
@@ -4083,11 +4116,12 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
   if (uploads && hasAttachments) {
-    text = await uploads.prepare(text, async (id, name, data) => {
+    clearComposerStatus();
+    text = await uploads.prepare(text, async (id, name, data, onProgress) => {
       const connection = connections.get(machine.id);
       if (!connection) throw new Error("The machine is disconnected.");
       try {
-        return await connection.uploadFile(session, id, name, data);
+        return await connection.uploadFile(session, id, name, data, onProgress);
       } catch (error) {
         const detail = (error as { detail?: string })?.detail;
         if (detail) throw new Error(detail);
@@ -4108,7 +4142,9 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (sent && hasAttachments) countUsage("reply.attachment");
   if (sent && !quick) draftDictated = false;
   } catch (error) {
-    showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
+    if (!composerUploads || !(error instanceof composerUploads.UploadPreparationError)) {
+      showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
+    }
   } finally {
     pendingSubmissions.delete(submissionKey);
   }
@@ -4646,7 +4682,7 @@ function renderConversationList(): void {
     const machineOnline = connectionStates.get(machine.id)?.phase === "live" && session.machine_online !== false;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, ended: session.ended, harness: session.harness, account_email: session.account_email, project: session.project, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live", conversationStatusLabel(machine.id, session.name)) ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live", conversationStatusLabel(machine.id, session.name)) ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5262,6 +5298,7 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
     epics: (status?.epics as ReleaseEpic[]) ?? [], focused: typeof status?.focused_epic === "string" ? status.focused_epic : null,
     supervisors: [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name)),
     asks: key ? waitingOnOperator(conversationHistories.get(key)) : 0,
+    askLabel: key ? conversationHistories.get(key)?.waiting()[0]?.summary : undefined,
     stale: statusFailures.has(key!) ? "Staffing update failed. Showing the last state received." : stale,
     unavailable: session?.ended ? "This session has ended." : !status ? statusFailures.has(key!) ? "Couldn’t load staffing." : "Waiting for project status…" : undefined,
   }, () => select(false), openProgressSheet);

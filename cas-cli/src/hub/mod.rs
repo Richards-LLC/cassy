@@ -31,6 +31,7 @@ pub mod open_files;
 pub mod operator_inbox;
 pub mod projects;
 mod runtime;
+pub mod secret_auto_delete;
 mod chunk_assets;
 mod server;
 pub(crate) mod state;
@@ -504,6 +505,12 @@ pub enum DaemonLiveness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubSession {
     pub name: String,
+    /// The live supervisor's fingerprinted MCP daemon epoch, not the hub binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_version: Option<String>,
+    /// Installed CLI on this machine; may be newer than a connected MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
     /// The recorded supervisor harness, normalized to its backend name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
@@ -523,6 +530,10 @@ pub struct HubSession {
     /// Canonical project identity, falling back to the main project's folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Human project name for Commander: `[project] display_name`, else the
+    /// main project's folder name; never the canonical id (cas-6f79).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     /// This machine answered the local catalog. A dormant session's daemon
     /// may be dead while its machine remains online; those are separate facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -586,6 +597,15 @@ pub struct LocalSessionReadModel {
     /// [`LAST_ACTIVITY_TTL`] so a device's five-second catalog refresh does
     /// not query every project's queue each time.
     activity: Arc<std::sync::Mutex<HashMap<String, CachedActivity>>>,
+    versions: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, CachedVersions>>>,
+}
+
+const MCP_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone)]
+struct CachedVersions {
+    read_at: std::time::Instant,
+    snapshot: Option<crate::factory_binary_skew::Snapshot>,
 }
 
 /// How long a session's last activity is reused before it is read again.
@@ -676,6 +696,29 @@ fn cloud_project_id(cas_root: &std::path::Path) -> Option<String> {
     id
 }
 
+/// The project's human name: a non-empty `[project] display_name` in
+/// `<cas_root>/config.toml`, else the main project's folder name. The
+/// canonical id is a grouping key, never a label (cas-6f79).
+fn project_display_name(cas_root: &std::path::Path) -> Option<String> {
+    let configured = std::fs::read_to_string(cas_root.join("config.toml"))
+        .ok()
+        .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
+        .and_then(|parsed| {
+            parsed
+                .get("project")?
+                .get("display_name")?
+                .as_str()
+                .map(|name| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty());
+    configured.or_else(|| {
+        cas_root
+            .parent()?
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })
+}
+
 fn session_cas_root(session: &SessionInfo) -> Option<std::path::PathBuf> {
     let project_dir = session.metadata.project_dir.as_deref()?;
     find_cas_root_ignoring_env(std::path::Path::new(project_dir)).ok()
@@ -691,14 +734,30 @@ impl LocalSessionReadModel {
             .iter()
             .map(|session| {
                 let mut projected = hub_session(session);
-                projected.cloud_project_id = session_cas_root(session)
-                    .and_then(|cas_root| cloud_project_id(&cas_root));
+                let cas_root = session_cas_root(session);
+                projected.cloud_project_id = cas_root.as_deref().and_then(cloud_project_id);
                 projected.project = projected.cloud_project_id.clone().or_else(|| {
-                    session_cas_root(session)?
+                    cas_root
+                        .as_deref()?
                         .parent()?
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                 });
+                projected.project_name = cas_root.as_deref().and_then(project_display_name);
+                if !projected.dormant && projected.liveness == DaemonLiveness::Live
+                    && let Some(snapshot) = cas_root.as_deref().and_then(|root| self.mcp_versions(root))
+                {
+                    projected.installed_version = Some(snapshot.installed.clone()).filter(|version| version != "unknown");
+                    let matches: Vec<_> = snapshot.servers.iter().filter(|server| {
+                        server.role == cas_types::AgentRole::Supervisor
+                            && server.session.as_deref() == Some(session.name.as_str())
+                            && server.name == projected.supervisor
+                    }).collect();
+                    // Reconnecting can briefly leave two live MCP processes.
+                    // Different observations are unknown, never an arbitrary version.
+                    projected.mcp_version = matches.first().and_then(|server| server.version.clone())
+                        .filter(|version| matches.iter().all(|server| server.version.as_ref() == Some(version)));
+                }
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
                     projected.last_activity = Some(label);
@@ -724,19 +783,24 @@ impl LocalSessionReadModel {
                 socket_exists: false,
             };
             let identity = hub_session(&recorded);
-            let project = session_cas_root(&recorded).and_then(|root| {
-                cloud_project_id(&root).or_else(|| {
+            let cas_root = session_cas_root(&recorded);
+            let project = cas_root.as_deref().and_then(|root| {
+                cloud_project_id(root).or_else(|| {
                     root.parent()?.file_name().map(|name| name.to_string_lossy().into_owned())
                 })
             });
+            let project_name = cas_root.as_deref().and_then(project_display_name);
             rows.push(HubSession {
                 name: receipt.metadata.name,
+                mcp_version: None,
+                installed_version: None,
                 harness: identity.harness,
                 model: identity.model,
                 effort: identity.effort,
                 agents: identity.agents,
                 account_email: identity.account_email,
                 project,
+                project_name,
                 machine_online: Some(false),
                 project_dir: receipt.metadata.project_dir,
                 supervisor: receipt.metadata.supervisor.name,
@@ -754,6 +818,23 @@ impl LocalSessionReadModel {
             });
         }
         rows
+    }
+
+    fn mcp_versions(&self, cas_root: &std::path::Path) -> Option<crate::factory_binary_skew::Snapshot> {
+        let mut cache = self.versions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(cas_root)
+            && cached.read_at.elapsed() < MCP_VERSION_TTL
+        {
+            return cached.snapshot.clone();
+        }
+        let installed = crate::factory_binary_skew::installed_version();
+        let snapshot = crate::factory_binary_skew::snapshot_with_installed(
+            cas_root, installed.as_deref().unwrap_or("unknown"), chrono::Utc::now(),
+        ).ok();
+        cache.insert(cas_root.to_path_buf(), CachedVersions {
+            read_at: std::time::Instant::now(), snapshot: snapshot.clone(),
+        });
+        snapshot
     }
 
     fn last_activity(&self, session: &SessionInfo) -> Option<(String, String)> {
@@ -863,12 +944,15 @@ fn hub_session(session: &SessionInfo) -> HubSession {
     let effort = supervisor.and_then(|agent| agent.effort.clone());
     HubSession {
         name: session.name.clone(),
+        mcp_version: None,
+        installed_version: None,
         harness,
         model,
         effort,
         agents,
         account_email,
         project: None,
+        project_name: None,
         machine_online: Some(true),
         project_dir: session.metadata.project_dir.clone(),
         supervisor: session.metadata.supervisor.name.clone(),
@@ -1123,12 +1207,15 @@ impl SessionReadModel for RecordingReadModel {
 pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
+        mcp_version: None,
+        installed_version: None,
         harness: None,
         model: None,
         effort: None,
         agents: Vec::new(),
         account_email: None,
         project: None,
+        project_name: None,
         machine_online: None,
         project_dir: Some("/tmp/project".into()),
         supervisor: "supervisor".into(),

@@ -27,7 +27,7 @@ function installationTime(doc: Document, value: string): HTMLElement {
     const missing = doc.createElement("span"); missing.textContent = "Not recorded"; return missing;
   }
   const time = doc.createElement("time"); time.dateTime = value;
-  time.title = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
+  time.title = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", hour12: true }).format(timestamp);
   // A machine clock can lead this browser's. Activity cannot be in the
   // future; retain the exact timestamp in the title and Technical details.
   const seconds = Math.min(0, (timestamp - Date.now()) / 1_000);

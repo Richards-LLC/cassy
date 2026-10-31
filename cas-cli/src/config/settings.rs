@@ -159,6 +159,24 @@ impl HubTransportMode {
     }
 }
 
+/// Where Commander saves a secret the operator pastes for an agent
+/// (cas-1996). Lives at `[secrets]` in a project's `.cas/config.toml`, with a
+/// user default in `~/.cas/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    /// Folder for saved secrets. `~` expands to the home directory and
+    /// `<project>` to the project folder's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// When a saved secret is deleted unless the card chooses otherwise:
+    /// `off` (default), `after_use`, or a time such as `1h` (cas-2f55).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delete: Option<String>,
+}
+
+/// The built-in `secrets.destination`.
+pub const DEFAULT_SECRETS_DESTINATION: &str = "~/.cas/private/creds/<project>";
+
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {
@@ -365,6 +383,11 @@ pub struct ProjectConfig {
     /// to a path-hash slug for the fs-root edge case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_id: Option<String>,
+
+    /// Human project name for Commander (e.g. `Cassy`). When absent,
+    /// Commander shows the project's folder name, never `canonical_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 
     /// Cloud-provided aliases mirrored by the project identity cache. Keeping
     /// this field in the typed config prevents a normal config save from

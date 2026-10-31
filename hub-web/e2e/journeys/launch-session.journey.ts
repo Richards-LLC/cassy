@@ -82,9 +82,11 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
   });
 });
 
-test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }) => {
+test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }, testInfo) => {
   const launch = atlasLaunch();
-  Object.assign(launch.profiles!.claude!.profiles[1], { recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)" });
+  const projectProfiles = structuredClone(launch.profiles!);
+  Object.assign(projectProfiles.claude!.profiles[1], { recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)" });
+  launch.targetProfiles = { "p-ledger": projectProfiles };
   const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -104,6 +106,16 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();
     await expect(sheet.getByRole("radio", { name: "Claude Default" })).toBeChecked();
+    // Capture the same project/account state on phone and desktop, including
+    // the failing base build where main remains selected.
+    const captures = join(testInfo.outputDir, "project-policy");
+    mkdirSync(captures, { recursive: true });
+    await expect(sheet.locator(".launch-accounts")).toBeVisible();
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.screenshot({ path: join(captures, `recommendation-${width}.png`) });
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await expect(sheet.getByText("Start ledger-api with Claude (support@petrastella.io) on Atlas · Linux.")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
   });
@@ -131,6 +143,15 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await accounts.getByRole("radio", { name: /support@petrastella.io Recommended/ }).check();
     await expect(sheet.getByText("Start ledger-api with Claude (support@petrastella.io) on Atlas · Linux.")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
+  });
+
+  await journey.stage("Changing projects refreshes the account recommendation", async () => {
+    await sheet.getByRole("searchbox", { name: "Filter projects" }).fill("");
+    await sheet.getByRole("radio", { name: /old-notes/ }).check();
+    await expect(sheet.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+    await expect(sheet.getByText("Start old-notes with Claude (main) on Atlas · Linux.")).toBeVisible();
+    await sheet.getByRole("radio", { name: /ledger-api/ }).check();
+    await expect(sheet.getByRole("radio", { name: /support@petrastella.io Recommended/ })).toBeChecked();
   });
 
   await journey.stage("Start it and land on its supervisor", async () => {

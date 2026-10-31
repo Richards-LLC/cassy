@@ -29,16 +29,23 @@ function tokensFor(source: string, language: string): readonly Token[] | null {
   const key = `${mode}\0${source}`;
   const hit = cache.get(key);
   if (hit) { cache.delete(key); cache.set(key, hit); return hit.tokens; }
-  // Each alternative consumes a whole string/comment, including unterminated
-  // ones. Anchored string bodies contain no nested quantifiers. No recursion.
+  // Rust apostrophes introduce either a closed character or a plain lifetime.
+  // Shell single quotes are raw and may span lines. Other single-quoted
+  // strings stop at a line boundary, including a dangling escape. Word
+  // apostrophes in JSX text do not start a script string.
+  const singleQuoted = mode === "shell" ? String.raw`'[^']*(?:'|$)` : mode === "rust"
+    ? String.raw`'(?:[^'\\\r\n]|\\(?:u\{[\da-fA-F_]+\}|x[\da-fA-F]{2}|[^\r\n]))'|'[A-Za-z_]\w*`
+    : `${mode === "script" ? String.raw`(?<![\w$])` : ""}${String.raw`'(?:[^'\\\r\n]|\\[^\r\n])*(?:'|\\?(?=[\r\n]|$))`}`;
+  // Anchored string bodies contain no nested quantifiers. No recursion.
   const strings = mode === "python"
-    ? '"""[\\s\\S]*?(?:"""|$)|\'\'\'[\\s\\S]*?(?:\'\'\'|$)|"(?:[^"\\\\\\r\\n]|\\\\[\\s\\S])*(?:"|$)|\'(?:[^\'\\\\\\r\\n]|\\\\[\\s\\S])*(?:\'|$)'
-    : '"(?:[^"\\\\]|\\\\[\\s\\S])*(?:"|$)|\'(?:[^\'\\\\]|\\\\[\\s\\S])*(?:\'|$)|`(?:[^`\\\\]|\\\\[\\s\\S])*(?:`|$)';
+    ? `${String.raw`"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)|"(?:[^"\\\r\n]|\\[\s\S])*(?:"|$)`}|${singleQuoted}`
+    : `${String.raw`"(?:[^"\\]|\\[\s\S])*(?:"|$)`}|${singleQuoted}|${String.raw`\x60(?:[^\x60\\]|\\[\s\S])*(?:\x60|$)`}`;
   const comments = mode === "json" ? "" : mode === "shell" || mode === "python" ? "#[^\\r\\n]*|" : "//[^\\r\\n]*|/\\*[\\s\\S]*?(?:\\*/|$)|";
-  const pattern = new RegExp(`${comments}${strings}|\\b(?:0[xX][\\da-fA-F_]+|\\d[\\d_]*(?:\\.\\d[\\d_]*)?(?:[eE][+-]?\\d+)?)\\b|[A-Za-z_$][\\w$]*`, "g");
+  const pattern = new RegExp(`${comments}${strings}|\\b(?:0[xX][\\da-fA-F_]+|\\d[\\d_]*(?:\\.\\d[\\d_]*)?(?:[eE][+-]?\\d+)?)\\b|[A-Za-z_$][\\w$]*`, "gu");
   const tokens: Token[] = [];
   for (const match of source.matchAll(pattern)) {
     const word = match[0];
+    if (mode === "rust" && word.startsWith("'") && !word.endsWith("'")) continue;
     const kind: Kind | undefined = /^(?:#|\/\/|\/\*)/.test(word) ? "comment"
       : /^["'`]/.test(word) ? "string"
       : /^\d/.test(word) || literals.has(word) ? "literal"
@@ -50,12 +57,13 @@ function tokensFor(source: string, language: string): readonly Token[] | null {
   // Conservative heap accounting: UTF-16 key + 96 bytes/run + Map/object
   // allowance, rather than presenting raw source bytes as actual heap use.
   const bytes = key.length * 2 + tokens.length * 96 + 128;
+  if (bytes > SYNTAX_LIMITS.cacheBytes) return tokens;
   while (cache.size && (cacheBytes + bytes > SYNTAX_LIMITS.cacheBytes || cache.size >= SYNTAX_LIMITS.cacheEntries)) {
     const oldest = cache.keys().next().value!;
     cacheBytes -= cache.get(oldest)!.bytes;
     cache.delete(oldest);
   }
-  if (bytes <= SYNTAX_LIMITS.cacheBytes) { cache.set(key, { tokens, bytes }); cacheBytes += bytes; }
+  cache.set(key, { tokens, bytes }); cacheBytes += bytes;
   return tokens;
 }
 

@@ -61,7 +61,12 @@ export interface ThreadWorking { type: "working"; key: string }
  * (cas-ff22): its thinking, tool calls and task events, oldest first.
  * Keyed by its first event, so events appended to it repaint this one node.
  */
-export interface ThreadWork { type: "work"; key: string; events: WorkEvent[] }
+export interface ThreadWork { type: "work"; key: string; events: WorkEvent[]; changedFiles?: WorkEvent[] }
+
+/** A transcript turn's identity is scoped to its session and maker. */
+export function workTurnKey(event: WorkEvent): string {
+  return JSON.stringify([event.session, event.agent ?? "", event.turn]);
+}
 
 export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking | ThreadWork;
 
@@ -95,10 +100,13 @@ export function eventKey(event: ConversationEvent): string {
 /** The time a turn shows: its own time, not the sort key a live event was clamped to (cas-ac1f). */
 function eventAt(event: ConversationEvent): number | undefined { return event.shownAt ?? event.at; }
 
+// The operator reads 12-hour times with AM/PM (cas-73dd9), in this browser's
+// locale and timezone. Reused across frames, like the day formatters below.
+const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+
 export function clockLabel(at: number | undefined): string | undefined {
   if (at === undefined) return undefined;
-  const date = new Date(at);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return clockFormat.format(new Date(at));
 }
 
 /**
@@ -139,7 +147,7 @@ export function shownTimes(events: readonly ConversationEvent[], now: number): A
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /**
- * A turn's time as it is shown (cas-e829): "17:20" today, "Sep 30, 17:20" on
+ * A turn's time as it is shown (cas-e829): "5:20 PM" today, "Sep 30, 5:20 PM" on
  * any other day, with the year when it is not this year. A bare clock time
  * from yesterday read as today's.
  */
@@ -321,6 +329,20 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
   });
   if (events.length > 0) flushWork(undefined);
   closeGroup();
+  // A turn can span several replies/work blocks. Its newest cumulative
+  // snapshot belongs once, beneath its latest visible block, not once per call.
+  const changes = new Map<string, { snapshot?: WorkEvent; owner: ThreadWork }>();
+  for (const item of items) {
+    if (item.type !== "work") continue;
+    item.changedFiles = [];
+    for (const event of item.events) {
+      if (!event.turn) continue;
+      const key = workTurnKey(event);
+      const snapshot = event.changed_files ? event : changes.get(key)?.snapshot;
+      changes.set(key, { snapshot, owner: item });
+    }
+  }
+  for (const { snapshot, owner } of changes.values()) if (snapshot?.changed_files?.files.length) owner.changedFiles!.push(snapshot);
   // An empty durable page owns the empty state. Do not let pagination or a
   // transient working signal turn it into a fake history marker/thread.
   if (events.length > 0) {

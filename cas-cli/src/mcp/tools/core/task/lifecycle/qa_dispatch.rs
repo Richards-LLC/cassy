@@ -47,6 +47,22 @@ impl QaDispatchStatus {
     }
 }
 
+/// Journeys the QA impact map names. A Tier 0 delivery walks none: a changed
+/// journey file names its own journey, but nothing that runs has changed.
+fn impact_journey_reasons(changed: Option<&[String]>, impact: Option<&serde_json::Value>) -> Vec<String> {
+    let tier = changed.and_then(super::review_tier::tier_for_paths).map(|(tier, _)| tier);
+    if tier == Some(super::review_tier::VerificationTier::Mechanical) {
+        return Vec::new();
+    }
+    impact
+        .and_then(|report| report["journeys"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|journey| journey["id"].as_str())
+        .map(|id| format!("journey:{id}"))
+        .collect()
+}
+
 fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
     std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", commit, target])
@@ -737,13 +753,7 @@ impl CasCore {
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, head, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
-        if let Some(journeys) = impact.as_ref().and_then(|report| report["journeys"].as_array()) {
-            for journey in journeys {
-                if let Some(id) = journey["id"].as_str() {
-                    eligibility.reasons.push(format!("journey:{id}"));
-                }
-            }
-        }
+        eligibility.reasons.extend(impact_journey_reasons(changed.as_deref(), impact.as_ref()));
         // cas-1b4d: in an operator's rapid-response window the supervisor
         // reviews screenshots instead of a per-task round; the skip back-fills
         // when the window closes. An explicit request still dispatches.
@@ -1966,6 +1976,21 @@ pub(crate) fn unresolved_delivery_refusal(
 }
 
 #[cfg(test)]
+mod review_tier_tests {
+    use super::impact_journey_reasons;
+
+    /// A journey-only change walks no journey; adding product source walks it.
+    #[test]
+    fn tier_zero_delivery_skips_impacted_journeys() {
+        let impact = serde_json::json!({ "journeys": [{ "id": "HUB-J16" }] });
+        let journey = "hub-web/e2e/journeys/end-session.journey.ts".to_string();
+        assert!(impact_journey_reasons(Some(std::slice::from_ref(&journey)), Some(&impact)).is_empty());
+        let mixed = [journey, "hub-web/src/project-navigation.ts".to_string()];
+        assert_eq!(impact_journey_reasons(Some(&mixed), Some(&impact)).len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod qa_work_item_tests {
     use super::*;
 
@@ -3148,6 +3173,52 @@ mod stale_anchor_rebind_tests_cas_00eb {
                 "{branch} at {tip}"
             );
         }
+    }
+
+    /// cas-3d70: a commit on a separate helper branch was stamped as the
+    /// anchor, so it is absent from the task's own branch and park refused,
+    /// asking for `commit_receipt=<tip>`. That exact receipt must rebind the
+    /// anchor to the tip, through a target sync merge, instead of repeating
+    /// the refusal. Without the receipt the recorded anchor stays.
+    #[test]
+    fn park_receipt_rebinds_an_anchor_stamped_on_a_helper_branch_cas_3d70() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["checkout", "-q", "-b", "factory/worker-cas-ui02-main", "main"]);
+        std::fs::write(repo.join("helper.txt"), "main-ready\n").unwrap();
+        git(repo, &["add", "helper.txt"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-ui02): main-ready helper"]);
+        let helper = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("target.txt"), "moved\n").unwrap();
+        git(repo, &["add", "target.txt"]);
+        git(repo, &["commit", "-q", "-m", "merge another delivery"]);
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "Merge branch 'main' into delivery", "main"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut task = f.task.clone();
+        task.deliverables.factory_branch_anchor = Some(helper.clone());
+        let park = |tip: &str, receipt: Option<&str>| {
+            f.core
+                .advance_commit_time_anchor_before_park_with_receipt(
+                    tasks.as_ref(), &task, repo, "main", Some(WORKER_TASK_BRANCH), Some(tip), receipt,
+                )
+                .deliverables
+                .factory_branch_anchor
+        };
+        assert_eq!(park(&tip, None), Some(helper.clone()));
+        assert_eq!(park(&tip, Some(&tip)), Some(tip.clone()));
+        // Adversarial: the exact tip receipt cannot adopt another task's commit.
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        std::fs::write(repo.join("other.txt"), "x\n").unwrap();
+        git(repo, &["add", "other.txt"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-f0a6): someone else's change"]);
+        let foreign = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        assert_eq!(park(&foreign, Some(&foreign)), Some(helper));
     }
 
     /// cas-ba4a still holds: a commit claiming another task stops the advance.

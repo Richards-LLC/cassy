@@ -225,7 +225,7 @@ pub(crate) fn snapshot_with_installed(
     })
 }
 
-fn installed_version() -> Option<String> {
+pub(crate) fn installed_version() -> Option<String> {
     static CACHE: OnceLock<Mutex<Option<(String, Instant, Option<String>)>>> = OnceLock::new();
     let path = std::env::var("PATH").unwrap_or_default();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
@@ -288,10 +288,10 @@ pub(crate) fn render(snapshot: &Snapshot, session: Option<&str>) -> String {
     lines.join("\n")
 }
 
-/// cas-1c1f: a supervisor's pane exit shuts its whole factory down (the
-/// daemon's `PaneExited` arm), so the remedy must name that cost and the route
-/// that keeps the workers running.
-const SUPERVISOR_RELOAD: &str = "For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. A supervisor restart stops every worker in its factory: have them commit and push or park, write handoffs, then respawn them by name.";
+/// cas-1c1f: a supervisor's unrequested pane exit shuts its whole factory down
+/// (the daemon's `PaneExited` arm), so the remedy must name that cost and the
+/// routes that keep the workers running.
+const SUPERVISOR_RELOAD: &str = "For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. For a new harness or a fresh context, use factory action=restart_supervisor. A plain supervisor exit stops every worker in its factory.";
 
 pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Option<String> {
     let snapshot = match snapshot(cas_root) {
@@ -548,7 +548,7 @@ mod tests {
         assert!(notice.contains("recycle affected workers"), "{notice}");
         assert!(notice.contains("MCP reconnect control"), "{notice}");
         assert!(
-            notice.contains("A supervisor restart stops every worker"),
+            notice.contains("A plain supervisor exit stops every worker"),
             "{notice}"
         );
     }

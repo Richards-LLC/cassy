@@ -179,12 +179,20 @@ interface SessionOptions {
   send(message: unknown): boolean;
   changed(): void;
 }
+const COMMAND_OUTCOME_WINDOW_MS = 95_000;
+/** The daemon's prefix on an error it answers a supervisor command with (`CommanderControl::error_prefix`). */
+export const COMMAND_ERROR_PREFIX = "supervisor command failed:";
 /** One conversation owns its mutations and polls only for their outcomes. */
 export class SupervisorCommandSession {
   readonly receipts = new Map<string, CommandReceipt>();
   supported = false;
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly endedCommands = new Map<string, string>();
+  private readonly exitSentAt = new Map<string, number>();
+  /** Commands the daemon has answered with a receipt, so a later error can't mean "never ran". */
+  private readonly acknowledged = new Set<string>();
+  /** How many refused attempts the one visible row for each command stands for. */
+  private readonly refusals = new Map<SupervisorCommand, number>();
   constructor(private readonly options: SessionOptions) {}
   async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
@@ -196,6 +204,7 @@ export class SupervisorCommandSession {
     if (!this.options.send({ SupervisorCommand: { client_ref: ref, command, confirmed } })) {
       this.receipts.delete(ref); throw new Error("The command was not sent. Try again once connected.");
     }
+    if (command === "exit") this.exitSentAt.set(ref, Date.now());
     this.options.changed(); this.poll(ref);
   }
   receive(receipt: CommandReceipt): void {
@@ -203,6 +212,8 @@ export class SupervisorCommandSession {
     if (!current || current.command !== receipt.command) return;
     if (current.phase === "refused" && receipt.phase !== "refused") return;
     this.receipts.set(receipt.client_ref, receipt);
+    this.acknowledged.add(receipt.client_ref);
+    if (receipt.phase !== "refused") this.clearRefusals(receipt.command);
     const ended = this.endedCommands.get(receipt.client_ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
     if (receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
@@ -212,6 +223,11 @@ export class SupervisorCommandSession {
   ended(reason: string): void {
     for (const receipt of this.receipts.values()) {
       if (!this.canSettleEnded(receipt)) continue;
+      // A later, unrelated end is not evidence that an old Exit executed.
+      if (receipt.command === "exit") {
+        const sentAt = this.exitSentAt.get(receipt.client_ref);
+        if (sentAt === undefined || Date.now() - sentAt > COMMAND_OUTCOME_WINDOW_MS) continue;
+      }
       this.endedCommands.set(receipt.client_ref, reason);
       this.settleEnded(receipt, reason);
     }
@@ -232,10 +248,28 @@ export class SupervisorCommandSession {
   reject(ref: string, detail: string): boolean {
     const receipt = this.receipts.get(ref); if (!receipt) return false;
     if (receipt.phase === "observed" || receipt.phase === "refused") return true;
+    if (!this.acknowledged.has(ref) && detail.startsWith(COMMAND_ERROR_PREFIX)) {
+      this.refuse(receipt, detail.slice(COMMAND_ERROR_PREFIX.length).trim());
+      this.stopPoll(ref); this.options.changed(); return true;
+    }
     receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
     const ended = this.endedCommands.get(ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
     this.stopPoll(ref); this.options.changed(); return true;
+  }
+  /** The daemon wrote nothing: one row per command stands for every refused attempt. */
+  private refuse(receipt: CommandReceipt, reason: string): void {
+    const attempts = (this.refusals.get(receipt.command) ?? 0) + 1;
+    this.clearRefusals(receipt.command);
+    this.refusals.set(receipt.command, attempts);
+    receipt.phase = "refused"; receipt.interactive = false;
+    receipt.detail = attempts > 1 ? `${reason} Tried ${attempts} times.` : reason;
+  }
+  private clearRefusals(command: SupervisorCommand): void {
+    this.refusals.delete(command);
+    for (const [ref, receipt] of this.receipts) {
+      if (receipt.command === command && receipt.phase === "refused") this.receipts.delete(ref);
+    }
   }
   async step(ref: string, key: CommandKey): Promise<void> {
     const receipt = this.receipts.get(ref); if (!receipt?.interactive) return;
@@ -253,7 +287,7 @@ export class SupervisorCommandSession {
     const read = () => {
       const receipt = this.receipts.get(ref);
       if (!receipt || receipt.phase !== "submitted") { this.stopPoll(ref); return; }
-      if (Date.now() - started > 95_000) {
+      if (Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
         this.reject(ref, "Harness execution was not observed. Check Raw output before running another command."); return;
       }
       this.options.send({ SupervisorCommandStatus: { client_ref: ref } });

@@ -58,6 +58,18 @@ coordination action=message target=operator in_reply_to=N summary="..." message=
 The fallback routes to the originating paired device and reports queued delivery while it is offline. Reply through that route once; do not also produce a mirrored pane answer. Never derive a routing target from the human-readable `From:` label. A missing receipt alone does not establish that a surface is unmirrored.
 For phone-sized wording in either route, follow the [phone reply contract](operator-reply.md).
 
+### Secret requests
+
+Request credentials only with `kind=secret`, never with `kind=ask` or in chat. When work needs a credential (API key, token, password), a pasted value in chat lands in history, transcripts and the relay. Send a secret request instead:
+
+```text
+coordination action=message target=operator kind=secret summary=STRIPE_KEY message="Needed to run the billing tests. Create a restricted key at dashboard → Developers → API keys."
+```
+
+`summary` is the secret's name and its file name: 1-64 letters, digits, `_`, `.` or `-`. Commander shows a card with a masked field. When the operator saves it, the hub writes the value to a mode-600 file in `secrets.destination` (default `~/.cas/private/creds/<project>/`) and you receive a reply naming that path; a decline says nothing was saved. Use it via `$(cat <path>)` or an env var in the command that needs it (for example `STRIPE_KEY="$(cat <path>)" npm test`); never print it, and never copy it into the repository, a note, a task or a message. A name that already exists is refused, so ask with a new name to replace a key. A worker that needs a secret asks its supervisor, which sends the request.
+
+The operator may choose to delete the file after saving (off by default; card choice or `secrets.auto_delete`). The reply then says so. For a timed deletion, read the file before the stated time. For deletion after use, reply to that "saved" message (`in_reply_to=<its notification id>`) once you are done with the secret; Cassy deletes the file and records a receipt without the value.
+
 ## Supervisor override
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
@@ -66,7 +78,7 @@ For phone-sized wording in either route, follow the [phone reply contract](opera
 
 **Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
 
-- *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
+- *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `restart_supervisor`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
 - *Servers*: `server_start`, `server_stop`, `server_list`
 - *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
@@ -235,6 +247,10 @@ task action=notes id=cas-abc1 notes="Progress update" note_type=progress
 `project_session_start_truncation.md`: **Immutable Core** (the cas-supervisor SKILL.md body, 8 KB cap), **Task Context** (on demand), and **Ephemeral** output. Details go in `references/`.
 
 ## Peer supervisors on the same repo
+
+Request one child with `factory action=epic_split id=<epic> target=<peer> mine=<id>`;
+the peer accepts or rejects. Use the grants/shared-epic rules below for the
+other peer operations.
 
 Other supervisors of this GitHub repo, on this machine or another one logged in to Cassy Cloud, are peers. They are not workers. You cannot spawn, assign or direct them, and they cannot do any of that to your fleet either.
 

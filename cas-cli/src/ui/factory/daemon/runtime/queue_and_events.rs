@@ -193,6 +193,28 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
     Some(bounded_tail_text(trimmed))
 }
 
+/// A PTY exit in plain words: the signal wins, then the code; a missing status
+/// stays explicitly unavailable rather than becoming a guessed code.
+fn pane_exit_status(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
+    match exit_signal.filter(|signal| !signal.trim().is_empty()) {
+        Some(signal) => format!("terminated by signal {signal}"),
+        None => match exit_code {
+            Some(code) => format!("exited with code {code}"),
+            None => "exit status unavailable".to_string(),
+        },
+    }
+}
+
+/// cas-c095: the supervisor's end reason is shown to the operator in the
+/// session-ended receipt, so it is plain words, never `Option` debug text.
+fn supervisor_exit_reason(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
+    let signalled = exit_signal.is_some_and(|signal| !signal.trim().is_empty());
+    if exit_code == Some(0) && !signalled {
+        return "exited normally".to_string();
+    }
+    format!("supervisor {}", pane_exit_status(exit_code, exit_signal))
+}
+
 /// Render only child-wait evidence for a genuine PTY exit. The pane tail is
 /// already bounded by `timeout_pane_tail`; keeping it alongside the status
 /// makes a crash actionable after the pane is removed and the live process
@@ -203,13 +225,7 @@ fn worker_exit_info(
     exit_signal: Option<&str>,
     pane_tail: Option<&str>,
 ) -> String {
-    let status = match exit_signal.filter(|signal| !signal.trim().is_empty()) {
-        Some(signal) => format!("terminated by signal {signal}"),
-        None => match exit_code {
-            Some(code) => format!("exited with code {code}"),
-            None => "exit status unavailable".to_string(),
-        },
-    };
+    let status = pane_exit_status(exit_code, exit_signal);
     let tail = pane_tail
         .filter(|tail| !tail.trim().is_empty())
         .map(|tail| {
@@ -1314,10 +1330,14 @@ pub(super) fn append_spawn_audit(
     // choke point every spawn stage already flows through — so no call site
     // can report a stage to the log and forget to report it to the store.
     //
-    // Best-effort by design: an unwritable store must never break a spawn.
+    // Audit stages must never break a spawn. Registration also ends durable
+    // replacement intent: retry it off-loop rather than leaving a completed
+    // recycle pending for the rest of the session when this write fails.
     if let Some(id) = request_id {
         if let Some(state) = cas_store::SpawnLifecycleState::from_stage_outcome(stage, outcome) {
-            if let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) {
+            if state == cas_store::SpawnLifecycleState::Registered {
+                record_terminal_spawn_state(cas_dir, id, state, worker_name.filter(|name| !name.is_empty()), detail);
+            } else if let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) {
                 let _ = queue.record_spawn_state(
                     id,
                     state,
@@ -5630,16 +5650,21 @@ impl FactoryDaemon {
                 exit_code,
                 exit_signal,
             } => {
+                let is_supervisor = pane_id == self.app.supervisor_name();
+                // cas-b492: a requested restart is no exit to report or shut
+                // down for; the next pass starts its replacement.
+                if is_supervisor && self.absorb_supervisor_restart_exit() {
+                    return;
+                }
                 // Notify GUI and WS clients
                 self.gui_notify_pane_exited(&pane_id, exit_code);
-                let is_supervisor = pane_id == self.app.supervisor_name();
                 let is_worker = self.app.worker_names().contains(&pane_id);
 
                 if is_supervisor {
                     if let Ok(agents) = open_agent_store(self.app.cas_dir())
                         && let Ok(rows) = agents.list(None)
                     {
-                        let reason = format!("pane_exit: code={exit_code:?}, signal={exit_signal:?}");
+                        let reason = supervisor_exit_reason(exit_code, exit_signal.as_deref());
                         for agent in rows.iter().filter(|a| a.name == pane_id && a.factory_session.as_deref() == Some(self.session_name.as_str())) {
                             if let Err(error) = crate::supervisor_continuity::record_end(self.app.cas_dir(), &agent.id, Some(&reason)) {
                                 tracing::warn!(%error, "could not retain supervisor pane-exit evidence");
@@ -6945,7 +6970,7 @@ impl FactoryDaemon {
         }
     }
 
-    fn forget_probe_pane(&mut self, pane: &str) {
+    pub(super) fn forget_probe_pane(&mut self, pane: &str) {
         self.queue_jobs.prompt_preparation.forget_pane(pane);
         self.normal_delivery_probes
             .retain(|_, probe| probe.pane != pane && probe.target != pane);
@@ -9096,7 +9121,7 @@ impl FactoryDaemon {
                                 &envelope.target_branch,
                                 &target_tip,
                             )),
-                            "merge already landed — re-close task",
+                            "merge already landed — awaiting verdict",
                         ),
                         MergeRequestDelivery::SuppressResolved { status } => (
                             Some(format!(
@@ -13839,6 +13864,7 @@ mod tests {
         spawn_provisioning_timed_out,
         spawn_queue_reset_report,
         stalled_spawn_requests,
+        supervisor_exit_reason,
         take_next_pending_spawn,
         take_spawn_cancellation,
         take_unverified_spawn_on_exit,
@@ -14859,6 +14885,23 @@ mod tests {
         let lone = closed_death_group(rest, chrono::Utc::now(), window).expect("closed");
         assert_eq!(lone.len(), 1, "a lone exit is dropped, not flagged");
         assert!(closed_death_group(&[], chrono::Utc::now(), window).is_none());
+    }
+
+    #[test]
+    fn supervisor_exit_reason_is_plain_words_without_option_debug_text() {
+        assert_eq!(supervisor_exit_reason(Some(0), None), "exited normally");
+        assert_eq!(
+            supervisor_exit_reason(Some(1), None),
+            "supervisor exited with code 1"
+        );
+        assert_eq!(
+            supervisor_exit_reason(None, Some("Killed")),
+            "supervisor terminated by signal Killed"
+        );
+        assert_eq!(
+            supervisor_exit_reason(None, None),
+            "supervisor exit status unavailable"
+        );
     }
 
     #[test]

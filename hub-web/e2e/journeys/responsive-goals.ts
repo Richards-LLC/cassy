@@ -57,6 +57,7 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
   });
   await journey.stage("A question arrives while reading another machine", async () => {
     await openConversation(page, "gabber-studio");
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone find-conversation socket never opened before the supervisor question" }).toBe(true);
     ask = hub.supervisorSays(PELICAN, "Which lane should go first?", { kind: "ask", options: ["Linux first", "Mac first"] });
     await showConversationList(page);
     await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByRole("img", { name: "Waiting for you", exact: true })).toBeVisible();
@@ -151,6 +152,7 @@ export async function phoneAsk(page: Page, journey: Journey): Promise<void> {
   await journey.stage("Read the actual question on the phone, opening its folded form when needed", async () => {
     await journey.open(); await openConversation(page, "cas-src");
     await page.getByRole("textbox", { name: "Your message" }).focus();
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone answer-question socket never opened before the supervisor question" }).toBe(true);
     ask = hub.supervisorSays(PELICAN, "Fix the gate in this patch or send it back for review?", { kind: "ask", options: ["Fix the gate", "Send for review"] });
     await declaredChoice(page, "Fix the gate");
     await expect(page.getByRole("log")).toContainText("Fix the gate in this patch");
@@ -179,6 +181,7 @@ export async function phoneDark(page: Page, journey: Journey): Promise<void> {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.stage("Read a supervisor message, then use Back to reach Appearance on the phone", async () => {
     await journey.open(); await openConversation(page, "cas-src");
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
     hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
     await expect(page.getByRole("log")).toContainText("Linux lane is green");
     await showConversationList(page);

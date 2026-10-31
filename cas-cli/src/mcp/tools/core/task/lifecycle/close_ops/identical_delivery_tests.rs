@@ -586,8 +586,17 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             mode,
             "dropped" | "missing" | "reverted" | "imported baseline" | "rebuilt recreated"
         ) {
+            let expected = if mode == "imported baseline" {
+                "DELIVERY CONTENT UNVERIFIABLE"
+            } else {
+                "DELIVERY CONTENT DROPPED"
+            };
             assert!(
-                matches!(result, MergeStateGateOutcome::Reject(_)),
+                matches!(&result, MergeStateGateOutcome::Reject(message)
+                    if message.contains(expected)
+                        && (mode != "imported baseline" || message.contains(
+                            "no task-attributed non-merge content commits with a tree effect"
+                        ))),
                 "{mode}: {result:?}"
             );
         } else {

@@ -585,8 +585,9 @@ export class ConversationHistory {
     this.events.forEach((event, index) => {
       if (event.kind !== "reply") return;
       const reply = event.value;
-      if ((reply.kind === "ask" || reply.kind === "blocker") && this.retirementAt(index)) return;
-      if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
+      if ((reply.kind === "ask" || reply.kind === "blocker" || reply.kind === "secret") && this.retirementAt(index)) return;
+      // A secret request (cas-1996) is answered like an ask: the hub's reply names it.
+      if ((reply.kind === "ask" || reply.kind === "secret") && !this.answered(reply.notification_id)) out.push(reply);
       else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed")) out.push(reply);
     });
     return out;
@@ -606,9 +607,9 @@ export class ConversationHistory {
   }
   private retirementAt(index: number): AskRetirement | undefined {
     const event = this.events[index];
-    if (event?.kind !== "reply" || (event.value.kind !== "ask" && event.value.kind !== "blocker")) return undefined;
+    if (event?.kind !== "reply" || (event.value.kind !== "ask" && event.value.kind !== "blocker" && event.value.kind !== "secret")) return undefined;
     const reply = event.value;
-    if (reply.kind === "ask" && this.answered(reply.notification_id)) return undefined;
+    if ((reply.kind === "ask" || reply.kind === "secret") && this.answered(reply.notification_id)) return undefined;
     if (this.dismissedAsks.has(reply.notification_id)) return "dismissed";
     if (this.attentionSnapshot && reply.notification_id <= this.attentionSnapshot.through && !this.attentionSnapshot.open.has(reply.notification_id)) return "handled";
     const later = this.events.slice(index + 1);

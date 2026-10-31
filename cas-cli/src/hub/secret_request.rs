@@ -1,0 +1,349 @@
+//! A secret an agent asked for is saved on this machine, not sent (cas-1996).
+//!
+//! The supervisor's `kind=secret` turn holds only the request: the name (its
+//! summary) and what it is for. Commander answers it here, never over
+//! `SendMessage`. The value goes straight to a mode-600 file in the project's
+//! `secrets.destination`; the queue row, the audit, the reply and the logs
+//! carry the name and path only. The supervisor gets a reply bound to the
+//! request that names the file.
+use super::*;
+use std::io::Write;
+use std::path::{Path as FsPath, PathBuf};
+use crate::hub::secret_auto_delete::{self, AutoDelete};
+
+/// One pasted credential, with JSON overhead. Bounded before parsing.
+const MAX_WIRE_BYTES: usize = 16 * 1024;
+
+/// The browser's answer. No `Debug`: it holds the value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretAnswer {
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    decline: bool,
+    /// cas-2f55: `keep`, `after_use` or a time such as `1h`; absent uses the
+    /// project's `secrets.auto_delete`, which defaults to keep.
+    #[serde(default)]
+    auto_delete: Option<String>,
+}
+
+/// Saving or declining, decided once the request is found open.
+enum Outcome {
+    Saved(PathBuf, AutoDelete),
+    Declined,
+}
+
+/// Why an answer was refused, in words that never include the value.
+enum Refusal {
+    NotOpen,
+    /// A file with the request's name is already there; it is never replaced.
+    Exists(PathBuf),
+    Storage(anyhow::Error),
+}
+
+/// One answer at a time, so two devices cannot both save and reply.
+static ANSWERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(super) async fn answer<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((session, notification_id)): Path<(String, i64)>,
+    request: Request<Body>,
+) -> Response {
+    let headers = request.headers().clone();
+    let uri = request.uri().path().to_owned();
+    // Handing an agent a credential is a management action.
+    let scope = Scope::FactoryManage;
+    let context = match authorize(&state, HubAction::Mutation, scope, &headers, "POST", &uri) {
+        Ok(Some(context)) => context,
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) if error.to_string() == "scope denied" => {
+            return with_cors(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error":"scope_denied", "required_scope":scope.as_str()})),
+                )
+                    .into_response(),
+                &headers,
+            );
+        }
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    let Some(auth) = state.auth.clone() else {
+        return with_cors(unauthorized(), &headers);
+    };
+    if auth.ensure_active_context(&context, chrono::Utc::now()).is_err() {
+        return with_cors(
+            launch_error(StatusCode::UNAUTHORIZED, "revoked", "device credential is no longer active"),
+            &headers,
+        );
+    }
+    let catalog = match state.catalog.list().await {
+        Ok(catalog) => catalog,
+        Err(error) => return with_cors(internal_error(error), &headers),
+    };
+    let Some(project) = valid_session_name(&session)
+        .then(|| catalog.iter().find(|item| item.name == session))
+        .flatten()
+        .and_then(|item| item.project_dir.clone())
+    else {
+        return with_cors(generic_not_found(), &headers);
+    };
+    let bytes = match axum::body::to_bytes(request.into_body(), MAX_WIRE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return with_cors(
+                launch_error(StatusCode::PAYLOAD_TOO_LARGE, "secret_too_large", "A secret must be no larger than 16 KiB."),
+                &headers,
+            );
+        }
+    };
+    // serde errors can quote the input, so none reaches the response or a log.
+    let answer = match serde_json::from_slice::<SecretAnswer>(&bytes) {
+        Ok(SecretAnswer { value: None, decline: true, auto_delete: None }) => None,
+        Ok(SecretAnswer { value: Some(value), decline: false, auto_delete })
+            if !value.trim().is_empty()
+                && auto_delete.as_deref().is_none_or(|choice| AutoDelete::parse(choice).is_some()) =>
+        {
+            Some((value.trim().to_owned(), auto_delete.as_deref().and_then(AutoDelete::parse)))
+        }
+        _ => {
+            return with_cors(
+                launch_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_secret",
+                    "Send {\"value\": \"...\"} with the secret and an optional \"auto_delete\" of keep, after_use or a time such as 1h, or {\"decline\": true}.",
+                ),
+                &headers,
+            );
+        }
+    };
+    drop(bytes);
+    let action = if answer.is_some() { "secret_save" } else { "secret_decline" };
+    let subject = format!("notification={notification_id}");
+    if let Err(error) = auth.audit_operation(
+        &context, "requested", action, scope, &session, Some(subject), chrono::Utc::now(),
+    ) {
+        return with_cors(
+            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            &headers,
+        );
+    }
+    let attribution = verified_attribution(&context);
+    let blocking_session = session.clone();
+    // Keep the caller's subscriber, so what the blocking work logs is captured with it.
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let outcome = tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            save(&project, &blocking_session, notification_id, answer.as_ref().map(|(value, choice)| (value.as_str(), *choice)), &attribution)
+        })
+    })
+    .await;
+    let (status, body, audit_outcome, detail) = match outcome {
+        Ok(Ok((name, Outcome::Saved(path, trigger)))) => (
+            StatusCode::OK,
+            serde_json::json!({"name": name, "path": path.display().to_string(), "saved": true, "auto_delete": trigger.label()}),
+            "allowed",
+            format!(
+                "notification={notification_id} name={name} path={} auto_delete={}",
+                path.display(),
+                trigger.label().unwrap_or_else(|| "keep".into())
+            ),
+        ),
+        Ok(Ok((name, Outcome::Declined))) => (
+            StatusCode::OK,
+            serde_json::json!({"name": name, "declined": true}),
+            "allowed",
+            format!("notification={notification_id} name={name} declined"),
+        ),
+        Ok(Err(Refusal::NotOpen)) => (
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "secret_not_open", "detail": "This secret request is not waiting in this session. It may already be answered."}),
+            "invalid",
+            format!("notification={notification_id} not open"),
+        ),
+        Ok(Err(Refusal::Exists(path))) => (
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "secret_exists", "path": path.display().to_string(), "detail": format!(
+                "A secret with this name already exists at {}. Nothing was saved: delete that file, or Decline and ask for a new name.",
+                path.display()
+            )}),
+            "invalid",
+            format!("notification={notification_id} exists path={}", path.display()),
+        ),
+        Ok(Err(Refusal::Storage(error))) => {
+            tracing::warn!(%error, %session, notification_id, "cas-1996: secret could not be saved");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"error": "secret_storage_failed", "detail": "Could not save the secret on this machine. Nothing was sent; try again."}),
+                "failed",
+                format!("notification={notification_id} storage failed"),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, %session, notification_id, "cas-1996: secret save task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"error": "secret_storage_failed", "detail": "Could not save the secret on this machine. Nothing was sent; try again."}),
+                "failed",
+                format!("notification={notification_id} storage failed"),
+            )
+        }
+    };
+    if let Err(error) =
+        auth.audit_operation(&context, audit_outcome, action, scope, &session, Some(detail), chrono::Utc::now())
+    {
+        tracing::warn!(%error, %session, action, "cas-1996: secret outcome audit row could not be written");
+    }
+    with_cors((status, Json(body)).into_response(), &headers)
+}
+
+/// Find the open request, write or skip the file, then reply to the supervisor
+/// with the path and close the request.
+fn save(
+    project: &str,
+    session: &str,
+    notification_id: i64,
+    value: Option<(&str, Option<AutoDelete>)>,
+    attribution: &MessageAttribution,
+) -> Result<(String, Outcome), Refusal> {
+    let _answering = ANSWERING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let project = FsPath::new(project);
+    let cas_dir = crate::store::find_cas_root_ignoring_env(project).map_err(|error| Refusal::Storage(error.into()))?;
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|error| Refusal::Storage(error.into()))?;
+    let request = queue
+        .queued_prompt(notification_id)
+        .map_err(|error| Refusal::Storage(error.into()))?
+        .filter(|row| {
+            row.source == "supervisor"
+                && row.target.eq_ignore_ascii_case("operator")
+                && row.kind.as_deref() == Some(crate::ui::factory::OperatorTurnKind::Secret.as_str())
+                && row.factory_session.as_deref() == Some(session)
+                && row.acked_at.is_none()
+        })
+        .ok_or(Refusal::NotOpen)?;
+    let name = request.summary.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    if !crate::ui::factory::valid_secret_name(&name) {
+        return Err(Refusal::NotOpen);
+    }
+    let (outcome, text, summary) = match value {
+        Some((value, choice)) => {
+            let directory = destination(&cas_dir, project).map_err(Refusal::Storage)?;
+            let path = match write_secret(&directory, &name, value) {
+                Ok(path) => path,
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+                {
+                    return Err(Refusal::Exists(directory.join(&name)));
+                }
+                Err(error) => return Err(Refusal::Storage(error)),
+            };
+            let trigger = choice.unwrap_or_else(|| AutoDelete::project_default(&cas_dir));
+            // A secret that cannot be listed for deletion is not kept silently.
+            if let Err(error) =
+                secret_auto_delete::schedule(&cas_dir, &name, &path, session, notification_id, trigger)
+            {
+                let _ = std::fs::remove_file(&path);
+                return Err(Refusal::Storage(error));
+            }
+            let mut text = format!(
+                "Secret {name} saved to {path} (mode 600). Use it via $(cat {path}) or an env var \
+                 in the command that needs it; never print it. The value is not in this message or any history.",
+                path = path.display()
+            );
+            if let Some(sentence) = trigger.sentence() {
+                text.push(' ');
+                text.push_str(&sentence);
+            }
+            (Outcome::Saved(path, trigger), text, format!("Secret {name} saved"))
+        }
+        None => (
+            Outcome::Declined,
+            format!("Declined the secret {name}. Nothing was saved."),
+            format!("Secret {name} declined"),
+        ),
+    };
+    let reply = crate::ops::fleet::enqueue_commander_message_with_client_ref(
+        &cas_dir, session, "supervisor", &text, Some(&summary), false, Some(notification_id), None, attribution,
+    )
+    .map_err(Refusal::Storage)?;
+    if let Outcome::Saved(_, AutoDelete::AfterUse) = outcome
+        && let Err(error) = secret_auto_delete::bind_reply(&cas_dir, notification_id, reply.id())
+    {
+        tracing::warn!(%error, %session, notification_id, "cas-2f55: after-use secret could not bind its reply");
+    }
+    if matches!(reply, cas_store::EnqueueOutcome::Created(_)) {
+        crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(&cas_dir);
+    }
+    Ok((name, outcome))
+}
+
+/// The project's `secrets.destination`, else the user default in
+/// `~/.cas/config.toml`, else `~/.cas/private/creds/<project>`.
+fn destination(cas_dir: &FsPath, project: &FsPath) -> anyhow::Result<PathBuf> {
+    let configured = |dir: &FsPath| {
+        crate::config::Config::load(dir)
+            .ok()
+            .and_then(|config| config.secrets)
+            .and_then(|secrets| secrets.destination)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let host = crate::config::host_config_dir();
+    let raw = configured(cas_dir)
+        .or_else(|| (host != cas_dir && host.join("config.toml").exists()).then(|| configured(&host)).flatten())
+        .unwrap_or_else(|| crate::config::DEFAULT_SECRETS_DESTINATION.to_owned());
+    let project_name: String = project
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .collect();
+    anyhow::ensure!(!project_name.is_empty() && !project_name.starts_with('.'), "project has no usable name");
+    let raw = raw.trim().replace("<project>", &project_name);
+    let path = match raw.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            dirs::home_dir().context("no home directory")?.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(&raw),
+    };
+    anyhow::ensure!(
+        path.is_absolute() && path.components().all(|part| !matches!(part, std::path::Component::ParentDir)),
+        "secrets.destination must be an absolute path"
+    );
+    Ok(path)
+}
+
+/// Create missing folders mode 700, then write `<directory>/<name>` mode 600
+/// through a private temporary file linked into place. The link never
+/// replaces an existing name: that fails with `AlreadyExists`.
+fn write_secret(directory: &FsPath, name: &str, value: &str) -> anyhow::Result<PathBuf> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(directory)?;
+    let metadata = std::fs::symlink_metadata(directory)?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "secret destination is not a real directory"
+    );
+    let path = directory.join(name);
+    let pending = directory.join(format!(".{name}.{}.pending", uuid::Uuid::new_v4()));
+    let written = (|| -> anyhow::Result<()> {
+        let mut file = super::composer_upload::private_file(&pending, true)?;
+        file.write_all(value.as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&pending, &path)?;
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&pending);
+    written?;
+    Ok(path)
+}

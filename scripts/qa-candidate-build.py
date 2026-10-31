@@ -12,9 +12,15 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import signal
+import time
+from urllib.parse import quote
+from urllib.request import build_opener, ProxyHandler
 
 import release_env
 import release_scratch
+import journey_dist
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 
 def sha256(path):
@@ -38,6 +44,77 @@ def verify_candidate_version(output, declared, revision):
         raise ValueError(
             f"candidate version {output!r} differs from revision's cas {declared} ({revision[:7]})"
         )
+
+
+def verify_web(scope, binary, snapshot, owned):
+    """Read embedded assets from this PID's private loopback hub, then retire it."""
+    home, project = owned / 'web-home', owned / 'web-project'
+    home.mkdir()
+    (project / '.cas').mkdir(parents=True)
+    env = {'HOME':str(home), 'XDG_CONFIG_HOME':str(home/'config'),
+           'XDG_RUNTIME_DIR':str(home/'runtime'), 'CAS_ROOT':str(project/'.cas'),
+           'PATH':os.environ.get('PATH',''), 'LANG':'C.UTF-8',
+           'CAS_SKIP_FACTORY_TOOLING':'1', 'CAS_SUPPRESS_DUPLICATE_WARNING':'1'}
+    run(scope, ['git','init','-q',project],env=env)
+    run(scope, [binary,'init','--yes','--no-integrations'],cwd=project,env=env,
+        stdout=sys.stderr,stderr=sys.stderr)
+    served = owned / 'served-web'
+    served.mkdir()
+    opener = build_opener(ProxyHandler({}))
+    with (owned/'candidate-hub.log').open('w') as log:
+        pids = []
+        scope.spawn_hooks.append(pids.append)
+        executor = ThreadPoolExecutor(max_workers=1)
+        launch = executor.submit(scope.run,[str(binary),'hub','serve','--no-tailscale-serve','--port','0'],
+                                 cwd=project,env=env,stdout=log,stderr=log)
+        try:
+            deadline = time.monotonic()+15
+            record = home/'.cas/hub/process.json'
+            while True:
+                if launch.done():
+                    launch.result()
+                    raise ValueError('candidate hub exited before serving its web receipt')
+                if pids and record.is_file():
+                    state = json.loads(record.read_text())
+                    if state['pid'] != pids[0]:
+                        raise ValueError('candidate hub receipt belongs to another PID')
+                    origin = f'http://127.0.0.1:{int(state["port"])}'
+                    try:
+                        with opener.open(origin+'/commander/',timeout=1) as response:
+                            response.read()
+                        break
+                    except OSError:
+                        pass # Startup readiness, never a test or build retry.
+                if time.monotonic()>=deadline:
+                    raise ValueError('candidate hub did not serve its web receipt within15s')
+                time.sleep(.05)
+            for path in sorted(Path(snapshot['dist_path']).rglob('*')):
+                if not path.is_file(): continue
+                relative = path.relative_to(snapshot['dist_path'])
+                target = served/relative
+                target.parent.mkdir(parents=True,exist_ok=True)
+                route = '/commander/' if relative.as_posix()=='index.html' else '/commander/'+quote(relative.as_posix())
+                with opener.open(origin+route,timeout=5) as response:
+                    target.write_bytes(response.read())
+            actual = journey_dist.dist_hash(served)
+            if actual != snapshot['dist_sha256']:
+                raise ValueError('candidate served web digest differs from source-bound web digest')
+            return {'source_sha':snapshot['source_sha'],'dist_sha256':snapshot['dist_sha256'],
+                    'served_dist_sha256':actual}
+        finally:
+            try:
+                if pids and not launch.done():
+                    try: os.killpg(pids[0],signal.SIGTERM)
+                    except ProcessLookupError: pass
+                try: launch.result(timeout=3)
+                except FutureTimeout:
+                    if pids:
+                        try: os.killpg(pids[0],signal.SIGKILL)
+                        except ProcessLookupError: pass
+                    launch.result()
+            finally:
+                executor.shutdown(wait=True)
+                scope.spawn_hooks.remove(pids.append)
 
 
 def build(repo, revision, candidate_dir):
@@ -64,6 +141,16 @@ def build(repo, revision, candidate_dir):
             checkout = owned / "checkout"
             run(scope, ["git", "-C", repo, "worktree", "add", "--detach", checkout, revision])
             try:
+                run(scope, ['npm','ci'],cwd=checkout/'hub-web',stdout=sys.stderr,stderr=sys.stderr)
+                # Use the journey producer's source-bound production build,
+                # then install its bytes only in this disposable checkout.
+                web_artifacts = owned/'web'
+                run(scope, [sys.executable,checkout/'scripts/journey_dist.py','build',
+                            '--repo',checkout,'--artifacts',web_artifacts],stdout=sys.stderr,stderr=sys.stderr)
+                snapshot = json.loads((web_artifacts/'journey-build.json').read_text())
+                journey_dist.verify_build(checkout,snapshot,revision)
+                shutil.rmtree(checkout/'hub-web/dist',ignore_errors=True)
+                shutil.copytree(snapshot['dist_path'],checkout/'hub-web/dist')
                 zig = release_env.resolve_zig(checkout, link=True)
                 if not zig.path:
                     raise ValueError(f"Zig unavailable: {'; '.join(zig.tried)}; {zig.fix}")
@@ -84,12 +171,13 @@ def build(repo, revision, candidate_dir):
                     shutil.copy2(binary, stage / "cas")
                     version = subprocess.check_output([str(stage / "cas"), "--version"], text=True).strip()
                     verify_candidate_version(version, declared, revision)
+                    web = verify_web(scope,stage/'cas',snapshot,owned)
                     (stage / "VERSION.txt").write_text(f"{version}\nrevision={revision}\n")
                     binary_hash = sha256(stage / "cas")
                     version_hash = sha256(stage / "VERSION.txt")
                     receipt = {"revision": revision, "version": version,
                                "sha256": binary_hash, "zig": zig.path,
-                               "zig_source": zig.source, "cargo_target": str(target)}
+                               "zig_source": zig.source, "cargo_target": str(target), "web":web}
                     (stage / "RECEIPT.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
                     receipt_hash = sha256(stage / "RECEIPT.json")
                     (stage / "SHA256SUMS").write_text(

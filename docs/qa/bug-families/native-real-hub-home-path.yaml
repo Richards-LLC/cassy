@@ -1,0 +1,4 @@
+title: Native real-hub fixtures allocate a short macOS HOME so the GUI daemon socket fits the 103-byte pathname limit with the default TMPDIR
+tasks: [cas-a716]
+invariants: [HUB-J7-GOAL, HUB-J11-GOAL, HUB-J13-GOAL, HUB-J24-GOAL]
+journeys: [HUB-J7, HUB-J11, HUB-J13, HUB-J24]

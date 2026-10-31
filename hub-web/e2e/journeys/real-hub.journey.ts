@@ -1,7 +1,8 @@
 import { test, expect, type Request } from "@playwright/test";
 import { access, chmod, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { claimReceiptDirectory } from "./receipt-directory.mjs";
+import { claimReceiptDirectory, showRecordingChapter } from "./receipt-directory.mjs";
+import { RECORD } from "./journey";
 import {
   saveQaTrace,
   redactQaText,
@@ -110,7 +111,7 @@ test(
     const header = page.locator("#conversation-connection");
     const stage = async (title: string, body: () => Promise<void>) =>
       test.step(title, async () => {
-        await page.screencast.showChapter(title, { duration: 1000 });
+        await showRecordingChapter(page, title, { duration: 1000 });
         const started = performance.now();
         await body();
         const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
@@ -610,24 +611,59 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
 
 // The disposable project's config must load when the real upload stores bytes;
 // protocol doubles cannot catch a malformed config in real-hub-server.mjs.
-test("HUB-J24 real hub composer upload stores the picked file", {
+test("HUB-J24 real hub composer decodes a local raster preview and stores the picked file", {
   annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
-}, async ({ page }) => {
+}, async ({ page }, info) => {
   try {
-    const fixture = await command("reset", { messageControl: true });
+    const fixture = await command("reset", { messageControl: true, nativeCommander: true });
     const pairing = new URL(fixture.pairUrl);
     pairing.pathname = "/commander/";
     await page.setViewportSize({ width: 390, height: 844 });
     await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
-    await page.goto(pairing.href);
+    const documentResponse = await page.goto(pairing.href);
+    expect(documentResponse!.headers()["content-security-policy"]).toContain("default-src 'none'");
     await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable upload QA");
     await page.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(page.locator("#pair-dialog")).toBeHidden();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
-    const bytes = Buffer.from("Real fixture upload must load the project config.\n");
+    if (RECORD) {
+      await page.evaluate(() => {
+        const violations: string[] = [];
+        (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations = violations;
+        document.addEventListener("securitypolicyviolation", event => {
+          if (event.effectiveDirective.startsWith("style-src")) violations.push(event.effectiveDirective);
+        });
+      });
+      await page.screencast.start({ path: info.outputPath("native-chapter.webm"), size: { width: 390, height: 844 } });
+      const chapter = showRecordingChapter(page, "M01 Choose a local image", { duration: 5000 });
+      await expect(page.getByText("M01 Choose a local image", { exact: true })).toBeVisible();
+      await page.screenshot({ path: info.outputPath("native-chapter.png") });
+      await chapter;
+      expect(await page.evaluate(() => (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations)).toEqual([]);
+    }
+    await expect(page.getByText("M01 Choose a local image", { exact: true })).toHaveCount(0);
+    const imageViolations: string[] = [];
+    await page.exposeFunction("recordImageViolation", (blocked: string) => imageViolations.push(blocked));
+    await page.evaluate(() => document.addEventListener("securitypolicyviolation", event => {
+      if (event.effectiveDirective === "img-src")
+        (window as unknown as { recordImageViolation: (blocked: string) => void }).recordImageViolation(event.blockedURI);
+    }));
+    // Untrusted active formats stay named files, never mounted as previews.
+    const unsafeChooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Attach files", exact: true }).click();
+    await (await unsafeChooser).setFiles({ name: "untrusted.svg", mimeType: "image/svg+xml", buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') });
+    await expect(page.locator(".composer-file")).toContainText("untrusted.svg");
+    await expect(page.locator(".composer-file img")).toHaveCount(0);
+    await page.getByRole("button", { name: "Remove untrusted.svg", exact: true }).click();
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
     const chooser = page.waitForEvent("filechooser");
     await page.getByRole("button", { name: "Attach files", exact: true }).click();
-    await (await chooser).setFiles({ name: "fixture-config.txt", mimeType: "text/plain", buffer: bytes });
+    await (await chooser).setFiles({ name: "fixture.png", mimeType: "image/png", buffer: bytes });
+    const thumbnail = page.locator(".composer-file img");
+    await expect(thumbnail).toHaveAttribute("src", /^blob:/);
+    await expect.poll(() => thumbnail.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    expect(imageViolations).toEqual([]);
+    await page.screenshot({ path: info.outputPath("pending-thumbnail.png") });
     const uploaded = page.waitForResponse(response =>
       response.request().method() === "POST" && new URL(response.url()).pathname.includes("/uploads/"));
     await page.getByRole("button", { name: /^Send to the .+ supervisor$/, exact: true }).click();
@@ -637,6 +673,7 @@ test("HUB-J24 real hub composer upload stores the picked file", {
     expect(await readFile(stored.path)).toEqual(bytes);
     await expect(page.locator(".composer-uploads")).toBeHidden();
   } finally {
+    if (RECORD) await page.screencast.stop().catch(() => undefined);
     await command("cleanup");
   }
 });

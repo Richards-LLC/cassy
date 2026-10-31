@@ -111,11 +111,22 @@ impl CasService {
         req: VerificationRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::VerificationShowRequest;
-        let inner_req = VerificationShowRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for show"))?,
-        };
+        let id = req
+            .id
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for show"))?;
+        // cas-6048: batch QA receipts, local or synced from a peer machine.
+        if id.starts_with("qab-") {
+            return match cas_store::get_qa_batch_receipt(&self.inner.cas_root, &id)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+            {
+                Some(receipt) => Ok(Self::success(render_batch_receipt(&receipt))),
+                None => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Batch QA receipt not found: {id}"),
+                )),
+            };
+        }
+        let inner_req = VerificationShowRequest { id };
         self.inner
             .cas_verification_show(Parameters(inner_req))
             .await
@@ -484,4 +495,28 @@ impl CasService {
             Ok(Self::success(output))
         }
     }
+}
+
+/// One batch QA receipt, as `verification show` prints it.
+fn render_batch_receipt(receipt: &cas_store::QaBatchReceipt) -> String {
+    let tasks: Vec<String> = receipt
+        .task_heads
+        .iter()
+        .map(|(task, head)| format!("{task}@{}", &head[..head.len().min(12)]))
+        .collect();
+    format!(
+        "Batch QA receipt {id}{origin}\nRecorded: {at} by {recorder}\nLedger author: {author} ({role})\nStaging: {staging}\nLedger: {artifact} {path} sha256={sha}\nTasks ({count}): {tasks}",
+        id = receipt.id,
+        origin = if receipt.imported { " (synced from a peer machine)" } else { "" },
+        at = receipt.recorded_at,
+        recorder = receipt.recorder_agent_id,
+        author = receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"),
+        role = receipt.ledger_author_role.as_deref().unwrap_or("unknown"),
+        staging = receipt.staging_sha,
+        artifact = receipt.ledger_artifact_id,
+        path = receipt.ledger_path,
+        sha = receipt.ledger_sha256,
+        count = receipt.task_heads.len(),
+        tasks = tasks.join(", "),
+    )
 }

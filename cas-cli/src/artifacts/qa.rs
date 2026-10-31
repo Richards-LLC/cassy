@@ -271,6 +271,18 @@ pub(crate) fn record(
     Ok(())
 }
 
+// The producer's missing leaf cannot be canonicalized on a peer. Resolve its
+// nearest existing ancestor (notably macOS /var -> /private/var), keeping the
+// absent suffix and the original citation/proof unchanged.
+fn source_identity(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|ancestor| {
+            let canonical = ancestor.canonicalize().ok()?;
+            Some(canonical.join(path.strip_prefix(ancestor).ok()?))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Return a local producer citation only when the original host path is
 /// absent. Existing files retain their original validation and diagnostics.
 pub(crate) fn restore(
@@ -287,12 +299,13 @@ pub(crate) fn restore(
     {
         return Ok(None);
     }
+    let source = source_identity(&source);
     let proof = task
         .notes
         .lines()
         .filter_map(parse)
         .rev()
-        .find(|proof| Path::new(&proof.source_path) == source);
+        .find(|proof| source_identity(Path::new(&proof.source_path)) == source);
     let Some(proof) = proof else {
         return Ok(None);
     };

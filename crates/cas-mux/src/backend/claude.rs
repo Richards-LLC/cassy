@@ -33,6 +33,7 @@ impl Backend for Claude {
     }
 
     fn build_worker_config(&self, launch: WorkerLaunchConfig<'_>) -> PtyConfig {
+        let cwd = launch.cwd.clone();
         let mut config = PtyConfig::claude(
             launch.name,
             "worker",
@@ -50,6 +51,9 @@ impl Backend for Claude {
             launch.config_dir_source,
         );
         apply_launch_options(&mut config, launch.cas_root, launch.name, false);
+        if let Some(account) = super::skill_catalog::claude_account(launch.config_dir) {
+            super::skill_catalog::apply_claude(&mut config, &account, &cwd);
+        }
         finish_worker_config(
             &mut config,
             launch.supervisor_cli,

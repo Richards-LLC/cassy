@@ -103,12 +103,12 @@
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         },
         {
-          "text": "A supervisor restart stops every worker",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "text": "supervisor exit stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         },
         {
           "text": "references/worker-recovery.md#supervisor-restart",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [
@@ -344,11 +344,11 @@
         },
         {
           "text": "## Supervisor restart",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         },
         {
-          "text": "No action restarts a supervisor alone",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "text": "factory action=restart_supervisor",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [],
@@ -1965,8 +1965,8 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
         },
         {
-          "text": "showChapter",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+          "text": "showRecordingChapter",
+          "reason": "QA chapter examples use the constructed-stylesheet helper compatible with native Commander's style-src policy."
         },
         {
           "text": "toMatchAriaSnapshot",
@@ -3118,8 +3118,8 @@
           "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
         },
         {
-          "text": "A supervisor restart stops every worker",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "text": "supervisor exit stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [
@@ -3500,8 +3500,8 @@
           "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
         },
         {
-          "text": "A supervisor restart stops every worker",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "text": "supervisor exit stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [
@@ -4811,7 +4811,7 @@
         },
         {
           "text": "stops every worker",
-          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [

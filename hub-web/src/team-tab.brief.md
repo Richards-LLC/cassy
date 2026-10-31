@@ -6,7 +6,7 @@ The operator can see who is working on the supervisor's epic, what needs a decis
 
 ## Hero form
 
-A compact epic progress rule above a staffing ledger: one lane per live worker, a shared left edge for task/state, and a short evidence trail toward delivery. On a phone the same lanes stack; no desktop diagram shrinks into illegibility.
+A compact epic progress rule above a staffing ledger: one lane per live worker, a shared left edge for task/state, and a short evidence trail toward delivery. On a phone the same lanes stack; no desktop diagram shrinks into illegibility. Four lanes fit above the fold at 1280x800 and 390x844, and the panel is the release block's one home while Team is open: the rail hides its copy, and its worker rows step back to a quiet control list because they hold the only worker controls.
 
 ## Emotional register
 
@@ -14,7 +14,7 @@ Calm and exact Commander Glass. Reuse hub-web/DESIGN.md and tokens.css/glass.css
 
 ## Distinctive move
 
-The lane joins the worker to its current task and the actual delivery evidence. Started, pushed, CI green, merged and verified are distinct facts; absent evidence stays unreported. A small Needs you strip leads back to the existing ask, blocker or merge action rather than creating another operations console.
+The heading is a finding computed from the session, not a slogan, and each lane's figure is its delivery track: five receipts on one line, where a segment fills only between two recorded receipts. The lane joins the worker to its current task and the actual delivery evidence. Started, pushed, CI green, merged and verified are distinct facts; absent evidence stays unreported. A small Needs you strip leads back to the existing ask, blocker or merge action rather than creating another operations console.
 
 ## Deliberately omitted
 
@@ -44,4 +44,14 @@ The delivery trail uses semantic ordered lists, labeled receipt marks and text; 
 
 ## Critique
 
-Pending rendered evidence and scored rubric.
+Scored on 2026-10-30 from real captures with four live workers. The worker's scores were recorded before each independent read. Each round had a new independent reader, who saw no scores. The worker wrote the fixes it scored.
+
+| Dimension | Round 1, f2162488a: worker / independent | Round 2, d91ccbe13: worker / independent | Round 3, c3adc949: worker / independent | Round 3 evidence |
+| --- | --- | --- | --- | --- |
+| Distinctiveness | 4 / 3 | 4 / 3 | 4 / 4 | The computed serif sentence and five-receipt track lead and repeat, though no filled segment has been seen on a real lane. |
+| Fit to argument | 3 / 2 | 4 / 4 | 4 / 3 | Each lane joins who, what and stage, but state is only a word and the tracks look alike, so you read to find the odd worker out. |
+| Hierarchy | 3 / 2 | 4 / 3 | 4 / 3 | The finding leads with little more ink than nearby titles, and the rail's In progress cards share the lanes' style at 1280. |
+| Craft | 4 / 3 | 4 / 3 | 4 / 3 | Strict visual QA passes on 8 of 8 with no page overflow, with seams: rail controls stagger. |
+| Accessibility | 4 / 2 | 3 / 3 | 3 / 4 | Text and the release track pass, but the lane connector is 2.24:1 light and 2.64:1 dark. |
+
+Two independent reads of round three's surface disagree: 4/3/3 on real-hub captures, and 4/4/4 on fixture screenshots with mixed worker states (batch QA round 12). The factory supervisor ruled the floor met on the second. The first read's concern stands as an open question: when real workers share a state the lanes look alike, so how does a worker that needs attention stand out without reading every lane?

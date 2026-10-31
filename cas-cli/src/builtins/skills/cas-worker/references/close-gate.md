@@ -8,6 +8,15 @@ metadata:
 Read at delivery. Review owns coding and test-quality judgments; this branch
 collects evidence and delivers the assigned task.
 
+## Commit and push
+
+Commit scoped work; push once before parking, once per review round, unless
+`delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
+`scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
+CI owns fast-row proof; local receipts are pre-push feedback. Park reads
+exact-tip capped test receipts, never runs checks. For changelog scope and
+format, follow [Changelog at park](#changelog-at-park).
+
 ## Clean-tree receipt
 
 Run `git status --porcelain` and `git rev-parse HEAD`. Empty porcelain and HEAD
@@ -19,9 +28,8 @@ of closing over them. This receipt applies at every depth.
 For `depth=light`, deliver the minimal working outcome with honest evidence.
 For deep or unset depth, map every criterion to executed proof or a named proof
 owner using `verify-before-claim`; trace affected consumers and registrations.
-Read [discipline.md](discipline.md) before check/test work. Rust assembly belongs
-to the supervisor; name unexecuted obligations. Run affected non-Rust checks and
-record their exit status and actual test count. A zero-test success is no proof.
+Consume the receipts from [discipline.md](discipline.md); name unexecuted
+obligations and their assembly owner.
 
 ## Ledger preflight
 
@@ -39,7 +47,7 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
    unread supervisor messages and re-read the task before corrective edits.
 2. Capture the current tip: `git rev-parse factory/<name>` (use your per-task
    branch if active). Check `git merge-base --is-ancestor <delivered-tip> <target-tip>`.
-   If already merged or closed, re-close or stop rather than amend stale state.
+   If already merged or closed, stop and await the verdict rather than amend stale state.
 3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
    merge with its branch and SHA. Push only with explicit supervisor authorization.
    Otherwise push the delivered branch, then send `merge_request=true` with the

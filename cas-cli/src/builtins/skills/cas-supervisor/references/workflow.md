@@ -43,6 +43,10 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 3. Gather the EPIC specification and task breakdown through the supervisor's task/spec workflow.
 4. Review task scope and dependencies
 
+**Spawn threshold for review findings.** Read a verifier's `Improvements (non-blocking)` and warning issues, and leave them in the verdict. File a follow-up only when a finding shows reproduced, observable wrong behaviour that affects someone today. With three or more findings under that bar, note them together on the task and file nothing. A worker may fix a nit in its own lane before merge; a nit never reopens or extends a merged task. `task action=create` enforces this: a follow-up from a finding (`finding_origin`, a QA or verifier caller, or text naming one) needs `repro` and `affected`. A P0/P1 bug you or the operator observed directly is exempt. An epic with at least 5 completed reviews whose follow-ups from findings reach 0.5 per review over its last 10 sends you one notice and shows the ratio in `epic_status`. At release prep, run `cas qa polish --epic <id>` to list warnings by file, then batch them into one polish task for that release or drop them.
+
+**Verification tiers.** Close records the tier on the task. Tier 0 (only docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys) has no independent verifier; CI and the mechanical gates still apply. Tier 1 is one verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, merge-queue and close-gate code) adds an adversarial probe. QA follows the same tiers, including batch rounds: Tier 0 walks no journeys and needs no ledger row, Tier 1 walks the impacted journeys, and Tier 2 needs an `Adversarial probe:` row in the task ledger. To force a verifier on a Tier 0 task, add the `force-verifier` label before close.
+
 **Standalone follow-up work (no EPIC needed).** An EPIC is for a body of work broken into
 tasks. When an epic has closed and one loose task turns up — a follow-up, a late bug, a
 one-off — do NOT create a single-child epic to satisfy the spawn gate. Create the task and
@@ -69,6 +73,9 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+
+`qa.user_facing_labels` require `demo_statement` before creation/assignment:
+`As a <user>, I <do X> and see <Y>`; epics/internal tasks are exempt.
 
 Human-facing output follows [DESIGN.md first](../../design-spec/references/design-md-first.md)
 without being told; the brief adds only the target project when it is not the
@@ -205,6 +212,10 @@ clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource
 
+A green push alone is not ready: a test-first checkpoint can be green and
+incomplete. The role's readiness triggers require a completed delivery. Keep CI
+and QA gates; pending/red CI needs override authority and a reason.
+
 Finish delivered work before expanding noncritical work. Apply this closure
 pass every turn, including startup and simultaneous worker completions:
 
@@ -252,6 +263,11 @@ evidence; verify they name the delivered commit and affected scope. The full
 Rust build and suite run once, at the Phase 4 final gate: the merge queue where
 base has one, otherwise local assembly.
 
+For public surfaces, score distinctiveness, fit and hierarchy 1–5 using
+cas-codebase-design before merge; the floor is 4/5. Record exceptions/remedies.
+A script used on several platforms needs more than Linux proof unless a fixture
+covers the difference.
+
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
    tests that still pin the old contract before landing the lane. For example:
@@ -286,7 +302,7 @@ end-of-lane, once the worker is done with that worktree.
 
 **Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. Merge on `READY TO MERGE` or any evidence that the delivery tip is pushed and required lane CI is green. Never wait for park, `awaiting_merge`, or a merge request, including when a close gate refused park. The merge needs no worker action. Drain ready merges before free-form user replies.
+1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). Drain ready merges before free-form user replies.
 2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before
@@ -301,7 +317,7 @@ end-of-lane, once the worker is done with that worktree.
    not the implementer, on the taste recipe:
    `factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
    Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
-   `git merge factory/<worker>`, and the re-close all refuse until then. A rejection sends the
+   `git merge factory/<worker>`, and task close all refuse until then. A rejection sends the
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
    `verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `verification action=qa_status task_id=<task-id>`.
@@ -383,13 +399,13 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
 
 - Workers set status to blocked and add a blocker note
 - Help resolve or reassign the task
-- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After a worker's close, verify it stayed closed before proceeding — a stale `status=blocked` update can overwrite the close. If a closed task comes back, note the race on the task and message the worker to re-close.
+- **Reopened task:** Read its current state and findings before acting; the merge verdict owns completion.
 - **Stale outbox replays:** Workers may send duplicate stale messages due to outbox replay. Before acting on a blocker notification or status change, check the task's current state with `task action=show` — the message may be outdated.
 
 **Multiple workers complete simultaneously:**
 
 - Merge each parked lane (`worktree_merge`) in one response turn
-- Message each worker to re-close its own task
+- Let each merge verdict close the task or return findings
 - Apply the closure pass before reassigning workers
 
 ### Supervisor-run fixture scripts
@@ -405,10 +421,18 @@ Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-deli
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 Every hour with new deliveries, build a candidate at the exact epic tip, walk the
 combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
-with `task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`; every listed
+with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and
+`ledger_author`, who walked it and did not implement a listed task; every listed
 delivery anchor must be contained in that reviewed target commit. Then close those
 deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
 remain available.
+
+A round covers whatever is merged at the tip when it starts. Never hold a round for
+lanes still in review; they join the next round. Title its task `Batch QA round ...`,
+because that in-progress task is how Cassy knows a round is running. If a merged
+delivery has no receipt after 60 minutes and no round started in that time, every
+supervisor on the epic gets a `QA batch overdue` notice each hour. Start a round
+when it arrives.
 
 ## Phase 4: Complete
 

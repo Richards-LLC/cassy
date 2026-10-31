@@ -1135,27 +1135,54 @@ async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
 /// those checks. The normal merge requirement still applies.
 #[tokio::test]
 async fn park_accepts_delivery_without_fast_rows_receipt_cas_51ff() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main");
-    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
-    std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
-    std::fs::write(worker_path.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
-    std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
-    git(&worker_path, &["add", "."]);
-    git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
-    git(&worker_path, &["push", "-q", "--no-verify", "origin", LANE]);
-    let id = "cas-fr02";
-    f.put(&assigned(id, TaskType::Task, "main"));
-    claim(&f, id);
-    let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
+    for union_during_park in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
+        std::fs::write(worker_path.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
+        std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+        git(&worker_path, &["add", "."]);
+        git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
+        git(&worker_path, &["push", "-q", "--no-verify", "origin", LANE]);
+        let id = "cas-fr02";
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.notes = "Unstamped original context\n\n[2026-01-02 00:00] Worker progress".into();
+        f.put(&task);
+        claim(&f, id);
+        if union_during_park {
+            let root = f.cas_dir();
+            lifecycle_race_hook::before_park(id, move || {
+                let store = crate::store::open_task_store_local(&root).unwrap();
+                let before = store.get(id).unwrap();
+                let mut merged = before.clone();
+                merged.notes = crate::cloud::syncer::pull::merge_task_notes(
+                    &before.notes, "[2026-01-01 00:00] Receipt imported from another machine",
+                );
+                merged.updated_at = chrono::Utc::now();
+                assert!(store.update_from_sync(&merged, &before).unwrap().is_some());
+                let current = serde_json::to_value(store.get(id).unwrap()).unwrap();
+                let before = serde_json::to_value(before).unwrap();
+                let changed: Vec<_> = before.as_object().unwrap().iter()
+                    .filter_map(|(key, value)| (current.get(key) != Some(value)).then_some(key.as_str()))
+                    .collect();
+                assert_eq!(changed, ["notes", "updated_at"], "audit the actual sync write");
+            });
+        }
+        let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
 
-    let parked = call(&f.worker, close.clone()).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+        let parked = call(&f.worker, close.clone()).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+        if union_during_park {
+            assert!(f.task(id).notes.contains("Receipt imported from another machine"));
+            assert!(f.task(id).notes.contains("Unstamped original context"));
+        }
 
-    let again = call(&f.worker, close).await;
-    assert!(again.contains("MERGE REQUIRED"), "unmerged work must not close: {again}");
-    assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
+        let again = call(&f.worker, close).await;
+        assert!(again.contains("MERGE REQUIRED"), "unmerged work must not close: {again}");
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
+    }
 }
 
 /// Release preparation used a suffixed promotion branch, while the worker's
@@ -1748,6 +1775,101 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
     }
 }
 
+/// cas-3d57 (cas-985f follow-ups), through the close handler: a worker on an
+/// epic-bound lane merges released origin/main (no rebase) and parks; after
+/// park it merges a newer origin/main and re-parks, both without override.
+/// A local `main` ahead of origin is not released: merging it is refused.
+#[tokio::test]
+async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released_cas_3d57() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "epic/next");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    let id = "cas-3d57";
+    let lane = format!("{LANE}-{id}");
+    git(&worker_path, &["checkout", "-q", "-b", &lane, "origin/epic/next"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let mut task = assigned(id, TaskType::Bug, "epic/next");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+    assert!(f.task(id).deliverables.factory_branch_start.is_some(), "{started}");
+    std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&worker_path, &["add", "own.rs"]);
+    git(&worker_path, &["commit", "-q", "-m", "fix(hub): own delivery"]);
+    let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivery ready"});
+    // Another task's work, released on main and merged in as instructed.
+    let merge_main = |file: &str, subject: &str, push: bool| {
+        std::fs::write(repo.join(file), "pub fn released() {}\n").unwrap();
+        git(repo, &["add", file]);
+        git(repo, &["commit", "-q", "-m", subject]);
+        if push { git(repo, &["push", "-q", "origin", "main"]); }
+        git(&worker_path, &["fetch", "-q", "origin"]);
+        git(&worker_path, &["merge", "-q", "--no-ff", "--no-edit", if push { "origin/main" } else { "main" }]);
+        git(&worker_path, &["push", "-q", "origin", &lane]);
+        git(&worker_path, &["rev-parse", "HEAD"])
+    };
+    for (round, (file, subject)) in [("one.rs", "fix(cas-a0b1): released before park"),
+        ("two.rs", "fix(cas-a0b2): released after park")].into_iter().enumerate() {
+        let tip = merge_main(file, subject, true);
+        let response = call(&f.worker, close.clone()).await;
+        let parked = f.task(id);
+        assert!(response.contains("MERGE REQUIRED"), "round {round}: {response}");
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "round {round}: {response}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "round {round}");
+    }
+    let parked_anchor = f.task(id).deliverables.factory_branch_anchor;
+    // An own correction before the foreign merge remains attributable even
+    // when a sibling task later becomes in progress on this worker.
+    std::fs::write(worker_path.join("own.rs"), "pub fn own() { /* before foreign */ }\n").unwrap();
+    git(&worker_path, &["add", "own.rs"]);
+    git(&worker_path, &["commit", "-qm", "fix(cas-3d57): correction before next task"]);
+    let own_correction = git(&worker_path, &["rev-parse", "HEAD"]);
+    let offending = merge_main("three.rs", "fix(cas-0e2b): unreleased, only on local main", false);
+    // Keep the offending merge distinct from the ignored current tip.
+    std::fs::write(worker_path.join("own.rs"), "pub fn own() { /* correction */ }\n").unwrap();
+    git(&worker_path, &["add", "own.rs"]);
+    git(&worker_path, &["commit", "-qm", "fix(cas-3d57): final correction"]);
+    git(&worker_path, &["push", "-q", "origin", &lane]);
+    let ignored_tip = git(&worker_path, &["rev-parse", "HEAD"]);
+    let mut unrelated = assigned("cas-dec0", TaskType::Bug, "epic/next");
+    unrelated.status = TaskStatus::Open;
+    f.put(&unrelated);
+    let refused = call(&f.worker, close.clone()).await;
+    assert_eq!(f.task(id).deliverables.factory_branch_anchor, parked_anchor,
+        "a local main ahead of origin is not released, so the anchor must not advance: {refused}");
+    assert!(refused.contains("PARK REFUSED"), "{refused}");
+    assert!(refused.contains("request changes") && !refused.contains(&unrelated.id),
+        "an unrelated same-worker task must not acquire the foreign advance: {refused}");
+    for boundary in [parked_anchor.as_ref().unwrap(), &ignored_tip, &offending] {
+        assert!(refused.contains(boundary), "missing {boundary}: {refused}");
+    }
+
+    let next = assigned("cas-0e2b", TaskType::Bug, "epic/next");
+    f.put(&next);
+    // A new target conflict must refresh the parked flag even when the
+    // rejected branch continuation returns before ordinary re-park work.
+    assert!(!f.task(id).deliverables.merge_conflicted);
+    git(repo, &["checkout", "-q", "epic/next"]);
+    std::fs::write(repo.join("own.rs"), "pub fn target_version() {}\n").unwrap();
+    git(repo, &["add", "own.rs"]);
+    git(repo, &["commit", "-qm", "fix: conflicting target delivery"]);
+    git(repo, &["push", "-q", "origin", "epic/next"]);
+    git(&worker_path, &["fetch", "-q", "origin"]);
+    let refused = call(&f.worker, close).await;
+    let parked = f.task(id);
+    let remedy = refused.contains(&next.id) && refused.contains("own branch")
+        && !refused.contains("request changes") && !refused.contains("request_changes");
+    let first_foreign = refused.contains(&offending) && !refused.contains(&own_correction);
+    assert!(remedy && first_foreign && parked.deliverables.merge_conflicted,
+        "next-task remedy={remedy}, first foreign commit={first_foreign}, refreshed conflict={}: {refused}",
+        parked.deliverables.merge_conflicted);
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert_eq!(parked.deliverables.factory_branch_anchor, parked_anchor);
+}
 /// A queued successor uses its own target, while the delivery just parked or
 /// closed keeps its immutable ref. Replaying that close cannot consume C.
 #[tokio::test]

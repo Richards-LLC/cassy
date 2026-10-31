@@ -66,9 +66,9 @@ finding as follows:
 
 If replacement is needed, ask the operator to install the intended clean build
 and use the harness's MCP reconnect/restart control, which keeps every worker
-running; then confirm the Cassy tools are available and rerun preflight. A
-fresh session is a supervisor restart and stops every worker
-([supervisor restart](worker-recovery.md#supervisor-restart)).
+running; then confirm the Cassy tools are available and rerun preflight. Exiting
+for a fresh session stops every worker; `factory action=restart_supervisor` does
+not ([supervisor restart](worker-recovery.md#supervisor-restart)).
 Never restart `cas serve` from the active MCP session.
 If `repository.candidate_limit` is reported, preview safe registry-only cleanup
 with `cas known-repos prune-missing --dry-run`, then apply it without the flag.

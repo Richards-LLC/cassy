@@ -682,6 +682,11 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Names the journey-eval QA command and required release evidence.",
     ),
     (
+        "skills/cas-supervisor/references/workflow.md",
+        "journey",
+        "Names the registry-backed QA journeys each verification tier walks.",
+    ),
+    (
         "skills/cas-cut-release/references/failure-log.md",
         "journey",
         "Names the required journey-evaluation report and its Markdown files carried on a release branch.",
@@ -943,8 +948,9 @@ fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
     );
 }
 
-/// cas-1c1f: a supervisor's pane exit shuts its whole factory down, so no
-/// shipped text may present a supervisor restart as one its workers outlive.
+/// cas-1c1f: a supervisor's plain pane exit shuts its whole factory down, so no
+/// shipped text may present one as something its workers outlive. Only
+/// `factory action=restart_supervisor` spares them (cas-b492).
 #[test]
 fn no_builtin_presents_a_supervisor_restart_as_sparing_its_workers() {
     let unsafe_claim = regex::RegexBuilder::new(
@@ -969,8 +975,8 @@ fn no_builtin_presents_a_supervisor_restart_as_sparing_its_workers() {
     }
     assert!(
         violations.is_empty(),
-        "a supervisor restart stops every worker; name that cost and the MCP reconnect \
-         route instead:\n{}",
+        "a plain supervisor exit stops every worker; name that cost, the MCP reconnect \
+         route and restart_supervisor instead:\n{}",
         violations.join("\n")
     );
 }

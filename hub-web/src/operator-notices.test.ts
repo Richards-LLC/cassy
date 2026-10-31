@@ -60,8 +60,8 @@ describe("notice age (cas-5c22)", () => {
     expect(noticeTime(new Date(now + 600_000).toISOString(), now)).toBe(new Date(now).toISOString());
   });
   it("shows an earlier day's notice by its date, today's by its age", () => {
-    expect(attentionTimeLabel(new Date(2026, 8, 30, 17, 49).toISOString(), now)).toBe("Sep 30, 17:49");
-    expect(attentionTimeLabel(new Date(2025, 8, 30, 17, 49).toISOString(), now)).toBe("Sep 30 2025, 17:49");
+    expect(attentionTimeLabel(new Date(2026, 8, 30, 17, 49).toISOString(), now)).toBe("Sep 30, 5:49 PM");
+    expect(attentionTimeLabel(new Date(2025, 8, 30, 17, 49).toISOString(), now)).toBe("Sep 30 2025, 5:49 PM");
     expect(attentionTimeLabel(new Date(now - 23 * 60_000).toISOString(), now)).toBe("23m");
     expect(attentionTimeLabel(new Date(now - 20_000).toISOString(), now)).toBe("now");
   });

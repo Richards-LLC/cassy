@@ -822,6 +822,77 @@ fn h1_machine_identity_is_stable_on_disk() {
 #[derive(Clone)]
 struct ExactOriginReadAuthorizer(&'static str);
 
+#[cfg(unix)]
+#[tokio::test]
+async fn launch_profiles_follow_the_resolved_projects_account_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.remove("CAS_ROOT");
+    env.remove("CODEX_HOME");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let shell = bin.join("private-shell");
+    crate::test_paths::warm_stub(&shell, &format!("#!/bin/sh\nprintf '__CAS_PATH_BEGIN__{}:/usr/bin:/bin__CAS_PATH_END__'\n", bin.display()));
+    env.set("SHELL", &shell);
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nprintf 'Logged in using ChatGPT'\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let now = chrono::Utc::now();
+    for (name, used, days) in [("soon", 60.0, 1), ("spare", 10.0, 4)] {
+        let folder = home.join(format!(".codex-{name}"));
+        std::fs::create_dir_all(folder.join("sessions")).unwrap();
+        std::fs::write(folder.join("auth.json"), "{}").unwrap();
+        std::fs::write(folder.join("sessions/usage.jsonl"), serde_json::json!({
+            "timestamp": now, "payload": {"rate_limits": {"primary": {
+                "used_percent": used, "window_minutes": 10080,
+                "resets_at": (now + chrono::Duration::days(days)).timestamp()
+            }}}
+        }).to_string()).unwrap();
+    }
+    let repos = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let project = repos.path().join("project");
+    std::fs::create_dir_all(project.join(".cas")).unwrap();
+    assert!(Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
+    crate::store::known_repos::ensure_host_schema().unwrap();
+    crate::store::known_repos::register_repo_strict(&project).unwrap();
+    let target = super::projects::list_projects(&[]).unwrap().pop().unwrap().target;
+    std::fs::write(home.join(".cas/config.toml"), format!("[hub]\nlaunch_roots = [{}]\n", serde_json::to_string(repos.path()).unwrap())).unwrap();
+    let browse = super::projects::LaunchTarget::Browse {
+        root_id: super::projects::configured_launch_roots().unwrap()[0].id.clone(),
+        path: "project".into(),
+    };
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
+        MachineIdentity { id: "recommendations".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ));
+    // Both overrides must change the actual HTTP projection, while no target
+    // retains the global soonest-reset policy.
+    for (query_target, config, expected) in [
+        (None, "[accounts]\nthreshold = 50\n", "soon"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'most-headroom'\n", "spare"),
+        (Some(serde_json::to_string(&browse).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
+    ] {
+        std::fs::write(project.join(".cas/config.toml"), config).unwrap();
+        let query = query_target.map(|target| url::form_urlencoded::Serializer::new(String::new()).append_pair("target", &target).finish());
+        let uri = format!("/v1/launch/profiles{}", query.map(|q| format!("?{q}")).unwrap_or_default());
+        let response = app.clone().oneshot(Request::get(&uri).header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let chosen = body["codex"]["profiles"].as_array().unwrap().iter().find(|row| row.get("recommendation").is_some());
+        assert_eq!(chosen.map(|row| row["name"].as_str().unwrap()), Some(expected), "{body}");
+    }
+    for target in ["not-json", r#"{"kind":"project","id":"missing"}"#, r#"{"kind":"browse","root_id":"missing","path":"../escape"}"#] {
+        let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("target", target).finish();
+        let response = app.clone().oneshot(Request::get(format!("/v1/launch/profiles?{query}")).header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
 impl HubAuthorizer for ExactOriginReadAuthorizer {
     fn authorize(&self, request: &HubRequest) -> AuthorizationDecision {
         if request.action == HubAction::Health
@@ -1760,7 +1831,7 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         assert!(csp.contains(required), "missing CSP directive {required}");
     }
     // pin: Native media and workers receive only these exact CSP sources.
-    for (directive, expected) in [("img-src", "img-src 'self' data:"),
+    for (directive, expected) in [("img-src", "img-src 'self' data: blob:"),
         ("media-src", "media-src 'self'"), ("worker-src", "worker-src 'self'")] {
         let value = csp.split(';').map(str::trim)
             .find(|value| value.starts_with(&format!("{directive} "))).unwrap();
@@ -2024,6 +2095,42 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     let pane = receiver.recv().await.unwrap();
     assert_eq!(pane.kind, MachineEventKind::PaneAdded);
     assert_eq!(pane.pane_id.as_deref(), Some("worker-1"));
+
+    // cas-c095: a pane exit carries its code, and names the supervisor's, so
+    // a device can tell a deliberate supervisor exit from a worker crash.
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::PaneAdded {
+            pane: PaneInfo {
+                id: "noble-cheetah-84".into(),
+                kind: PaneKind::Supervisor,
+                focused: true,
+                title: "Supervisor".into(),
+                exited: false,
+            },
+        },
+    );
+    receiver.recv().await.unwrap();
+    for (pane_id, exit_code, payload) in [
+        ("worker-1", Some(1), serde_json::json!({ "exit_code": 1 })),
+        (
+            "noble-cheetah-84",
+            Some(0),
+            serde_json::json!({ "exit_code": 0, "role": "supervisor" }),
+        ),
+    ] {
+        events.observe_daemon(
+            "factory-a",
+            &DaemonMessage::PaneExited {
+                pane_id: pane_id.into(),
+                exit_code,
+            },
+        );
+        let exited = receiver.recv().await.unwrap();
+        assert_eq!(exited.kind, MachineEventKind::PaneExited);
+        assert_eq!(exited.pane_id.as_deref(), Some(pane_id));
+        assert_eq!(exited.payload, Some(payload));
+    }
 
     events.reconcile_sessions(std::iter::empty::<&str>()).await;
     let removed = receiver.recv().await.unwrap();
@@ -3374,12 +3481,29 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     );
     assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), persisted,
         "ordinary DPoP traffic must not rewrite durable identities");
+    // cas-3b22: the old skew window accepts this proof before a restart.
+    // Delay the assertion so the red run also exercises the replay itself.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(60), "future");
+    let before_restart = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now);
     // A pre-boot proof with an unused jti must also be refused: after restart
     // the previous process's in-memory replay set no longer exists.
     let pre_boot = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now, "pre-boot-unused");
     let restarted = AuthStore::open_at(temp.path().join("hub"), "machine-test", now + chrono::Duration::seconds(1)).unwrap();
     let refused = restarted.authenticate_dpop(&authorization, &pre_boot, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
     assert!(matches!(refused.downcast_ref::<super::AuthRefusal>(), Some(super::AuthRefusal::StaleProof { .. })));
+
+    // Replaying the formerly accepted +60s proof after restarting must fail
+    // even though its iat clears the boot cutoff and its jti was forgotten.
+    let refused = restarted.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
+    assert_eq!(refused.downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 58 }));
+    assert_eq!(before_restart.unwrap_err().downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 60 }));
+    // Even one second ahead is a retryable stale proof, rather than a
+    // credential failure or an entry in the volatile replay set.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(1), "slightly-fast");
+    let refused = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now).unwrap_err();
+    let refusal = refused.downcast_ref::<super::AuthRefusal>().unwrap();
+    assert_eq!(*refusal, super::AuthRefusal::StaleProof { skew_secs: 1 });
+    assert!(refusal.retryable());
 
     let wrong_method = sign_dpop(
         &signing,
@@ -4809,6 +4933,192 @@ async fn cas_ab04_write_grants_refuse_unauthenticated_and_unscoped_callers() {
     );
 }
 
+/// A supervisor `kind=secret` turn, recorded the way `coordination message
+/// target=operator kind=secret` records it (cas-1996).
+fn record_secret_request(cas_dir: &std::path::Path, kind: crate::ui::factory::OperatorTurnKind, name: &str) -> i64 {
+    let payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message: "Needed to publish. Create one at the provider's API keys page.".into(),
+        summary: name.into(),
+        device_id: "*".into(),
+        operator_label: None,
+        kind,
+        attachments: Vec::new(),
+        options: Vec::new(),
+        reply_to_session: None,
+    })
+    .unwrap();
+    crate::store::open_prompt_queue_store(cas_dir)
+        .unwrap()
+        .record_operator_turn(&cas_store::OperatorTurn {
+            source: "supervisor",
+            target: "operator",
+            prompt: &payload,
+            factory_session: Some(OPS_SESSION),
+            metadata: cas_store::OperatorTurnMetadata {
+                summary: Some(name),
+                origin: Some(&cas_store::QueueOrigin::Daemon),
+                kind: Some(kind.as_str()),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+        .id()
+}
+
+/// cas-1996: the operator answers an agent's secret request from a paired
+/// device holding factory:manage. The value lands in a mode-600 file in the
+/// configured destination, the supervisor gets a reply naming the path, and
+/// the value is in no other file under the fixture (cas.db and its WAL, the
+/// hub's audit log), no log line and no response. Declining saves nothing.
+#[tokio::test]
+async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
+    use std::io::{Read, Seek};
+    use std::os::unix::fs::PermissionsExt;
+    const VALUE: &str = "sk_live_cas1996_d7f3a9c2e4b1";
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let destination = fixture._temp.path().join("creds/<project>");
+    let mut config = crate::config::Config::load(&fixture.cas_dir).unwrap();
+    config.set("secrets.destination", &destination.display().to_string()).unwrap();
+    config.save(&fixture.cas_dir).unwrap();
+    let request = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let uri = format!("/v1/sessions/{OPS_SESSION}/secrets/{request}");
+
+    let mut log = tempfile::tempfile().unwrap();
+    let capture = log.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || capture.try_clone().unwrap()).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let (status, body) = fixture.call("POST", &uri, Some(serde_json::json!({"value": format!("  {VALUE}\n")}))).await;
+    let (again, _) = fixture.call("POST", &uri, Some(serde_json::json!({"value": VALUE}))).await;
+    drop(guard);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(again, StatusCode::CONFLICT, "an answered request cannot be answered again");
+
+    let file = fixture._temp.path().join("creds/project/STRIPE_KEY");
+    assert_eq!(body["path"], file.display().to_string(), "{body}");
+    // cas-2f55: auto-delete is off unless chosen: nothing is listed for deletion.
+    assert!(body["auto_delete"].is_null(), "{body}");
+    assert!(!fixture.cas_dir.join("secret-auto-delete.json").exists());
+    // pin: the file holds exactly the pasted value, with surrounding whitespace trimmed.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), VALUE, "saved trimmed");
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+
+    let rows = fixture.queued();
+    let reply = rows.iter().find(|row| row.target == "supervisor").expect("a reply to the supervisor");
+    assert!(
+        reply.prompt.starts_with(&format!("[CAS reply: explicitly acknowledges notification_id={request}]\n"))
+            && reply.prompt.contains(&file.display().to_string()),
+        "{}",
+        reply.prompt
+    );
+    assert!(reply.operator.as_ref().is_some_and(|stamp| stamp.verified && stamp.device_id == fixture.device_id));
+    let queue = crate::store::open_prompt_queue_store(&fixture.cas_dir).unwrap();
+    assert!(queue.queued_prompt(request).unwrap().unwrap().acked_at.is_some(), "the request is answered");
+    let outcomes: Vec<_> = fixture.audit("secret_save").iter().map(|row| row["outcome"].as_str().unwrap().to_string()).collect();
+    assert_eq!(outcomes, ["requested", "allowed", "requested", "invalid"]);
+
+    // The value is nowhere else on disk, in the logs or in the response.
+    let mut stack = vec![fixture._temp.path().to_path_buf()];
+    let mut scanned = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path != file {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                assert!(!bytes.windows(VALUE.len()).any(|window| window == VALUE.as_bytes()), "the value leaked into {}", path.display());
+                scanned += 1;
+            }
+        }
+    }
+    assert!(scanned > 2 && fixture.cas_dir.join("cas.db").exists(), "the scan read the store");
+    log.rewind().unwrap();
+    let mut logged = String::new();
+    log.read_to_string(&mut logged).unwrap();
+    assert!(!logged.contains(VALUE), "{logged}");
+    assert!(!body.to_string().contains(VALUE));
+
+    let declined = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "NPM_TOKEN");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{declined}"), Some(serde_json::json!({"decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!fixture._temp.path().join("creds/project/NPM_TOKEN").exists());
+    assert!(queue.queued_prompt(declined).unwrap().unwrap().acked_at.is_some(), "a decline answers the request");
+
+    // cas-2f55: chosen on the card, the file goes once the supervisor answers the "saved" reply.
+    let chosen = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "DEPLOY_KEY");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{chosen}"), Some(serde_json::json!({"value": "dk-value", "auto_delete": "after_use"})))
+        .await;
+    assert_eq!((status, &body["auto_delete"]), (StatusCode::OK, &serde_json::json!("after_use")), "{body}");
+    let saved = fixture._temp.path().join("creds/project/DEPLOY_KEY");
+    let reply = fixture.queued().into_iter().find(|row| row.target == "supervisor" && row.prompt.contains("DEPLOY_KEY")).unwrap();
+    // pin: the supervisor learns from this reply that its own answer deletes the file.
+    assert!(reply.prompt.contains("deleted once you confirm"), "{}", reply.prompt);
+    assert!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, chosen).unwrap().is_empty(), "the request id is not the reply");
+    assert_eq!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, reply.id).unwrap(), ["DEPLOY_KEY"]);
+    assert!(!saved.exists());
+}
+
+/// cas-1996: only a factory:manage device answers, only an open secret
+/// request of that session, and nothing is written when refused.
+#[tokio::test]
+async fn cas_1996_secret_answer_refuses_unscoped_devices_and_other_turns() {
+    let unscoped = ops_fixture(control_scopes());
+    let request = record_secret_request(&unscoped.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let (status, body) = unscoped
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{request}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["required_scope"], "factory:manage");
+
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let destination = fixture._temp.path().join("creds");
+    let mut config = crate::config::Config::load(&fixture.cas_dir).unwrap();
+    config.set("secrets.destination", &destination.display().to_string()).unwrap();
+    config.save(&fixture.cas_dir).unwrap();
+    let ask = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Ask, "STRIPE_KEY");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{ask}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "an ask is not a secret request: {body}");
+    let secret = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let (status, _) = fixture
+        .call("POST", &format!("/v1/sessions/factory-other/secrets/{secret}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "another session cannot answer it");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // cas-2f55: an unknown deletion choice is refused before anything is saved.
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "auto_delete": "forever"})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!destination.exists(), "nothing was written");
+    // A name that already holds a file is refused, and the file is kept.
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("STRIPE_KEY"), "existing").unwrap();
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::CONFLICT, Some("secret_exists")), "{body}");
+    // pin: the existing file's bytes are untouched.
+    assert_eq!(std::fs::read(destination.join("STRIPE_KEY")).unwrap(), b"existing");
+    assert!(fixture.queued().iter().all(|row| row.target == "operator"), "nothing was sent");
+}
+
 /// A retried `op_id` returns the first outcome and sends nothing twice.
 #[tokio::test]
 async fn operations_op_id_is_idempotent() {
@@ -5518,6 +5828,21 @@ fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
     );
 }
 
+/// cas-6f79: Commander titled a project card with its canonical id ("cas-src").
+/// The session's human name is the configured display name, else the main
+/// project's folder, and never the canonical id.
+#[test]
+fn project_name_is_the_display_name_or_folder_never_the_canonical_id_cas_6f79() {
+    let parent = tempfile::tempdir().unwrap();
+    let cas_root = parent.path().join("widget").join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let config = cas_root.join("config.toml");
+    std::fs::write(&config, "[project]\ncanonical_id = \"cas-src\"\ndisplay_name = \" Cassy \"\n").unwrap();
+    assert_eq!(project_display_name(&cas_root).as_deref(), Some("Cassy"));
+    std::fs::write(&config, "[project]\ncanonical_id = \"cas-src\"\ndisplay_name = \"\"\n").unwrap();
+    assert_eq!(project_display_name(&cas_root).as_deref(), Some("widget"));
+}
+
 /// cas-2c559: `/v1/projects` needs only machine:read, but a live session's
 /// project (cas-0273) is session data. A pairing that can only see machines
 /// must not learn the folder of a running session in an unregistered project;
@@ -5649,13 +5974,14 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     // cas-195a: the real upload must be previewable without publishing to Cloud,
     // including by another read-only paired device, but only in its own session.
     let image_id = image["artifact_id"].as_str().unwrap();
-    let ticket_request = |session: &str| {
-        let uri = format!("/v1/sessions/{session}/artifacts/{image_id}/ticket");
+    let ticket_for = |session: &str, artifact: &str| {
+        let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/ticket");
         Request::post(&uri).header("origin", "https://controller.example")
             .header("authorization", format!("DPoP {}", read_credential.credential))
             .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()))
             .body(Body::empty()).unwrap()
     };
+    let ticket_request = |session: &str| ticket_for(session, image_id);
     assert_eq!(app.clone().oneshot(ticket_request("factory-b")).await.unwrap().status(), StatusCode::NOT_FOUND);
     let response = app.clone().oneshot(ticket_request("factory-a")).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK, "a session's own upload must mint a preview ticket");
@@ -5676,6 +6002,17 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
             assert_eq!(bytes.as_ref(), if range.is_some() { &png[1..=4] } else { &png });
         }
     }
+    // cas-a4c4: the sender's own notes.txt opens too, as sandboxed plain text, never a document.
+    let text_id = first.as_ref().unwrap()["artifact_id"].as_str().unwrap().to_owned();
+    let response = app.clone().oneshot(ticket_for("factory-a", &text_id)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a session's own text upload must mint a ticket");
+    let text_ticket: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let response = app.clone().oneshot(Request::get(format!("/v1/sessions/factory-a/artifacts/{text_id}/content?t={}", text_ticket["ticket"].as_str().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(response.headers()["content-disposition"], "inline");
+    assert!(response.headers().get_all("content-security-policy").iter().any(|policy| policy == "default-src 'none'; sandbox"));
+    assert_eq!(to_bytes(response.into_body(), 65536).await.unwrap().as_ref(), b"hello");
     // Neither forged bytes nor symlink replacements become local preview access.
     let image_path = std::path::Path::new(image["path"].as_str().unwrap());
     std::fs::write(image_path, vec![b'x'; png.len()]).unwrap();
@@ -5698,6 +6035,10 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),
         (&b"mif1\0\0\0\0heic"[..], "image/heic"),
         (&b"avif\0\0\0\0mif1"[..], "image/avif"),
+        (&b"mif1\0\0\0\0"[..], "image/heif"),
+        (&b"heim\0\0\0\0"[..], "image/heif"),
+        (&b"heis\0\0\0\0"[..], "image/heif"),
+        (&b"msf1\0\0\0\0"[..], "image/heif"),
         (&b"qt  \0\0\0\0"[..], "video/quicktime"),
         (&b"isom\0\0\0\0mp42"[..], "video/mp4"),
     ] {
@@ -6165,6 +6506,8 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     let project = env.home().join("model-project");
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);
+    // A Claude host's own effort would otherwise answer for an unreported one.
+    env.remove("CLAUDE_EFFORT");
     let store = crate::store::open_agent_store(&root).unwrap();
     let session = SessionInfo { name: "model-session".into(),
         metadata: create_metadata("model-session", std::process::id(), "lead", &["helper".into()], None, project.to_str(), Some(4173)),
@@ -6221,4 +6564,53 @@ fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status()
     let missing = serde_json::to_value(hub_session(&SessionInfo { name:"unreported".into(), ..session })).unwrap();
     assert!(missing.get("model").is_none());
     assert!(missing.get("effort").is_none());
+}
+
+/// cas-8125: the catalog never borrows another session's, worker's, or hub's version.
+#[test]
+fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
+    use crate::factory_binary_skew::{ServerVersion, Snapshot};
+    use crate::store::{AgentStore, init_cas_dir};
+    use cas_types::{Agent, AgentRole};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = init_cas_dir(project.path()).unwrap();
+    let mut supervisor = Agent::new_with_role("lead-id".into(), "lead".into(), AgentRole::Supervisor);
+    supervisor.factory_session = Some("badge-session".into());
+    crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let session = SessionInfo {
+        name: "badge-session".into(),
+        metadata: crate::ui::factory::create_metadata("badge-session", std::process::id(), "lead", &[], None, project.path().to_str(), Some(4173)),
+        is_running: true, socket_exists: true,
+    };
+    let observed = ServerVersion { name: "lead".into(), role: AgentRole::Supervisor,
+        session: Some("badge-session".into()), pid: 42, version: Some("9.99.1".into()), older: true };
+    for (name, role, owner, version, duplicate, live, expected) in [
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, Some("9.99.1")),
+        ("lead", AgentRole::Supervisor, "another-session", Some("9.99.1"), None, true, None),
+        ("another-lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Worker, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", None, None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), Some("9.99.2"), true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, false, None),
+    ] {
+        let model = LocalSessionReadModel::default();
+        let mut servers = vec![ServerVersion { name: name.into(), role, session: Some(owner.into()),
+            version: version.map(str::to_owned), ..observed.clone() }];
+        if let Some(version) = duplicate {
+            servers.push(ServerVersion { pid: 43, version: Some(version.into()), ..observed.clone() });
+        }
+        // Inject the already independently tested Factory MCP snapshot boundary;
+        // exercise the real registry/session projection and wire omission below.
+        model.versions.lock().unwrap().insert(root.clone(), CachedVersions {
+            read_at: std::time::Instant::now(),
+            snapshot: Some(Snapshot { installed: "9.99.2".into(), servers }),
+        });
+        let row = model.project(&[SessionInfo { is_running: live, ..session.clone() }]).remove(0);
+        let wire = serde_json::to_value(row).unwrap();
+        assert_eq!(wire.get("mcp_version").and_then(|value| value.as_str()), expected, "{name}/{role:?}/{owner}/{live}");
+        if expected.is_some() {
+            assert_eq!(wire["installed_version"], "9.99.2");
+        }
+    }
 }

@@ -656,6 +656,42 @@ fn cas_07ee_unreadable_recipient_registry_still_needs_attention() {
 }
 
 #[test]
+fn registered_recycle_retries_lost_state_before_later_shutdown_cas_f501() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let spawns = open_spawn_queue_store(&f.cas_dir).unwrap();
+    let request = spawns.enqueue_recycle("worker", None, Some(SESSION)).unwrap();
+    let conn = rusqlite::Connection::open(f.cas_dir.join("cas.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER lose_registered_state BEFORE UPDATE OF spawn_state ON spawn_queue
+        WHEN NEW.spawn_state = 'registered'
+        BEGIN SELECT RAISE(ABORT, 'injected registration write failure'); END;").unwrap();
+    super::append_spawn_audit(
+        &f.cas_dir, SESSION, Some(request), Some("worker"), "register", "confirmed", "registered successfully",
+    );
+    conn.execute_batch("DROP TRIGGER lose_registered_state").unwrap();
+    let (done, receive) = std::sync::mpsc::channel();
+    super::super::store_worker::global().submit("registration retry sentinel", move || { done.send(()).unwrap(); });
+    receive.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+    // Registration completed, then the replacement really shut down. A lost
+    // audit write must not keep its reusable name pending for the whole session.
+    let agents = open_agent_store(&f.cas_dir).unwrap();
+    agents.graceful_shutdown("worker-id").unwrap();
+    f.daemon.dead_workers.insert("worker".into());
+    let id = f.aged("supervisor", "worker", "Please handle this after shutdown");
+    assert!(f.scan().is_empty(), "completed recycle must not leave a shutdown recipient alarming");
+    let selection = super::run_queue_select(&super::super::prompt_queue_jobs::QueueSelectRequest {
+        cas_dir: f.cas_dir.clone(), session_name: SESSION.into(), supervisor_name: SUPERVISOR.into(),
+        worker_names: Vec::new(), dead_workers: f.daemon.dead_workers.clone(), replacement_workers: Default::default(),
+        limit: 10, operator_replies: false, deferred_operator_replies: Default::default(), adopt_operator_notices: false,
+    }, 1).unwrap();
+    assert!(selection.shut_down_recipients.iter().any(|name| name == "worker"));
+    let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.pending_reason, Some(cas_store::PendingReason::ShutdownCancelled));
+    assert!(!spawns.has_pending_spawn("worker", Some(SESSION)).unwrap());
+}
+
+#[test]
 fn cas_07ee_respawned_worker_name_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();

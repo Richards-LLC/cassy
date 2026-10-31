@@ -171,7 +171,14 @@ fn unfiltered(command: &str, depth: usize) -> bool {
             let verified = words[..i]
                 .iter()
                 .any(|w| w.ends_with("run-verified-tests.mjs"));
-            let needs_selection = verified || args.iter().any(|a| a == "test");
+            // Help as the only argument runs nothing. Anywhere later it can be an
+            // option's value: `test --grep-invert --help` runs the whole suite.
+            let help_only = !verified
+                && matches!(
+                    args,
+                    [subcommand, help] if subcommand == "test" && (help == "--help" || help == "-h")
+                );
+            let needs_selection = !help_only && (verified || args.iter().any(|a| a == "test"));
             // The direct CLI consumes its subcommand; the verified runner adds
             // that subcommand itself, so all of its args are filters/options.
             let args = if !verified && args.first().is_some_and(|arg| arg == "test") {

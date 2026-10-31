@@ -5,6 +5,76 @@ import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 vi.mock("pele/lazy", async (original) => ({ ...await original<typeof import("pele/lazy")>() }));
 
 describe("supervisor markdown subset", () => {
+  it("keeps complete emoji sequences colored without changing text, code or safe literal markup", () => {
+    const prose = '<script> & ☺️ 👍🏽 👩🏽‍💻 🇯🇵 1️⃣ 🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, `${prose}\n\n\`👍🏽\``));
+    expect(root.querySelector("p")?.textContent).toBe(prose);
+    expect([...root.querySelectorAll(".emoji-text")].map(node => node.textContent)).toEqual(["☺️", "👍🏽", "👩🏽‍💻", "🇯🇵", "1️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]);
+    expect(root.querySelector("script")).toBeNull();
+    expect(root.querySelector("code")?.textContent).toBe("👍🏽");
+    expect(root.querySelector("code .emoji-text")).toBeNull();
+  });
+  it.each([
+    {
+      language: "bash",
+      source: "awk '{\n  print $1\n}' file.txt\njq '.items[]\n  | .name' data.json",
+      strings: ["'{\n  print $1\n}'", "'.items[]\n  | .name'"],
+      keywords: [],
+    },
+    {
+      language: "rust",
+      source: String.raw`fn borrow<'a>(value: &'a str) -> &'a str {
+  let chars = ['a', '\n', '\'', '\x41', '\u{1F980}', '🦀'];
+  let forever: &'static str = "ready";
+  return value;
+}`,
+      strings: ["'a'", String.raw`'\n'`, String.raw`'\''`, String.raw`'\x41'`, String.raw`'\u{1F980}'`, "'🦀'", '"ready"'],
+      keywords: ["fn", "let", "let", "return"],
+    },
+    {
+      language: "jsx",
+      source: "const label = <p>don't stop</p>;\r\nconst other = 'ready';\nreturn true;",
+      strings: ["'ready'"],
+      keywords: ["const", "const", "return"],
+    },
+    {
+      language: "ts",
+      source: "const broken = 'unfinished\\\r\nconst good = 'ready';\nreturn true;",
+      strings: ["'unfinished\\", "'ready'"],
+      keywords: ["const", "const", "return"],
+    },
+  ])("keeps $language apostrophes from swallowing following code", async ({ language, source, strings, keywords }) => {
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, `\`\`\`${language}\n${source}\n\`\`\``));
+    await vi.waitFor(() => expect(root.querySelector('[data-syntax-state="ready"]')).not.toBeNull());
+    const code = root.querySelector("code")!;
+    expect(code.textContent).toBe(source);
+    expect([...code.querySelectorAll(".syntax-string")].map((node) => node.textContent)).toEqual(strings);
+    expect([...code.querySelectorAll(".syntax-keyword")].map((node) => node.textContent)).toEqual(keywords);
+  });
+
+  it("keeps cached source when another colored block is too large to cache", async () => {
+    const { highlightCode, SYNTAX_LIMITS } = await import("./rich-syntax");
+    const paint = (source: string) => {
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = source;
+      pre.append(code);
+      expect(highlightCode(pre, "ts")).toBeUndefined();
+      expect(code.textContent).toBe(source);
+    };
+    const cached = "const retainedCacheEntry = true;";
+    paint(cached);
+    // Fits the source/span budgets, but its source plus runs exceed cache bytes.
+    paint("let ".repeat(SYNTAX_LIMITS.spans).padEnd(SYNTAX_LIMITS.sourceUnits, " "));
+    const tokenize = vi.spyOn(String.prototype, "matchAll");
+    try {
+      paint(cached);
+      expect(tokenize).not.toHaveBeenCalled();
+    } finally { tokenize.mockRestore(); }
+  });
+
   it("colors safe source lazily while preserving selection and oversized plain text", async () => {
     const source = 'const message = "<script>&雪"; // keep source\r\nreturn true;';
     const root = document.createElement("div");
@@ -187,6 +257,21 @@ it("renders Mermaid through sanitized SVG and keeps invalid diagrams as source",
   root.append(...renderMarkdown(document, "```mermaid\nflowchart LR\nA[Ready] --> B[Ship]\n```\n\n```mermaid\nthis is invalid\n```"));
   await vi.waitFor(() => expect(root.querySelector("svg" )).not.toBeNull());
   expect(root.querySelector("svg")?.textContent).toContain("Ready");
+  const frame = root.querySelector<HTMLElement>(".code-frame")!;
+  const source = frame.querySelector<HTMLButtonElement>('[data-action="source"]')!;
+  expect(source).not.toBeNull();
+  source.click();
+  expect(frame.querySelector<HTMLPreElement>("pre")!.hidden).toBe(false);
+  expect(frame.querySelector<HTMLElement>(".rich-diagram")!.hidden).toBe(true);
+  expect(frame.querySelector("pre")!.textContent).toBe("flowchart LR\nA[Ready] --> B[Ship]");
+  source.click();
+  expect(frame.querySelector<HTMLPreElement>("pre")!.hidden).toBe(true);
+  expect(frame.querySelector<HTMLElement>(".rich-diagram")!.hidden).toBe(false);
+  const expand = frame.querySelector<HTMLButtonElement>('[data-action="expand"]')!;
+  expand.click();
+  expect(expand.getAttribute("aria-expanded")).toBe("true");
+  expand.click();
+  expect(expand.getAttribute("aria-expanded")).toBe("false");
   await vi.waitFor(() => expect(root.querySelector('[data-rich-state="fallback"]')?.textContent).toContain("this is invalid"));
   canvas.mockRestore(); root.remove();
 });

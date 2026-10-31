@@ -66,13 +66,24 @@ pub enum PublishDisposition {
     UploadFailed { reason: String },
 }
 
+/// Storage state without a QA warning wrapper. Renderers can match this
+/// exhaustively without assuming a recursive warning has been unwrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageDisposition<'a> {
+    Committed,
+    CommittedMetadataUnavailable { reason: &'a str },
+    StorageNotLive { reason: &'a str },
+    NotLoggedIn,
+    UploadFailed { reason: &'a str },
+}
+
 impl PublishDisposition {
     /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
         matches!(
             self.storage_disposition(),
-            PublishDisposition::Committed { .. }
-                | PublishDisposition::CommittedMetadataUnavailable { .. }
+            StorageDisposition::Committed
+                | StorageDisposition::CommittedMetadataUnavailable { .. }
         )
     }
 
@@ -92,10 +103,14 @@ impl PublishDisposition {
         }
     }
 
-    pub(crate) fn storage_disposition(&self) -> &Self {
+    pub(crate) fn storage_disposition(&self) -> StorageDisposition<'_> {
         match self {
             Self::QaBundleNotPortable { storage, .. } => storage.storage_disposition(),
-            other => other,
+            Self::Committed { .. } => StorageDisposition::Committed,
+            Self::CommittedMetadataUnavailable { reason } => StorageDisposition::CommittedMetadataUnavailable { reason },
+            Self::StorageNotLive { reason } => StorageDisposition::StorageNotLive { reason },
+            Self::NotLoggedIn => StorageDisposition::NotLoggedIn,
+            Self::UploadFailed { reason } => StorageDisposition::UploadFailed { reason },
         }
     }
 
@@ -311,8 +326,9 @@ pub fn digest_file(path: &Path) -> Result<(String, u64), PublishError> {
     Ok((format!("{:x}", hasher.finalize()), size_bytes))
 }
 
-/// Media type from the file extension. Unknown extensions get the honest
-/// `application/octet-stream` rather than a guess.
+/// Media type from the file extension. Ambiguous TypeScript extensions use
+/// text unless their bytes have MPEG-TS framing. Unknown extensions get the
+/// honest `application/octet-stream` rather than a guess.
 pub fn mime_for(path: &Path) -> String {
     let extension = path
         .extension()
@@ -324,6 +340,18 @@ pub fn mime_for(path: &Path) -> String {
         "html" | "htm" => "text/html",
         "md" | "markdown" => "text/markdown",
         "txt" | "log" => "text/plain",
+        "ts" | "tsx" => {
+            // A lone 0x47 is also ASCII G in valid TypeScript. Require two
+            // complete 188-byte transport packets with repeated sync bytes.
+            const PACKET_BYTES: usize = 188;
+            let mut prefix = [0u8; PACKET_BYTES * 2];
+            let framed = File::open(path)
+                .and_then(|mut file| file.read_exact(&mut prefix))
+                .is_ok()
+                && prefix[0] == 0x47
+                && prefix[PACKET_BYTES] == 0x47;
+            if framed { "video/mp2t" } else { "text/plain" }
+        }
         "json" => "application/json",
         "jsonl" | "ndjson" => "application/x-ndjson",
         "csv" => "text/csv",
@@ -439,11 +467,13 @@ pub fn publish(
         disposition,
         source,
     };
-    if outcome.disposition.is_committed()
-        && let Some((_temp, archive)) = closure
-    {
-        if let Err(error) = qa::record(context, &outcome, &archive) {
-            qa_error = Some(error.to_string());
+    if let Some((_temp, archive)) = closure {
+        if outcome.disposition.is_committed() {
+            if let Err(error) = qa::record(context, &outcome, &archive) {
+                qa_error = Some(error.to_string());
+            }
+        } else {
+            qa_error = Some("manifest is not stored in Cloud, so its QA archive is not portable".into());
         }
     }
     outcome.disposition = outcome.disposition.with_qa_error(qa_error);
@@ -640,7 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn producer_publication_keeps_manifest_when_closure_is_unavailable() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_string_contains, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -654,6 +684,13 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path("/blob"))
             .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/blob"))
+            .and(body_string_contains("trace.zip"))
+            .respond_with(ResponseTemplate::new(403))
+            .with_priority(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -719,6 +756,19 @@ mod tests {
                     }
                 }
             }
+            // A valid archive cannot travel either if its manifest upload fails.
+            fs::write(f.task_dir.join("trace.zip"), b"saved QA trace").unwrap();
+            fs::write(&manifest, serde_json::json!({
+                "schema": 1, "task_id": "cas-b72a", "producer": "cas-qa-craft",
+                "files": {"trace": "trace.zip"}
+            }).to_string()).unwrap();
+            let mut context = f.context();
+            context.cloud = Some(ArtifactUploadClient::new(&endpoint, "test-token"));
+            assert!(qa::prepare(&context, &manifest).unwrap().is_some());
+            let published = publish(&context, &manifest).unwrap();
+            assert_eq!(published.artifact.status, "local");
+            assert_eq!(published.disposition.metadata_state(), "qa_bundle_not_portable");
+            assert!(published.disposition.qa_portability_error().unwrap().contains("manifest"));
             assert_eq!(fs::read(private).unwrap(), private_bytes);
         })
         .await
@@ -851,6 +901,29 @@ mod tests {
         assert_eq!(mime_for(Path::new("a/noext")), "application/octet-stream");
     }
 
+    #[test]
+    fn typescript_sources_publish_as_text_while_transport_streams_remain_video() {
+        let f = fixture();
+        let mut transport_stream = vec![0xff; 188 * 2];
+        for packet in transport_stream.chunks_exact_mut(188) {
+            // Two valid null packets: sync, null PID, payload-only header.
+            packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        }
+        for (name, bytes, expected) in [
+            ("probe.ts", b"export const probe = true;\n".as_slice(), "text/plain"),
+            ("component.TSX", b"export const View = () => <div />;\n".as_slice(), "text/plain"),
+            // ASCII G is also 0x47, but source is not a transport stream.
+            ("graph.ts", b"Graph.render();\n".as_slice(), "text/plain"),
+            ("recording.ts", transport_stream.as_slice(), "video/mp2t"),
+        ] {
+            let file = f.task_dir.join(name);
+            fs::write(&file, bytes).unwrap();
+            let outcome = publish(&f.context(), &file).unwrap();
+            assert_eq!(outcome.artifact.mime, expected, "{name}");
+            assert_eq!(f.store.get(&outcome.artifact.id).unwrap().unwrap().mime, expected, "{name}");
+        }
+    }
+
     #[tokio::test]
     async fn webm_publish_is_rejected_before_cloud_requests_and_suggests_zip() {
         let server = wiremock::MockServer::start().await;
@@ -920,8 +993,8 @@ mod tests {
                 case.is_committed(),
                 matches!(
                     case.storage_disposition(),
-                    PublishDisposition::Committed { .. }
-                        | PublishDisposition::CommittedMetadataUnavailable { .. }
+                    StorageDisposition::Committed
+                        | StorageDisposition::CommittedMetadataUnavailable { .. }
                 )
             );
         }

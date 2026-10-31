@@ -21,7 +21,8 @@ reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defau
 For batch work, capture before/after evidence during implementation. The supervisor
 builds an hourly candidate at the exact epic tip and walks one combined matrix.
 Publish the PASS ledger, then record `verification action=batch_receipt` with
-`task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`. Every listed
+`task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author`
+(a non-implementer). Every listed
 task's delivery anchor must be contained in that reviewed target commit. Close
 after the receipt covers those anchors. A deferred close reports "waiting for
 batch receipt" until then. Explicit `qa_request` reviews use the procedure below.
@@ -195,8 +196,15 @@ matching local run (see step 4). The files, all listed in `bundle.json`:
 - `trace-actions.txt`: the output of `npx playwright trace actions`
 - `receipt.webm`, only for `visual_change: true`: start it with
   `page.screencast.start({ path, size: page.viewportSize() })` and
-  `showActions`, and add one `showChapter('F01 …', { duration: 1000 })` per
-  finding; omit screencast and chapter calls for non-visual changes
+  `showActions`, and add one
+  `showRecordingChapter(page, 'F01 …', { duration: 1000 })` per finding. For
+  other projects, copy the self-contained constructed-stylesheet helper from
+  the [worked example](evidence-bundle.md#worked-example) into the evidence spec.
+  Commander-only, in the Cassy source checkout: import that helper from
+  `hub-web/e2e/journeys/receipt-directory.mjs`, adjusting the spec's relative
+  path. That repository file is not installed in other projects. Both routes
+  preserve `style-src 'self'`. Omit screencast and chapter calls for non-visual
+  changes
 - `final.aria.yml` and `final.aria.json`
 - `F01.png`, `F02.png`, …: one capture per finding, listed in `files.cells`
 - `visual-qa/` and `visual-qa.stdout`
@@ -214,8 +222,10 @@ Write `<ledger-dir>/LEDGER.md` beside `bundle.json`. It has these sections:
   `| # | Path | Viewport · scheme | Expected | Actual | Severity | Evidence |`
 - **Polish:** the rubric table, the checklist, and the
   `visual-qa.mjs --strict` verdict line (plus the base run's, when scoped).
-- **Pre-existing:** every defect the base build shares, with its evidence and
-  the follow-up task Cassy filed for it. Say "none" when there are none.
+- **Pre-existing:** every defect the base build shares, with its evidence, and
+  the follow-up Cassy filed for any that carries `repro` (steps or command, plus
+  the wrong output) and `affected` (who acts on it today). Say "none" when there
+  are none.
 
 Every finding cites a `trace action N` **and** its `F0N.png`. A finding
 without both is not a finding. Recording the verdict cites the bundle on the
@@ -240,18 +250,19 @@ states the same bar, so decide by it, not by impression:
   mode is `NOT EXERCISED: <reason>`, never PASS.
 
 Record each finding classified as pre-existing under §3 in the ledger and pass
-it to `qa_record` with `"scope": "pre-existing"`. Cassy files each one as a
-follow-up task linked to the delivery and lists the new task ids in the verdict.
-A rejection whose every issue is pre-existing is refused.
+it to `qa_record` with `"scope": "pre-existing"`. Cassy files one as a follow-up
+linked to the delivery only when it also carries `repro` and `affected`, and
+lists the new task ids in the verdict. The rest stay in the verdict. A rejection
+whose every issue is pre-existing is refused.
 
-Otherwise approve. List Normal and Note findings in the summary so the
-supervisor can turn them into follow-ups.
+Otherwise approve. List Normal and Note findings in the summary; they stay in the
+verdict for the release's polish sweep.
 
 ```text
 verification action=qa_record task_id=<delivery> status=approved|rejected \
   summary="<one line: verdict and the top findings>" \
   issues='[{"severity":"high","problem":"...","suggestion":"...","file":"<screenshot>"},
-          {"severity":"normal","scope":"pre-existing","problem":"...","file":"<screenshot>"}]' \
+          {"severity":"normal","scope":"pre-existing","problem":"...","file":"<screenshot>","repro":"<steps and wrong output>","affected":"<who acts on it today>"}]' \
   ledger_path=<ledger-dir>/LEDGER.md
 ```
 

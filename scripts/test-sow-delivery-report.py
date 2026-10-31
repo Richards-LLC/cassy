@@ -61,10 +61,15 @@ class SowGateTests(unittest.TestCase):
                 'max_shots': 6, 'viewports': ['1280x800'], 'mask': []},
                 'shots': [{'id': 'R1', 'path': '/', 'viewport': [9999, 9999]}],
                 'credentials_file': str(Path(tmp) / 'absent')}))
-            result = subprocess.run(['node', str(CAPTURE), str(plan), '--validate'],
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(json.loads(result.stdout)['code'], 'capture-catalog')
+            alias = Path(tmp) / 'assets'
+            alias.symlink_to(CAPTURE.parent, target_is_directory=True)
+            for script, flags in [(CAPTURE, []), (alias / CAPTURE.name, []),
+                                  (alias / CAPTURE.name, ['--preserve-symlinks-main'])]:
+                with self.subTest(script=script, flags=flags):
+                    result = subprocess.run(['node', *flags, str(script), str(plan), '--validate'],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)['code'], 'capture-catalog')
             self.assertFalse((Path(tmp) / 'pairs.json').exists())
 
     def test_missing_mask_names_selector_and_sides_once(self):

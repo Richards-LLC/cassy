@@ -643,6 +643,16 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             "zero drift: {saved}"
         );
     }
+    // A clean measured tree can still have new, uncommitted family inputs.
+    git(&["reset", "--hard", &curated]);
+    assert_eq!(status()["differs_from_measured_ref"], false);
+    write(
+        "docs/qa/bug-families/uncommitted.yaml",
+        "title: Uncommitted family\ntasks: [cas-1234]\ninvariants: [FLOW]\njourneys: [home]\n",
+    );
+    let uncommitted = status();
+    assert_eq!(uncommitted["problems"], serde_json::json!([]), "{uncommitted}");
+    assert_eq!(uncommitted["differs_from_measured_ref"], true, "{uncommitted}");
 }
 
 /// The lib-test probe child does not exercise main.rs's early executable route.

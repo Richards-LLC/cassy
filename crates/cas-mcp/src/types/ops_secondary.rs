@@ -367,6 +367,10 @@ pub struct VerificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "batch_receipt: full 40-hex staging commit SHA, contained in each task's configured target")]
     pub staging_sha: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: agent id or name that walked the ledger; refused if it implemented a listed tier 1/2 task unless the operator ran `cas qa author-override <task>`")]
+    pub ledger_author: Option<String>,
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
     #[schemars(
@@ -649,17 +653,17 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_queue' (inspect, reorder or clear pending task_ids for id=<worker>), 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_queue' (inspect, reorder or clear pending task_ids for id=<worker>), 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session), 'restart_supervisor' (supervisor-only: replace only this supervisor's session; workers keep running. Record a handoff first)"
     )]
     pub action: String,
 
     /// Return complete GC inventory as one JSON document.
-    #[schemars(description = "gc_report: one JSON document with report_text, full_report and complete machine_status")]
+    #[schemars(description = "gc_report/gc_cleanup: one JSON document with report_text, full_report and complete machine_status")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
     /// Return the original unabridged GC report.
-    #[schemars(description = "gc_report: original full report including raw status; incompatible with limit/offset")]
+    #[schemars(description = "gc_report/gc_cleanup: original full report including raw status; incompatible with limit/offset")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub full: Option<bool>,
 
@@ -994,7 +998,7 @@ pub struct FactoryRequest {
 ///   message_ack, message_status.
 /// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
-///   remind, remind_list, remind_cancel, restart_spawn_queue, claim, claim_status,
+///   remind, remind_list, remind_cancel, restart_spawn_queue, restart_supervisor, claim, claim_status,
 ///   release_claim, transfer_claim, accept_claim.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
 ///   worktree_merge, worktree_status.
@@ -1021,12 +1025,12 @@ pub struct CoordinationRequest {
     pub peer: Option<String>,
 
     /// Machine-readable peer or GC report with untruncated values.
-    #[schemars(description = "peers/gc_report: one JSON document, untruncated")]
+    #[schemars(description = "peers/gc_report/gc_cleanup: one JSON document, untruncated")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
     /// Original GC report including complete machine-status lines.
-    #[schemars(description = "gc_report: unabridged; not with limit/offset")]
+    #[schemars(description = "gc_report/gc_cleanup: unabridged; not with limit/offset")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub full: Option<bool>,
 

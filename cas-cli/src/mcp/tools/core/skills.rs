@@ -89,6 +89,10 @@ impl CasCore {
                 match read_skill_from_file(project_root, &req.id) {
                     Ok(Some(s)) => (s, true),
                     Ok(None) => {
+                        let harness = catalog_harness();
+                        if let Some(file) = crate::builtins::builtin_skill_file(harness, &req.id) {
+                            return Ok(Self::success(render_builtin_skill(harness, &req.id, file)));
+                        }
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
                             message: Cow::from(self.unknown_skill_message(&req.id, skill_store.as_ref())),
@@ -708,7 +712,13 @@ impl CasCore {
             }
         }
 
-        if all_skills.is_empty() {
+        let known: HashSet<String> = all_skills.iter().map(|s| s.name.to_lowercase()).collect();
+        let shipped: Vec<_> = crate::builtins::builtin_skill_index(catalog_harness())
+            .into_iter()
+            .filter(|(name, _)| !known.contains(&name.to_lowercase()))
+            .collect();
+
+        if all_skills.is_empty() && shipped.is_empty() {
             return Ok(Self::success("No skills found"));
         }
 
@@ -737,6 +747,37 @@ impl CasCore {
             output.push_str(&format!("\n... and {} more", all_skills.len() - limit));
         }
 
+        if !shipped.is_empty() {
+            output.push_str("\nShipped skills (action=show id=<name>):\n");
+            for (name, description) in shipped {
+                output.push_str(&format!("- {name}: {description}\n"));
+            }
+        }
+
         Ok(Self::success(output))
     }
+}
+
+/// The harness whose spelling of the shipped catalog this caller should read.
+fn catalog_harness() -> cas_mux::SupervisorCli {
+    std::env::var("CAS_FACTORY_WORKER_CLI")
+        .ok()
+        .and_then(|cli| cli.parse().ok())
+        .unwrap_or(cas_mux::SupervisorCli::Claude)
+}
+
+fn render_builtin_skill(
+    harness: cas_mux::SupervisorCli,
+    id: &str,
+    file: &crate::builtins::BuiltinFile,
+) -> String {
+    let mut output = format!("Skill: {id}\nSource: shipped with Cassy\n\n{}", file.content);
+    let resources = crate::builtins::builtin_skill_resources(harness, id);
+    if !resources.is_empty() {
+        output.push_str("\n\nResources (action=show id=<path>):\n");
+        for resource in resources {
+            output.push_str(&format!("- {resource}\n"));
+        }
+    }
+    output
 }

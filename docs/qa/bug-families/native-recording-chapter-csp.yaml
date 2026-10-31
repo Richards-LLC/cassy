@@ -1,0 +1,4 @@
+title: Native Commander recordings show chapter captions without inline-style CSP refusals or changes to the production policy
+tasks: [cas-aff6]
+invariants: [HUB-J24-GOAL]
+journeys: [HUB-J24]

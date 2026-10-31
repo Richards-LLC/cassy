@@ -7,6 +7,905 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.92.0] - 2026-10-31
+
+### Changed — Team leads with what your team is doing
+
+- **The heading states a finding** — Team now opens with a sentence computed from the session, such as "3 working, 1 waiting. 1 needs you.", and says when it is showing the last reported state.
+- **The delivery trail is the lane's figure** — Each lane shows its five receipts on one track, and a segment fills only between two recorded receipts.
+- **The rail steps back beside Team** — On desktop, worker rows in the side rail become a quiet list while Team is open, and keep their controls.
+
+### Fixed — Team tab finish
+
+- **Delivery track contrast** — The line between receipts on each Team lane now holds at least 3:1 against its lane in both schemes.
+- **Rail rows beside Team** — Each worker's name and controls share one line, the worker menu has a visible edge at rest, and forced colors no longer paint a border against the name.
+- **Receipt names for screen readers** — Delivery receipts no longer read out internal event ids.
+- **Release track contrast and shapes** — The release progress track has a stronger outline in both schemes, the Team panel and tabs have rounded corners, and state pills sit evenly in their lanes.
+
+### Fixed — Commander conversation
+
+- **A refused slash command keeps one row** — Was: each resend of a command the supervisor refused added another row to the conversation and another Attention event, and the rows stayed. Now: one row per command says why it was refused and how many times you tried, it clears once that command is accepted, and a refusal no longer raises Attention. A command that may have run still shows as uncertain.
+- **Codex's own context no longer appears as something you sent** — Was: with a Codex supervisor, a new conversation showed Codex's `<environment_context>` block as a delivered message and Cassy's startup prompt ("Message from director: …") as a message from Terminal, and the sidebar preview read "You: Message from director". → Now: Codex launch context, AGENTS.md instructions and the factory's own pane deliveries are recognized as machine input and never mirrored as operator messages. Each is matched on the whole message, so a typed message that pastes such a block after your own words still reaches Commander.
+- **Times read 12-hour, like the rest of Cassy** — Was: message bubbles, session dividers, the Team trail and Attention's last-event time showed 24-hour clock times such as "19:15", and the connection details showed the browser's default with seconds. → Now: every Commander clock time uses your browser's timezone in 12-hour form with AM/PM, such as "7:15 PM" or "Sep 30, 5:49 PM".
+
+### Fixed — Forced colors in Commander
+
+- **Selected states read correctly in forced colors** — The selected conversation's name is readable on its highlighted row, and only the selected view tab is underlined, so Team no longer looks unselected.
+
+### Fixed — Codex launch
+
+- **Codex workers and supervisors no longer update Codex by accident** — Was: when a newer Codex was available, launch showed an "Update now" dialog with that option selected, and the factory's first Enter accepted it, so Codex ran `npm install -g @openai/codex`, changed the machine's global npm and the session died. → Now: factory Codex panes launch with `check_for_update_on_startup=false`, so the dialog never appears and the first prompt reaches the agent.
+
+### Fixed — Release progress at zero
+
+- **An unstarted release looks empty** — The release progress bar in Team and the side rail now has a hollow, outlined track, so 0 of 4 merged no longer looks like a full bar.
+
+### Fixed — Supervisor commands during a running turn
+
+- **Commands sent just after a reply wait for the prompt to settle** — Was:
+  promptly sending Exit after a supervisor reply could be refused as busy.
+  → Now: an idle prompt gets up to 3 seconds to complete its 2-second quiet
+  window, with fresh output and busy state checked again before typing.
+- **Slash commands wait for the supervisor's turn to end** — Commander no longer
+  types a command into a running turn. Claude's `·` spinner frame counts as busy,
+  and the supervisor's terminal must be quiet for 2 seconds first. A Codex
+  supervisor also counts as busy from its turn start to its turn end in Codex's
+  session file, because Codex can pause for more than 2 seconds mid-reply with
+  no busy text.
+- **A repeat Codex status is confirmed** — Was: sending Status again while the
+  last status was still on screen never showed as done, and every other command
+  waited 90 seconds. → Now: the new status output Codex prints confirms it, even
+  when the screen looks the same.
+
+### Fixed — Backquote command inspection
+
+- **Nested backquote commands keep workspace and operator checks** — The shell
+  guard removes one backquote escape layer before inspecting the inner command,
+  including escaped backticks, dollar signs and backslashes. Nested outside writes
+  and escaped operator-only verbs stay denied; escaped backticks used as literal
+  double-quoted data remain allowed.
+
+### Fixed — Released trunk attribution
+
+- **Lane attribution uses the full released-trunk ref** — A local branch named
+  `origin/main` can no longer pass unreleased work off as released. An octopus
+  sync may combine epic and released-trunk parents; every side parent must
+  independently belong to one of those upstreams.
+
+### Fixed — Team tab state and decisions stand out
+
+- **Worker state reads at a glance** — Working, waiting, stalled and parked workers now have distinct pill colors in Team and the side rail, and each Team lane has a status dot on its avatar. The Needs you control uses the warning treatment and names the question when exactly one is open.
+
+### Fixed — Park after a helper-branch commit
+
+- **A worker's helper branch no longer hijacks its delivery, and park stops looping** — Was: a commit on a separate helper branch (such as a main-ready copy) became the task's delivery anchor, so park refused because that commit was missing from the worker's own branch, and the `commit_receipt=<tip>` it asked for was refused again with the same instruction. → Now: only the task's own branches move its anchor, and the exact receipt for the worker's current tip rebinds the anchor when that tip's history since it left the target is this task's work plus target sync merges.
+
+### Fixed — Compact merge and close receipts
+
+- **Routine merges now return their compact receipt** — Includes the merge policy, CI commit and immutable detail reference. Overrides, unparked deliveries, push failures and close gates retain their full diagnostics; close summaries keep worktree warnings and verification skip reasons. Closed tasks correctly report no next action.
+
+### Fixed — Supervisor idle alerts
+
+- **A worker waiting on its own tests no longer pages the supervisor every minute** — Was: a worker that told the supervisor it was not blocked, or that kept rerunning its background tests, drew the same "pending delivery" idle alert about once a minute. → Now: a changed condition (new tip, CI result or task state) still alerts at once. The same alert repeats at most once in 10 minutes after a background run ends, and is held for 10 minutes after the worker's own status for that task that needs nothing. A blocker, question, ready report or stated need never quiets it.
+
+### Fixed — Cross-machine batch QA
+
+- **A batch QA receipt recorded on one machine now closes tasks delivered on another** — Was: a receipt existed only on the machine that recorded it, so the delivering machine's close refused with "waiting for batch receipt" and `verification show` said the receipt was not found. → Now: the receipt travels with each listed task through task sync, either machine's close accepts it, and `verification show id=qab-…` prints it. The independent-author check still applies on the closing machine.
+
+### Fixed — Conditional operand recognition
+
+- **Function and coprocess bodies keep arithmetic checks** — Unquoted `[[ … ]]`
+  operands receive numeric-only validation regardless of preceding command
+  words, including functions, coprocesses and nested substitutions.
+
+### Fixed — QA overdue notice
+
+- **A running "3.92 batch QA round N" holds back the overdue notice** — Was: the hourly notice that merged tasks are waiting for QA only recognized a running round whose title started with "Batch QA round", so a round titled "3.92 batch QA round 8" was ignored and the notice fired anyway. → Now: "batch QA round" anywhere in the title, in any case, counts as a running round.
+
+### Fixed — Task close
+
+- **A changelog entry received by merging a predecessor's branch counts** — Was: a worker who merged an earlier worker's branch into its lane was refused with "CHANGELOG [Unreleased] REQUIRED", because the check skipped merge commits. → Now: close counts a titled Unreleased entry introduced by the commits it attributes to the task, including a merged branch of the same task. Entries brought in by a target refresh or another task's merged branch still do not count.
+
+### Fixed — Workspace guard and `case`
+
+- **A `case` statement no longer reads as an unmatched scope** — Was: the workspace guard denied any `case` arm, even a harmless heredoc, because it took the pattern's `)` for the end of a subshell. → Now: pattern text and `)` are read as `case` syntax, and what an arm runs is checked as before. A pattern with a substitution or `$`, and an unterminated `case`, stay denied, and a `cd` in one arm no longer hides the directory the next arm runs in. A redirect's filename is no longer read as the command, so `>out touch /x` and `{fd}>out touch /x` are judged as `touch /x`.
+
+### Fixed — Source-bound QA candidates
+
+- **QA candidates include current Commander source changes** — The isolated
+  candidate checkout now builds production web assets before compiling Cassy.
+  Its receipt records the source and served web digests, and publication fails
+  if the candidate serves different bytes. The previous candidate stays intact
+  when verification fails. Homepage verification uses the hub's canonical
+  Commander route, so a valid candidate no longer fails with an HTML 404.
+
+### Fixed — Independent batch QA
+
+- **A worker's own QA walk no longer counts as independent QA** — Was: a batch QA receipt and a QA-backed close accepted a ledger walked by the worker that delivered the task, as long as a different supervisor recorded it. → Now: `batch_receipt` requires `ledger_author` and records its id and role. It refuses an author in any listed tier 1 or 2 task's implementation lineage, and close rechecks receipts and passed QA rounds the same way. QA reviewers, verifiers and non-delivering workers, including on another machine, are accepted. Only the operator's own `cas qa author-override <task> --note "<why>"` lets a lineage author through; agents are refused, and a task note does not count. Receipts recorded before authors were tracked still count.
+
+### Added — Supervisor Cassy versions in Commander
+
+- **See which supervisors need a refresh** — Each online supervisor with a known MCP version shows a quiet badge. An upgrade arrow identifies sessions running an older Cassy than their machine has installed, with guidance to reconnect MCP.
+
+### Added — Batch QA overdue alarm
+
+- **Supervisors are told when merged work waits for QA** — Was: a batch QA round could be held for hours while merged tasks waited, and nothing flagged it. → Now: if a merged delivery has no receipt after 60 minutes and no round started in that time, every supervisor on the epic, on both machines, gets one notice an hour. The supervisor guidance now says a round covers what is merged at the tip and never waits for lanes still in review.
+
+### Fixed — Conditional and parameter operands
+
+- **Recursive parameter operands stay unresolved** — `[[ … ]]` comparisons and
+  `${…}` array indices, substring positions and indirection cannot hide executable
+  subscript text. Literal numeric comparisons, indices and slices stay allowed.
+
+### Fixed — Merge admission after a cancelled lane run
+
+- **A cancelled code run no longer reads as pending forever** — Was: when a docs push cancelled the code commit's lane run, `worktree_merge` refused with "CI PENDING", though that run could never finish. → Now: once the tip's run is green, the code commit's cancelled and lingering jobs are set aside. A passed code check admits the merge, and with none it needs the docs-only override, because a docs tip validates no code. A job still running in a live run stays refused.
+
+### Fixed — Browser tier guard
+
+- **Tab-stripped heredocs pass the workspace guard again** — Was: any `<<-` heredoc, even a quoted literal one, was denied as an unresolved shell payload. → Now: the guard keeps `<<-` together when it compares delimiters, so these heredocs are judged like any other.
+- **`playwright test --help` is allowed for workers and QA** — Was: the browser tier guard denied this read-only command as an unfiltered suite run. → Now: `test --help` and `test -h` pass when help is the only argument. A later `--help` is still denied, because it can be another option's value and the whole suite would run.
+
+### Changed — Verification
+
+- **Review findings stop spawning tasks, and verification follows risk** — Was:
+  every delivery got the same verifier, and its non-blocking improvements became
+  new tasks that each got another verifier. → Now: improvements stay in the
+  verdict unless they show a reproduced defect affecting someone today. Close
+  records a tier: docs and tests have no independent verifier, most changes get
+  one, and guard, CI, release and close-gate changes also get an adversarial
+  probe. QA follows the same tiers, including batch rounds: Tier 0 walks no
+  journeys, and Tier 2 needs an adversarial probe row in the task ledger.
+  `cas qa polish --epic <id>` lists an epic's warnings by file for one polish task
+  per release. The verifier's scratch-checkout lifetime details moved to its evidence-gate
+  reference, keeping its definition under budget with every rule in place.
+- **Follow-ups from findings must clear the spawn threshold** — Was: nothing in
+  the tools stopped a review finding becoming a task, and nothing showed when an
+  epic's reviews were generating more work than they closed. → Now: `task create`
+  refuses a follow-up from a finding without `repro` and `affected`, and a P0/P1
+  bug an operator or supervisor observed directly stays exempt. QA's automatic
+  pre-existing follow-ups need the same two fields; the rest stay in the verdict.
+  With at least 5 completed reviews, at 0.5 follow-ups per review over an epic's
+  last 10, the supervisor gets one notice, and
+  `epic_status` shows the ratio.
+
+### Fixed — Hub pin safety
+
+- **The hub pin refuses agents, partial installs and a stale update** — Was: only a hook stopped a worker running `scripts/hub-pin.sh`; the installed copy could start `install` and stop partway without its drop-ins; and `cas update` could overwrite a rollback that finished just before it took the pin lock. → Now: the script refuses every factory agent role except an operator command in a supervisor pane, `install` says to run from a checkout before changing anything, and the update checks the pin again under the lock.
+
+### Added — Release-pinned hub and host isolation
+
+- **The hub is pinned to release builds** — Was: a live hub hotfix could run any
+  binary, including a slow `cas qa candidate` debug build, and applying the hub and
+  factory weights to a host was a manual merge. → Now: `scripts/hub-pin.sh install`
+  applies the weights and the pinned path, with a `--dry-run`. `stage`, `activate`
+  and `rollback` accept only a successful, audited Release Prebuild artifact and
+  refuse a debug binary. A newer release clears a hotfix pin through `cas update`.
+
+### Fixed — Expanding heredoc workspace checks
+
+- **Heredoc substitutions respect workspace write boundaries** — Unquoted
+  heredoc bodies now receive the same filesystem-effect and numeric-only
+  arithmetic checks as command arguments, including tab-stripped heredocs.
+  Quoted bodies and escaped substitution markers remain literal data.
+  Ambiguous body ownership and joined terminators now fail closed; escaped
+  and partially quoted delimiters retain their literal body semantics.
+  Heredocs containing whitespace other than space, tab or newline, dollar-quoted
+  delimiter fragments, and continued heredoc declarations are conservatively refused.
+
+### Fixed — Team tab shows the whole team
+
+- **Four workers fit without scrolling** — Team lanes now take three compact rows, and the release block is a slim rule above them, so four workers fit at 1280x800 and 390x844. While Team is open on desktop, the side rail no longer repeats the release block.
+
+### Added — Merge queue flake recovery
+
+- **A recovered test no longer ejects the release** — The merge queue reruns
+  failed Rust tests or journey specs once on the same tree, preserving both
+  attempts. A fail-then-pass files a deduplicated P1 issue; a second independent
+  flake quarantines that identity through an open issue label. Closing its fix
+  issue restores the test. Persistent failures still eject, and worker/lane
+  checks retain zero retries. Rust recovery adds at most 30 seconds.
+
+### Fixed — Shell policy command recognition
+
+- **Shell syntax cannot hide operator-only commands** — Agent checks now
+  recognize brace, loop, coprocess and function-body command positions,
+  inspect both possible command words in ambiguous coprocess syntax,
+  remove shell line continuations,
+  and decode common ANSI-C quoted words before matching policy commands.
+  Unsupported ANSI-C escapes are refused; quoted data remains literal.
+
+### Fixed — Delivery-scoped upkeep waivers
+
+- **Upkeep decisions cover one delivery and finding** — Park now prints the
+  complete waiver command with the delivery SHA and finding ID, and rejects old
+  or mismatched decisions. Bug fixes also receive a named case-coverage refusal
+  when an untouched malformed registry prevents evaluating their regression case.
+
+### Fixed — QA impact for test fixtures
+
+- **Test fixtures stay outside product QA impact** — Files in fixture directories
+  no longer select every Commander journey or appear as unowned product surfaces.
+  Registered suites and test inputs retain their journey coverage; product source
+  retains its QA checks.
+
+### Added — Per-file edit sizes in Commander
+
+- **Tool-reported files show known edit sizes** — Changed-file rows display added and removed line counts when a successful edit reports them, including zeroes. Unknown counts stay absent. Screen readers hear both numbers and their meaning; the counts describe the latest successful edit, not Git or turn totals.
+
+### Fixed — Quoted shell data
+
+- **Escaped backticks stay literal inside double quotes** — Factory workspace
+  checks allow quoted backtick data while still inspecting executable backtick
+  substitutions for filesystem writes and operator-only commands.
+
+### Fixed — Merged delivery recovery guidance
+
+- **Launch and status messages agree on merge completion** — All harness launch
+  contracts, stale merge replies and worker status rows let the merge verdict
+  close or reopen the delivery, without another close command from the worker.
+
+### Added — Supervisor-only restart
+
+- **A supervisor can restart without stopping its workers** — Was: any supervisor
+  exit shut the factory down and stopped every worker, so a new harness version or
+  a fresh context meant checkpointing and respawning the whole fleet. → Now:
+  `factory action=restart_supervisor` ends only the supervisor's session and starts
+  a new one with the factory's boot harness, model and effort. Workers keep their
+  tasks, panes and leases. A plain exit or crash still shuts the factory down.
+
+### Fixed — Reused-lane recovery advice
+
+- **Refused advances identify the next task** — Re-parking names the first
+  foreign commit and directs the worker to deliver recognized next-task work
+  on its own branch. The parked anchor stays intact, and newly detected merge
+  conflicts refresh its recovery flag before close returns.
+
+### Changed — Factory workers
+
+- **Worker launches carry a role-scoped skill listing** — Was: every worker and
+  Codex verifier read the whole native skill listing at launch, 12,000 to 18,000
+  characters on every harness. → Now: workers list six role skills through each
+  harness's own control, under 2,500 characters on Claude, Codex, Grok and
+  OpenCode, and Codex verifiers list none. Supervisors are unchanged. Any skill
+  stays available: `/name` or `$name` still expands, and `skill action=list_all`
+  and `skill action=show` now serve the shipped catalog and its references even
+  when no project synced it. Grok workers in a Cassy-managed worktree run with
+  `GROK_FOLDER_TRUST=false` and a generated `.grok/skills` that ignores itself, so
+  the shared exclude file stays untouched; other checkouts keep the full listing.
+  A user's own Grok skills and skills a repository tracks stay listed,
+  as do Claude plugin skills, which Claude's control does not reach. Only directories holding a `SKILL.md` count as skills, so stray entries such as `.trash` are not listed in the overrides.
+
+### Fixed — Async terminal output at exit
+
+- **Terminal waits keep the final output** — Async PTY waits observe buffered
+  output and reader completion together, so a short-lived command cannot
+  report an unexpected exit while its matching output is already available.
+
+### Fixed — Worker guidance contracts
+
+- **Worker startup keeps its protected workflow** — Always-loaded guidance
+  again states sequential task ownership, checkpointing, evidence-ledger
+  commands and all component issue-routing keys within its existing budget.
+
+### Fixed — Secret policy configuration examples
+
+- **Secret auto-delete examples use accepted policies** — Configuration help now
+  offers `off`, `after_use` and `1h`, so registry round trips and reset contracts
+  exercise real stored policies instead of generic string values.
+
+### Fixed — Delivery process
+
+- **Clock-only updates do not strand a ready delivery** — Was: a close-owned
+  update could change only a task's timestamp, yet parking refused the ready
+  delivery as a changed snapshot. → Now: parking refreshes the clock when every
+  non-audit field still agrees, preserving append-only notes and refusing
+  concurrent reopens, ownership changes and proof corrections.
+
+### Fixed — Work evidence offline recovery
+
+- **Source edits wait for reconnection** — Expanded source evidence names an offline machine and loads when it reconnects, without requesting again on every redraw. Closing an edit disclosure removes its saved entry.
+
+### Fixed — Refused delivery advances
+
+- **Re-parking names work it cannot attribute** — When a pushed branch advances
+  beyond its parked delivery through unowned work, close reports the kept anchor,
+  ignored tip and offending commit instead of returning an ordinary merge request.
+
+### Fixed — Independent case checks after registry failures
+
+- **Registry waivers retain separate regression checks** — Fixing a base duplicate
+  evaluates the delivered registry and compares every old case variant. Unreadable
+  delivered registries and catalog drift still require a separate bug-case decision,
+  including when an earlier registry waiver exists. Duplicates still present in the
+  delivery refuse with a named error; unavailable Git inputs retain their warning.
+
+### Fixed — Parked delivery attribution
+
+- **Upkeep excludes later work on a reused lane** — When an integration merge
+  brings in a tip beyond the parked delivery, close checks use the task's own
+  changes and record an integration-parent mismatch diagnostic.
+
+### Fixed — Image viewer recovery
+
+- **Repeated image failures leave one clear note** — Unavailable previews and
+  viewer loads share a single notice that clears on recovery. Phone checks keep
+  Try again visible without scrolling in light and dark.
+
+### Fixed — Arithmetic workspace checks
+
+- **Command-line arithmetic refuses unproven operands** — Factory checks
+  require numeric source in `$(( ))`, `$[ ]`, `let` and `(( ))`, and refuse
+  persistent integer declarations whose later assignments could run arithmetic.
+
+- **Shell syntax cannot hide inside arithmetic** — Arithmetic with comment
+  markers, line breaks, quotes or escapes is refused; plain balanced arithmetic
+  keeps its existing allowance.
+
+- **Ambiguous arithmetic keeps command checks** — Parentheses must match the
+  arithmetic boundary. Command substitutions and dynamic arithmetic operands
+  retain workspace checks and unresolved effects are refused.
+
+- **Multiplication stays arithmetic in shell arguments** — Workspace checks
+  keep arithmetic operators out of filesystem resolution while still checking
+  nested command substitutions and refusing unresolved effects.
+
+### Fixed — Factory cleanup feedback
+
+- **Cleanup stays readable while large inventories run** — Factory GC shows
+  bounded counts and the largest items, with complete details under `--full`
+  or `--json`. Human cleanup reports progress on stderr; JSON stays silent
+  until its single result. Existing deletion consent gates are unchanged.
+
+### Added — Emoji in Commander conversations
+
+- **Choose emoji without leaving your draft** — The composer has a searchable, keyboard-accessible emoji tray beside the mic, with recent picks and insertion at the cursor. Its English dataset loads locally on demand. Messages, list previews and waiting questions use native color-emoji fonts while preserving their text.
+
+### Fixed — Parking during note sync
+
+- **Synced note order does not block an unchanged delivery** — A worker can park
+  while cloud sync collates its audit notes. Earlier notes must remain intact;
+  review rejections and changes to task scope still invalidate the close.
+
+### Fixed — Bug-family registry comparisons
+
+- **Case coverage keeps its Git error warning** — An unreadable base registry
+  cannot credit an unchanged bug case as new. Journey status also reports new
+  untracked family files as working-tree drift.
+
+### Fixed — Commander project order
+
+- **Project cards and supervisor rows stay put** — Was: Commander ordered
+  project cards and the supervisors inside them by recent activity, so a
+  project with supervisors on two machines flickered as they traded places.
+  Now: cards sort by project name and rows by supervisor name (then machine,
+  then session), and activity never moves either; the Most recent mark stays
+  on the newest session where it stands.
+
+### Fixed — Deliverable capture on macOS
+
+- **Capture from linked directories returns its receipt** — Evidence capture
+  runs through macOS temporary paths instead of silently exiting, preserving
+  the JSON timeout result and cleanup behavior.
+
+### Fixed — Extracted handler journey coverage
+
+- **Rich inspection stays in source-impact selection** — Literal DOM lookups
+  retain the journeys that own their UI when a handler moves into an existing
+  shared module. Existing import ownership remains; unmapped source still
+  selects the whole surface even when it queries known UI.
+
+### Fixed — Changelog category validation
+
+- **Documentation and test entries pass release validation** — Titled non-shipped
+  changelog categories follow the release report rules; unknown categories and
+  malformed entries remain refused.
+
+### Fixed — Commander stylesheet loading
+
+- **Commander keeps its page styles when opening images** — The global
+  stylesheet retains its served name, while every lazy stylesheet receives a
+  hashed chunk name that the hub can serve.
+
+### Added — Commander reading frames
+
+- **Shared source frames and compact work rows** — Diagrams, diffs and code
+  share Copy and inline Expand, with Source/Preview for rich content, including
+  tool-reported file edits. Desktop work rows use a fixed icon gutter and less
+  space; phone targets stay 44px. Only explicitly live tools animate, with motion
+  disabled for reduced motion and forced colors.
+
+### Fixed — Worker test-shape scope
+
+- **Syncing released trunk preserves the task's test scope** — The test-shape
+  guard excludes files imported only by a trunk sync merge, while checking the
+  task's committed and working edits on either side of the sync.
+
+### Added — Readable published reasoning
+
+- **Published reasoning stays easy to skim** — Commander shows a folded summary preview with formatted detail and an exact raw-text fallback. Opening or updating it preserves focus and reading position; Thinking and Thought labels require reported lifecycle events.
+
+### Fixed — Merge completion guidance
+
+- **Parked workers wait for the merge verdict** — Recycle briefs, merge alerts
+  and supervisor references consistently let verification close a merged task or
+  return findings, without requesting another close from a worker or supervisor.
+
+### Added — Work-event edit line counts
+
+- **Edit facts can carry per-file additions and removals** — Successful explicit
+  patch records expose optional line counts through the Commander v2 contract
+  and parser. Counts describe each file's latest edit event; missing counts stay
+  unknown. The changed-files card can consume these facts in a follow-up.
+
+### Added — Conversation image inspection
+
+- **Inspect screenshots without leaving the conversation** — Image cards open a
+  viewer with zoom, pan and a gallery limited to that turn. Touch, mouse and
+  keyboard controls keep filenames and load failures visible; closing restores
+  keyboard focus and the reading position.
+
+### Fixed — Multi-line shell source
+
+- **Shell quotations keep their complete program colored** — Single-quoted awk and jq programs can span lines without coloring trailing file arguments as part of the string. Shell backslashes remain literal inside those quotes.
+
+### Fixed — Project account recommendations
+
+- **New session follows the selected project's account policy** — Commander
+  applies that project's account selection and usage threshold when recommending
+  an account, and refreshes the recommendation whenever the project changes.
+
+### Added — Turn edit summaries
+
+- **Inspect tool-reported edits per turn** — Commander groups the recorded file
+  paths beneath Show work. Open a file for its recorded unified diff or source
+  edit detail; disclosures stay expanded on this device. The summary reports
+  successful tool calls without inventing Git state or line counts.
+
+### Fixed — Merge-readiness guidance
+
+- **Merge guidance points to readiness gates** — The supervisor's merge row now
+  links to the caveats that a green push alone is not ready and pending or red CI
+  requires override authority and a reason. The Codex coordination note now says
+  the merge verdict closes or reopens the task, so workers do not re-close it.
+
+### Fixed — Composer file uploads
+
+- **Slow photo uploads show progress and have more time** — File transfers reserve
+  25% margin on a 512 kbit/s link, show their byte progress and storage step, and
+  keep a refusal in one place. Generic HEIF photos retain their image type.
+
+### Fixed — Release draft linting
+
+- **Unused draft helper removed** — Delete the orphan failure classifier.
+  Draft routing, lint failures and posted-receipt matching keep their behavior.
+
+### Added — Cloud request correlation
+
+- **Cloud discovery and claim failures retain a local attempt ID** — Agent lists,
+  lock reads and claim submissions send a fresh diagnostic UUID for each explicit
+  dispatch. Local receipts preserve available server IDs and distinguish response,
+  body/decode and transport failures without recording bodies or credential URLs.
+  A missing claim response still leaves its mutation outcome unknown.
+
+### Fixed — Factory guidance size
+
+- **Factory instructions leave room to grow** — Shared check, delivery and blocker
+  rules have one owner, reached when that phase starts. Workers and supervisors
+  reuse each reference within a context. Worker startup guidance reserves at
+  least 2,000 bytes below its 8,000-byte cap; supervisor guidance also leaves
+  room for the context header and Codex worker note. Tested instruction and
+  credential-request contracts stay intact.
+
+### Fixed — Compact factory gate receipts
+
+- **Routine merge and close receipts keep full details fetchable** — Successful
+  gate replies now keep the task, delivery, CI and next-action facts in a short
+  response, with the full immutable receipt available at its content-hashed path.
+
+### Fixed — Duplicate account EOF
+
+- **Login cancellation starts on a new line after EOF** — Was: Ctrl-D at the
+  duplicate-account question left the cancellation notice attached to the
+  prompt. Now: EOF ends the prompt line before the notice; entered answers
+  keep their spacing and the existing account stays intact.
+
+### Fixed — GitHub issue citation filtering
+
+- **Documentation anchors and issue prose keep lookup slots free** — Issue
+  citations skip documentation filenames and ambiguous `issue/` or `issues/`
+  shorthand before applying attachment and doctor lookup limits. Explicit GitHub
+  URLs and the configured project repository still resolve those names, and
+  dotted repository names such as `vue.js` remain valid shorthand.
+
+### Fixed — Shared-file warnings
+
+- **Workers can add their own changelog entries without coordination** — Was:
+  append-only detection accepted edits that rewrote another entry while adding
+  a new bullet. Now: the hook applies edits to current text and skips the
+  warning only when an insertion starts with a bullet or heading at an entry
+  boundary; indented lines must follow a newly inserted bullet. Rewrites,
+  deletions and continuations to existing bullets still warn.
+
+### Fixed — Cacheless worker delivery cleanup
+
+- **Deliveries without a build cache skip background retirement** — Closing or
+  parking a worker that has no debug output no longer launches a metadata writer
+  that can outlive its temporary project and invalidate a passing test receipt.
+  Existing build caches still retire in the background and keep their proof logs.
+
+### Fixed — Task start branch ownership
+
+- **Misbound factory branches fail before work starts** — Was: task start
+  could accept another worker's factory branch or a task suffix missing `cas-`,
+  leaving the commit guard to refuse the first commit. Now: start uses the
+  same ownership check and names the worker's canonical per-task branch before
+  claiming a lease or changing the checkout.
+
+### Fixed — Hub authentication clock correction
+
+- **Fast device clocks recover automatically** — The hub refuses future-dated
+  authentication proofs to prevent replay after a restart. Commander retries
+  on the hub's clock even when the device is only 1–4 seconds ahead.
+
+### Fixed — Reverted task receipts
+
+- **Backlog hygiene distinguishes reverted deliveries** — Was: `cas doctor`
+  and supervisor startup could suggest closing an open task with its revert
+  commit. Now: the latest explicit revert, or complete restoration of the
+  task's changed paths, appears as delivered then reverted without a close
+  receipt. Normal deliveries keep their close suggestions; unavailable tree
+  checks withhold unchecked receipts.
+
+### Fixed — Worker recycle recipe
+
+- **A recycled Codex worker stays on Codex** — Was: a hook or `cas` command in
+  a Codex worker's pane re-registered its session without the harness, so its
+  row lost `worker_cli`, read as Claude, and `recycle_worker` refused the
+  recipe (`cli=claude, model=gpt-6.1-sol`). Now: the Codex pane names its own
+  harness, a re-registration keeps the original spawn's harness, model,
+  effort and account when it lacks them, and a row that already lost its
+  harness relaunches on the harness its model belongs to.
+
+### Fixed — Delayed lifecycle holding causes
+
+- **Delayed notices keep their last recorded hold** — Lifecycle delay markers
+  name busy-pane, debounce or rate-limit holds when recorded, and say when the
+  cause is unrecorded. Message status retains the cause after hook acknowledgment
+  without changing delivery or confirmation receipts.
+
+### Fixed — Merge readiness
+
+- **A worker's ready message counts, and the supervisor waits for it** — Was:
+  pre-park readiness came only from a task note naming the full 40-character
+  tip, so a worker's typed ready message with a short SHA never counted, and
+  supervisor guidance said to merge any pushed tip with green CI, including an
+  incomplete test-first checkpoint. Now: a typed `status: ready` message is
+  recorded on the worker's own task, a short SHA of seven or more characters
+  matches the pushed tip it prefixes, and supervisor skills and launch
+  contracts merge on READY TO MERGE, `awaiting_merge` or that ready signal,
+  never on a green push alone.
+
+### Fixed — Shared-file advisories
+
+- **Remote file holders keep the coordination hint** — Was: a named holder on
+  another machine lost the cross-session supervisor hint. Now: recorded remote
+  identities retain it; the unknown-session fallback stays unchanged.
+
+### Fixed — Factory QA
+
+- **Task-specific QA branches survive a parked anchor** — Was: an anchored
+  plain worker lane could hide the task's per-task or companion delivery
+  branch. Now: QA selects recorded delivery branches before the anchored lane,
+  while retaining exact pushed-head validation.
+
+- **QA waivers follow a current repark after handoff** — Was: an older passed
+  round on a retired worker's branch could override the current assignee's
+  anchored repark. Now: a validated current-worker parked lane with an active
+  delivery anchor is selected for the waiver, while the exact pushed head is
+  still required.
+
+### Fixed — Profile listing parity
+
+- **Claude and Codex profiles use the terminal width consistently** — Both
+  listings shorten long names and folders by display cells, including CJK and
+  emoji, while preserving login and active states. `--full` and `--json` retain
+  exact values; the full-value hint appears only when a value was shortened.
+
+### Added — Commander secret auto-delete
+
+- **A saved secret can delete itself** — Was: a secret saved from Commander's secret card stayed on the machine until someone deleted it. Now: the card offers to keep the file, delete it once the agent has used it, or delete it after 1 or 24 hours. The project setting `secrets.auto_delete` (default `off`) sets the default. Each deletion leaves a receipt in `.cas/secret-receipts.jsonl` that never contains the value.
+
+### Changed — Journey source snapshots
+
+- **Lanes test their committed source without generated dist commits** — Journey runs build a scratch production snapshot, verify its source revision and content hash when serving and recording evidence, and preserve that provenance in reused receipts. Source-only changes invalidate background evaluations even when committed dist stays unchanged.
+
+### Fixed — Exit confirmation
+
+- **Old Exit requests stay unconfirmed** — A later session end confirms Exit
+  only within its 95-second outcome window, so an unrelated shutdown cannot
+  relabel an old timed-out request as executed.
+
+### Fixed — Capped test package selection
+
+- **Duplicate crate names can select an exact version** — Capped worker and
+  verifier tests accept selectors such as `crossterm@0.25.0`, retain the version
+  in test receipts, and keep the existing named-test and resource guards.
+
+### Fixed — Codex profile listing width
+
+- **Long profile names fit the terminal** — `cas codex --list-profiles` shortens
+  displayed names and folders to fit 80 columns while keeping login and active
+  states readable. Use `--full` to see exact names and folders.
+
+### Fixed — Posted release notes
+
+- **Posted drafts keep their historical wording** — Was: later pushes could
+  re-lint release notes already posted to Slack. Now: the fast check skips
+  drafts with an unfenced `## POSTED` section containing a Slack permalink,
+  message receipt or root/reply timestamp and names each skipped file. Fenced
+  examples, empty sections and placeholders still pass through their usual
+  release or diary lint.
+
+### Fixed — Worker pre-push guard
+
+- **Worker Git configuration cannot disable the private push guard** — Combined
+  shell export flags, exported `GIT_CONFIG_*` overrides and removal of the Git
+  `core` section are refused. A one-command configuration prefix on a read
+  command remains scoped to that command and is not treated as persistent.
+
+### Fixed — Commander sent attachments
+
+- **Your own text file opens from its card** — Was: Open on a file you sent that was not media, such as notes.txt, failed. Now: your own text upload opens as plain text, and other uploaded files download. Neither type is ever opened as a page.
+- **Edit keeps a refused message's files as cards** — Was: Edit put each file's raw reference, including the machine's file path, into the composer. Now: the files come back as their attachment cards and only your text returns to the composer.
+- **Previews check an upload once** — Was: every preview ticket and content request re-read and re-hashed the whole upload, up to 10 MiB. Now: the hub keeps each upload's verified digest and re-checks only when the file changes.
+
+### Fixed — Deliberate supervisor exit
+
+- **A deliberate /exit ends quietly** — Was: exiting a supervisor raised
+  "Daemon connection lost" and "Worker stopped" attention items, even with no
+  workers, and the session-ended receipt read `pane_exit: code=Some(0),
+  signal=None`. Now: a supervisor exit with code 0 and the clean daemon exit
+  after it raise no attention item, the receipt says "exited normally", and a
+  supervisor crash still alerts as "Supervisor stopped".
+
+### Fixed — Generated artifact regeneration
+
+- **Current dependencies survive regeneration** — Was: every changed hub-web
+  merge reinstalled dependencies, and failures repeated successful-step logs.
+  Now: matching installed lockfiles skip the reinstall, failure diagnostics
+  show only failed steps, and the recovery hint installs before building.
+
+### Fixed — Source highlighting
+
+- **Apostrophes keep nearby code readable** — Rust lifetimes stay plain while character literals receive string color. JSX word apostrophes and unfinished single-quoted strings no longer color following lines as strings. A block too large to cache preserves previously cached source.
+
+### Fixed — Commander reply hints
+
+- **Commander alias errors follow the pane-once rule** — Missing-session, unmatched-label and reply-ID mismatch hints say to answer once in the pane. Explicit routing is reserved for disabled or unmirrored delivery, with the shared reply contract linked for that fallback.
+
+### Fixed — ASCII diagnostic contrast
+
+- **Doctor status words stay readable in C locales** — ASCII `[OK]`, `[WARN]`,
+  `[ERROR]` and `[INFO]` labels use bold terminal foreground on light and dark
+  terminals. UTF-8 glyphs keep semantic colors, and `NO_COLOR` keeps plain output.
+
+### Fixed — Merge CI diagnostics
+
+- **Delivery Git failures name their cause** — Merge CI receipts distinguish Git timeouts, start failures and nonzero exits by subcommand without exposing stderr. A failed delivery-range inspection says the GitHub endpoint was not queried; repository lookup failures keep their separate headline.
+
+### Fixed — Candidate QA assets
+
+- **Real-hub QA checks the candidate's embedded Commander** — Was: the helper
+  could serve a stylesheet from external dist even when the candidate lacked
+  it. → Now: Commander requests preserve the actual hub's bytes, status and
+  security headers. External-dist overrides are refused; baseline checks use
+  their own candidate binary.
+
+### Fixed — Terminal heading readability
+
+- **Hook status headings stay readable on light terminals** — Shared CLI H1
+  headings use bold terminal foreground instead of teal, and use ASCII rules
+  when the locale is not UTF-8, including `LANG=C`.
+
+### Fixed — Screencast guidance
+
+- **QA examples recommend 10 fps** — Lower frame rates reduce encoding work;
+  journey guidance points to the finalization trace step to monitor the
+  remaining encoder drain during four-worker release runs.
+
+### Fixed — Recycled worker shutdown
+
+- **Completed replacements stop retaining shutdown mail** — Registration retries a failed lifecycle write, so a later shutdown can cancel unread mail and retire its alarms. Dead-pane recycle failures now use the same stale fallback and visible deferred-retirement warning as live panes. Alarm scans query replacement intent only for shut-down recipients, once per recipient.
+
+### Fixed — Release report counts
+
+- **Known limitations stay out of shipped totals** — Was: only the exact
+  "Known limits" heading was excluded. Now: the "Known limit…" heading family
+  stays in report prose without adding shipped changes.
+
+### Fixed — Portable QA guidance
+
+- **QA examples work outside the Cassy repository** — The generic evidence
+  example includes its own CSP-safe chapter helper. The Commander helper import
+  is labeled for Cassy's source checkout only.
+
+### Fixed — Preview and journey diagnostics
+
+- **Missing hub frames are named on timeout** — Journey failures identify the
+  notification frame and retain the original timeout as their cause. Preview
+  builds substitute the browser runtime only for imports from the journey
+  fixture directory, leaving unrelated modules alone.
+
+### Fixed — Live work
+
+- **Live work catches up after a pending read** — A new work notice received
+  while a thread or worker timeline is loading now triggers one follow-up
+  read after that page finishes. Repeated notices coalesce, and hidden or
+  disconnected views do not keep fetching.
+
+### Fixed — Factory delivery attribution
+
+- **A parked delivery can merge released main and re-park** — Was: a task that
+  had already parked and then merged a newer origin/main kept its old parked
+  commit, so the merge never reached review. → Now: a merge after park that
+  brings in only released trunk commits moves the parked commit forward.
+- **Only origin's trunk counts as released** — Was: a local `main` that was
+  ahead of origin, or moved by hand, could make unreleased commits look
+  released. → Now: when `origin/main` exists, only its history counts as
+  released.
+
+### Fixed — Factory context
+
+- **Idle workers reset through their own harness** — Was: context reset could
+  skip an Idle Codex registration and use an older Active Claude row, then
+  refuse because no Claude transcript directory existed. → Now: Active and
+  Idle registrations are eligible within the factory session, and reset uses
+  the current registration's harness metadata. Codex queues its durable
+  recycle path, Claude keeps its verified control command, and unverified
+  Grok or OpenCode resets remain refused.
+
+### Fixed — QA artifact publishing
+
+- **A failed manifest upload reports its QA bundle as not portable** — Was:
+  a prepared archive could hide the portability warning when its manifest
+  upload failed. → Now: JSON and human output retain the upload failure and
+  also report that the QA archive cannot be shared.
+
+### Fixed — Factory delivery
+
+- **Merging released main into a delivery branch no longer blocks close** — Was:
+  a worker told to merge origin/main into a branch bound to an epic (without
+  rebasing) could not close or be merged. Task close and worktree_merge called
+  the already-released commits that main brought in "foreign" and refused, so
+  the supervisor had to merge by hand and override. → Now: commits already on
+  the released trunk count as upstream, and a merge that only brings in that
+  trunk is a sync merge. Another task's unreleased work is still refused.
+
+### Fixed — QA recording guidance
+
+- **Native Commander chapter captions respect its security policy** — QA
+  examples use the CSP-safe `showRecordingChapter` helper. The native upload
+  journey records its chapter and waits for it only when recording is enabled.
+
+### Fixed — Artifact publishing
+
+- **TypeScript source artifacts record the text MIME type** — Was: `.ts` and
+  `.tsx` sources were recorded as unknown binary data. → Now: the CLI records
+  plain text and preserves the video type for actual MPEG-TS packet data.
+  Cloud uploads can still return 403 until the separate presign fix ships
+  ([Cloud #258](https://github.com/Richards-LLC/petra-stella-cloud/issues/258)).
+
+### Fixed — Release proof tooling on macOS
+
+- **Assembly proofs find the same GNU objdump as the ISA audit** — Homebrew's
+  keg-only binutils and the configured objdump override now work for row proofs.
+  Changelog-only harness checks run without an ELF compiler.
+
+### Fixed — Live factory test evidence
+
+- **Explicit headful tests fail when Claude is unavailable** — Was: an opted-in test could pass without launching Claude, and the fixture discarded the selected Claude account. Now: dependency and authentication failures are explicit, live fixtures retain Claude credentials, and documented capped operator runs preserve host PATH and show live success evidence.
+
+### Added — Commander secret requests
+
+- **An agent can ask for a secret, and it stays out of chat** — Was: an agent
+  that needed an API key had to ask in a message, and the key you pasted back
+  became part of the conversation, its history and the supervisor's
+  transcript. → Now: a supervisor sends `coordination action=message
+  target=operator kind=secret summary=<NAME> message=<what it is for>`, and
+  Commander shows an "Asking for a secret" card with a masked field, Save
+  securely and Decline. The value goes to the hub's new
+  `POST /v1/sessions/{session}/secrets/{id}` route (factory:manage pairings
+  only) and is written to a mode-600 file named after the request in a mode-700
+  folder. The supervisor gets a reply naming the file, never the value, and
+  the audit records the name and path only. The folder is
+  `secrets.destination` (`cas config set secrets.destination <path>`), with a
+  user default in `~/.cas/config.toml` and a built-in default of
+  `~/.cas/private/creds/<project>`; only the operator can change it. Saved
+  files are kept until you delete them, and a name that already holds a file
+  is refused rather than replaced. The field tells browsers and password
+  managers not to save it. The coordination tool's `kind` description and the
+  cas-supervisor skill now name `kind=secret`, so supervisors request
+  credentials with it instead of asking in chat.
+
+### Fixed — Fleet keyboard feedback
+
+- **Undo keeps focus when the phone shell refreshes** — After returning from
+  Raw output, a newly discovered session no longer leaves the visible Undo
+  button without keyboard focus.
+
+### Fixed — Journey capture
+
+- **Busy pages keep their journey screenshots** — The 250 ms paint-settle
+  deadline returns to screenshot capture when a renderer is busy, while page
+  closure and other errors still fail the journey.
+
+### Fixed — Conversation keyboard navigation
+
+- **Machine filters keep keyboard focus during catalog refreshes** — An unchanged
+  project list refresh retains the focused machine button, so Tab navigation and
+  its visible focus ring continue to work while machines report their status.
+
+### Fixed — Commander supervisor commands
+
+- **Supervisor commands keep working after 256 uses** — Was: the factory daemon
+  kept every slash-command receipt for its whole run, so after 256 commands it
+  refused every further command until the daemon restarted. → Now: a finished
+  receipt is kept for 10 minutes after its last activity and then dropped. A
+  repeated request inside that window still returns the stored receipt and does
+  not run the command again.
+- **A refused unconfirmed Clear or Exit is audited as denied** — Was: the hub
+  logged the command as "requested" before checking its confirmation, so a
+  refused Clear or Exit left a "requested" row with no outcome. → Now: it is
+  logged as "denied".
+
+### Fixed — macOS automatic release installation
+
+- **Mac install retries explain the wait** — A failed LaunchAgent load now
+  prints `retrying once` before the short wait. Plist checks also skip with a
+  message when macOS supplies a Python stub that cannot run.
+
+- **LaunchAgent reinstall tolerates shutdown delay** — Reinstalling the release
+  LaunchAgent retries a failed load once after a short
+  delay, allowing the previous job to finish shutting down. Persistent load errors
+  still fail the install. The script test skips plist validation with a message
+  when Python 3 is unavailable, while keeping scheduler lifecycle checks active.
+
+### Fixed — Release checks
+
+- **Release ISA fixtures work on macOS** — The fixture harness selects its real
+  x86_64 Linux compiler before installing a fake Zig for toolchain checks, so
+  the Ghostty build output exists and the ISA audits run.
+
+### Changed — Accounts
+
+- **macOS shell visibility is explained before account changes** — Was: rename
+  and remove help did not mention that idle Apple system shells can hide account
+  selectors from the busy guard. → Now: both help pages ask users to close those
+  shells first; readable process environments and registered agents stay checked.
+
+### Fixed — QA evidence
+
+- **Published QA bundles restore through macOS path aliases** — Was: a peer
+  could miss a published bundle cited under `/var` because publication recorded
+  `/private/var`. → Now: restore compares canonical source identities even
+  after producer files are gone, then validates the published evidence as usual.
+
+### Fixed — Commander
+
+- **Quick rich-content inspections are counted** — Opening and closing a
+  diagram source or unified diff quickly now records the inspection even
+  when the browser combines the open and close toggle events.
+
+- **Late file layout keeps the newest turn in view** — Was: a file preview
+  could shrink and grow before its scroll event arrived, leaving the thread
+  above the latest reply. → Now: layout keeps following the tail, while an
+  upward reading gesture keeps the reader's place.
+
+- **Picked images preview in native Commander** — Was: the native image policy
+  blocked local raster thumbnails before sending. → Now: picked PNG, JPEG,
+  GIF and WebP images can preview, while SVG and HTML stay named files.
+
 ## [3.91.1] - 2026-10-30
 
 ### Fixed — Commander daemon replacement

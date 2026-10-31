@@ -7,13 +7,13 @@
 // scripts/journey-eval.sh keeps one passing trace per bundle for qa_evidence,
 // keeps failed or incomplete diagnostics, and writes bundle.json (producer
 // "journey"). Redundant passing traces are discarded.
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, errors, expect, type Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
 import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
-import { captureMask, captureStageScreenshot, claimReceiptDirectory, receiptPartName } from "./receipt-directory.mjs";
+import { captureMask, captureStageScreenshot, claimReceiptDirectory, receiptPartName, showRecordingChapter } from "./receipt-directory.mjs";
 
 export { expect };
 
@@ -148,7 +148,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
       id,
       async stage(title, body) {
         await test.step(title, async () => {
-          if (RECORD) await page.screencast.showChapter(title, { duration: 1000 });
+          if (RECORD) await showRecordingChapter(page, title, { duration: 1000 });
           const started = performance.now();
           await body();
           const ms = performance.now() - started;
@@ -266,37 +266,19 @@ export async function holdPageClock(page: Page, ahead = 250): Promise<void> {
 
 /** Two animation frames: let the UI paint before a screenshot. */
 export async function settle(page: Page): Promise<void> {
-  // A test that holds the page clock (ProtocolClock) holds animation frames
-  // too; the screenshot then shows the held frame, after at most a short
-  // real-time wait instead of a hang (cas-1f7e).
-  // Return the state immediately: evaluating the promise itself would leave
-  // no way to finish it when the virtual clock holds both frame callbacks.
-  const state = await page.evaluateHandle(() => {
-    let frame: number;
-    let finish!: () => void;
-    const painted = new Promise<void>((resolve) => {
-      finish = () => {
-        cancelAnimationFrame(frame);
-        resolve();
-      };
-      frame = requestAnimationFrame(() => { frame = requestAnimationFrame(finish); });
+  // Playwright polls native browser frames even when ProtocolClock holds the
+  // app's RAF callbacks. The first predicate runs immediately, then two paint
+  // opportunities follow. Keep the old 250ms budget on the native operation:
+  // a host Promise.race did not bound the finish/drain evaluations in finally.
+  // A busy renderer can use that budget without producing another frame.
+  // Capture what is painted then; no cleanup evaluation may wait on it.
+  // Closure/navigation and other errors still fail the journey (cas-fc03).
+  const painted = await page.waitForFunction((state) => ++state.frames === 3,
+    { frames: 0 }, { polling: "raf", timeout: 250 }).catch((error: unknown) => {
+      if (!(error instanceof errors.TimeoutError)) throw error;
     });
-    return { painted, finish };
-  });
-  const painted = state.evaluate(({ painted }) => painted);
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([painted, new Promise<void>((resolve) => { deadline = setTimeout(resolve, 250); })]);
-  } finally {
-    clearTimeout(deadline);
-    try {
-      await state.evaluate(({ finish }) => finish());
-    } finally {
-      // Drain even on navigation/close; do not turn a real page error into a
-      // successful screenshot or leave an evaluation to fail at teardown.
-      try { await painted; } finally { await state.dispose(); }
-    }
-  }
+  if (!painted) return;
+  await painted.dispose();
 }
 
 /**

@@ -331,6 +331,10 @@ The heading answers, in this order of weight: which project, which model, where,
 - An action cluster is one flex row with an `--space-2` gap; the primary action is last. A sheet's sticky action bar keeps its 12px gap and hairline.
 - Section labels inside a sheet are eyebrows (`typography.eyebrow`, `--ink-mid`) followed by their count in the same style ("WORKERS · 5"); they are not cards.
 
+### Published reasoning
+
+Show work and worker timelines keep published reasoning subordinate to replies: a quiet label over a plain-text preview, with safe Markdown detail opened in place. Only `codex_summary` and `claude_thinking` v2 sources opt into formatting. Legacy and unknown sources remain literal. Raw summary exposes the exact published text; opening it survives repaints. Without a lifecycle boundary, use Reasoning summary (Reasoning for a work block); use Thinking for a reported start/phase and Thought for a reported end. Detail scroll and keyboard focus stay put across updates.
+
 ### Unknown and empty states
 
 - Say what is missing in plain words, at the weight of evidence, not of a verdict: `--ink-mid`, regular weight, `--fs-meta`. "Merge progress not reported", "Usage unknown", "Version unknown" are evidence lines; they are never bold, never headings and never status pills.
@@ -346,7 +350,7 @@ The heading answers, in this order of weight: which project, which model, where,
 
 ### App switcher
 
-The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud apps"); below 380px it shows the mark and chevron only. It opens `nav#app-switcher`, a native popover: an opaque `--bg-panel` card, `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide, listing **Commander** then **Explorer** (15px semibold names, 13px `--ink-mid` hints, 44px rows). The current app is a `span[aria-current="page"]` with `--bg-active` and an inner 2px `--color-action` outline, never the Send gradient. The other app is a link to a named tab (`cassy-explorer` / `cassy-commander`) with `rel="noopener noreferrer"`, opening `<cloud origin>/explorer/tasks?project_id=<id>`. The URL carries only the origin, the path and `project_id`, never a key, code, session name or token (`app-switcher.test.ts`).
+The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud apps"). Whenever the list header itself is 27rem (432px) wide or narrower, it shows the mark and chevron only, so pairing, Accounts and settings share one row. That includes the desktop rail at its usual width as well as the phone; the wordmark stays in the button's accessible name. It opens `nav#app-switcher`, a native popover: an opaque `--bg-panel` card, `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide, listing **Commander** then **Explorer** (15px semibold names, 13px `--ink-mid` hints, 44px rows). The current app is a `span[aria-current="page"]` with `--bg-active` and an inner 2px `--color-action` outline, never the Send gradient. The other app is a link to a named tab (`cassy-explorer` / `cassy-commander`) with `rel="noopener noreferrer"`, opening `<cloud origin>/explorer/tasks?project_id=<id>`. The URL carries only the origin, the path and `project_id`, never a key, code, session name or token (`app-switcher.test.ts`).
 
 ## Do's & Don'ts
 
@@ -360,7 +364,7 @@ The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud 
 - ❌ Never put light-scheme ink on `--bg-terminal` or wire ANSI colours to application tokens.
 - ✅ Make every `box-shadow` a token (`--lift*`, `--look-shadow-float`, `--shadow-overlay`); `invariants.test.ts` checks it.
 - ❌ Never render conversation content inside `.pane-host`, give it a visible size, or add a second presentation beside Conversations.
-- ❌ Never hand-edit `hub-web/dist`. For exact-tip affected journeys, a factory lane may include a separate final generated build commit; the integration owner supersedes it by rebuilding the merged sources. Follow [the generated-dist workflow](../cas-cli/docs/CONTRIBUTING.md#generated-dist-for-exact-tip-journeys).
+- ❌ Never hand-edit or commit `hub-web/dist` on a factory lane. Journey tooling builds a scratch production snapshot bound to the committed source tip and records its content hash. The integration owner generates the committed release bundle from merged sources. Follow [the scratch-build workflow](../cas-cli/docs/CONTRIBUTING.md#scratch-builds-for-exact-tip-journeys).
 
 ## Behavioural constraints
 <!-- keep -->

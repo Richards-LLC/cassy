@@ -1004,6 +1004,37 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
 }
 
 #[tokio::test]
+async fn restart_supervisor_requests_the_daemon_only_for_a_supervisor() {
+    let worker = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let path = cas::factory_daemon_health::supervisor_restart_path(
+        &env.cas_root,
+        "session-restart-supervisor",
+    );
+    let error = env
+        .service
+        .factory_request(Parameters(factory_req("restart_supervisor")))
+        .await
+        .expect_err("a worker may not restart the supervisor");
+    assert!(error.message.contains("only the supervisor"), "{}", error.message);
+    assert!(!path.exists());
+
+    drop(worker);
+    let _supervisor = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "supervisor"),
+    ]);
+    env.service
+        .factory_request(Parameters(factory_req("restart_supervisor")))
+        .await
+        .expect("a supervisor may request its own restart");
+    assert!(path.exists(), "the daemon reads this request file");
+}
+
+#[tokio::test]
 async fn restart_spawn_queue_is_supervisor_only() {
     let _guard = EnvGuard::set(&[
         ("CAS_FACTORY_SESSION", "session-worker-restart"),
@@ -3697,10 +3728,10 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
 
 /// cas-9fd4 (GH #341): the normal AwaitingMerge advice becomes stale after a
 /// supervisor has already landed the parked factory branch. The worker still
-/// has to re-close, so status must name that real blocker instead of asking
+/// awaits the verdict, so status must name that owner instead of asking
 /// the supervisor to merge the same branch again.
 #[tokio::test]
-async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9fd4() {
+async fn test_worker_status_names_delivered_merge_awaiting_verdict_cas_9fd4() {
     use std::process::Command;
 
     let _guard = EnvGuard::set(&[]);
@@ -3745,7 +3776,7 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
 
     let task_store = env.task_store();
     let id = task_store.generate_id().expect("id");
-    let mut task = Task::new(id.clone(), "Delivered task awaiting re-close".to_string());
+    let mut task = Task::new(id.clone(), "Delivered task awaiting verdict".to_string());
     task.status = TaskStatus::AwaitingMerge;
     task.assignee = Some(worker.to_string());
     task.deliverables.parked_branch = Some(format!("factory/{worker}"));
@@ -3762,12 +3793,13 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
             .expect("status"),
     );
     assert!(
-        text.contains("delivered-and-merged, awaiting worker re-close"),
+        // pin: integrated deliveries await their verdict, not another close.
+        text.contains("delivered-and-merged, awaiting merge verdict"),
         "status must report the delivered state, not stale merge work: {text}"
     );
     assert!(
-        text.contains("WAITING ON WORKER") && text.contains("retry task close"),
-        "status must name the worker re-close as the blocker: {text}"
+        text.contains("WAITING ON VERDICT") && !text.contains("retry task close"),
+        "status must name the merge verdict as the completion owner: {text}"
     );
     assert!(
         !text.contains("merge its branch, then it can close"),
@@ -5531,6 +5563,28 @@ fn clear_context_fixture(
     )
 }
 
+/// A completed turn can leave the current registration Idle while an older
+/// same-name registration still says Active. Harness comes from the current
+/// row's metadata, not the UUID or the stale row's provider.
+fn register_idle_reset_worker(
+    env: &FactoryTestEnv,
+    fixture: &ClearContextFixture,
+    stale_cli: &str,
+) -> Agent {
+    let store = env.agent_store();
+    let mut stale = fixture.worker.clone();
+    stale.id = format!("old-{}", stale.name);
+    stale.registered_at -= chrono::Duration::seconds(1);
+    stale.last_heartbeat -= chrono::Duration::seconds(1);
+    stale.metadata.insert("worker_cli".into(), stale_cli.into());
+    store.register(&stale).expect("register stale active row");
+    let mut current = fixture.worker.clone();
+    current.id = "00000000-0000-4000-8000-000000001114".into();
+    current.status = AgentStatus::Idle;
+    store.register(&current).expect("register current idle row");
+    current
+}
+
 /// cas-dffe (GH #145), the regression this task exists for, pinned dead: the
 /// queued row must be a CONTROL command, never the literal text `/clear`.
 ///
@@ -5550,7 +5604,7 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
             "supervisor".to_string(),
         ))
         .expect("register supervisor");
-    store.register(&fixture.worker).expect("register worker");
+    register_idle_reset_worker(&env, &fixture, "codex");
 
     let mut req = factory_req("clear_context");
     req.target = Some("wolf".to_string());
@@ -5725,43 +5779,55 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
     assert!(briefs[0].prompt.contains(&format!("#{answer_id}")));
 }
 
-/// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls
-/// through to the durable recycle path rather than queueing a fake reset.
+/// Current recorded harness wins over a same-name Active ghost: Codex
+/// recycles, while Grok/OpenCode retain their unsupported-reset refusal.
 #[tokio::test]
-async fn test_clear_context_recycles_harness_without_verified_reset() {
-    let (guard, fixture) = clear_context_fixture("badger", "codex", "0");
-    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+async fn test_clear_context_uses_current_idle_harness_cas_1114() {
+    for cli in ["codex", "grok", "opencode"] {
+        let (guard, fixture) = clear_context_fixture("badger", cli, "0");
+        let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
-    let store = env.agent_store();
-    store
-        .register(&Agent::new(
-            "test-sup".to_string(),
-            "supervisor".to_string(),
-        ))
-        .expect("register supervisor");
-    let mut worker = fixture.worker.clone();
-    // The recycle fallback only needs the durable worker identity and recipe;
-    // this fixture's temp directory is intentionally not a Git checkout.
-    worker.metadata.remove("clone_path");
-    store.register(&worker).expect("register worker");
+        let store = env.agent_store();
+        store
+            .register(&Agent::new(
+                "test-sup".to_string(),
+                "supervisor".to_string(),
+            ))
+            .expect("register supervisor");
+        let mut worker = register_idle_reset_worker(&env, &fixture, "claude");
+        // The recycle fallback only needs the durable worker identity and recipe;
+        // this fixture's temp directory is intentionally not a Git checkout.
+        worker.metadata.remove("clone_path");
+        store.update(&worker).expect("update current worker");
+        std::fs::remove_dir_all(&fixture.projects).expect("no Claude transcripts for this harness");
 
-    let mut req = factory_req("clear_context");
-    req.target = Some("badger".to_string());
-    let result = env
-        .service
-        .factory_request(Parameters(req))
-        .await
-        .expect("Codex clear_context should recycle the worker");
-    let message = get_text(&result);
-    assert!(message.contains("recycle"), "{message}");
+        let mut req = factory_req("clear_context");
+        req.target = Some("badger".to_string());
+        let result = env
+            .service
+            .factory_request(Parameters(req))
+            .await;
+        if cli != "codex" {
+            let error = result.expect_err("an unverified reset must remain unsupported");
+            assert!(error.message.contains(&format!("harness '{cli}'")), "{error}");
+            assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+            assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
+            continue;
+        }
+        let result = result.expect("Idle Codex clear_context should recycle the current worker");
+        let message = get_text(&result);
+        assert!(message.contains("recycle"), "{message}");
 
-    let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
-    assert!(
-        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
-        "Codex recycle must not queue readable prompt text"
-    );
+        let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
+        let spec: cas_mux::WorkerSpec = serde_json::from_str(requests[0].worker_spec.as_deref().unwrap()).unwrap();
+        assert_eq!(spec.cli, SupervisorCli::Codex, "reset must preserve the current Codex recipe");
+        assert!(
+            env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+            "Codex recycle must not queue readable prompt text"
+        );
+    }
 }
 
 /// GH #751: clear_context is not a recovery action once Claude is repeatedly
@@ -6414,6 +6480,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     // Named cache consent must never enter ordinary GC's evidence-retention
     // or process-reaping paths, even when the named path is refused.
     let mut named = factory_req("gc_cleanup");
+    named.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     named.force = Some(true);
     named.dry_run = Some(false);
     named.reclaim_unknown_target = Some(env.cas_root.join("unknown/target").display().to_string());
@@ -6437,6 +6504,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
                 .set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
         }
         let mut named = factory_req("gc_cleanup");
+    named.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
         named.force = Some(true);
         named.dry_run = Some(false);
         named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
@@ -6459,6 +6527,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     }
 
     let mut preview = factory_req("gc_cleanup");
+    preview.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     preview.force = Some(true);
     preview.dry_run = Some(false);
     let preview = env
@@ -6538,6 +6607,7 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
         .unwrap();
 
     let mut request = factory_req("gc_cleanup");
+    request.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     request.force = Some(true);
     request.dry_run = Some(false);
     request.artifacts = Some(true);
@@ -6672,6 +6742,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
+    preview.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     preview.force = Some(true);
     let preview = env
         .service
@@ -6687,6 +6758,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_preserved(); // force alone/omitted dry_run never deletes.
 
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let cleanup = env
@@ -6816,6 +6888,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     closed.status = TaskStatus::Closed;
     env.task_store().update(&closed).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
@@ -6881,9 +6954,9 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
         .truncate(false).open(slots.join("review-trash.lock")).unwrap();
     collector.lock_exclusive().unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    cleanup.full = Some(true);
     let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
     assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
     let deferred_status: serde_json::Value = serde_json::from_str(deferred.lines()
@@ -6964,6 +7037,7 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
         failures.push(format!("stale owner temp must leave 11 reclaimable and 23 pending bytes: {review}"));
     }
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service.factory_request(Parameters(cleanup)).await.unwrap();
@@ -7033,6 +7107,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
             assert_ne!(next.id, dispatch.id);
         }
         let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
         cleanup.force = Some(true);
         cleanup.dry_run = Some(false);
         let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
@@ -7120,6 +7195,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     std::fs::create_dir_all(checkout.join("target")).unwrap();
     std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7284,6 +7360,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7400,6 +7477,7 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
     let control = PathBuf::from(std::env::var_os("REVIEW_GC_RACE_CONTROL_75AE").unwrap());
     std::fs::write(&control, format!("{}\n", checkout.display())).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let output = env
@@ -7466,6 +7544,7 @@ async fn test_gc_reports_large_unmanaged_scratch_cas_3fb4() {
         "{text}"
     );
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7486,8 +7565,12 @@ async fn test_gc_cleanup_without_force() {
     let pq = env.prompt_queue();
     pq.enqueue("src", "wolf", "test").expect("enqueue");
 
-    let req = factory_req("gc_cleanup");
-    let result = env.service.factory_request(Parameters(req)).await;
+    // Exercise the public action allowlist, including CLI's explicit false
+    // presentation flags, rather than bypassing dispatch via factory_request.
+    let mut req = coord_req("gc_cleanup");
+    req.json = Some(false);
+    req.full = Some(false);
+    let result = env.service.factory(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -7500,6 +7583,10 @@ async fn test_gc_cleanup_without_force() {
         "Should report process-group cleanup outcome: {text}"
     );
 
+    assert!(text.starts_with("[INFO] GC cleanup complete:"), "{text}");
+    assert!(text.lines().all(|line| line.len() <= 79), "{text}");
+    assert!(!text.contains("_STATUS_JSON="), "machine payload must be opt-in");
+    assert!(text.contains("cleanup --full") && text.contains("cleanup --json"));
     // Prompts should still be pending
     assert_eq!(pq.pending_count().expect("count"), 1);
 }
@@ -7564,6 +7651,7 @@ async fn test_gc_cleanup_with_force_prunes_by_retention_window() {
     }
 
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
 
     let result = env.service.factory_request(Parameters(req)).await;
@@ -7590,6 +7678,7 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
     let id = pq.enqueue("src", "dead-worker", "poison").expect("enqueue");
 
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
     req.older_than_secs = Some(0);
     let result = env.service.factory_request(Parameters(req)).await.unwrap();
@@ -7634,6 +7723,7 @@ async fn test_c384_gc_cleanup_aggregates_notices_per_sender() {
         }
     }
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
     req.older_than_secs = Some(0);
     let result = env.service.factory_request(Parameters(req)).await.unwrap();
@@ -11837,6 +11927,75 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         let recorded = store.get(&task_b).unwrap().deliverables.factory_branch_start;
         assert_eq!(recorded.map(|start| start.branch), Some(started_on));
     }
+}
+
+#[tokio::test]
+async fn test_start_rejects_commit_guard_factory_misbinding_cas_b153() {
+    let mut guard = EnvGuard::set(&[
+        ("CAS_FACTORY_MODE", "1"),
+        ("CAS_FACTORY_SESSION", "session-cas-b153"),
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-hawk-30"),
+        ("CAS_AGENT_ID", "test-agent-id"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "watchful-hawk-30";
+    let checkout = init_sync_repo(&env, worker);
+    guard._guard.set("CAS_CLONE_PATH", &checkout);
+    std::fs::write(env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-b153-fixture\"\n").unwrap();
+    let mut agent = Agent::new("test-agent-id".into(), worker.into());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = Some("session-cas-b153".into());
+    agent.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+    env.agent_store().register(&agent).unwrap();
+    let mut task = Task::new("cas-f1f5".into(), "start binding".into());
+    task.assignee = Some(worker.into());
+    let store = env.task_store();
+    store.add(&task).unwrap();
+    let start: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start", "id": task.id,
+    })).unwrap();
+    let commit_guard = || {
+        let input = serde_json::from_value(serde_json::json!({
+            "session_id": agent.id, "cwd": checkout, "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m continued"},
+        })).unwrap();
+        serde_json::to_value(cas::hooks::handle_pre_tool_use(&input, Some(&env.cas_root)).unwrap()).unwrap()
+    };
+    // Missing WorkTarget must not hide a factory identity mismatch either.
+    for (branch, declared) in [
+        ("factory/watchful-hawk-30-f1f5", false),
+        ("factory/retired-worker-cas-f1f5", true),
+    ] {
+        if declared {
+            task.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "project:cas-b153-fixture".into(),
+                target_branch: "epic/requested".into(),
+            });
+            store.update(&task).unwrap();
+        }
+        git_stdout(&checkout, &["switch", "-c", branch, "epic/requested"]);
+        let tip = git_stdout(&checkout, &["rev-parse", "HEAD"]);
+        let before = serde_json::to_value(store.get(&task.id).unwrap()).unwrap();
+        let guard = commit_guard();
+        assert_eq!(guard.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{guard}");
+        let refused = env.service.task(Parameters(start.clone())).await
+            .expect_err("task start must reject a branch the commit guard denies");
+        assert!(refused.message.contains("factory/watchful-hawk-30-cas-f1f5"), "{refused}");
+        assert_eq!(serde_json::to_value(store.get(&task.id).unwrap()).unwrap(), before);
+        assert!(env.agent_store().list_agent_leases(&agent.id).unwrap().is_empty());
+        assert_eq!(git_stdout(&checkout, &["branch", "--show-current"]), branch);
+        assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tip);
+    }
+    let own = "factory/watchful-hawk-30-cas-f1f5";
+    git_stdout(&checkout, &["switch", "-c", own, "epic/requested"]);
+    env.service.task(Parameters(start)).await.expect("canonical task branch starts");
+    let saved = store.get(&task.id).unwrap();
+    assert_eq!(saved.status, TaskStatus::InProgress);
+    assert_eq!(saved.deliverables.factory_branch_start.unwrap().branch, own);
+    let allowed = commit_guard();
+    assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{allowed}");
 }
 
 #[tokio::test]

@@ -22,6 +22,47 @@ in a new profile, because Cassy never reads or rewrites the Keychain secret.
 A duplicate subscription offers to reuse the existing folder; cancellation drops staging.
 Distinct provider identities sharing one email receive `email-2`, `email-3`, and so on.
 
+## Duplicate-account EOF (cas-4d78)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | The existing default-no question keeps its prompt line; EOF ends that line before the login-cancelled notice. |
+| Scannable | Cancellation and the statement that the existing account was kept appear together on their own line. |
+| Readable | Ctrl-D with or without unfinished input cancels cleanly; normal entered and queued answers retain their existing spacing. |
+| Machine output | The prompt and cancellation remain on stderr; piped EOF also ends the prompt line, with unchanged exit status and stdout. |
+| Omitted | EOF does not echo a made-up answer, expose credentials, or add a second newline to an already-echoed queued answer. |
+
+The shared answer reader supplies the missing line break when stdin reaches
+EOF. The current duplicate-subscription path is reachable for Claude's
+non-secret account metadata; Codex identity remains unknown without reading
+its credential file.
+
+### EOF critique
+
+`terminal-qa: PASS duplicate-eof-treatment · 11 runs · 0 fail · 0 warn · 0 allowed`
+at `<artifacts>/cas-4d78/terminal-treatment/report.json`.
+
+Exact-build comparison `ae0e3c052` → `4953c8fa1`: EOF after unfinished input,
+empty EOF and piped EOF put cancellation on the prompt line before and on its
+own line after. Normal default-no Enter and accepting the existing account keep
+their behavior. Six real-binary fixture cells pass, including the adjacent
+Codex login with unknown identity. Provider executables and Keychain access are
+inert fixture boundaries; live credentials and accounts are untouched.
+
+The [before](captures/duplicate-eof/before.80.txt) and
+[after](captures/duplicate-eof/after.80.txt) captures redact the temporary home
+path. Raw captures and the build receipts remain in the task evidence.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The default-no question remains first; cancellation is a separate verdict line. |
+| Fit | 4 | Both widths fit, and EOF does not echo a made-up answer. |
+| Craft | 5 | The cancellation starts after the unfinished answer's line; Enter answers gain no extra blank line. |
+| Theme safety | 5 | Four palettes, NO_COLOR and the C locale pass without mechanical failures. |
+| Machine contract | 4 | Prompts and cancellation remain on stderr; exit status and stdout are unchanged, and piped EOF gains the same line break. |
+
+Scored by Codex on 2026-10-30 against the managed candidate.
+
 
 ## Critique
 

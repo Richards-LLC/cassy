@@ -1278,6 +1278,142 @@ fn run_hermetic_recycle_child(test_name: &str) -> bool {
     true
 }
 
+/// cas-b492: `factory action=restart_supervisor` replaces only the supervisor
+/// pane, through the real request file, exit event and PTYs. The worker keeps its
+/// process, row and lease. Once replaced, a plain exit still stops the factory.
+#[tokio::test(flavor = "current_thread")]
+async fn restart_supervisor_keeps_workers_and_a_plain_exit_still_stops_the_factory_cas_b492() {
+    const TEST: &str = "restart_supervisor_keeps_workers_and_a_plain_exit_still_stops_the_factory_cas_b492";
+    if run_hermetic_recycle_child(TEST) {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    env.set("CAS_ROOT", &cas_dir);
+    let mut daemon = daemon(&cas_dir);
+    let supervisor = daemon.app.supervisor_name().to_string();
+    let launch = cas_mux::SupervisorLaunch {
+        name: supervisor.clone(),
+        cwd: dir.path().to_path_buf(),
+        cas_root: Some(cas_dir.clone()),
+        cli: cas_mux::SupervisorCli::Claude,
+        worker_cli: cas_mux::SupervisorCli::Claude,
+        model: None,
+        effort: None,
+        teams: Some(cas_mux::TeamsSpawnConfig {
+            team_name: SESSION.into(),
+            agent_id: format!("supervisor@{SESSION}"),
+            agent_name: "supervisor".into(),
+            agent_color: "green".into(),
+            agent_type: "team-lead".into(),
+            parent_session_id: None,
+            lead_session_id: Some("first-lead".into()),
+            settings_path: None,
+        }),
+    };
+    daemon.app.mux.set_supervisor_launch(launch.clone());
+    assert!(daemon.app.mux.restart_supervisor(&[], None).unwrap().is_none());
+    let first_pid = daemon.app.mux.pane_process_group_id(&supervisor).unwrap();
+    let team = super::teams::TeamsManager::new(SESSION);
+    team.init_team_config(&[], dir.path(), &HashMap::new(), "first-lead").unwrap();
+    let team_config = team.teams_dir().join("config.json");
+    daemon.teams = Some(team);
+
+    let worker = "kept-worker";
+    register_idle_worker(&cas_dir, worker);
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut registration = agents.get(&format!("agent-{worker}")).unwrap();
+    registration.factory_session = Some(SESSION.into());
+    agents.update(&registration).unwrap();
+    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas_types::Task::new("cas-kept".into(), "Survives the restart".into());
+    task.assignee = Some(worker.into());
+    task.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    agents.try_claim(&task.id, &registration.id, 1800, None).unwrap();
+    let pane = idle_worker_pane(worker, cas_mux::SupervisorCli::Codex);
+    let worker_pid = pane.process_group_id().unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    let register_supervisor = |id: &str| {
+        let mut row = cas_types::Agent::new(id.into(), supervisor.clone());
+        row.role = cas_types::AgentRole::Supervisor;
+        row.factory_session = Some(SESSION.into());
+        agents.register(&row).unwrap();
+    };
+    register_supervisor("supervisor-before");
+
+    // A restart that cannot relaunch leaves the supervisor running.
+    daemon.app.mux.set_supervisor_launch(cas_mux::SupervisorLaunch {
+        cwd: dir.path().join("gone"),
+        ..launch.clone()
+    });
+    crate::factory_daemon_health::request_supervisor_restart(&cas_dir, SESSION, "supervisor-before").unwrap();
+    daemon.take_supervisor_restart_request();
+    daemon.advance_supervisor_restart().await;
+    assert_eq!(daemon.app.mux.pane_process_group_id(&supervisor), Some(first_pid));
+    assert!(alive(first_pid), "a refused restart must not stop the supervisor");
+    daemon.app.mux.set_supervisor_launch(launch);
+
+    crate::factory_daemon_health::request_supervisor_restart(&cas_dir, SESSION, "supervisor-before").unwrap();
+    daemon.take_supervisor_restart_request();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while daemon.app.mux.pane_process_group_id(&supervisor) == Some(first_pid) {
+        assert!(Instant::now() < deadline, "the supervisor pane was never replaced");
+        let (_, events) = daemon.app.mux.poll_batch();
+        for event in events {
+            daemon.handle_mux_event(event).await;
+        }
+        daemon.advance_supervisor_restart().await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let second_pid = daemon.app.mux.pane_process_group_id(&supervisor).unwrap();
+    assert!(wait_until(Duration::from_secs(5), || !alive(first_pid)), "the old supervisor is gone");
+    assert!(alive(second_pid), "the replacement is running");
+    assert!(alive(worker_pid), "the worker's process survives the restart");
+    assert_eq!(daemon.app.mux.pane_process_group_id(worker), Some(worker_pid), "same worker pane");
+    assert!(!daemon.shutdown.load(Ordering::Relaxed), "a requested restart is no shutdown");
+    // Claude's --session-id cannot reuse a session, and it ignores its inbox
+    // unless the team config names the session it launched with.
+    let lead = daemon.app.mux.get(&supervisor).unwrap().harness_session_id().unwrap();
+    assert_ne!(lead, "first-lead");
+    let team_config: serde_json::Value = serde_json::from_slice(&std::fs::read(&team_config).unwrap()).unwrap();
+    assert_eq!(team_config["leadSessionId"], lead.as_str());
+    let prompts = open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(15), || prompts.peek_all(50).unwrap().iter().any(|row| {
+            row.target == supervisor
+                && row.prompt.starts_with(crate::ui::factory::app::SUPERVISOR_RESTART_PREFACE)
+                && row.prompt.contains(worker)
+        })),
+        "the new session is told its workers are still running"
+    );
+
+    // The successor's registration retires its predecessor, not the fleet.
+    register_supervisor("supervisor-after");
+    assert_eq!(agents.get("supervisor-before").unwrap().status, cas_types::AgentStatus::Shutdown);
+    let kept = agents.get(&registration.id).unwrap();
+    assert_eq!(kept.status, registration.status);
+    assert_eq!(kept.factory_session.as_deref(), Some(SESSION));
+    assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, registration.id);
+    assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker));
+
+    // Nothing is armed any more, so this exit is the factory's shutdown signal.
+    daemon.app.mux.get_mut(&supervisor).unwrap().kill_tree_force();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !daemon.shutdown.load(Ordering::Relaxed) {
+        assert!(Instant::now() < deadline, "a plain supervisor exit must stop the factory");
+        let (_, events) = daemon.app.mux.poll_batch();
+        for event in events {
+            daemon.handle_mux_event(event).await;
+        }
+        daemon.advance_supervisor_restart().await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(daemon.app.mux.pane_process_group_id(&supervisor), Some(second_pid), "no relaunch");
+    daemon.app.mux.kill_all();
+}
+
 /// Reproduce the lane environment inside the capped test runner: no login
 /// profile, local bin directory, inherited CAS identity, or installed harness.
 #[test]
@@ -1463,10 +1599,20 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         assert_ne!(replacement_pid, old_pid, "recycle started a new process");
         // The old registration is retired, but the replacement has not
         // registered. A write makes this a changed-DB director snapshot.
-        let old_registration = open_agent_store(&cas_dir)
-            .unwrap()
-            .get(&format!("agent-{NAME}"))
-            .unwrap();
+        // Under load the bounded first attempt can lose to a busy store: the row is
+        // marked stale and retirement is deferred to the store worker, which must
+        // still finish it.
+        let retirement_deadline = Instant::now() + Duration::from_secs(30);
+        let old_registration = loop {
+            let row = open_agent_store(&cas_dir)
+                .unwrap()
+                .get(&format!("agent-{NAME}"))
+                .unwrap();
+            if row.status == cas_types::AgentStatus::Shutdown || Instant::now() >= retirement_deadline {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
         assert_eq!(old_registration.status, cas_types::AgentStatus::Shutdown);
         let mut held = tasks.get("cas-recycled-held").unwrap();
         held.notes = "Replacement is waiting to register".into();

@@ -14,7 +14,11 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
     return unavailable ? route.abort() : route.fulfill({ json: { tag_name: "v3.88.0" } });
   });
   const versions = { atlas: "3.9.0", studio: "3.88.0" };
-  await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], versions });
+  const supervisors: Machine[] = [
+    { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude", mcp_version: "3.90.0", installed_version: "3.91.1" })) },
+    { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session, harness: "codex", mcp_version: "3.91.1", installed_version: "3.91.1" })) },
+  ];
+  await journey.hub({ machines: supervisors, paired: ["atlas", "studio"], versions });
   await journey.open();
   // seedPaired clears localStorage during fixture setup. Measure the cache
   // after the real returning-user navigation, independently of that warm-up.
@@ -27,6 +31,15 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
   await expect(studio).toContainText("Cassy 3.88.0");
   await expect(studio.locator(".machine-version-update")).toHaveCount(0);
   await expect(page.locator('[title="Web client release and build"]')).toHaveText(/^Web \d+\.\d+\.\d+ · [a-f0-9]{8}$/);
+  const atlasSupervisor = page.locator(`[data-thread-key="atlas:${PELICAN}"] .supervisor-version`);
+  const studioSupervisor = page.locator(`[data-thread-key="studio:${OTTER}"] .supervisor-version`);
+  await journey.stage("Read each supervisor's MCP version and the installed upgrade (cas-8125)", async () => {
+    await expect(atlasSupervisor).toContainText("3.90.0");
+    await expect(atlasSupervisor).toContainText("↑");
+    await expect(atlasSupervisor).toHaveAttribute("title", /3\.91\.1.*Reconnect MCP/);
+    await expect(studioSupervisor).toHaveText("3.91.1");
+    await expect(studioSupervisor).not.toHaveClass(/update-available/);
+  });
   const captureVersions = async (name: string) => {
     if (!process.env.VERSION_QA) return;
     // Preserve the real production DOM and CSS for the strict visual polish
@@ -59,9 +72,11 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
   });
   await journey.stage("Reloads and unknown machine versions do not invent update warnings or extra checks", async () => {
     versions.studio = "unknown";
+    supervisors[1]!.sessions[0]!.mcp_version = undefined;
     await page.reload();
     await expect(studio).toContainText("Version unknown");
     await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+    await expect(studioSupervisor).toHaveCount(0);
     await expect(atlas).toContainText("Update available → 3.88.0");
     expect(checks).toBe(initialChecks);
   });
@@ -205,10 +220,10 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expectOneRowHeading();
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
-    // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
-    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
-    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
-    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, "quiet-heron-7", OTTER]);
+    // cas-ade2: project cards sort by name (cas-src, gabber-studio, lighthouse). Rows are titled by project, then machine; the codename is tertiary.
+    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
+    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Studio Mac", "Forge build box with an unusual hostname"]);
+    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, OTTER, "quiet-heron-7"]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });
@@ -768,8 +783,34 @@ for (const width of [1280, 390]) {
     session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"], unverified: [] };
     session.liveness = "stale_metadata";
     session.workers = ["worker-c"];
+    // cas-c095: the hub's events for a deliberate exit, then a crash elsewhere
+    // that proves the stream was read. Only the crash becomes attention.
+    const exitEvents = [
+      { kind: "pane_exited", sequence: 9101, session: session.name, pane_id: session.supervisor, payload: { exit_code: 0, role: "supervisor" } },
+      { kind: "daemon_disconnected", sequence: 9102, session: session.name, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata." } },
+      { kind: "daemon_disconnected", sequence: 9103, session: "another-session", diagnostic: { cause: { kind: "signal", signal: 9, name: "SIGKILL" }, next_action: "Inspect the factory daemon log and session metadata." } },
+    ];
+    await page.evaluate((rows) => {
+      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
+      for (const event of rows) wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
+    }, exitEvents);
+    await expect.poll(() => page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("cas-commander-v1", 2);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const rows = await new Promise<{ id: string }[]>((resolve, reject) => {
+        const request = db.transaction("attention").objectStore("attention").getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+      return rows.map(row => row.id).filter(id => id.startsWith("atlas:event:")).sort();
+    }), { message: "a deliberate exit files no attention item" }).toEqual(["atlas:event:9103"]);
     await hub.announceCatalog(machine.id);
     await journey.stage("Session ended accounts for every worker", async () => {
+      await expect(page.locator("#conversation-attention")).toBeHidden();
       await expect(page.locator("#conversation-connection")).toContainText("Ended");
       await expect(page.locator(".session-end-receipt")).toContainText("Supervisor and 2 workers stopped");
       await expect(page.locator(".session-end-receipt")).toContainText("/exit");
@@ -789,3 +830,44 @@ for (const width of [1280, 390]) {
     await expect(page.locator(".conversation-row").first()).toContainText("Ended");
   });
 }
+
+// cas-ade2: the register is alphabetical. Two supervisors of one project on
+// two machines trade recency on every update; no card or row ever moves.
+test("HUB-J3 project cards and supervisor rows keep their places while two machines stay active (cas-ade2)", journeyPart, async ({ page, journey }) => {
+  // The catalog lists widget first; the register still puts cas-src first.
+  const atlas: Machine = { ...ATLAS, sessions: [
+    { ...ATLAS.sessions[0]!, name: "amber-otter-5", supervisor: "amber-otter-5", project_dir: "/projects/widget" },
+    { ...ATLAS.sessions[0]!, name: "zesty-heron-3", supervisor: "zesty-heron-3", project_dir: "/projects/cas-src" },
+  ] };
+  const studio: Machine = { ...STUDIO, sessions: [{ ...STUDIO.sessions[0]!, name: "bright-robin-2", supervisor: "bright-robin-2", project_dir: "/projects/cas-src" }] };
+  const stamp = (tick: number) => {
+    // Each update makes a different session the newest, as live work does.
+    atlas.sessions[0]!.last_activity_at = journeyStamp(-30_000 - tick * 1_000);
+    atlas.sessions[1]!.last_activity_at = journeyStamp(tick % 2 ? -1_000 : -90_000);
+    studio.sessions[0]!.last_activity_at = journeyStamp(tick % 2 ? -90_000 : -1_000);
+  };
+  stamp(0);
+  const hub = await journey.hub({ machines: [atlas, studio], paired: ["atlas", "studio"] });
+  await journey.open();
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const layout = () => list.evaluate((nav) => [...nav.querySelectorAll<HTMLElement>(".project-card")].map((card) => [
+    card.querySelector(".project-card-name")?.textContent ?? "",
+    ...[...card.querySelectorAll<HTMLElement>(".conversation-row")].map((row) => row.dataset.threadKey ?? ""),
+  ]));
+  await journey.stage("Cards sort by project name and rows by supervisor name", async () => {
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
+    expect(await layout()).toEqual([["cas-src", "studio:bright-robin-2", "atlas:zesty-heron-3"], ["widget", "atlas:amber-otter-5"]]);
+  });
+  const first = await layout();
+  // Tag each rendered row so a re-created or moved node is caught too.
+  await list.evaluate((nav) => nav.querySelectorAll<HTMLElement>(".conversation-row").forEach((row, index) => { (row as unknown as { ade2?: number }).ade2 = index; }));
+  await journey.stage("Repeated activity updates on both machines move nothing", async () => {
+    for (let tick = 1; tick <= 4; tick++) {
+      stamp(tick);
+      await hub.announceCatalog("atlas");
+      await hub.announceCatalog("studio");
+      expect(await layout(), `update ${tick}`).toEqual(first);
+      expect(await list.evaluate((nav) => [...nav.querySelectorAll(".conversation-row")].map((row) => (row as unknown as { ade2?: number }).ade2)), `update ${tick} keeps every row node in place`).toEqual([0, 1, 2]);
+    }
+  });
+});

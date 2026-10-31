@@ -1929,7 +1929,7 @@ impl FactoryApp {
                     // Missing refs or an unavailable fresh read still owe one
                     // liveness relay, not an unbounded relay every retry minute.
                     let unknown = merge_alert::WorkerWait {
-                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false,
+                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false, status_at: None,
                     };
                     let read = worker_waits.get(worker)
                         .filter(|read| read.task == task.task_id).unwrap_or(&unknown);
@@ -2934,6 +2934,19 @@ impl FactoryApp {
         self.lead_session_id.as_deref()
     }
 
+    /// Swap in a new supervisor pane under a new lead session (cas-b492).
+    /// Returns the previous pane for the caller to drop off the control loop.
+    pub(crate) fn restart_supervisor_pane(
+        &mut self,
+        lead_session_id: &str,
+    ) -> anyhow::Result<Option<cas_mux::Pane>> {
+        let previous = self.mux.restart_supervisor(&self.worker_names, Some(lead_session_id))?;
+        self.lead_session_id = Some(lead_session_id.to_string());
+        self.supervisor_stall_tracker = None;
+        let _ = self.sync_pane_sizes();
+        Ok(previous)
+    }
+
     /// Get the director data
     /// Replace the cached director snapshot (tests: a stale cache).
     #[cfg(test)]
@@ -3201,6 +3214,49 @@ pub(crate) fn queue_supervisor_intro_prompt(
     session_id: Option<&str>,
     factory_session: Option<&str>,
 ) {
+    queue_supervisor_startup_prompt(
+        cas_dir,
+        supervisor_name,
+        supervisor_cli,
+        worker_names,
+        session_id,
+        factory_session,
+        None,
+    );
+}
+
+/// The intro for a supervisor that replaced its predecessor in a running
+/// factory (cas-b492). `session_id` must be new: it scopes the intro's dedupe.
+pub(crate) fn queue_supervisor_restart_prompt(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    supervisor_cli: cas_mux::SupervisorCli,
+    worker_names: &[String],
+    session_id: &str,
+    factory_session: &str,
+) {
+    queue_supervisor_startup_prompt(
+        cas_dir,
+        supervisor_name,
+        supervisor_cli,
+        worker_names,
+        Some(session_id),
+        Some(factory_session),
+        Some(SUPERVISOR_RESTART_PREFACE),
+    );
+}
+
+pub(crate) const SUPERVISOR_RESTART_PREFACE: &str = "Supervisor restart: this session replaced the previous supervisor of a running factory, at its request. Every current worker named below is still running with its task, pane and lease; do not respawn them. Read your handoff, then check factory action=worker_status.";
+
+fn queue_supervisor_startup_prompt(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    supervisor_cli: cas_mux::SupervisorCli,
+    worker_names: &[String],
+    session_id: Option<&str>,
+    factory_session: Option<&str>,
+    preface: Option<&str>,
+) {
     let worker_list = if worker_names.is_empty() {
         "(none)".to_string()
     } else {
@@ -3319,6 +3375,10 @@ Current workers: {worker_list}",
             assembler.append_protected("</cas-queued-session-start>".to_string());
             prompt = assembler.render();
         }
+    }
+
+    if let Some(preface) = preface {
+        prompt = format!("{preface}\n\n{prompt}");
     }
 
     if let Ok(queue) = open_prompt_queue_store(cas_dir) {

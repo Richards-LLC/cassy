@@ -163,10 +163,19 @@ pub enum QaCommand {
     Candidate(CandidateArgs),
     /// Map a diff to journeys and unowned CODEMAP areas
     Impact(super::qa_impact::ImpactArgs),
+    /// List an epic's warning findings from approved verdicts, by file
+    Polish(super::qa_polish::PolishArgs),
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
     /// Operator-only, time-boxed rapid-response window for one epic
     RapidResponse(super::qa_rapid_response::RapidResponseArgs),
+    /// Operator-only: accept QA authored by someone who implemented the task
+    AuthorOverride {
+        task: String,
+        /// Why this author's QA is accepted; recorded on the task
+        #[arg(long)]
+        note: String,
+    },
     /// Seed, inspect or validate the journey registry
     #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status", "traffic"])))]
     Journeys {
@@ -195,7 +204,7 @@ pub enum QaCommand {
 }
 
 /// Compare the checkout with the pinned upkeep commit, including a newly
-/// created registry that Git has not tracked yet. Unavailable is not equal.
+/// created registry or family file that Git has not tracked yet. Unavailable is not equal.
 fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> Option<bool> {
     let (_, sha) = upkeep.measured_ref.rsplit_once('@')?;
     let diff = Command::new("git")
@@ -206,6 +215,24 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
     match diff.status.code()? {
         1 => Some(true),
         0 => {
+            let families = Path::new(registry).parent()?.join("bug-families");
+            // Include ignored files too: the working registry loader reads them.
+            let untracked = Command::new("git")
+                .args(["--literal-pathspecs", "ls-files", "--others", "-z", "--"])
+                .arg(families)
+                .current_dir(root)
+                .output()
+                .ok()?;
+            if !untracked.status.success() {
+                return None;
+            }
+            if std::str::from_utf8(&untracked.stdout)
+                .ok()?
+                .split('\0')
+                .any(|path| crate::qa_registry::is_registry_input(registry, path))
+            {
+                return Some(true);
+            }
             let committed = Command::new("git")
                 .args(["show", &format!("{sha}:{registry}")])
                 .current_dir(root)
@@ -220,13 +247,32 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
     }
 }
 
+/// cas-26ac: the operator accepts a lineage author's QA for one task.
+fn author_override(task: &str, note: &str, cas_root: Option<&Path>) -> Result<()> {
+    use crate::config::operator_policy::{InvocationContext, operator_action_refusal};
+    if let Some(refusal) = operator_action_refusal(
+        "Overriding the independent QA author rule",
+        "run `cas qa author-override` yourself from your own terminal",
+        &InvocationContext::from_process(),
+    ) {
+        anyhow::bail!(refusal);
+    }
+    let root = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))?;
+    let store = crate::store::open_task_store(root)?;
+    crate::qa_author_override::record(root, store.as_ref(), task, note, chrono::Utc::now())?;
+    println!("QA author override recorded for {task}; its batch receipt or QA round may now count.");
+    Ok(())
+}
+
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
         QaCommand::Ledger(args) => super::qa_ledger::execute(args, cli, cas_root),
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
+        QaCommand::Polish(args) => super::qa_polish::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
         QaCommand::RapidResponse(args) => super::qa_rapid_response::execute(args, cas_root),
+        QaCommand::AuthorOverride { task, note } => author_override(task, note, cas_root),
         QaCommand::Journeys {
             check: _,
             seed,

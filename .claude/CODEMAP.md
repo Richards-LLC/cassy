@@ -96,7 +96,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry/sidecar validation and diff-scoped journey selection.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
-- `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs` - independent reviews, cross-host sync and batch receipts.
+- `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs` - independent reviews, cross-host sync, batch receipts and the operator-only QA author override.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
 - `cas-cli/src/rapid_response.rs`, `cas-cli/src/cli/qa_rapid_response.rs` - operator-only, time-boxed per-epic rapid-response windows, scaled-down gates and the back-fill ledger.
 - `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - local action counts and per-journey traffic shares.
@@ -111,14 +111,17 @@
 - `hub-web/src/supervisor-commands.ts` - slash palette, confirmations, native chooser controls and command receipts.
 - `hub-web/src/live-phase.ts`, `hub-web/src/status-refresh.ts` - measured phase/elapsed view with explicit waiting, stale and unreported states; session-scoped latest status response ownership.
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts` - shared release/task state, lazy Team and receipt trail.
-- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - typed operation disclosures and live work pages.
+- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - typed operation disclosures, folded published-reasoning previews with safe Markdown/raw fallback, and live work pages.
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/conversation-view.ts` - fenced source, native evidence/status tables and two-format copy.
-- `hub-web/src/code-frame.ts`, `hub-web/src/rich-syntax.ts` - reusable Copy/Wrap frame and bounded lazy source color.
+- `hub-web/src/emoji-composer.ts`, `hub-web/src/emoji-picker.ts`, `hub-web/src/emoji-data.ts`, `hub-web/src/emoji-text.ts` - lazy local emoji search/recents, caret insertion and color glyph sequences.
+- `hub-web/src/code-frame.ts`, `hub-web/src/rich-syntax.ts` - shared Copy/Wrap/Source/Expand frame for code and previews, and bounded lazy source color.
 - `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - lazy evidence renderers.
+- `hub-web/src/image-viewer.ts`, `hub-web/src/image-viewer.css` - lazy image inspection dialog, turn gallery and pointer/keyboard controls; rationale in `hub-web/src/image-viewer.brief.md`.
 - `hub-web/src/accounts-panel.ts`, `hub-web/src/accounts-model.ts` - per-machine account ledger, confirmations and launch-choice invalidation.
 - `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs` - non-secret account projection and audited typed lifecycle routes.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth cache, durable phone input and recovery audits.
-- `cas-cli/src/hub/composer_upload.rs`, `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts` - bounded upload identity and persistent sent-file presentation.
+- `cas-cli/src/hub/composer_upload.rs`, `hub-web/src/composer-uploads.ts`, `hub-web/src/upload-transport.ts`, `hub-web/src/sent-attachments.ts` - byte progress, bounded upload identity and persistent sent-file presentation.
+- `cas-cli/src/hub/secret_request.rs`, `cas-cli/src/config/meta/seed/secrets.rs` - Commander secret requests: the value is saved to a mode-600 file in `secrets.destination` and only its path is replied.
 - `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media streams, hashed chunks and sandboxed pages.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/context-resize.ts` - pairing, scoped folder grants and remembered layout width.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, isolated previews and real-hub recovery fixtures.
@@ -135,6 +138,7 @@
 - **Release tools:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`.
 - **Host release installation:** `scripts/install-on-publish.sh` installs a Linux systemd user timer or macOS LaunchAgent; `scripts/test-install-on-publish.sh` proves the scheduler lifecycle and release timer.
 - **Hosted publication:** `.github/workflows/release.yml`, `scripts/deploy-hub-release.py`, `scripts/verify-hub-dist.sh`.
+- **Queue flake recovery:** `scripts/ci-queue-flakes.py` owns queue-only native result classification, routed GitHub issue publication and open-issue quarantine; `scripts/test-ci-queue-flakes.py` covers the native runner and HTTP boundaries. `.github/workflows/ci.yml` wires read-only shards and the required publication fan-in.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
 - **Runtime/config:** `ops/systemd/`, `docs/ci/`, `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`.
 - **CLI/library:** `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`; **TUI/daemon:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`.

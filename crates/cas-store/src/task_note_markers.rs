@@ -20,6 +20,7 @@ const PROVENANCE_BLOCKS: &[(&str, &str)] = &[
 fn is_proof_line(line: &str) -> bool {
     line.starts_with("ARTIFACT_PROOF:") || line.starts_with("QA_PASS_PROOF:")
         || line.starts_with("QA_EVIDENCE_PROOF:")
+        || line.starts_with("QA_BATCH_RECEIPT_PROOF:")
 }
 
 pub fn is_reserved_line(line: &str) -> bool {

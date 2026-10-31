@@ -249,6 +249,77 @@ it("groups a served image thumbnail and a failed preview with their own file car
   }
 });
 
+it("inspects only the turn's images with zoom, pan, gallery, failure and restored keyboard focus", async () => {
+  const files = ["First.png", "Second.png", "Missing.png"].map((name) => ({ ...brief, name, mime: "image/png", artifact_id: name }));
+  const fetchImage = async (file: ArtifactRef) => ({ ok: true as const, view: { artifact_id: file.artifact_id, url: `https://files.example/${file.name}` } });
+  const sheet = renderAttachmentSheet(document, files[0]!);
+  const root = inlineAttachment(sheet, files[0]!, () => fetchImage(files[0]!), { gallery: [...files, brief], fetchImage });
+  document.body.append(root); root.scrollTop = 120;
+  const show = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+  const close = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
+  Object.defineProperties(HTMLDialogElement.prototype, {
+    showModal: { configurable: true, value(this: HTMLDialogElement) { this.open = true; } },
+    close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; this.dispatchEvent(new Event("close")); } },
+  });
+  try {
+    sheet.focus(); sheet.click();
+    await vi.waitFor(() => expect(document.querySelector(".image-viewer[open]")).not.toBeNull());
+    const dialog = document.querySelector<HTMLDialogElement>(".image-viewer")!;
+    const button = (name: string) => dialog.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;
+    const canvas = dialog.querySelector<HTMLElement>(".image-viewer-canvas")!;
+    const image = () => dialog.querySelector<HTMLImageElement>("img")!;
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({ width: 200, height: 200, left: 0, top: 0, right: 200, bottom: 200, x: 0, y: 0, toJSON: () => ({}) });
+    Object.defineProperties(image(), { naturalWidth: { value: 800 }, naturalHeight: { value: 800 } });
+    image().dispatchEvent(new Event("load"));
+    expect(document.activeElement).toBe(button("Close image viewer"));
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "+", bubbles: true }));
+    expect(image().style.transform).toContain("scale(1.5)");
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true }));
+    expect(image().style.transform).not.toContain("translate(0px, 0px)");
+    const pointer = (type: string, id: number, x: number) => canvas.dispatchEvent(Object.assign(new Event(type, { bubbles: true, cancelable: true }), { pointerId: id, pointerType: "touch", button: 0, clientX: x, clientY: 100 }));
+    pointer("pointerdown", 1, 50); pointer("pointerdown", 2, 150); pointer("pointermove", 2, 180);
+    expect(image().style.transform).not.toContain("scale(1.5)");
+    pointer("pointerup", 1, 50); pointer("pointerup", 2, 180);
+    button("Fit image").click();
+    expect(image().style.transform).toContain("scale(1)");
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await vi.waitFor(() => expect(image().getAttribute("src")).toContain("Second.png"));
+    image().dispatchEvent(new Event("load"));
+    expect(dialog.textContent).toContain("2 of 3");
+    button("Next image").click();
+    await vi.waitFor(() => expect(image().getAttribute("src")).toContain("Missing.png"));
+    image().dispatchEvent(new Event("error"));
+    expect(dialog.querySelector('[role="status"]')!.textContent).toContain("Couldn't load Missing.png");
+    expect(button("Next image").disabled).toBe(true);
+    button("Try image again").focus();
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(button("Close image viewer"));
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(document.querySelector(".image-viewer")).toBeNull();
+    expect(document.activeElement).toBe(sheet);
+    expect(root.scrollTop).toBe(120);
+    const viewer = await import("./image-viewer");
+    const unavailable = vi.spyOn(viewer, "openImageViewer").mockImplementation(() => { throw new Error("viewer unavailable"); });
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        sheet.click();
+        await vi.waitFor(() => expect(unavailable).toHaveBeenCalledTimes(attempt));
+        await vi.waitFor(() => expect(sheet.querySelectorAll(".preview-note")).toHaveLength(1));
+      }
+    } finally { unavailable.mockRestore(); }
+    sheet.click();
+    await vi.waitFor(() => expect(document.querySelector(".image-viewer[open]")).not.toBeNull());
+    expect(sheet.querySelectorAll(".preview-note")).toHaveLength(0);
+    document.querySelector<HTMLDialogElement>(".image-viewer")!.close();
+  } finally {
+    document.querySelector(".image-viewer")?.remove(); root.remove();
+    for (const [name, descriptor] of [["showModal", show], ["close", close]] as const) {
+      if (descriptor) Object.defineProperty(HTMLDialogElement.prototype, name, descriptor);
+      else Reflect.deleteProperty(HTMLDialogElement.prototype, name);
+    }
+  }
+});
+
 it("loads supported inline media into reserved space and keeps the original Open link", async () => {
   for (const [mime, tag] of [["image/png", "img"], ["video/mp4", "video"], ["audio/mpeg", "audio"]]) {
     const file = { ...brief, mime: mime!, name: "Evidence", artifact_id: `art-${tag}` };

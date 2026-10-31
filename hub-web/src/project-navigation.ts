@@ -1,19 +1,35 @@
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineVersionMarkup } from "./machine-version";
-import { ConversationList, machineName, type ConversationRow } from "./conversation-list";
+import { ConversationList, machineName, rowProjectName, type ConversationRow } from "./conversation-list";
 
 export interface NavigationMachine { id: string; label: string; online?: boolean; runtime?: string; latestRelease?: string }
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
 interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[] }
-interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
+interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
-const projectName = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.supervisor;
+const projectName = (row: ConversationRow) => rowProjectName(row) || row.supervisor;
 const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.key;
 const endedSessionKey = (row: ConversationRow) => `${row.key}\u0000${row.ended?.at ?? ""}`;
+
+/**
+ * cas-ade2: the register's order is alphabetical and never follows activity,
+ * so a live update cannot move a card or a row. Cards sort by project name
+ * (case-insensitive, then canonical id); rows by supervisor name, then
+ * machine, then session.
+ */
+const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+const byText = (a: string, b: string) => collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
+export function compareProjectCards(a: readonly ConversationRow[], b: readonly ConversationRow[]): number {
+  return byText(projectName(a[0]!), projectName(b[0]!)) || byText(projectKey(a[0]!), projectKey(b[0]!));
+}
+export function compareSupervisorRows(a: ConversationRow, b: ConversationRow): number {
+  return byText(a.supervisor, b.supervisor) || byText(machineName(a.host), machineName(b.host))
+    || byText(a.machineId, b.machineId) || byText(a.session, b.session);
+}
 
 /** The project register composes the existing keyed row renderer, so pointer
  * intent, confirmation and focus behavior have one implementation. */
@@ -116,7 +132,8 @@ export class ProjectNavigation {
       groups.set(key, [...groups.get(key) ?? [], row]);
     }
     const ordered: HTMLElement[] = [];
-    const decisions = rows.filter((row) => !this.isDismissedEnded(row) && needsYou(row) && matches(row));
+    const decisions = rows.filter((row) => !this.isDismissedEnded(row) && needsYou(row) && matches(row))
+      .sort((a, b) => byText(projectName(a), projectName(b)) || compareSupervisorRows(a, b));
     if (decisions.length) {
       const section = this.pinned ??= document.createElement("section");
       section.className = "needs-you-section";
@@ -136,7 +153,7 @@ export class ProjectNavigation {
       ordered.push(section);
     } else this.pinned?.remove();
 
-    for (const [key, members] of groups) {
+    for (const [key, members] of [...groups].sort(([, a], [, b]) => compareProjectCards(a, b))) {
       const visible = members.filter((row) => matches(row) && !this.isDismissedEnded(row));
       if (!visible.length) continue;
       let card = this.cards.get(key);
@@ -162,7 +179,8 @@ export class ProjectNavigation {
       const label = `${name} · ${visible.length} ${visible.length === 1 ? "conversation" : "conversations"} on ${hosts.map((row) => machineName(row.host)).join(", ")}`;
       card.node.setAttribute("aria-label", label);
       if (card.heading.textContent !== label) card.heading.textContent = label;
-      const markup = `<strong class="project-card-name">${escapeHtml(name)}</strong><span class="project-card-count">${visible.length}<span class="sr-only"> ${visible.length === 1 ? "conversation" : "conversations"}</span></span><span class="project-card-chevron" aria-hidden="true">⌄</span>`;
+      const identity = members[0]!.project?.trim();
+      const markup = `<strong class="project-card-name"${identity && identity !== name ? ` title="${escapeHtml(identity)}"` : ""}>${escapeHtml(name)}</strong><span class="project-card-count">${visible.length}<span class="sr-only"> ${visible.length === 1 ? "conversation" : "conversations"}</span></span><span class="project-card-chevron" aria-hidden="true">⌄</span>`;
       if (card.toggle.innerHTML !== markup) card.toggle.innerHTML = markup;
       card.body.hidden = this.collapsed.has(key) && !options.searchActive;
       card.toggle.setAttribute("aria-expanded", String(!card.body.hidden));
@@ -183,7 +201,12 @@ export class ProjectNavigation {
         const online = machine?.online ?? row.machine_online;
         return `<button type="button" class="project-machine-chip" data-project-machine="${escapeHtml(row.machineId)}" aria-label="Filter conversations on ${escapeHtml(machineName(row.host))}${online === undefined ? "" : online ? ", online" : ", offline"}"><span class="machine-online-dot${online === true ? " online" : online === false ? " offline" : ""}" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}<span class="sr-only">${online === undefined ? "" : online ? ", online" : ", offline"}</span>${machineVersionMarkup(machine?.runtime, machine?.latestRelease)}</button>`;
       }).join("");
-      if (card.chips.innerHTML !== chipMarkup) card.chips.innerHTML = chipMarkup;
+      // The live DOM also contains aria-description added below. Compare the
+      // generated input so an unchanged catalog tick keeps the focused chip.
+      if (card.chipMarkup !== chipMarkup) {
+        card.chips.innerHTML = chipMarkup;
+        card.chipMarkup = chipMarkup;
+      }
       for (const chip of card.chips.querySelectorAll<HTMLButtonElement>("button")) {
         chip.setAttribute("aria-description", chip.querySelector(".machine-version")!.textContent!);
         chip.onclick = () => this.setFilter(`machine:${chip.dataset.projectMachine!}`);
@@ -196,10 +219,12 @@ export class ProjectNavigation {
       card.summary.hidden = !summary;
       const anyActivity = visible.some((row) => row.activityAt !== undefined);
       const rank = (row: ConversationRow) => (anyActivity ? row.activityAt : row.startedAt) ?? -Infinity;
-      const sorted = [...visible].sort((a, b) => rank(b) - rank(a));
+      const sorted = [...visible].sort(compareSupervisorRows);
+      // The most recent session is marked where it stands; it never moves.
+      const newest = sorted.reduce<ConversationRow | undefined>((best, row) => rank(row) > (best ? rank(best) : -Infinity) ? row : best, undefined);
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
-      const nested = sorted.map((row, index) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && index === 0 && rank(row) !== -Infinity } }));
+      const nested = sorted.map((row) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
       card.rows.render(card.body, nested, open, end, (row) => this.dismissEnded(row));
       ordered.push(card.node);
     }

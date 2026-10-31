@@ -1,0 +1,4 @@
+title: Preview collapse and growth before queued scroll delivery retain tail following, while explicit upward reading gestures retain the reader's place
+tasks: [cas-d587]
+invariants: [HUB-J4-GOAL]
+journeys: [HUB-J4]

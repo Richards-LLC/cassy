@@ -117,12 +117,18 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         shared = self.repo / ".git/shared-node-modules"
         shared.mkdir()
         (shared / "keep.txt").write_text("another checkout's installation")
-        for state in ("absent", "stale", "shared-symlink"):
+        for state in ("absent", "matching", "stale", "shared-symlink"):
             with self.subTest(node_modules=state):
-                if modules.exists():
+                if modules.exists() and state not in ("matching", "stale"):
                     shutil.rmtree(modules)
+                marker = modules / ".installation-marker"
+                if state in ("matching", "stale"):
+                    marker.write_text("keep a matching installation")
                 if state == "stale":
-                    modules.mkdir()
+                    hidden = modules / ".package-lock.json"
+                    installed = json.loads(hidden.read_text())
+                    next(iter(installed["packages"].values()))["version"] = "0.0.0"
+                    hidden.write_text(json.dumps(installed))
                 elif state == "shared-symlink":
                     modules.symlink_to(shared, target_is_directory=True)
                 before = self.git("rev-parse", "HEAD").stdout.strip()
@@ -135,6 +141,8 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
                 self.assertEqual((self.repo / "hub-web/dist/app.txt").read_text(), "locked dependency")
                 self.assertEqual(self.git("status", "--porcelain").stdout, "")
                 self.assertFalse(modules.is_symlink(), "regeneration owns its checkout's dependencies")
+                self.assertEqual(marker.exists(), state == "matching",
+                                 "only a matching installation must survive without npm ci")
                 self.assertEqual([p.name for p in shared.iterdir()], ["keep.txt"],
                                  "another checkout's node_modules must stay untouched")
 
@@ -185,6 +193,9 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         result = self.run_script("regenerate-generated-artifacts.sh", before, after, ok=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(result.stderr.splitlines()[0], r"hub-web/dist.*failed")
+        self.assertIn("regenerated " + LEDGER, result.stdout)
+        self.assertNotIn("--- reference-history", result.stderr,
+                         "successful step logs must not be repeated as failure diagnostics")
         # The merge receipt keeps only line one, so its log must survive exit.
         match = re.search(r"log: ([^)]+)", result.stderr.splitlines()[0])
         self.assertIsNotNone(match, result.stderr)

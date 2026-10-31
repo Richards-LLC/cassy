@@ -1,0 +1,4 @@
+title: Rust lifetimes stay plain beside colored characters, script apostrophes stay line-bounded, shell quotes span lines, and uncacheable source preserves earlier cached entries
+tasks: [cas-7457]
+invariants: [HUB-J22-SYNTAX-SOURCE]
+journeys: [HUB-J22]

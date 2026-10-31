@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,10 +28,49 @@ spec.loader.exec_module(proof)
 
 
 class ReceiptTests(unittest.TestCase):
+    def test_row_toolchain_uses_the_isa_audits_selected_objdump(self):
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copy(Path(__file__).with_name("release-portable.sh"), scripts)
+        tools = self.root / "bin"
+        tools.mkdir()
+        for name in ("cargo", "rustc", "cargo-zigbuild", "gobjdump"):
+            tool = tools / name
+            tool.write_text("#!/bin/sh\n" + ("exit 1\n" if name == "gobjdump" else "echo fixture-version\n"))
+            tool.chmod(0o755)
+        objdump = self.root / "keg-only objdump"
+        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.defpath,
+                   CARGO=str(tools / "cargo"), OBJDUMP=str(objdump))
+        fingerprints = []
+        for version in ("first", "second"):
+            objdump.write_text(f"#!/bin/sh\necho 'GNU objdump {version}'\n")
+            objdump.chmod(0o755)
+            with mock.patch.object(proof.platform, "system", return_value="Darwin"):
+                fingerprints.append(proof.row_toolchain(self.root, "release-binary-isa", env))
+        self.assertNotEqual(*fingerprints, "the ISA audit's selected objdump version must bind the row proof")
+
+    def test_changelog_section_does_not_require_a_fixture_compiler(self):
+        # Model a host without an ELF compiler at the portable tool boundary;
+        # leave the real section dispatcher and all changelog cases running.
+        startup = self.root / "no-compiler.sh"
+        startup.write_text('''source() {
+    builtin source "$@"
+    if [[ "$1" == */release-portable.sh ]]; then
+        release_portable_x86_64_linux_cc() { return 1; }
+    fi
+}
+''')
+        result = subprocess.run(["bash", str(Path(__file__).with_name("test-release-gate.sh")),
+                                 "--changelog-only"], env=dict(os.environ, BASH_ENV=str(startup)),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"[1-9]\d* passed, 0 failed")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Git and proof receipts use physical paths (/var is an alias on macOS).
+        self.root = Path(self.temp.name).resolve()
         # A private admission pool: live worker suites on this host must not
         # make proof fixtures wait or time out.
         patcher = mock.patch.object(proof, "HOST_MEMORY_DIRECTORY", self.root / ".host-memory")
@@ -201,7 +241,7 @@ class ReceiptTests(unittest.TestCase):
                     self.assertNotIn(value, stream.getvalue())
 
     def test_cas_398c_receipt_records_included_and_excluded_names_with_reasons(self):
-        env = dict(self.harness_environment({"HOME": str(self.root), "PATH": "/bin",
+        env = dict(self.harness_environment({"HOME": str(self.root), "PATH": "/usr/bin:/bin",
                                              "RUSTFLAGS": "-C debuginfo=1"}),
                    **self.DAEMON_ONLY, **self.SHELL_ONLY, CARGO_TARGET_DIR="/fixture/target",
                    CAS_RELEASE_GATE_LOG_DIR="/fixture/logs")
@@ -627,7 +667,7 @@ printf 'PASS %s fixture\n' "$row"
             return tuple(results)
 
         with tempfile.TemporaryDirectory() as directory:
-            scratch = Path(directory) / 'base'
+            scratch = Path(directory).resolve() / 'base'
             env = {'CAS_RELEASE_GATE_HOME_DIR': str(scratch), 'CARGO_TARGET_DIR': '/foreign/target'}
             with mock.patch.object(proof, 'clone_scratch', return_value=scratch), \
                     mock.patch.object(proof, 'inputs', return_value=(expected, env)), \
@@ -742,7 +782,7 @@ p.prove(root)
         # exercised separately by the shell fixture suite.
         (self.root / "scripts/release-gate.sh").write_text(
             '#!/bin/bash\n'
-            'echo "$BASHPID" > "$SCRATCH/child-pid"\n'
+            'echo "$$" > "$SCRATCH/child-pid"\n'
             'touch "$SCRATCH/ready"\n'
             'exec python3 -c "import time; time.sleep(60)"\n')
         self.commit()
@@ -835,7 +875,6 @@ p.prove(root)
         self.assertEqual([item["admitted"] for item in execution["phases"]], [False, True])
         sleep.assert_called_once()
 
-    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "needs /proc")
     def test_cas_7b7b9_row_daemon_does_not_keep_the_proof_lease(self):
         # The release incident (cas-7b7b9): a row's build started an sccache server that
         # inherited the proof's intent/budget and held them after the proof.
@@ -868,8 +907,14 @@ p.prove(root)
             self.assertEqual(proof.run_contexts(self.root, self.root, env, self.root, self.root, {}), "ran")
         daemon = int(pidfile.read_text())
         os.kill(daemon, 0)  # the daemon outlived its row and the proof
-        held = {os.readlink(fd) for fd in Path(f"/proc/{daemon}/fd").iterdir()
-                if os.path.exists(fd) and os.readlink(fd).startswith(str(pool))}
+        if sys.platform == "darwin":
+            # macOS has no /proc; lsof observes the same live daemon descriptors.
+            listing = subprocess.check_output(["/usr/sbin/lsof", "-a", "-p", str(daemon), "-Fn"], text=True)
+            names = (Path(line[1:]).resolve() for line in listing.splitlines() if line.startswith("n/"))
+            held = {str(name) for name in names if name == pool or pool in name.parents}
+        else:
+            held = {os.readlink(fd) for fd in Path(f"/proc/{daemon}/fd").iterdir()
+                    if os.path.exists(fd) and os.readlink(fd).startswith(str(pool))}
         self.assertEqual(held, set(), "the row daemon inherited the proof's admission descriptors")
         spec = importlib.util.spec_from_file_location("host_memory_7b7b9", Path(proof.__file__).with_name("host_memory.py"))
         host = importlib.util.module_from_spec(spec)
@@ -954,7 +999,7 @@ p.prove(root)
                 with self.assertRaisesRegex(RuntimeError, "guard accepted"):
                     proof.prove(self.root)
                 self.assertTrue(resolve.call_args.kwargs["durable"])
-                self.assertEqual(sweep.call_args.args[1], Path("/home/cas-release-gate/base"))
+                self.assertEqual(sweep.call_args.args[1], Path("/home/cas-release-gate/base").resolve())
         gap = proof.release_env.ScratchResolution(
             "", "", "/srv", ["platform default /var/tmp/cas-release-gate: under system temporary root"],
             "no usable scratch base on the checkout filesystem /srv", "sudo install -d /srv/cas-release-gate")

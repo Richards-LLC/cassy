@@ -715,22 +715,39 @@ describe("Commander live connection lifecycle", () => {
   });
   it("keeps a failed event catalog read from bypassing four failed heartbeats on a half-open machine (cas-eefe)", async () => {
     const hub = transport();
-    const connection = supervisor(await storedMachine("half-open-catalog"));
+    let eventDelivered: (() => void) | undefined;
+    let catalogFailed: (() => void) | undefined;
+    let catalogLoaded!: () => void;
+    const initialCatalog = new Promise<void>(resolve => { catalogLoaded = resolve; });
+    const fetchNow = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      try { return await fetchNow(input, init); }
+      catch (error) {
+        if (new URL(String(input)).pathname === "/v1/sessions") catalogFailed?.();
+        throw error;
+      }
+    }));
+    const connection = supervisor(await storedMachine("half-open-catalog"), () => {}, () => eventDelivered?.(), catalogLoaded);
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await initialCatalog;
+    expect(connection.snapshot().phase).toBe("live");
     // Half-open: HTTP stops answering while the event stream stays open.
     hub.block(true);
     const sessionReads = () => hub.requests.filter(request => request.path === "/v1/sessions").length;
     for (let beat = 1; beat <= 3; beat++) {
-      // An event lands with every beat, so its catalog read races (and
-      // shares) the heartbeat's own read, as in the HUB-J12 trace.
+      // Observe the event and a failed catalog fetch before moving the clock.
+      // Native DPoP signing can outlive a synthetic heartbeat under CPU load;
+      // elapsed heartbeat time does not prove the signed read reached fetch.
       const reads = sessionReads();
+      const delivered = new Promise<void>(resolve => { eventDelivered = resolve; });
+      const failed = new Promise<void>(resolve => { catalogFailed = resolve; });
       hub.event();
+      await Promise.all([delivered, failed]);
+      expect(sessionReads()).toBeGreaterThan(reads);
       await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
       await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(beat));
-      await vi.waitFor(() => expect(sessionReads()).toBeGreaterThan(reads));
       expect(connection.snapshot().phase).toBe("live");
       if (beat >= 2) expect(connection.snapshot().degraded).toBe(true);
       expect(hub.streams).toHaveLength(1);

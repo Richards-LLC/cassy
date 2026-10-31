@@ -55,7 +55,8 @@
 //! unsets or clears `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, so the role gates
 //! that read them see the role the factory gave the agent. That hook refusal
 //! is the control for those role gates, which include `cas update`'s worker
-//! restriction, `restart_spawn_queue` and `supervisor_override`.
+//! restriction, `restart_spawn_queue`, `restart_supervisor` and
+//! `supervisor_override`.
 //!
 //! The gates themselves still read the environment. Overriding it from the
 //! process's cgroup was rejected, because a worker's own test harnesses run
@@ -652,6 +653,11 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     // cas-d58d: the operator's privacy rule for same-repo peers; `team`
     // admits other users' supervisors again.
     "peers.same_repo_scope",
+    // cas-1996: an agent pointing the destination into a tracked or shared
+    // folder would publish the secrets the operator pastes in Commander.
+    "secrets.destination",
+    // cas-2f55: whether pasted secrets are deleted is the operator's choice.
+    "secrets.auto_delete",
 ];
 
 /// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.
@@ -758,6 +764,9 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
             _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
         },
+        Commands::Qa(crate::cli::qa::QaCommand::AuthorOverride { .. }) => {
+            Some("Overriding the independent QA author rule (`cas qa author-override`)")
+        }
         _ => None,
     }
 }
@@ -1104,6 +1113,7 @@ mod tests {
             "qa rapid-response enable cas-ep1c --for 2h --reason outage --rollback revert",
             "qa rapid-response disable cas-ep1c",
             "qa rapid-response review-migration cas-de11 --note checked",
+            "qa author-override cas-de11 --note accepted",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),

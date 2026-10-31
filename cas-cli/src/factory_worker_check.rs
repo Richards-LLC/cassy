@@ -188,6 +188,19 @@ pub(crate) fn valid_package(package: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+/// Targeted tests may disambiguate duplicate crate names with an exact version.
+/// Keep URLs, partial versions, ranges and shell syntax outside the capped lane.
+fn package_selector(package: &str) -> Option<(&str, Option<&str>)> {
+    let (name, version) = match package.split_once('@') {
+        Some((name, version)) => {
+            semver::Version::parse(version).ok()?;
+            (name, Some(version))
+        }
+        None => (package, None),
+    };
+    valid_package(name).then_some((name, version))
+}
+
 /// Deliberately excludes glob/package-ID expressions, aliases, flags that
 /// broaden the scope, and arbitrary Cargo configuration or toolchains.
 pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
@@ -222,7 +235,7 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
         return None;
     }
     let package = args.get(3)?.clone();
-    if !valid_package(&package) {
+    if package_selector(&package).is_none() {
         return None;
     }
     let mut index = 4;
@@ -287,6 +300,7 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
 }
 
 fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+    let (name, version) = package_selector(package).context("invalid package selector")?;
     let root = repo.join("Cargo.toml");
     let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
     let mut manifests = vec![root];
@@ -308,8 +322,21 @@ fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(toml::Value::as_str)
-            == Some(package)
+            == Some(name)
         {
+            if let Some(version) = version {
+                let declared = value.get("package").and_then(|p| p.get("version"));
+                let resolved = declared.and_then(toml::Value::as_str).or_else(|| {
+                    declared
+                        .and_then(|v| v.get("workspace"))
+                        .and_then(toml::Value::as_bool)
+                        .filter(|inherited| *inherited)
+                        .and_then(|_| manifest.get("workspace")?.get("package")?.get("version")?.as_str())
+                });
+                if resolved != Some(version) {
+                    continue;
+                }
+            }
             return Ok((path, value));
         }
     }
@@ -615,6 +642,29 @@ fn executable(path: &Path) -> bool {
 }
 
 const HOST_PATH_OPT_OUT: &str = "CAS_WORKER_TEST_ALLOW_HOST_PATH";
+const HEADFUL_FILTER: &str = "test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)";
+
+/// Compose the existing explicit opt-ins rather than weakening default test isolation.
+fn live_headful_mode(test: Option<&TargetedTest>, isolated_test_env: Option<&Path>, host_reason: Option<&str>) -> Result<bool> {
+    if std::env::var_os("CAS_HEADFUL_E2E").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Ok(false);
+    }
+    if !test.is_some_and(|test| test.package == "cas"
+        && test.harness.as_deref() == Some("e2e_test") && test.filter == HEADFUL_FILTER)
+    {
+        bail!("Live headful requires the exact headful e2e_test selection documented in CONTRIBUTING");
+    }
+    if host_reason.is_none() {
+        bail!("Live headful requires CAS_WORKER_TEST_ALLOW_HOST_PATH with a single-line reason; run from the operator's own terminal");
+    }
+    if isolated_test_env.is_some() {
+        bail!("Live headful cannot use the credential-free isolated-test-env profile; retain the selected Claude account environment");
+    }
+    if !cfg!(target_os = "macos") {
+        bail!("Live headful requires macOS with Terminal.app; no live test was executed");
+    }
+    Ok(true)
+}
 
 fn host_path_opt_out() -> Result<Option<String>> {
     let Some(reason) = std::env::var_os(HOST_PATH_OPT_OUT) else {
@@ -867,7 +917,15 @@ impl<'a> PassingTests<'a> {
 
     pub(crate) fn packages(&self) -> Vec<String> {
         let mut packages = self.records().iter()
-            .map(|(_, package, _)| package.clone()).collect::<Vec<_>>();
+            .filter_map(|(_, package, _)| {
+                let (name, version) = package_selector(package)?;
+                // A dependency's other version must never cover this workspace
+                // crate. The receipt/audit identity keeps the full selector.
+                if version.is_some() && package_manifest(self.repo, package).is_err() {
+                    return None;
+                }
+                Some(name.to_string())
+            }).collect::<Vec<_>>();
         packages.sort();
         packages.dedup();
         packages
@@ -984,7 +1042,7 @@ fn read_passing_test_record(
     let test = record.test.take()?;
     if record.repo != repo
         || record.packages.len() != 1
-        || !valid_package(&record.packages[0])
+        || package_selector(&record.packages[0]).is_none()
         || !named_filter(&test.filter)
         || test.count == 0
         || test
@@ -1791,6 +1849,15 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
+    let live_headful = live_headful_mode(test.as_ref(), isolated_test_env, host_path_opt_out.as_deref())?;
+    if live_headful {
+        println!("Live headful: enabled; host PATH and Claude credentials inherited");
+        println!("Factory launch remains operator-only; normal build caps apply");
+    } else if test.as_ref().is_some_and(|test| test.harness.as_deref() == Some("e2e_test")
+        && test.filter.contains("factory_tui_headful")) {
+        println!("Live headful: NOT EXERCISED (CAS_HEADFUL_E2E=1 not set)");
+    }
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -1859,7 +1926,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
     if let Some(reason) = &host_path_opt_out {
         println!("Worker test PATH: host opt-out: {reason}");
     }
@@ -1920,6 +1986,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         command.env("PATH", path);
     }
     let mut cargo_args = args.to_vec();
+    if live_headful {
+        cargo_args.extend(["--success-output".into(), "immediate".into()]);
+    }
     // An omitted harness means library tests; do not build every test binary.
     if test.as_ref().is_some_and(|test| test.harness.is_none())
         && cargo_args.get(4).is_some_and(|arg| arg == "-E")
@@ -2288,14 +2357,15 @@ child.wait()
     #[cfg(unix)]
     #[test]
     fn detached_runner_leads_its_own_session_outside_the_callers_group() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 5"]);
+        // Own the process holding the capture pipe, with no shell descendant.
+        let mut command = Command::new("sleep");
+        command.arg("5");
         let mut child = spawn_detached(command).unwrap();
         let pid = child.id() as libc::pid_t;
         // SAFETY: plain process-id queries on our own live child.
         let (sid, pgid, caller_pgid) = unsafe { (libc::getsid(pid), libc::getpgid(pid), libc::getpgrp()) };
-        let _ = child.kill();
-        let _ = child.wait();
+        child.kill().expect("kill the owned detached fixture");
+        child.wait().expect("reap the fixture and close its output descriptors");
         assert_eq!(sid, pid, "detached runner must be a session leader");
         assert_eq!(pgid, pid, "detached runner must lead its own process group");
         assert_ne!(pgid, caller_pgid, "a kill of the caller's group must not reach it");
@@ -2857,6 +2927,49 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
 
     #[cfg(unix)]
     #[test]
+    fn live_headful_profile_requires_reason_and_preserves_credentials_cas_7e12() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        env.set("CAS_HEADFUL_E2E", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname='cas'\nversion='0.1.0'\n[[test]]\nname='e2e_test'\npath='tests/e2e.rs'\n").unwrap();
+        std::fs::write(repo.join("tests/e2e.rs"), "").unwrap();
+        fixture_commit_as(&repo, "explicit e2e harness");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, "printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\\n'");
+        let args = ["nextest", "run", "-p", "cas", "--test", "e2e_test", "-E",
+            "test(=e2e::factory_tui_headful::factory_tui_headful_reuse_window)"].map(str::to_string);
+        let error = execute_at(&root, &args, &repo, &cargo).unwrap_err().to_string();
+        assert!(error.contains("CAS_WORKER_TEST_ALLOW_HOST_PATH"), "{error}");
+        env.set(HOST_PATH_OPT_OUT, "operator live headful credential proof");
+        let xdg = dir.path().join("private-config");
+        std::fs::create_dir(&xdg).unwrap();
+        let error = execute_at_with_scope(&root, &args, &repo, &cargo, None, Some(&xdg)).unwrap_err().to_string();
+        assert!(error.contains("credential-free"), "{error}");
+        let lib_args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(selected)"].map(str::to_string);
+        let error = execute_at(&root, &lib_args, &repo, &cargo).unwrap_err().to_string();
+        assert!(error.contains("exact headful"), "{error}");
+        if !cfg!(target_os = "macos") { return; }
+        env.set("CLAUDE_CONFIG_DIR", "/fixture/selected-account");
+        env.set("CLAUDE_CODE_OAUTH_TOKEN", "fixture-token");
+        env.set("XDG_CONFIG_HOME", &xdg);
+        fake_cargo(&cargo, r#"[ "$CAS_HEADFUL_E2E" = 1 ] || exit 21
+[ "$CLAUDE_CONFIG_DIR" = /fixture/selected-account ] || exit 22
+[ "$CLAUDE_CODE_OAUTH_TOKEN" = fixture-token ] || exit 23
+[ -d "$XDG_CONFIG_HOME" ] || exit 24
+[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 25
+case "$*" in *'--success-output immediate'*) ;; *) exit 26 ;; esac
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+        execute_at(&root, &args, &repo, &cargo).unwrap();
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].contains("operator live headful credential proof"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn private_fake_cas_fixture_preserves_process_path_cas_a9fc() {
         let _env = crate::test_support::TestEnvGuard::new();
         let original = std::env::var_os("PATH");
@@ -3397,6 +3510,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             "nextest run -p cas -E test(hooks::handlers)",
             "nextest run -p cas --lib -E test(=module::name)",
             "nextest run -p cas --test integration_factory -E test(worker)",
+            "nextest run -p crossterm@0.25.0 --lib -E test(take_buffered)",
+            "nextest run -p crate-name@1.0.0-rc.1+build.5 --test harness -E test(worker)",
         ] {
             assert!(allowed_args(&words(accepted)), "{accepted}");
         }
@@ -3440,6 +3555,18 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             args.push(filter.into());
             assert!(!allowed_args(&args), "{filter}");
         }
+        for package in [
+            "@0.25.0", "crossterm@", "crossterm@0.25", "crossterm@01.0.0",
+            "crossterm@0.25.0@0.29.0", "crossterm@*", "crossterm@^0.25.0",
+            "crossterm@0.25.0-", "crossterm@0.25.0+", "crossterm@0.25.0-01",
+            "crossterm@0.25.0 other", "crossterm@0.25.0\n", "crossterm@0.25.0\0",
+            "crossterm@0.25.0;echo", "crossterm@0.25.0$(echo)",
+            "https://example.test/#crossterm@0.25.0",
+        ] {
+            let mut args = words("nextest run -p cas --lib -E test(name)");
+            args[3] = package.into();
+            assert!(!allowed_args(&args), "{package:?}");
+        }
     }
 
     #[test]
@@ -3447,7 +3574,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let repo = tempfile::tempdir().unwrap();
         std::fs::write(
             repo.path().join("Cargo.toml"),
-            "[workspace]\nmembers = [\"package\"]\n",
+            "[workspace]\nmembers = [\"package\"]\n[workspace.package]\nversion = \"0.25.0\"\n",
         )
         .unwrap();
         let package = repo.path().join("package");
@@ -3460,6 +3587,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             filter: "test(worker)".into(),
         };
         validate_harness(repo.path(), &test).unwrap();
+        for version in ["version = \"0.25.0\"", "version.workspace = true"] {
+            std::fs::write(package.join("Cargo.toml"), format!(
+                "[package]\nname = \"cas\"\n{version}\n[[test]]\nname = \"integration_factory\"\npath = \"harness.rs\"\n"
+            )).unwrap();
+            test.package = "cas@0.25.0".into();
+            validate_harness(repo.path(), &test).unwrap();
+            test.package = "cas@0.29.0".into();
+            assert!(validate_harness(repo.path(), &test).is_err());
+        }
+        test.package = "cas".into();
         test.harness = Some("source_suite_alias".into());
         assert!(validate_harness(repo.path(), &test).is_err());
         test.harness = Some("integration_factory".into());
@@ -4427,22 +4564,28 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 2\n").unwrap();
         let fake = dir.path().join("fake-cargo");
-        // A pipe handshake holds admitted payloads until all N+1 processes
-        // report admission/refusal. No compiler, host load, or sleep race.
+        // A per-payload FIFO holds admitted slots until all N+1 processes
+        // answer. Cargo's verified wrapper deliberately gives it null stdin.
         fake_cargo(&fake, r#"printf 'PAYLOAD_STARTED\n'
-IFS= read -r release
+IFS= read -r release < target/release.fifo
 printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut children = Vec::new();
         let mut readers = Vec::new();
+        let mut releases = Vec::new();
         for index in 0..3 {
             let repo = root.join(format!("worktrees/worker-{index}"));
             fixture_commit(&repo);
             std::fs::create_dir(repo.join("target")).unwrap();
+            let fifo = repo.join("target/release.fifo");
+            assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            // Hold both ends so opening/writing cannot block during failure
+            // cleanup, even for the refused child which never opens its FIFO.
+            releases.push(std::fs::OpenOptions::new().read(true).write(true).open(&fifo).unwrap());
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
                 .env(CHILD, serde_json::to_string(&[&root, &repo, &fake]).unwrap())
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit())
                 .spawn().unwrap();
             let output = child.stdout.take().unwrap();
             let sender = sender.clone();
@@ -4451,7 +4594,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
                 for line in std::io::BufReader::new(output).lines() {
                     let line = line.unwrap();
                     if line == "PAYLOAD_STARTED" || line.starts_with("RUNNER_RESULT refused:") {
-                        sender.send(line.clone()).unwrap();
+                        sender.send((index, line.clone())).unwrap();
                     }
                     lines.push(line);
                 }
@@ -4468,9 +4611,11 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         }
         // Release before assertions, including a failed handshake, so no
         // payload survives a failed regression.
-        for child in &mut children {
-            if let Some(mut input) = child.stdin.take() {
-                let _ = writeln!(input, "release");
+        for (index, release) in releases.iter_mut().enumerate() {
+            if events.len() != 3 || events.iter().any(|(child, line)|
+                *child == index && line == "PAYLOAD_STARTED")
+            {
+                let _ = writeln!(release, "release");
             }
         }
         for child in &mut children {
@@ -4478,8 +4623,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         }
         let logs: Vec<_> = readers.into_iter().map(|reader| reader.join().unwrap()).collect();
         assert_eq!(events.len(), 3, "all runner processes must answer: {logs:?}");
-        assert_eq!(events.iter().filter(|line| *line == "PAYLOAD_STARTED").count(), 2);
-        let refusal = events.iter().find(|line| line.starts_with("RUNNER_RESULT refused:")).unwrap();
+        assert_eq!(events.iter().filter(|(_, line)| line == "PAYLOAD_STARTED").count(), 2);
+        let (_, refusal) = events.iter().find(|(_, line)| line.starts_with("RUNNER_RESULT refused:")).unwrap();
         assert!(refusal.contains("Waiting for build admission"), "{refusal}");
         assert!(refusal.contains("max_concurrent_builders=2"), "{refusal}");
         let mut held_slots = Vec::new();
@@ -4536,10 +4681,15 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let slots = root.join("worker-check-slots");
         std::fs::create_dir_all(&slots).unwrap();
         let _held = acquire_slot(&slots, 1).unwrap();
-        let args: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(x)"]
-            .iter()
-            .map(|arg| arg.to_string())
-            .collect();
+        // Exercise the real verifier-test CLI transport before capped admission.
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas", "factory", "verifier-test", "--cas-root", root.to_str().unwrap(),
+            "--task-id", "cas-proof", "--head", &head, "--",
+            "nextest", "run", "-p", "crossterm@0.25.0", "--lib", "-E", "test(take_buffered)",
+        ]).unwrap();
+        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+        let Some(crate::cli::factory::FactoryCommands::VerifierTest { cargo_args: args, .. }) = factory.command else { panic!("verifier-test command") };
 
         crate::store::init_cas_dir(&repo).unwrap();
         crate::store::open_task_store(&root)
@@ -4731,6 +4881,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         );
         assert!(passing_receipt(root.path(), &repo, &"b".repeat(40)).is_none());
         assert!(passing_receipt(root.path(), root.path(), &head).is_none());
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"cas\"\nversion = \"0.25.0\"\n").unwrap();
+        record_passing_test_for_tests(root.path(), &repo, &head, "cas@0.29.0", "test(worker)");
+        assert!(passing_test_packages(root.path(), &repo, &head).is_empty(),
+            "a passing dependency version cannot cover the workspace crate");
+        record_passing_test_for_tests(root.path(), &repo, &head, "cas@0.25.0", "test(worker)");
+        assert_eq!(passing_test_packages(root.path(), &repo, &head), ["cas"]);
+        assert_eq!(passing_test_receipts(root.path(), &repo, &head), [
+            format!("test: PASS {head} cas@0.25.0 test(worker) 1"),
+            format!("test: PASS {head} cas@0.29.0 test(worker) 1"),
+        ], "receipt identities and audit lines must retain each exact version");
     }
 
     #[cfg(unix)]

@@ -1642,7 +1642,12 @@ check_changelog_and_versions() {
         $0 == "## [Unreleased]" { in_unreleased=1; next }
         in_unreleased && /^## \[/ { exit }
         in_unreleased && /^### / {
-            area = ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security) — [^<>]+$/)
+            category = substr($0, 5)
+            sub(/ — .*/, "", category)
+            shipped = (category ~ /^(Added|Changed|Deprecated|Removed|Fixed|Security)$/)
+            # Match release_report.rs::is_non_shipped_category and the rubric.
+            non_shipped = (tolower(category) ~ /^(doc|test|known limit)/)
+            area = ((shipped || non_shipped) && $0 ~ /^### [^<>]+ — [^<>]+$/)
             next
         }
         in_unreleased && /^- / {
@@ -1844,6 +1849,36 @@ check_fixture_paths_src() {
 # cas-e7d4: a cut once stopped at preflight on a Slack draft committed
 # hours earlier (a 26-word Dev punch). A Slack suffix identifies the channel,
 # not the workflow: route diary threads and runtime release drafts separately.
+draft_has_posted_receipt() {
+    python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+fence = None
+posted = False
+receipt = re.compile(
+    r"\bmessage_id=[0-9]+(?:\.[0-9]+)?\b"
+    r"|https://(?:[A-Za-z0-9-]+\.)?slack\.com/archives/[A-Za-z0-9]+/p[0-9]+\b"
+    r"|\b[0-9]{10}\.[0-9]{6}\b"
+)
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if fence:
+        if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line):
+            fence = None
+    else:
+        opening = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+        elif re.match(r" {0,3}##(?:[ \t]|$)", line):
+            posted = re.fullmatch(r" {0,3}##[ \t]+POSTED[ \t]*", line) is not None
+            continue
+    if posted and receipt.search(line):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 check_release_notes_draft() {
     local -a diary_drafts=() runtime_drafts=()
     local path
@@ -1853,6 +1888,12 @@ check_release_notes_draft() {
     fi
     while IFS= read -r path; do
         [[ -f "$path" ]] || continue
+        # Only a real posting receipt makes this a historical record. Fenced
+        # examples and empty/template POSTED sections remain lintable drafts.
+        if draft_has_posted_receipt "$path"; then
+            printf 'release-notes-draft: skipping posted draft %s\n' "$path"
+            continue
+        fi
         # Runtime releases and harness diaries both use Slack drafts. Headings
         # or a thread filename distinguish the diary workflow from runtime.
         if [[ "$path" == *harness-diary* || "$path" == *-thread.md ]] \

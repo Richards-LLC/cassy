@@ -132,7 +132,51 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         ))
         .stdout(predicate::str::contains(
             "  work (not logged in)\n    ~/.claude-work\n",
-        ));
+        ))
+        .stdout(predicate::str::contains("Full profile names and folders:").not());
+
+    for alias in [
+        format!("{}@example.com", "long-profile-".repeat(5)),
+        "界".repeat(50),
+        "🚀".repeat(40),
+    ] {
+        let directory = home.path().join(format!(".claude-{alias}"));
+        std::fs::create_dir(&directory).unwrap();
+        let email = format!("{alias}@example.org");
+        std::fs::write(directory.join(".claude.json"), serde_json::json!({
+            "oauthAccount": {"emailAddress": email, "accountUuid": alias, "organizationUuid": "long-profile"}
+        }).to_string()).unwrap();
+        let output = cas_cmd(home.path())
+            .env("COLUMNS", "80")
+            .env("CLAUDE_CONFIG_DIR", &directory)
+            .args(["claude", "--list-profiles"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        for line in output.lines() {
+            let width = ratatui::text::Line::from(line).width();
+            assert!(width <= 80, "profile list overflows 80 cells: {line}");
+        }
+        let header = output.lines().find(|line| line.contains("(active)")).unwrap();
+        assert!(ratatui::text::Line::from(header).width() >= 79, "unused display cells: {header}");
+        assert!(header.contains("(not logged in) (active)"), "{output}");
+        assert!(output.contains("--full"), "truncated identity needs an escape: {output}");
+        for flag in ["--full", "--json"] {
+            cas_cmd(home.path())
+                .env("CLAUDE_CONFIG_DIR", &directory)
+                .args(["claude", "--list-profiles", flag])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(&email))
+                .stdout(predicate::str::contains(&alias))
+                .stdout(predicate::str::contains(format!("~/.claude-{alias}")))
+                .stdout(predicate::str::contains("Full profile names and folders:").not());
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }
 
 #[test]
@@ -853,6 +897,22 @@ fn factory_flags_pass_through_with_and_without_a_profile() {
 }
 
 #[test]
+fn account_mutation_help_explains_macos_shell_visibility() {
+    let home = TempDir::new().unwrap();
+    for command in ["rename", "remove"] {
+        cas_cmd(home.path())
+            .args(["accounts", command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("macOS"))
+            .stdout(predicate::str::contains("/bin/zsh, /bin/bash and /bin/sh"))
+            .stdout(predicate::str::contains("CLAUDE_CONFIG_DIR"))
+            .stdout(predicate::str::contains("CODEX_HOME"))
+            .stdout(predicate::str::contains("Close shells"));
+    }
+}
+
+#[test]
 fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
     const HOLDER: &str = "CAS_TEST_ACCOUNT_HOLDER";
     if std::env::var_os(HOLDER).is_some() {
@@ -942,12 +1002,19 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         {
             use std::io::{BufRead, Write};
             use std::process::Stdio;
-            // macOS hides Apple system-shell environments from ps. Reenter
-            // this executable so the real guard can observe the live selector.
-            let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            let test_name = "accounts_lifecycle_preserves_shared_targets_and_guards_mutations";
+            let child_test = module_path!()
+                .split_once("::")
+                .map(|(_, module)| format!("{module}::{test_name}"))
+                .unwrap_or_else(|| test_name.to_string());
+            // Keep an Apple shell alive around a readable child. Even when
+            // macOS hides the shell's env, its descendant must protect the account.
+            let mut holder = std::process::Command::new("/bin/sh")
+                .args(["-c", "\"$@\"; exit $?", "account-holder"])
+                .arg(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "claude_profile_test::accounts_lifecycle_preserves_shared_targets_and_guards_mutations",
+                    &child_test,
                     "--nocapture",
                 ])
                 .env(HOLDER, "1")

@@ -16,6 +16,25 @@ use tempfile::TempDir;
 #[path = "../../fixtures/ci_check_run.rs"]
 mod ci_check_run;
 
+fn compact_close_detail(response: &str, task_id: &str, target: &str) -> String {
+    let (summary, reference) = response
+        .split_once("\nDetails: ")
+        .expect("successful close must reference its durable detail receipt");
+    assert_eq!(
+        summary.lines().next().unwrap(),
+        format!("Closed task: {task_id}; delivery none; target {target}; next: none.")
+    );
+    let (path, _) = reference
+        .rsplit_once(" (SHA-256 ")
+        .expect("detail reference must include its content digest");
+    let detail = std::fs::read_to_string(path).expect("close detail receipt must be readable");
+    assert!(
+        detail.contains(&format!("Closed task: {task_id}")),
+        "detail must describe the closed task: {detail}"
+    );
+    detail
+}
+
 fn proof_boundary_git(path: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -1008,6 +1027,55 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
             .expect("close after the verdict"),
     );
     assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+/// Deliver one file, merged to main, and close through the real close path with
+/// the delivery's start and anchor recorded. Returns the close's text and notes.
+async fn close_delivery_of(path: &str, branch: &str) -> (String, String, bool) {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, branch).await;
+    let start = head_of(worker_dir.path());
+    let file = worker_dir.path().join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "delivered\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", path]);
+    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "deliver one path"]);
+    let tip = head_of(worker_dir.path());
+    proof_boundary_git(temp.path(), &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+        assignee: "worker".into(),
+        branch: branch.into(),
+        base_sha: start,
+    });
+    tasks.update(&task).unwrap();
+
+    let mut request = close_request(&task_id, "delivered");
+    request.commit_receipt = Some(tip);
+    let text = extract_text(service.cas_task_close(Parameters(request)).await.expect("close"));
+    let notes = tasks.get(&task_id).unwrap().notes;
+    let dispatched = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().is_some();
+    (text, notes, dispatched)
+}
+
+/// cas-5207: docs close with no independent verifier and say so on the task;
+/// anything that can change behavior still gets one.
+#[tokio::test]
+async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
+    let (text, notes, dispatched) = close_delivery_of("docs/guide.md", "factory/tier-zero").await;
+    assert!(text.contains("Closed task:"), "{text}");
+    assert!(!dispatched, "{text}");
+    assert!(notes.contains("VERIFICATION TIER 0"), "{notes}");
+
+    let (text, notes, dispatched) = close_delivery_of("src/lib.rs", "factory/tier-one").await;
+    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
+    assert!(dispatched, "{text}");
+    assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
 }
 
 /// cas-5200 negative: a receipt that is NOT on the target keeps today's
@@ -3509,8 +3577,8 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
             .await
             .unwrap(),
     );
-    assert!(closed.contains("Closed task:"), "{closed}");
-    assert!(closed.contains("measured negative result"), "{closed}");
+    let detail = compact_close_detail(&closed, task_id, "main");
+    assert!(detail.contains("measured negative result"), "{detail}");
 
     let closed_task = task_store.get(task_id).unwrap();
     assert_eq!(closed_task.status, TaskStatus::Closed);
@@ -7506,7 +7574,7 @@ async fn test_task_lifecycle_with_verification() {
         id.to_string(),
         "All checks passed".to_string(),
     );
-    add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
+    let dispatch = add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
 
     // Close task - should succeed now with verification
     let close_req = TaskCloseRequest {
@@ -7525,14 +7593,20 @@ async fn test_task_lifecycle_with_verification() {
         .expect("task_close should succeed");
 
     let text = extract_text(result);
-    assert!(
-        text.contains("Closed") || text.contains("closed"),
-        "Task should close with verification: {text}"
-    );
-    assert!(
-        text.contains("verified"),
-        "Should indicate verification: {text}"
-    );
+    let detail = compact_close_detail(&text, &id, "");
+    assert!(detail.contains("(verified)"), "{detail}");
+
+    let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed);
+    assert!(!task.pending_verification);
+    let verification = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&id)
+        .unwrap()
+        .expect("approved verification must remain auditable after close");
+    assert_eq!(verification.id, "ver-test");
+    assert_eq!(verification.status, cas::types::VerificationStatus::Approved);
+    assert_eq!(verification.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
 }
 
 #[tokio::test]
@@ -7870,10 +7944,9 @@ async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() 
 }
 
 /// Positive: supervisor closes an orphaned task (no assignee) → bypass fires.
-/// Task goes to Closed without running the verifier and without writing a
-/// verification row. The close_reason passed by the supervisor is preserved
-/// on the task and the response carries the
-/// "(verification skipped — assignee inactive)" marker.
+/// Task goes to Closed without running the verifier, recording a Skipped
+/// verification row. The supervisor's close_reason is preserved on the task,
+/// and the durable detail receipt explains the orphaned-task bypass.
 #[tokio::test]
 async fn test_close_supervisor_bypass_orphaned_task() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -7944,17 +8017,15 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         .expect("task_close should succeed via supervisor bypass");
     let response_text = extract_text(result);
 
-    assert!(
-        response_text.contains("Closed"),
-        "bypass close should report success: {response_text}"
-    );
+    let detail = compact_close_detail(&response_text, &id, "");
     // cas-3bd4: orphaned (no-assignee) closes now cite the accurate
     // reason — "orphaned task, no assignee" — instead of the catch-all
     // "assignee inactive" phrase that was always emitted regardless of
     // actual assignee state.
     assert!(
-        response_text.contains("verification skipped — orphaned task, no assignee"),
-        "response must carry the orphaned-task bypass marker: {response_text}"
+        detail.contains("verification skipped — orphaned task, no assignee")
+            && response_text.contains("verification skipped — orphaned task, no assignee"),
+        "summary and detail must carry the orphaned-task bypass marker: {response_text}"
     );
     assert!(
         !response_text.contains("VERIFICATION REQUIRED"),
@@ -7996,6 +8067,7 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         "bypass row must be Skipped, got {:?}",
         verification_row.status
     );
+    assert!(verification_row.summary.contains("no assignee (orphaned)"));
 }
 
 /// Positive: supervisor closes a task whose assignee points at an agent that
@@ -8070,10 +8142,11 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
     // because `agent_store.get(name)` unwrap_or(true) collapsed every
     // lookup failure into the same bucket. The new path keeps the
     // supervisor bypass behavior but cites the real reason.
+    let detail = compact_close_detail(&response_text, &id, "");
     assert!(
-        response_text.contains("Closed")
+        detail.contains("verification skipped — assignee unknown")
             && response_text.contains("verification skipped — assignee unknown"),
-        "ghost-assignee bypass should close and mark skipped: {response_text}"
+        "ghost-assignee summary and detail should mark skipped: {response_text}"
     );
 
     let task_after = task_store.get(&id).expect("task should exist");
@@ -8085,6 +8158,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         .expect("verification lookup should not error")
         .expect("ghost-assignee bypass must write a Skipped verification row");
     assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
+    assert!(row.summary.contains("assignee row not found in agent store"));
 }
 
 /// cas-3bd4 regression: a factory worker's `task.assignee` stores the agent's

@@ -550,7 +550,7 @@ mod tests {
         dry_run: bool,
     ) -> serde_json::Value {
         use rmcp::handler::server::wrapper::Parameters;
-        let request = serde_json::from_value(serde_json::json!({"action":"gc_cleanup",
+        let request = serde_json::from_value(serde_json::json!({"action":"gc_cleanup", "full":true,
             "reclaim_unknown_target":target, "force":true, "dry_run":dry_run}))
         .unwrap();
         let result = service.factory_request(Parameters(request)).await.unwrap();

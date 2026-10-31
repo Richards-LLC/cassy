@@ -7,18 +7,17 @@ import { createServer, request as httpRequest } from "node:http";
 import { createServer as createTlsServer } from "node:https";
 import { connect } from "node:net";
 import {
-  mkdtemp,
   mkdir,
   writeFile,
   readFile,
   rm,
-  realpath,
   readdir,
 } from "node:fs/promises";
 import { existsSync, createWriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { resolve, join, extname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRealHubHome, createRealHubEnvironment } from "./real-hub-home.mjs";
+import { realHubProviderScript } from "./real-hub-provider.mjs";
+import { darwinProcessIdentity, darwinOwnedProcesses } from "./real-hub-processes.mjs";
+import { resolve, join } from "node:path";
 import { redactQaText, redactQaValue } from "../../../scripts/visual-qa.mjs";
 const run = promisify(execFile);
 if (!process.env.CAS_BIN)
@@ -27,10 +26,8 @@ const cli = resolve(process.env.CAS_BIN);
 const port = Number(process.env.REAL_HUB_CONTROL_PORT ?? 29925);
 const hubPort = Number(process.env.REAL_HUB_PORT ?? 29926);
 const tlsPort = Number(process.env.REAL_HUB_TLS_PORT ?? 29927);
-const dist = resolve(
-  process.env.REAL_HUB_DIST ??
-    fileURLToPath(new URL("../../dist", import.meta.url)),
-);
+if (process.env.REAL_HUB_DIST !== undefined)
+  throw Error("REAL_HUB_DIST is unsupported: real-hub QA serves only candidate-embedded assets; use a different CAS_BIN for a baseline");
 const origin = `http://127.0.0.1:${port}`;
 const hubUrl = `https://journey-hub.ts.net:${tlsPort}`;
 let state;
@@ -92,6 +89,7 @@ async function startHub() {
     ["hub", "serve", "--no-tailscale-serve", "--port", String(hubPort)],
     "hub-process.log",
   );
+  if (process.platform === "darwin") state.hubIdentity = await processIdentity(state.hub.pid);
   const end = performance.now() + 15000;
   while (performance.now() < end) {
     if (await healthy()) return;
@@ -103,6 +101,7 @@ async function startHub() {
   );
 }
 async function processIdentity(pid) {
+  if (process.platform === "darwin") return darwinProcessIdentity(pid);
   try {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/);
@@ -114,6 +113,8 @@ async function processIdentity(pid) {
   }
 }
 async function privateProcesses(home) {
+  if (process.platform === "darwin")
+    return darwinOwnedProcesses(state.hubIdentity, state.launchedProcesses);
   // PTY children have their own session/group, and can be reparented when
   // the reaper exits. This marked fixture's unique HOME follows those children.
   const expected = `HOME=${home}`;
@@ -164,6 +165,10 @@ async function stopLaunchedDaemon(home, owned) {
 async function cleanup() {
   if (!state) return;
   if (state.paused) state.hub.kill("SIGCONT");
+  // The native macOS daemon is a direct hub child, not the Linux shim's
+  // recorded reaper. Capture its tree while the owned hub is still alive.
+  if (state.newSession && process.platform === "darwin")
+    await stopLaunchedDaemon(state.home, { pid: state.hub.pid });
   await stop(state.hub);
   await stop(state.daemon);
   const ownedLaunch = join(state.home, "launched-pid");
@@ -211,9 +216,9 @@ function startDaemon() {
     "daemon-process.log",
   );
 }
-async function reset({ messageControl = false, newSession = false } = {}) {
+async function reset({ messageControl = false, newSession = false, nativeCommander = false } = {}) {
   await cleanup();
-  const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
+  const home = await createRealHubHome();
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
   const project = join(home, "project"),
     bin = join(home, "bin");
@@ -224,34 +229,7 @@ async function reset({ messageControl = false, newSession = false } = {}) {
     `#!/usr/bin/python3\nimport sys,time\nif sys.argv[1:3] == ['auth','status']: print('{\"loggedIn\":true}');sys.exit(0)\nif '--version' in sys.argv: print('2.1.47');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Claude Code disposable test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`,
     { mode: 0o700 },
   );
-  if (newSession) await writeFile(join(bin, "claude"), `#!/usr/bin/python3
-import sys,os,json,subprocess,uuid
-from datetime import datetime,timezone
-if sys.argv[1:3] == ['auth','status']: print('{"loggedIn":true}');sys.exit(0)
-if '--version' in sys.argv: print('2.1.47');sys.exit(0)
-if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)
-sid=sys.argv[sys.argv.index('--session-id')+1] if '--session-id' in sys.argv else str(uuid.uuid4())
-transcript=os.path.join(os.environ['HOME'],'.claude','projects',os.getcwd().replace('/','-').replace('.','-'),sid+'.jsonl')
-os.makedirs(os.path.dirname(transcript),exist_ok=True)
-open(transcript,'a').close()
-def hook(event):
- payload=json.dumps(dict(session_id=sid,cwd=os.getcwd(),hook_event_name=event,transcript_path=transcript))
- subprocess.run([${JSON.stringify(cli)},'hook',event],input=payload,text=True,stdout=subprocess.DEVNULL,check=True)
-hook('SessionStart')
-def reply(message):
- with open(transcript,'a') as f: f.write(json.dumps(dict(type='system',subtype='turn_duration',sessionId=sid,timestamp=datetime.now(timezone.utc).isoformat()))+'\\n')
- payload=json.dumps(dict(schema_version=2,reply_to=None,message=message,summary=message,device_id='*',kind='status',attachments=[]))
- subprocess.run([${JSON.stringify(cli)},'--json','factory','message','--session',os.environ['CAS_FACTORY_SESSION'],'--project-dir',os.getcwd(),'--target','operator','--from','supervisor','--no-wrap','--message',payload],stdout=subprocess.DEVNULL,check=True)
- hook('Stop')
- print('❯ ',flush=True)
-print('Claude Code disposable test supervisor\\n❯ ',flush=True)
-started=False
-for line in sys.stdin:
- if '/exit' in line: sys.exit(0)
- if not started:
-  reply('Supervisor ready');started=True
- if 'ping launch supervisor' in line: reply('Launch supervisor answered')
-`, { mode: 0o700 });
+  if (newSession) await writeFile(join(bin, "claude"), realHubProviderScript(cli), { mode: 0o700 });
   await mkdir(join(home, ".claude"));
   // The user-service manager is the sole host boundary: retain this fixture's
   // HOME and containment instead of asking the real login manager to launch
@@ -266,20 +244,8 @@ with open(log,'ab',buffering=0) as out:
 starttime=open('/proc/'+str(p.pid)+'/stat').read().split(') ',1)[1].split()[19]
 with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(dict(pid=p.pid,starttime=starttime),f)
 `, { mode: 0o700 });
-  const env = {
-    HOME: home,
-    XDG_CONFIG_HOME: join(home, "config"),
-    XDG_RUNTIME_DIR: join(home, "runtime"),
-    CAS_ROOT: join(project, ".cas"),
-    CAS_AGENT_NAME: process.env.CAS_AGENT_NAME ?? "real-hub-qa",
-    PATH: `${bin}:/usr/bin:/bin`,
-    TERM: "xterm-256color",
-    LANG: "C.UTF-8",
-    CAS_SKIP_FACTORY_TOOLING: "1",
-    CAS_SUPPRESS_DUPLICATE_WARNING: "1",
-    RUST_LOG: "cas=debug",
-  };
-  state = { home, project, env, session: "real-hub-journey" };
+  const env = await createRealHubEnvironment(home, project);
+  state = { home, project, env, session: "real-hub-journey", newSession, launchedProcesses: new Map() };
   await run("git", ["init", "-q", project], { env, timeout: 5000 });
   await cas(["init", "--yes", "--no-integrations"]);
   await writeFile(
@@ -336,30 +302,7 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
       key: await readFile(join(home, "tls.key")),
       cert: await readFile(join(home, "tls.crt")),
     },
-    (req, res) => {
-      const upstream = httpRequest(
-        {
-          host: "127.0.0.1",
-          port: hubPort,
-          path: req.url,
-          method: req.method,
-          headers: req.headers,
-        },
-        (r) => {
-          res.writeHead(r.statusCode ?? 502, r.headers);
-          r.pipe(res);
-        },
-      );
-      upstream.on("error", () => {
-        if (res.headersSent) res.destroy();
-        else {
-          res.writeHead(502);
-          res.end();
-        }
-      });
-      res.on("close", () => upstream.destroy());
-      req.pipe(upstream);
-    },
+    proxyToHub,
   );
   // A transparent TLS transport to the actual hub. Application frames are
   // neither fabricated nor decoded; actual upstream shutdown drops sockets.
@@ -392,6 +335,9 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
     tls.listen(tlsPort, "127.0.0.1", ok);
   });
   await startHub();
+  // Native cells load the hub's embedded document and its headers directly.
+  const commanderOrigin = nativeCommander ? `http://127.0.0.1:${hubPort}` : origin;
+  const pairingHubUrl = nativeCommander ? commanderOrigin : hubUrl;
   const pair = JSON.parse(
     (
       await cas([
@@ -400,9 +346,9 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
         "pair",
         ...(newSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,session-launch"] : messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
         "--origin",
-        origin,
+        commanderOrigin,
         "--hub-url",
-        hubUrl,
+        pairingHubUrl,
       ])
     ).stdout,
   );
@@ -508,33 +454,36 @@ async function evidence() {
     daemonPid: state.daemon?.pid,
   };
 }
-const types = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".css": "text/css",
-  ".wasm": "application/wasm",
-  ".svg": "image/svg+xml",
-  ".woff2": "font/woff2",
-};
+function proxyToHub(req, res) {
+  const upstream = httpRequest(
+    {
+      host: "127.0.0.1",
+      port: hubPort,
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    },
+    (r) => {
+      res.writeHead(r.statusCode ?? 502, r.headers);
+      r.pipe(res);
+    },
+  );
+  upstream.on("error", () => {
+    if (res.headersSent) res.destroy();
+    else {
+      res.writeHead(502);
+      res.end();
+    }
+  });
+  res.on("close", () => upstream.destroy());
+  req.pipe(upstream);
+}
 let chain = Promise.resolve();
 const server = createServer(async (req, res) => {
   try {
     const path = new URL(req.url ?? "/", origin).pathname;
-    if (path.startsWith("/commander")) {
-      const inner = path.replace(/^\/commander\/?/, "/");
-      const file = resolve(dist, `.${inner === "/" ? "/index.html" : inner}`);
-      if (!file.startsWith(`${dist}/`)) throw Error("invalid asset");
-      if (!existsSync(file)) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      const bytes = await readFile(file);
-      res.writeHead(200, {
-        "Content-Type": types[extname(file)] ?? "application/octet-stream",
-        "Cache-Control": "no-store",
-      });
-      res.end(bytes);
+    if (path === "/commander" || path.startsWith("/commander/")) {
+      proxyToHub(req, res);
       return;
     }
     if (req.method === "GET" && path === "/health") {
@@ -624,5 +573,5 @@ for (const sig of ["SIGTERM", "SIGINT"])
     cleanup().finally(() => server.close(() => process.exit(0)));
   });
 server.listen(port, "127.0.0.1", () =>
-  console.log(`real-hub fixture control and dist at ${origin}; binary ${cli}`),
+  console.log(`real-hub fixture control and candidate-embedded assets at ${origin}; binary ${cli}`),
 );

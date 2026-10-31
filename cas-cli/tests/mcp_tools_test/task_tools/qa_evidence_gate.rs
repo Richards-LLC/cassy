@@ -204,7 +204,7 @@ impl Fx {
 }
 
 #[tokio::test]
-async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
+async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source_alias_cas_ad505() {
     use super::independent_qa::{reviewer_core, round_evidence};
     use cas::mcp::CasService;
     use cas_mcp::types::VerificationRequest;
@@ -226,6 +226,10 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let producer = fx.write_bundle(&head);
+    // Keep the original citation: on macOS TempDir spells it /var, while
+    // publication records /private/var. Save the canonical spelling before
+    // hiding the source so peer restores exercise both identities below.
+    let canonical_producer = producer.canonicalize().unwrap();
     // Real cas-qa-craft/journey bundles mix path fields with descriptive
     // metadata in files.parts. Shared pairs live alongside qa/, inside task.
     let pairs_dir = fx.artifacts.join(TASK).join("pairs");
@@ -372,6 +376,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         "{:?}",
         published_bundle.disposition
     );
+    assert_eq!(published_bundle.source, canonical_producer);
     // A peer cannot see any producer files. Merely fetching bundle.json is
     // insufficient: its trace and all relative evidence must travel too.
     let hidden = producer.parent().unwrap().with_extension("source-only");
@@ -415,7 +420,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
             .mount(&server)
             .await;
     }
-    for (team, newer_local) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (team, newer_local) in [(true, false), (false, false), (true, true), (false, true)] {
         let (peer, peer_core) = setup_cas(&mut env);
         let root = peer.path().join(".cas");
         std::fs::write(root.join("config.toml"), format!(
@@ -512,6 +517,14 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
         assert!(!tasks.get(TASK).unwrap().notes.contains("qapass-invalid"));
         if newer_local {
             assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata");
+        }
+        if team {
+            // Team pulls exercise an exact canonical citation; personal
+            // pulls retain the original platform alias. Neither source exists.
+            let mut task = tasks.get(TASK).unwrap();
+            task.notes
+                .push_str(&format!("\nqa-bundle: {}", canonical_producer.display()));
+            tasks.update(&task).unwrap();
         }
         assert!(
             tasks
@@ -1712,8 +1725,8 @@ async fn batch_squash_receipt_still_requires_own_ui_bundle_cas_e5b1() {
 
 /// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the
 /// same lane and commits B's work. A pre-merge retry must not move A's anchor
-/// onto B's commit, and once X merges A's plain re-close judges X — not the
-/// lane tip — so it closes without an override.
+/// onto B's commit and names the ignored advance. Once X merges, A's plain
+/// re-close judges X — not the lane tip — so it closes without an override.
 #[tokio::test]
 async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_lane_cas_ba4a() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -1736,7 +1749,14 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
         let lane_tip =
             start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
         let retry = close_text(&fx.core, TASK).await;
-        assert!(retry.contains("MERGE REQUIRED"), "{status:?}: {retry}");
+        assert!(retry.contains("PARK REFUSED"), "{status:?}: {retry}");
+        assert!(retry.contains("cas-b0b1") && retry.contains("own branch")
+            && !retry.contains("request changes"),
+            "the first untagged next-task lease must supply the remedy: {status:?}: {retry}");
+        for boundary in [&parked_at, &lane_tip] {
+            assert!(retry.contains(boundary), "missing {boundary}: {retry}");
+        }
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{retry}");
         assert!(!retry.contains("stale"), "{status:?}: {retry}");
         assert_eq!(
             anchor(&fx).as_deref(),

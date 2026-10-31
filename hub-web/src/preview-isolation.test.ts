@@ -1,5 +1,6 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { build } from "vite";
 
@@ -35,18 +36,32 @@ describe("preview isolation", () => {
 
   it("builds the clickable preview without test runners or Node modules", async () => {
     const modules = new Set<string>();
-    await build({
-      configFile: join(__dirname, "..", "vite.preview.config.ts"),
-      logLevel: "silent",
-      build: { write: false },
-      plugins: [{
-        name: "preview-module-audit",
-        generateBundle() {
-          for (const id of this.getModuleIds()) modules.add(id);
+    const unrelated = mkdtempSync(join(realpathSync(tmpdir()), "cas-preview-resolve-"));
+    try {
+      writeFileSync(join(unrelated, "main.ts"), 'export { runtime } from "./hub-double-runtime";');
+      writeFileSync(join(unrelated, "hub-double-runtime.ts"), 'export const runtime = "unrelated runtime";');
+      await build({
+        configFile: join(__dirname, "..", "vite.preview.config.ts"),
+        logLevel: "silent",
+        build: {
+          write: false,
+          lib: {
+            entry: { preview: join(__dirname, "../preview/main.ts"), unrelated: join(unrelated, "main.ts") },
+            fileName: (_format, name) => `${name}.js`,
+          },
         },
-      }],
-    });
-    expect([...modules].filter(id => /playwright|node:|__vite-browser-external/.test(id))).toEqual([]);
-    expect([...modules].some(id => id.endsWith("/preview/main.ts"))).toBe(true);
+        plugins: [{
+          name: "preview-module-audit",
+          generateBundle() {
+            for (const id of this.getModuleIds()) modules.add(id);
+          },
+        }],
+      });
+      expect([...modules].filter(id => /playwright|node:|__vite-browser-external/.test(id))).toEqual([]);
+      expect([...modules].some(id => id.endsWith("/preview/main.ts"))).toBe(true);
+      expect(modules.has(join(unrelated, "hub-double-runtime.ts"))).toBe(true);
+    } finally {
+      rmSync(unrelated, { recursive: true, force: true });
+    }
   });
 });

@@ -59,6 +59,8 @@ mod qa_dispatch;
 pub(crate) mod qa_impact;
 pub(crate) mod qa_evidence_gate;
 pub(crate) mod repository_proof;
+pub(crate) mod review_loop;
+pub(crate) mod review_tier;
 pub(crate) mod stale_close_guard;
 pub(crate) mod supervisor_push;
 
@@ -2337,6 +2339,43 @@ impl CasCore {
             ));
         }
 
+        let declared_repo_context = task
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
+            .transpose()
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            })?;
+
+        // Use the commit guard's identity predicate before claiming QA or
+        // mutating the task, lease or checkout. A foreign factory ref must not
+        // silently fall back to the reusable worker lane (cas-b153).
+        if let Some(worker) = worker.as_ref()
+            && let Some(checkout) = worker.metadata.get("clone_path")
+                .map(std::path::Path::new)
+                .or_else(|| declared_repo_context.as_ref().map(|context| context.repo_root.as_path()))
+            && let Some(branch) = crate::factory_isolation::branch_at(checkout)
+            && matches!(
+                crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
+                crate::factory_isolation::WorkerBinding::Sibling { .. }
+            )
+        {
+            let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);
+            let base = declared_repo_context.as_ref().map(|context| context.target_branch.clone())
+                .unwrap_or_else(|| crate::factory_isolation::expected_worker_branch(&worker.name));
+            let [switch] = GitOperations::git_remedies([&["switch", "-c", &own, &base]])
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                "Cannot start task {}: '{branch}' is not worker '{}'s factory branch.\n\
+                 Use your own per-task branch '{own}' before starting:\n{switch}",
+                task.id, worker.name,
+            )));
+        }
+
         // cas-619f: a QA work item may never be started by the implementer of
         // the delivery it reviews; starting it claims the round.
         let qa_claim_note = self.claim_qa_round_on_start(&task, principal.as_ref().map(|p| p.agent().id.as_str()))?.unwrap_or_default();
@@ -2380,18 +2419,6 @@ impl CasCore {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, "Queued task changed before start; no Git or lease mutation was applied"));
             }
         }
-
-        let declared_repo_context = task
-            .deliverables
-            .work_target
-            .as_ref()
-            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
-            .transpose()
-            .map_err(|message| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message),
-                data: None,
-            })?;
 
         if queued_start && declared_repo_context.is_none() {
             return Err(Self::error(ErrorCode::INVALID_PARAMS,

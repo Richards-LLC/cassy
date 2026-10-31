@@ -68,6 +68,8 @@ mod client;
 pub(crate) mod daemon;
 mod director;
 pub(crate) use director::effective_stall_threshold_secs;
+#[cfg(test)]
+pub(crate) use director::delivery_marked_ready;
 pub(crate) use director::{enqueue_external_message, external_response_hint};
 pub(crate) mod cgroup;
 mod input;
@@ -145,7 +147,7 @@ pub use protocol::{
     MessageAttribution, OperatorReplyPayload, OperatorTurnKind, PROTOCOL_VERSION, PaneBootstrap,
     PaneInfo, PaneKind, PaneSizeAuthority, ProtocolCapability, SessionMetadata, SessionState,
     WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, WorkTool, WorkToolCounts, WorkLifecycle, WorkReasoning,
-    WorkChangedFile, WorkChangedFiles, daemon_capabilities,
+    WorkChangedFile, WorkChangedFiles, WorkLineCounts, daemon_capabilities, valid_secret_name,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{

@@ -107,6 +107,9 @@ pub(super) fn validated_started_delivery(
     if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
         return Err(refuse("the base is no longer an ancestor of the delivery"));
     }
+    // cas-985f: a worker told to merge the released trunk into its lane brings
+    // in other tasks' already-released commits. They are upstream, not foreign.
+    let upstream = released_upstream_refs(repo, &target);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -120,8 +123,11 @@ pub(super) fn validated_started_delivery(
             "--format=%H %P%x1f%B%x1e",
             &range,
             &format!("^{target}"),
-            "--",
-        ],
+        ]
+        .into_iter()
+        .chain(upstream.iter().map(String::as_str))
+        .chain(["--"])
+        .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the lane history cannot be read"))?;
     // Inspect side-parent work too, excluding integrated target history so a
@@ -136,8 +142,11 @@ pub(super) fn validated_started_delivery(
             &tip,
             &format!("^{}", start.base_sha),
             &format!("^{target}"),
-            "--",
-        ],
+        ]
+        .into_iter()
+        .chain(upstream.iter().map(String::as_str))
+        .chain(["--"])
+        .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the off-target history cannot be read"))?;
     let mut records = Vec::new();
@@ -168,7 +177,9 @@ pub(super) fn validated_started_delivery(
         }
         let parents: Vec<String> = metadata.map(str::to_owned).collect();
         let merged = parents.get(1..).unwrap_or_default();
-        if is_target_sync_merge(repo, merged, &target) {
+        if is_target_sync_merge(repo, merged, &target)
+            || upstream.iter().any(|reference| is_target_sync_merge(repo, merged, &reference[1..]))
+        {
             continue;
         }
         if subject_claims_another_task(message, &identity) {
@@ -451,6 +462,35 @@ fn merge_brings_foreign_work(
         }
     }
     false
+}
+
+/// cas-985f: exclusions (`^ref`) for the repository's released trunk. Empty
+/// when the trunk is the target itself or unresolvable, so a delivery to the
+/// trunk keeps its existing attribution.
+fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
+    released_trunk_ref(repo, target)
+        .map(|reference| format!("^{reference}"))
+        .into_iter()
+        .collect()
+}
+
+/// The ref whose history counts as released upstream for a lane bound to
+/// `target`: `refs/remotes/origin/<trunk>` when it exists (cas-3d57: a local
+/// trunk can be ahead of origin or moved by hand, so it never vouches for release), else
+/// the local trunk in a repository without that remote ref. None when the
+/// trunk is the target itself or unresolvable.
+pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
+    let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    if trunk == target || !is_safe_git_refname(&trunk) {
+        return None;
+    }
+    [
+        format!("refs/remotes/origin/{trunk}"),
+        format!("refs/heads/{trunk}"),
+    ]
+    .into_iter()
+    .find(|reference| git_ref_exists(repo, reference))
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
@@ -770,6 +810,24 @@ pub(crate) fn paths(
         .ok()?;
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
     paths_from_ranges(repo, ranges)
+}
+
+/// cas-2a65: the (base, tip) bounds of the same task-attributed delivery
+/// ranges, so a gate can judge what this task's own segments introduced
+/// (including a same-task predecessor merge) without crediting target-sync
+/// or another task's merged work.
+pub(crate) fn range_bounds(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<(String, String)>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    Some(ranges.into_iter().map(|range| (range.base, range.tip)).collect())
 }
 
 /// cas-2d27: without a task delivery tip, a no-code supervisor close must
@@ -3807,8 +3865,19 @@ mod tests {
             rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Closed task:"), "{text}");
-        assert!(text.contains("first.md") && text.contains("second.md"), "{text}");
-        assert!(!text.contains("next.md"), "next task's diff was attributed to the old delivery: {text}");
+        let detail_path = text
+            .split_once("Details: ")
+            .expect("close receipt detail reference")
+            .1
+            .split_once(" (SHA-256 ")
+            .unwrap()
+            .0;
+        let detail = std::fs::read_to_string(detail_path).expect("close detail artifact exists");
+        assert!(detail.contains("first.md") && detail.contains("second.md"), "{detail}");
+        assert!(
+            !detail.contains("next.md"),
+            "next task's diff was attributed to the old delivery: {detail}"
+        );
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
         assert_eq!(store.get(&next.id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), next_tip);

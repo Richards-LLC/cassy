@@ -453,12 +453,15 @@ mod tests {
         ];
         let sessions = vec![HubSession {
             name: "factory-main".into(),
+            mcp_version: None,
+            installed_version: None,
             harness: None,
             model: None,
             effort: None,
             agents: Vec::new(),
             account_email: None,
             project: None,
+            project_name: None,
             machine_online: None,
             project_dir: Some(linked.to_string_lossy().into_owned()),
             supervisor: "supervisor".into(),

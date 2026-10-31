@@ -124,7 +124,7 @@ optional family independently instead of refusing unfamiliar versions.
 | `tool` | `{name, operation, targets, command?, cwd?, exit_code?, counts?: {files?, matches?}}`. Operations are `read`, `search`, `command`, `edit`, or `other`. Unknown tools retain their name, label and detail. Targets come from explicit tool arguments or patch headers, never shell-command guesses. Missing counts/exit codes mean unknown. |
 | `lifecycle` | `{id, stage, phase?, outcome?, started_at?, ended_at?}`. A tool row starts at `start`, becomes `phase` while a command session is running, and becomes `end` on its matching final output. ID and row timestamp remain stable. Outcomes include `success`, `error`, `unknown`. Turn/compaction records become notice rows with lifecycle metadata. |
 | `reasoning` | `{summary, source}`. Source is `codex_summary` or `claude_thinking`; summary is the first published nonempty line. The existing on-demand `detail` contains only the recorded published text. Encrypted content, signatures, analysis messages and unrecorded reasoning are never interpreted or returned. |
-| `changed_files` | `{files: [{path, operation, source_event_id}], provenance: "successful_tool_calls", complete: false}`. A cumulative snapshot of successful explicit edit targets for this turn. Use the newest snapshot per agent/turn. It proves tool results, not a Git diff or a commit. Shell side effects and other agents' edits are unknown. |
+| `changed_files` | `{files: [{path, operation, source_event_id, line_counts?: {added, removed}}], provenance: "successful_tool_calls", complete: false}`. A cumulative snapshot of successful explicit edit targets for this turn. Use the newest snapshot per agent/turn. It proves tool results, not a Git diff or a commit. Shell side effects and other agents' edits are unknown. |
 
 ```json
 {"id":"t:agent:000000000001234:001","kind":"tool","session":"factory-1",
@@ -133,6 +133,24 @@ optional family independently instead of refusing unfamiliar versions.
  "lifecycle":{"id":"call-1","stage":"end","outcome":"success",
  "started_at":"2026-10-28T12:00:00Z","ended_at":"2026-10-28T12:00:01Z"}}
 ```
+
+`changed_files.files[].line_counts` is an optional additive v2 field, with no
+nested version. Both counts are nonnegative integers. They describe only the
+latest successful edit event identified by that path's `source_event_id`.
+They are neither cumulative counts for the turn nor a net Git diff. A later
+successful edit replaces that path's earlier counts; if its counts are unknown,
+the field is omitted rather than retaining earlier numbers or inventing zeroes.
+Clients keep the file provenance when the optional count field is absent or
+malformed, and accept zero as a known count.
+
+Counts come from explicit signed lines in a complete successful Codex
+`apply_patch` add/update input or a Claude `Edit`, `MultiEdit` or `Write` result's
+nonempty `structuredPatch`, attributed to its `filePath`. Context lines do not
+count. Delete/move patch inputs, truncated or malformed patches, empty structured
+patches (including some creates), and results without this metadata omit counts.
+Input replacement strings, command output prose and the current filesystem do
+not establish line counts. The adapter retains only numeric patch facts in its
+index; this field adds no patch text to the event.
 
 The source adapters are in `daemon/runtime/work_events.rs`. Claude publishes
 `assistant.message.content[].tool_use` and `user` tool results, and system

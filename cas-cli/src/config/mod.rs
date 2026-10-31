@@ -195,6 +195,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<ReleaseConfig>,
 
+    /// `[secrets]` — where Commander saves pasted secrets (cas-1996).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretsConfig>,
+
     /// `[hub]` — public origin used for Commander reverse pairing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub: Option<HubConfig>,
@@ -308,6 +312,7 @@ impl Config {
         merge_option!(history);
         merge_option!(memory);
         merge_option!(hub);
+        merge_option!(secrets);
         merge_option!(project);
         merge_option!(release);
         merge_option!(slack);

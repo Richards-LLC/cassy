@@ -492,15 +492,15 @@ impl<'w> Formatter<'w> {
     }
 
     /// The mark for a verdict: a coloured glyph on UTF-8 terminals, a bracketed
-    /// word everywhere else. Colour touches the mark only; its meaning is also
-    /// carried by the glyph or word, so a monochrome reader loses nothing.
+    /// word in the terminal foreground everywhere else. The longer ASCII words
+    /// need text contrast rather than the lower contrast floor of a small glyph.
     pub fn mark(&mut self, verdict: Verdict) -> io::Result<()> {
         let label = verdict.label(self.glyphs());
-        if self.mode == OutputMode::Styled {
+        if self.glyphs() {
             let color = self.verdict_color(verdict);
             self.write_bold_colored(label, color)
         } else {
-            write!(self.writer, "{label}")
+            self.write_bold_plain(label)
         }
     }
 
@@ -755,6 +755,19 @@ mod tests {
         // Without the guard, this cached shell policy survives env.remove below.
         env.set("NO_COLOR", "1");
         let _ = crossterm::style::Colored::ansi_color_disabled_memoized();
+        for theme in [ActiveTheme::default_dark(), ActiveTheme::default_light()] {
+            for verdict in [Verdict::Ok, Verdict::Warning, Verdict::Error, Verdict::Info] {
+                let mut buf = Vec::new();
+                Formatter::styled(&mut buf, theme.clone())
+                    .mark(verdict)
+                    .unwrap();
+                // ASCII status words are text, so use the terminal foreground.
+                assert_eq!(
+                    String::from_utf8(buf).unwrap(),
+                    format!("\x1b[1m{}\x1b[0m", verdict.label(false))
+                );
+            }
+        }
         for no_color in [None, Some("1")] {
             match no_color {
                 Some(value) => env.set("NO_COLOR", value),

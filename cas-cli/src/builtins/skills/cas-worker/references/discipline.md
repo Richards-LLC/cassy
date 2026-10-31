@@ -4,6 +4,17 @@ The shared launch contract in `cas-pty` carries task startup, sequential
 ownership, no-foreground-blocking, context headroom and lifecycle rules. This file
 covers capped check/test evidence and non-Rust suites without restating those rules.
 
+## Scope and test design
+
+Run affected targeted tests: the whole test module of each changed production
+function plus every integration harness that calls it. `CONTRIBUTING` names the
+scoped commands. Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) for test
+design and failing-first cases; scope determines existing tests to run, not new
+tests to add. Docs-only and no-code tasks prove their acceptance check instead
+(e.g. markdownlint, `cas codemap status`, a published artifact); don't add code
+tests to them. Record non-Rust exit status and actual test count; zero tests
+are not a pass.
+
 ## Check the committed change before parking
 
 Workers may run exactly `cargo check -p <crate> [-p <crate> ...] --lib` or
@@ -56,8 +67,7 @@ Commit first; zero matched tests fail. Success records
 `test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
 receipts. Run the red test before fixing it, then commit and run the green test.
 
-Prove shared surfaces whole: for every changed production function, run its
-whole lib test module and every integration harness that calls it, for example
+For affected module and harness selection, for example
 `--lib -E 'test(close_ops::)'` plus
 `--test integration_factory -E 'test(worktree_surface_test::)'`.
 Before rewording user-facing text, grep the tests for the old wording. Measure

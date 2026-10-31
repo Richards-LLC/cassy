@@ -690,9 +690,16 @@ fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
         .metadata
         .get("worker_model")
         .and_then(|model| cas_factory::model_harness(model));
+    // cas-9153: and a row that lost `worker_cli` reads as Claude, the
+    // fallback, so a model only another harness runs (a Codex worker's
+    // gpt-6.1-sol) names the harness it was spawned on.
     match model_cli {
-        Some(cas_mux::SupervisorCli::Claude) if recorded != cas_mux::SupervisorCli::Claude => {
-            cas_mux::SupervisorCli::Claude
+        Some(model_cli)
+            if model_cli != recorded
+                && (model_cli == cas_mux::SupervisorCli::Claude
+                    || recorded == cas_mux::SupervisorCli::Claude) =>
+        {
+            model_cli
         }
         _ => recorded,
     }
@@ -1937,8 +1944,8 @@ fn format_assigned_task_info(
             // relabel any status added to the parked set later.
             let (label, waiting) = match status {
                 cas_types::TaskStatus::AwaitingMerge if parked_merge_already_integrated => (
-                    "delivered-and-merged, awaiting worker re-close",
-                    "WAITING ON WORKER: the assigned worker must retry task close",
+                    "delivered-and-merged, awaiting merge verdict",
+                    "WAITING ON VERDICT: inspect the task's merge and verification state",
                 ),
                 cas_types::TaskStatus::AwaitingMerge => (
                     "finished, awaiting merge",
@@ -4197,6 +4204,51 @@ impl CasService {
         )))
     }
 
+    /// Ask the daemon to replace only this supervisor's pane (cas-b492). Its
+    /// workers keep running; a plain supervisor exit still stops the factory.
+    pub(super) async fn factory_restart_supervisor(
+        &self,
+        _req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::harness_policy::is_supervisor_from_env;
+
+        if !is_supervisor_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "restart_supervisor rejected: only the supervisor may restart itself",
+            ));
+        }
+        let factory_session = current_factory_session().ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "restart_supervisor requires an active factory session (CAS_FACTORY_SESSION is \
+                 not set)",
+            )
+        })?;
+        let requester = self
+            .inner
+            .get_agent_id()
+            .unwrap_or_else(|_| "supervisor".to_string());
+        crate::factory_daemon_health::request_supervisor_restart(
+            &self.inner.cas_root,
+            &factory_session,
+            &requester,
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Could not record the supervisor restart request: {error}"),
+            )
+        })?;
+        Ok(Self::success(format!(
+            "Supervisor restart requested for factory session '{factory_session}'. Within about \
+             a second the daemon ends this session and starts a new one with the factory's boot \
+             harness, model and effort. Workers keep their tasks, panes and leases. If this \
+             session is still running after 10 seconds, the restart did not happen: a refusal \
+             arrives as a message, and silence means the running daemon predates this action."
+        )))
+    }
+
     pub(super) async fn factory_set_worker_hold(
         &self,
         req: FactoryRequest,
@@ -6204,12 +6256,16 @@ impl CasService {
         })?;
         let factory_session = current_factory_session();
         let owned = supervisor_owned_workers();
-        let live_agents = agent_store.list(Some(AgentStatus::Active)).map_err(|e| {
+        let live_agents: Vec<_> = agent_store.list(None).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to list agents: {e}"),
             )
-        })?;
+        })?.into_iter()
+            // An idle registration is still the current worker. Ignoring it
+            // can select an older active row with a different harness recipe.
+            .filter(|agent| matches!(agent.status, AgentStatus::Active | AgentStatus::Idle))
+            .collect();
 
         // Resolve the concrete recipients. `all_workers` fans out over this
         // supervisor's live workers; every other target names exactly one.
@@ -6226,7 +6282,8 @@ impl CasService {
         } else {
             let found = live_agents
                 .iter()
-                .find(|agent| agent.name == target)
+                .find(|agent| agent.name == target
+                    && agent.visible_to_factory_session(factory_session.as_deref()))
                 .cloned()
                 .ok_or_else(|| {
                     Self::error(
@@ -7550,6 +7607,9 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
+            report.push_str(&gain.status_line());
+        }
         // cas-fd4c: a successor stacked on an open predecessor epic must not
         // silently fall behind it until the predecessor lands.
         if let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
@@ -7709,6 +7769,8 @@ impl CasService {
         use cas_types::{AgentRole, AgentStatus, WorktreeStatus};
         use std::path::Path;
 
+        let view = GcReportView::from_request(&req)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.replace("gc_report", "gc_cleanup")))?;
         if let Some(path) = req.reclaim_unknown_target.as_deref() {
             // Exact cache consent never invokes process reaping, task/artifact
             // retention, journey cleanup or any other GC mutation.
@@ -7725,10 +7787,11 @@ impl CasService {
             let live = live_target_cache_worktrees(agents.as_ref(), &self.inner.cas_root);
             let report = cleanup_target_cache_report(&self.inner.cas_root, &config, agents.as_ref(),
                 worktrees.as_ref(), &live, req.force == Some(true) && req.dry_run == Some(false), Some(Path::new(path)));
-            return Ok(Self::success(match report {
+            let output = match report {
                 Ok(report) => format!("Named target-cache reclaim.{}", render_target_cache_report(&report)),
                 Err(error) => format!("Named cache reclaim refused (fail-closed): {error}"),
-            }));
+            };
+            return Ok(Self::success(render_gc_report_response(&output, view)));
         }
 
         let prompt_expiry_age = req.older_than_secs;
@@ -7998,6 +8061,7 @@ impl CasService {
             orphan_process_summary.records_cleared.len(),
             orphan_process_summary.skipped,
         );
+        output.push('\n');
         output.push_str(&artifact_cleanup.render());
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
@@ -8027,16 +8091,19 @@ impl CasService {
                 text
             }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Simulator cleanup worker failed: {error}")))?;
+            output.push('\n');
             output.push_str(&text);
         }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
-                "\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
+                "\n\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
             )),
-            Err(error) => output.push_str(&format!("\nJourney recording cleanup incomplete: {error}\n")),
+            Err(error) => output.push_str(&format!("\n\nJourney recording cleanup incomplete: {error}\n")),
         }
 
+        output.push('\n');
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push('\n');
         output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
@@ -8062,6 +8129,7 @@ impl CasService {
         // orphan is indistinguishable from one Cassy never saw, and that is the
         // difference between "the port is free" and a wasted morning.
         if !orphan_processes.is_empty() {
+            output.push('\n');
             output.push_str(&orphan_processes.render());
         }
         if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
@@ -8083,7 +8151,7 @@ impl CasService {
             )),
         }
 
-        Ok(Self::success(output))
+        Ok(Self::success(render_gc_report_response(&output, view)))
     }
 }
 
@@ -8217,8 +8285,11 @@ impl GcReportView {
 /// behind explicit, zero-based `limit`/`offset` pages.
 fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
     const HEADER: &str = "Factory GC Report\n=================\n";
+    const CLEANUP_HEADER: &str = "Factory GC cleanup complete.\n";
+    let cleanup = full_report.starts_with(CLEANUP_HEADER) || full_report.starts_with("Named ");
     let detail = full_report
         .strip_prefix(HEADER)
+        .or_else(|| full_report.strip_prefix(CLEANUP_HEADER))
         .unwrap_or(full_report)
         .trim_start_matches('\n');
 
@@ -8250,17 +8321,17 @@ fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
                 "{}\n",
                 serde_json::json!({
                     "schema_version": 1,
-                    "report_text": summarize_gc_report(full_report, detail),
+                    "report_text": summarize_gc_report(full_report, detail, cleanup),
                     "full_report": full_report,
                     "machine_status": machine_status,
                 })
             )
         }
-        _ => summarize_gc_report(full_report, detail),
+        _ => summarize_gc_report(full_report, detail, cleanup),
     }
 }
 
-fn summarize_gc_report(full_report: &str, detail: &str) -> String {
+fn summarize_gc_report(full_report: &str, detail: &str, cleanup: bool) -> String {
     let mut sections = detail
         .split("\n\n")
         .map(|section| section.trim_matches('\n'))
@@ -8270,9 +8341,13 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         !section.lines().next().is_some_and(gc_report_is_machine_status_line)
             && !section.starts_with("Note:")
     }).count();
-    let mut summary = format!(
-        "[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n"
-    );
+    let mut summary = if full_report.starts_with("Named cache reclaim refused") {
+        "[WARN] GC cleanup refused: named cache preserved\nReview cleanup tiers: cas factory gc cleanup --help\n\n".to_owned()
+    } else if cleanup {
+        format!("[INFO] GC cleanup complete: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n")
+    } else {
+        format!("[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n")
+    };
     if !metrics.is_empty() {
         for line in metrics.lines() {
             if !gc_report_is_machine_status_line(line) {
@@ -8280,9 +8355,11 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
                 summary.push('\n');
             }
         }
-        summary.push_str(
-            "\nInventory (first up to 3 items per category):\n",
-        );
+        summary.push_str(if cleanup {
+            "\nInventory (up to 3 largest byte-counted items per category):\n"
+        } else {
+            "\nInventory (first up to 3 items per category):\n"
+        });
     }
 
     for section in sections {
@@ -8307,6 +8384,8 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .and_then(|values| values.rsplit_once(" closed-task candidates="))
         {
             ("Durable task artifacts".to_owned(), Some(counts))
+        } else if cleanup && heading.starts_with("Cargo target caches:") {
+            ("Cargo target caches".to_owned(), None)
         } else {
             (gc_report_category_label(heading), None)
         };
@@ -8316,18 +8395,29 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .copied()
             .filter(|line| !line.is_empty() && !gc_report_is_machine_status_line(line))
             .collect::<Vec<_>>();
-        let item_lines = detail_lines
+        let mut item_lines = detail_lines
             .iter()
             .copied()
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
+        if cleanup {
+            item_lines.sort_by_key(|line| std::cmp::Reverse(line.split_whitespace().rev()
+                .find_map(|word| word.strip_prefix("bytes=")?.parse::<u64>().ok()).unwrap_or(0)));
+        }
         let item_count = item_lines.len();
-        summary.push_str(&format!(
-            "- {label}: {item_count} items\n"
-        ));
+        if cleanup && item_count == 0 && artifact_counts.is_none()
+            && !heading.starts_with("Cargo target caches:")
+        {
+            summary.push_str(&format!("- {}\n", gc_report_short_line(heading)));
+        } else {
+            summary.push_str(&format!("- {label}: {item_count} items\n"));
+        }
 
         if let Some(counts) = artifact_counts {
             summary.push_str(&format!("  Counts: closed-task candidates={counts}\n"));
+        }
+        if cleanup && let Some(counts) = heading.strip_prefix("Cargo target caches: ") {
+            summary.push_str(&format!("  Counts: {counts}\n"));
         }
         if let Some(context) = detail_lines
             .iter()
@@ -8340,11 +8430,18 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             ));
         }
         for item in item_lines.iter().take(GC_REPORT_SAMPLE_ITEMS) {
-            summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
+            // Shorten opaque path tokens before shortening the whole sample,
+            // so a long cache root cannot hide its byte count or disposition.
+            let item = if cleanup {
+                gc_report_ascii(item).split_whitespace().map(|word| gc_report_shorten_token(word, 50)).collect::<Vec<_>>().join(" ")
+            } else { (*item).to_owned() };
+            summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(&item)));
         }
     }
+    let action = if cleanup { "cleanup" } else { "report" };
+    let pages = if cleanup { "" } else { "MCP pages: factory action=gc_report limit=100 offset=0\n" };
     summary.push_str(&format!(
-        "\nDetails: cas factory gc report --full\nJSON: cas factory gc report --json\nMCP pages: factory action=gc_report limit=100 offset=0\nReport: {} bytes; full text and status are opt-in.\n",
+        "\nDetails: cas factory gc {action} --full\nJSON: cas factory gc {action} --json\n{pages}Report: {} bytes; full text and status are opt-in.\n",
         full_report.len(),
     ));
     gc_report_fit_human(&summary)
@@ -8563,6 +8660,29 @@ mod resume_brief_sender_tests {
 #[cfg(test)]
 mod gc_report_render_tests {
     use super::*;
+
+    #[test]
+    fn cleanup_summary_bounds_inventory_and_keeps_largest_items() {
+        let artifacts = (0..1_000).map(|index| format!("  - /artifact-{index}")).collect::<Vec<_>>().join("\n");
+        let items = (0..1_000)
+            .map(|index| format!("  - /tmp/{}/cache-{index} bytes={index}", "long-path/".repeat(30)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let status = serde_json::json!({"dry_run": true, "caches": ["all original data"]});
+        let full = format!("Factory GC cleanup complete.\n\nStale agents marked: 0\n\nDurable task artifacts: root=/{} closed-task candidates=0 stray inventory=1000 mode=review-only\n{artifacts}\n\nCargo target caches: mode=dry-run\n{items}\nTARGET_CACHE_STATUS_JSON={status}\n", "é/".repeat(100));
+        let summary = render_gc_report_response(&full, GcReportView::Summary);
+        assert!(summary.starts_with("[INFO] GC cleanup complete:"), "{summary}");
+        assert!(summary.is_ascii() && summary.lines().all(|line| line.len() <= 79));
+        assert!(summary.lines().count() < 40, "inventory must stay bounded");
+        assert!(summary.contains("1000 items"));
+        assert!(summary.contains("bytes=999") && summary.contains("bytes=998") && summary.contains("bytes=997"));
+        assert!(!summary.contains("bytes=996") && !summary.contains("TARGET_CACHE_STATUS_JSON="));
+        assert!(summary.contains("cas factory gc cleanup --full") && summary.contains("cas factory gc cleanup --json"));
+        assert_eq!(render_gc_report_response(&full, GcReportView::Full), full);
+        let json: serde_json::Value = serde_json::from_str(&render_gc_report_response(&full, GcReportView::Json)).unwrap();
+        assert_eq!(json["full_report"], full);
+        assert_eq!(json["machine_status"]["TARGET_CACHE_STATUS_JSON"], status);
+    }
 
     #[test]
     fn summary_bounds_inventory_and_preserves_opt_in_machine_status() {
@@ -9740,7 +9860,7 @@ fn task_branch_affinity(
 /// reachable from the task's real integration target.
 ///
 /// `AwaitingMerge` normally means the supervisor still has to land the branch,
-/// but a worker can go idle after that landing and before its required re-close.
+/// but a worker can go idle after that landing while its verdict is pending.
 /// Reporting the normal merge instruction in that state sends the supervisor
 /// back to an action that is already complete. This is best-effort status
 /// evidence only: unknown Git state retains the conservative normal wording.
@@ -17605,7 +17725,7 @@ effort = "high"
             assert!(!out.contains("WAITING ON WORKER"), "{out}");
             assert!(!out.contains("re-close"), "{out}");
         }
-        // Without a live dispatch the merged delivery keeps its re-close row.
+        // Without a live dispatch the verdict still owns merged completion.
         let legacy = format_assigned_task_info(
             None,
             None,
@@ -17613,7 +17733,9 @@ effort = "high"
             true,
             None,
         );
-        assert!(legacy.contains("awaiting worker re-close"), "{legacy}");
+        // pin: merged status never tells a worker to close again.
+        assert!(legacy.contains("awaiting merge verdict"), "{legacy}");
+        assert!(!legacy.contains("retry task close"), "{legacy}");
     }
 
     /// The actionable half: quiet WITH undelivered mail means the worker was
@@ -19934,8 +20056,118 @@ effort = "high"
         agent.metadata.insert("worker_cli".into(), "codex".into());
         agent.metadata.insert("worker_model".into(), "gpt-6-luna".into());
         assert_eq!(worker_spec_from_agent(&agent).cli, cas_mux::SupervisorCli::Codex);
+
+        // cas-9153: a Codex worker whose row lost `worker_cli` (read as the
+        // Claude fallback) still relaunches on Codex.
+        agent.metadata.remove("worker_cli");
+        agent.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+        let spec = worker_spec_from_agent(&agent);
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+        cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+            .expect("the repaired Codex recipe relaunches");
     }
 
+    /// cas-9153: a Codex worker spawned, then recycled twice, keeps its
+    /// harness, model and effort on its row each time, even when a process in
+    /// its pane (a hook or a `cas` command) re-registers the same session.
+    #[test]
+    fn codex_worker_recycled_twice_keeps_its_harness_model_and_effort_cas_9153() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut spec = cas_mux::WorkerSpec {
+            name: Some("happy-spider-16".into()),
+            cli: cas_mux::SupervisorCli::Codex,
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some(cas_mux::Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+        for generation in 0..3 {
+            let effort = spec.effort.map(|effort| effort.to_string());
+            let pane = cas_pty::PtyConfig::codex(
+                "happy-spider-16",
+                "worker",
+                temp.path().to_path_buf(),
+                None,
+                None,
+                None,
+                spec.model.as_deref(),
+                effort.as_deref(),
+                None,
+            );
+            let pane_value = |key: &str| {
+                pane.env
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            };
+            let session = pane_value("CAS_SESSION_ID").expect("pane session");
+            let pane_cli = pane_value("CAS_FACTORY_WORKER_CLI");
+            let pane_model = pane_value("CAS_FACTORY_WORKER_MODEL");
+            let pane_effort = pane_value("CAS_FACTORY_WORKER_EFFORT");
+            // The pane's own registration, then a bare `cas` re-registration.
+            for vars in [
+                vec![
+                    ("CAS_AGENT_ROLE", Some("worker")),
+                    ("CAS_FACTORY_WORKER_CLI", pane_cli.as_deref()),
+                    ("CAS_FACTORY_WORKER_MODEL", pane_model.as_deref()),
+                    ("CAS_FACTORY_WORKER_EFFORT", pane_effort.as_deref()),
+                    ("CAS_FACTORY_WORKER_ACCOUNT_DIR", None),
+                ],
+                vec![
+                    ("CAS_AGENT_ROLE", Some("worker")),
+                    ("CAS_FACTORY_WORKER_CLI", None),
+                    ("CAS_FACTORY_WORKER_MODEL", None),
+                    ("CAS_FACTORY_WORKER_EFFORT", None),
+                    ("CAS_FACTORY_WORKER_ACCOUNT_DIR", None),
+                ],
+            ] {
+                let _env = crate::test_support::TestEnvGuard::with_optional_vars(&vars);
+                let mut agent = cas_types::Agent::new(session.clone(), "happy-spider-16".into());
+                agent.role = cas_types::AgentRole::Worker;
+                crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+                crate::mcp::daemon::register_with_role_reconciliation(
+                    store.as_ref(),
+                    &agent,
+                    Some(cas_types::AgentRole::Worker),
+                )
+                .unwrap();
+            }
+            let row = store.get(&session).unwrap();
+            assert_eq!(
+                row.metadata.get("worker_cli").map(String::as_str),
+                Some("codex"),
+                "generation {generation}"
+            );
+            assert_eq!(
+                row.metadata.get("worker_effort").map(String::as_str),
+                Some("high"),
+                "generation {generation}"
+            );
+            spec = worker_spec_from_agent(&row);
+            assert_eq!(
+                spec.cli,
+                cas_mux::SupervisorCli::Codex,
+                "generation {generation}"
+            );
+            assert_eq!(
+                spec.model.as_deref(),
+                Some("gpt-6.1-sol"),
+                "generation {generation}"
+            );
+            assert_eq!(
+                spec.effort,
+                Some(cas_mux::Effort::High),
+                "generation {generation}"
+            );
+            cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+                .unwrap_or_else(|error| {
+                    panic!("generation {generation} recipe must relaunch: {error}")
+                });
+        }
+    }
     #[test]
     fn worker_cli_from_agent_defaults_to_claude_when_missing_or_invalid() {
         let agent = cas_types::Agent::new("sess-1".to_string(), "legacy-worker".to_string());

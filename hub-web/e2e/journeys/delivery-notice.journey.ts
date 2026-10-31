@@ -50,7 +50,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(log).toContainText("Looking at the ledger import now.");
     await expect(log).not.toContainText("never reached it");
     // Yesterday's turn shows its date, not a bare clock time.
-    await expect(log.locator(".turn time").first()).toContainText("Sep 29, 17:20");
+    await expect(log.locator(".turn time").first()).toContainText("Sep 29, 5:20 PM");
   });
 
   await journey.stage("A blocker I never answered does not say I replied", async () => {
@@ -76,7 +76,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");
     // cas-5c22: the item carries the notice's own time, not when this page heard of it.
-    await expect(attentionItems.locator("time")).toHaveText("Sep 29, 17:49");
+    await expect(attentionItems.locator("time")).toHaveText("Sep 29, 5:49 PM");
     await expect(attentionItems.locator(".attention-title")).toHaveText(NOTICE_HEADLINE);
     await expect(attentionItems.locator(".attention-detail")).toHaveText("Worker daring-robin-43 stopped. The update did not reach the supervisor.");
     await expect(page.locator(".attention-group-label")).toHaveText("Accounting · happy-cheetah-1");
@@ -104,7 +104,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
     await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE })).toBeVisible();
-    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE }).locator("time")).toHaveText("Sep 29, 17:49");
+    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE }).locator("time")).toHaveText("Sep 29, 5:49 PM");
   });
 
   await journey.stage("Keyboard stays in the sheet", async () => {
@@ -279,7 +279,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     expect(await deliveryCount(), "resolved history and explicit resolution do not count twice").toBe(beforeResolution + 1);
     // cas-d043 G03: yesterday's blocker reads as the visit showed it; the time
     // this browser stored it is not a machine stamp to measure a clock by.
-    await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 17:20");
+    await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 5:20 PM");
     // cas-b113: resolved watchdog notices must not return from the device
     // journal as conversation blockers, nor make the rail wait on me.
     await expect(log.locator(".bub", { hasText: NOTICE_TEXT })).toHaveCount(0);

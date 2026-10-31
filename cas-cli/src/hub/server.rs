@@ -27,6 +27,8 @@ use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid
 
 #[path = "composer_upload.rs"]
 mod composer_upload;
+#[path = "secret_request.rs"]
+mod secret_request;
 #[path = "account_routes.rs"]
 mod account_routes;
 #[path = "artifact_proxy.rs"]
@@ -233,6 +235,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route(
             "/v1/sessions/{session}/uploads/{upload_id}",
             post(composer_upload::upload::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/secrets/{notification_id}",
+            post(secret_request::answer::<R>).options(preflight::<R>),
         )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route(
@@ -480,10 +486,12 @@ async fn security_headers(
     // are the embedded page's only external origins (`h4_csp_03`).
     // frame-src: Commander frames visual reply pages from the same paired
     // machines (cas-3aff); each page carries its own sandbox policy.
+    // img-src: pending raster attachments use local object URLs. Keep blob:
+    // scoped to images; the composer never previews active SVG/HTML formats.
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
             "; frame-src 'self' https: http://127.0.0.1:*",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
@@ -688,8 +696,15 @@ async fn machine<R: SessionReadModel>(
     )
 }
 
+#[derive(Deserialize)]
+struct LaunchProfilesQuery {
+    /// The same opaque target as POST /v1/sessions, encoded as JSON.
+    target: Option<String>,
+}
+
 async fn launch_profiles<R: SessionReadModel>(
     State(state): State<HubState<R>>,
+    Query(query): Query<LaunchProfilesQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(error) = authorize(
@@ -702,9 +717,25 @@ async fn launch_profiles<R: SessionReadModel>(
     ) {
         return with_cors(unauthorized_for(&error), &headers);
     }
+    let project_cas_root = if let Some(target) = query.target {
+        let target = match serde_json::from_str::<super::projects::LaunchTarget>(&target) {
+            Ok(target) => target,
+            Err(error) => return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_target", &error.to_string()), &headers),
+        };
+        // Resolve both known-project and browse targets through the launch
+        // allowlist; a caller never supplies a config path directly.
+        match tokio::task::spawn_blocking(move || super::projects::resolve_launch_target(&target)).await {
+            Ok(Ok(root)) => Some(root.path.join(".cas")),
+            Ok(Err(error)) => return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_target", &error.to_string()), &headers),
+            Err(_) => return with_cors(launch_error(StatusCode::INTERNAL_SERVER_ERROR, "launch_failed", "could not resolve the selected project"), &headers),
+        }
+    } else {
+        None
+    };
+    let claude_root = project_cas_root.clone();
     let (claude, codex, grok) = tokio::join!(
-        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Claude)),
-        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Codex)),
+        tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Claude, claude_root.as_deref())),
+        tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Codex, project_cas_root.as_deref())),
         tokio::task::spawn_blocking(|| {
             super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).map(|_| Vec::new())
         }),
@@ -3065,9 +3096,14 @@ async fn handle_client_message(
     }
     if let ClientMessage::SupervisorCommand { command, confirmed, client_ref, .. } = &message {
         let action = format!("supervisor_command_{command:?}").to_ascii_lowercase();
-        store.audit_operation(context, "requested", &action, scope, session,
-            Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string()), now)?;
-        anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
+        let detail = Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string());
+        // A refused unconfirmed command must leave a denied row, not a
+        // dangling "requested" with no outcome.
+        if command.needs_confirmation() && !*confirmed {
+            store.audit_operation(context, "denied", &action, scope, session, detail, now)?;
+            anyhow::bail!("This command needs confirmation.");
+        }
+        store.audit_operation(context, "requested", &action, scope, session, detail, now)?;
     }
     if let Err(error) = connector.send(session, message).await {
         // cas-a0e2: the hub accepted the device and the message, but the
@@ -5002,6 +5038,9 @@ mod upstream_unavailable_tests {
         let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = audit.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert!(rows.iter().any(|row| row["action"] == "supervisor_command_invalid" && row["outcome"] == "denied"));
+        // cas-7629: the refused unconfirmed Clear is denied, never left as a bare "requested".
+        let clear: Vec<_> = rows.iter().filter(|row| row["action"] == "supervisor_command_clear").map(|row| row["outcome"].as_str().unwrap()).collect();
+        assert_eq!(clear, ["denied"], "{audit}");
         assert!(rows.iter().any(|row| row["action"] == "supervisor_command_receipt" && row["outcome"] == "observed"));
     }
 

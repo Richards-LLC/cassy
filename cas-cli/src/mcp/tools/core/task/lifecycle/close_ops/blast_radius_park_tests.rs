@@ -820,3 +820,74 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
 }
+
+/// cas-3d70, through the real close: the commit-time anchor names a commit on
+/// a separate pushed helper branch, the worker's own lane has since synced the
+/// target, and park refuses because that anchor is absent from the lane. The
+/// refusal asks for `commit_receipt=<tip>`; that exact retry must park the
+/// lane's tip instead of repeating the same refusal.
+#[tokio::test]
+async fn exact_receipt_parks_after_a_helper_branch_anchor_cas_3d70() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let helper_branch = format!("{LANE}-{ID}-main");
+    git(repo, &["checkout", "-q", "-b", &helper_branch, "main"]);
+    std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 2; }\n").unwrap();
+    git(repo, &["commit", "-q", "-am", &format!("fix({ID}): main-ready copy")]);
+    let helper = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", &helper_branch]);
+    git(repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("README.md"), "another delivery\n").unwrap();
+    git(repo, &["add", "README.md"]);
+    git(repo, &["commit", "-q", "-m", "another delivery"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    git(&f.worker_path, &["merge", "-q", "--no-ff", "-m", "Merge branch 'main' into lane", "main"]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut task = f.task();
+    task.deliverables.factory_branch_anchor = Some(helper.clone());
+    task.deliverables.parked_branch = Some(LANE.into());
+    tasks.update(&task).unwrap();
+
+    let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(refused.contains(&format!("delivery anchor {helper} is absent")), "{refused}");
+    assert!(refused.contains(&format!("commit_receipt={tip}")), "{refused}");
+
+    // Safety half: a lane carrying another task's commit cannot be adopted by
+    // the exact receipt, and the refusal stops suggesting that receipt.
+    std::fs::write(f.worker_path.join("README.md"), "someone else\n").unwrap();
+    git(&f.worker_path, &["commit", "-q", "-am", "fix(cas-f0a6): someone else's change"]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let foreign = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &foreign, "widget", "test(gear)",
+    );
+    let guarded = call(
+        &f.worker,
+        serde_json::json!({"action": "close", "id": ID, "reason": "gear turns", "commit_receipt": foreign}),
+    )
+    .await;
+    assert!(guarded.contains("PARK REFUSED"), "{guarded}");
+    assert!(guarded.contains("Do not retry the same receipt"), "{guarded}");
+    assert!(!guarded.contains("Re-run"), "the refusal must not loop: {guarded}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+    assert_eq!(f.task().deliverables.factory_branch_anchor.as_deref(), Some(helper.as_str()));
+    git(&f.worker_path, &["reset", "-q", "--hard", &tip]);
+    git(&f.worker_path, &["push", "-q", "-f", "origin", LANE]);
+
+    let parked = call(
+        &f.worker,
+        serde_json::json!({"action": "close", "id": ID, "reason": "gear turns", "commit_receipt": tip}),
+    )
+    .await;
+    assert!(parked.contains("MERGE REQUIRED"), "the requested receipt must park: {parked}");
+    let task = f.task();
+    assert_eq!(task.status, TaskStatus::AwaitingMerge);
+    assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+    assert!(task.deliverables.historical_factory_branch_anchors.contains(&helper));
+}

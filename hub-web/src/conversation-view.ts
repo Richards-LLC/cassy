@@ -1,3 +1,4 @@
+import { appendEmojiText } from "./emoji-text";
 import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
 import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
@@ -61,6 +62,10 @@ export interface TurnRenderContext {
   readonly history?: ConversationHistory;
   /** Sends `text` as the operator's reply to `reply` (in_reply_to = its notification_id). Absent when this view cannot send. */
   readonly respond?: (reply: OperatorReply, text: string) => void;
+  /** Answers a secret request over the hub's secrets route, never as a message (cas-1996). Absent when this view cannot send. */
+  readonly answerSecret?: SecretAnswerer;
+  /** The machine this thread's session runs on, as the operator knows it. */
+  readonly machine?: string;
   /** True when rendering the copy pinned above the composer rather than the one in the flow. */
   readonly pinned?: boolean;
 }
@@ -70,7 +75,11 @@ export interface TurnRenderContext {
  * (Pebble 3, the fused-tray objects); `attachment` is called once per artifact
  * on any turn that carries one (Pebble 4, the dog-eared sheet).
  */
-export type RenderableKind = "ask" | "blocker" | "attachment";
+export type RenderableKind = "ask" | "blocker" | "secret" | "attachment";
+/** cas-2f55: when a saved secret is deleted; absent uses the project setting (keep by default). */
+export type SecretAutoDelete = "keep" | "after_use" | "1h" | "24h";
+/** Saves (`value`) or declines a secret request; resolves with where the hub saved it and when it deletes it. */
+export type SecretAnswerer = (request: OperatorReply, answer: { value: string; auto_delete?: SecretAutoDelete } | { decline: true }) => Promise<{ path?: string; auto_delete?: string | null }>;
 export type TurnRenderer = (event: OperatorReply, context: TurnRenderContext) => HTMLElement;
 
 const turnRenderers = new Map<RenderableKind, TurnRenderer>();
@@ -164,6 +173,12 @@ export interface ConversationViewOptions {
    * in the history with the same replyTo, which is what marks the ask answered.
    */
   respond?: (ask: OperatorReply, text: string) => void;
+  /**
+   * A secret request's Save securely / Decline (cas-1996). The caller POSTs
+   * to the hub's secrets route; the value never enters a send, the journal
+   * or the history.
+   */
+  answerSecret?: SecretAnswerer;
   /**
    * What the session is doing while it has said nothing to Commander
    * (cas-55a4): when it last did anything and between whom. The empty
@@ -511,6 +526,7 @@ export class ConversationView {
   private disposed = false;
   private updateRequest?: object;
   private resize?: ResizeObserver;
+  private contentChanges?: MutationObserver;
   private phase?: PhaseLine;
   private phaseClock?: ReturnType<typeof setInterval>;
 
@@ -589,29 +605,40 @@ export class ConversationView {
     // Browser pinning/focus recovery also emits scroll. Only a reading gesture
     // may start an older network request; explicit Load earlier works as well.
     this.element.addEventListener("wheel", event => {
-      this.earlierIntent = event.deltaY < 0;
+      this.noteEarlierIntent(event.deltaY < 0);
       if (this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)) this.scrollWindow(true);
     }, { passive: true });
-    this.element.addEventListener("keydown", event => { this.earlierIntent = ["ArrowUp", "PageUp", "Home"].includes(event.key); });
+    this.element.addEventListener("keydown", event => {
+      this.noteEarlierIntent(["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey));
+    });
+    this.element.addEventListener("pointerdown", event => {
+      // A scrollbar drag is reading intent too. Clicks on thread content
+      // keep following; only the scrollbar gutter belongs to this control.
+      const rect = this.element.getBoundingClientRect();
+      if (event.target === this.element && event.clientX >= rect.left + this.element.clientLeft + this.element.clientWidth) this.noteEarlierIntent(true);
+    });
     let touchY: number | undefined;
     this.element.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY; }, { passive: true });
     this.element.addEventListener("touchmove", event => {
       const next = event.touches[0]?.clientY;
-      if (next !== undefined && touchY !== undefined) this.earlierIntent = next > touchY;
+      if (next !== undefined && touchY !== undefined) this.noteEarlierIntent(next > touchY);
       touchY = next;
     }, { passive: true });
     this.element.addEventListener("scroll", () => {
-      // cas-6a9b: a scroll that moved the thread up and off its tail is the
-      // reader, whatever else is in flight. Layout never does that: a pin
-      // only moves down to the tail, content growing below leaves scrollTop
-      // where it was, and a box that shrank or clamped keeps the tail in
-      // view. Before this, a reader who scrolled up within the two frames
-      // after a pin was ignored and the pending re-pin took them back down,
-      // and one whose thread had grown unseen was read as layout and pinned.
+      // A preview can collapse (clamping scrollTop) and grow again before
+      // the queued scroll arrives. With changed geometry, the upward offset
+      // alone cannot identify a reader. Their input stops following before
+      // layout or a pending pin can obscure it; ordinary scrolls at stable
+      // geometry still claim the reading position (including scrollIntoView).
       this.pinDeferred = false;
       const scrollTop = this.element.scrollTop;
+      const height = this.element.clientHeight;
+      const contentHeight = this.element.scrollHeight;
+      const layoutChanged = (this.lastHeight !== undefined && height !== this.lastHeight)
+        || (this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight);
       const scrollingUp = scrollTop < this.scrolledTo;
-      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
+      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element)
+        && (!this.following || !layoutChanged);
       if (readerLeftTail) {
         this.following = false;
         this.jump.hidden = false;
@@ -628,7 +655,6 @@ export class ConversationView {
       // own scroll adjustment for that lands here before the resize observer
       // does. A scroll that comes with a height change is layout, not the
       // reader scrolling away: a thread following its tail keeps following.
-      const height = this.element.clientHeight;
       if (this.lastHeight !== undefined && height !== this.lastHeight) {
         this.lastHeight = height;
         if (this.following) { this.pin(); return; }
@@ -636,7 +662,6 @@ export class ConversationView {
       this.lastHeight = height;
       // A scroll that comes with a change of content height while following
       // is layout (content grew, the browser re-anchored), not the reader.
-      const contentHeight = this.element.scrollHeight;
       const grew = this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight;
       this.lastContentHeight = contentHeight;
       if (grew && this.following) { this.pin(); return; }
@@ -692,6 +717,13 @@ export class ConversationView {
       // scroll-anchoring nudge then read as the reader scrolling away.
       this.resize.observe(this.msgs);
     }
+    // Preview DOM changes can clamp and regrow the thread before either a
+    // scroll event or ResizeObserver delivery. Re-pin in their microtask,
+    // while explicit reading intent has already released following.
+    this.contentChanges = new MutationObserver(() => {
+      if (!this.disposed && this.following) this.pin();
+    });
+    this.contentChanges.observe(this.msgs, { childList: true, subtree: true, attributes: true, characterData: true });
   }
 
   /** Mount and session-state callbacks share one presentation before paint.
@@ -827,6 +859,14 @@ export class ConversationView {
     if (first) this.element.scrollTop += first.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
     this.scrolledTo = this.element.scrollTop;
     this.notePlace();
+  }
+
+  /** Claim an upward reading gesture before the browser delivers its scroll. */
+  private noteEarlierIntent(up: boolean): void {
+    this.earlierIntent = up;
+    // Claim the reader's place before a pending pin or resize callback can
+    // run, even when the browser has not delivered their scroll event yet.
+    if (up && this.element.scrollTop > 0) this.following = false;
   }
 
   /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
@@ -1043,7 +1083,7 @@ export class ConversationView {
     const bar = document.createElement("div"); bar.className = "pinned-bar";
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "pinned-expand";
     const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
-    const text = document.createElement("span"); text.className = "pinned-bar-text"; text.textContent = askLine(ask.message);
+    const text = document.createElement("span"); text.className = "pinned-bar-text"; appendEmojiText(document, text, askLine(ask.message));
     const glyph = document.createElement("template"); glyph.innerHTML = CHEVRON_UP;
     jump.append(label, " ", text, glyph.content.firstElementChild!);
     jump.title = "Go to the question";
@@ -1079,6 +1119,21 @@ export class ConversationView {
     this.composing = composing;
     this.renderPinned(this.element.ownerDocument);
     if (this.following) this.pin();
+  }
+
+  /**
+   * cas-1996: once the hub saved or declined a secret, it stops waiting here
+   * at once, before the hub's reply reaches the history. The repaint waits a
+   * task so the card first records its outcome.
+   */
+  private async answerSecret(request: OperatorReply, answer: Parameters<SecretAnswerer>[1]): ReturnType<SecretAnswerer> {
+    const outcome = await this.options.answerSecret!(request, answer);
+    setTimeout(() => {
+      if (this.disposed || !this.history.dismissAsk(request.notification_id)) return;
+      this.update();
+      this.options.dismissalsChanged?.();
+    }, 0);
+    return outcome;
   }
 
   /** Dismiss a waiting ask: it unpins, stops waiting, and its copy in the thread keeps its choices. */
@@ -1165,6 +1220,8 @@ export class ConversationView {
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
+      ...(this.options.answerSecret ? { answerSecret: (request: OperatorReply, answer: Parameters<SecretAnswerer>[1]) => this.answerSecret(request, answer) } : {}),
+      ...(this.options.machine ? { machine: this.options.machine } : {}),
       pinned,
     };
     return context;
@@ -1180,12 +1237,12 @@ export class ConversationView {
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
   private turnSignature(turn: ThreadTurn): string {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
-    const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
+    const answered = reply?.kind === "ask" || reply?.kind === "secret" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The bookmark target changes when the newest waiting question changes.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
-    const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
+    const retired = reply?.kind === "ask" || reply?.kind === "blocker" || reply?.kind === "secret" ? this.history.retirement(reply.notification_id) : undefined;
     const delivered = turn.event.kind === "send" ? this.history.showsDeliveryStatus(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
@@ -1356,8 +1413,10 @@ export class ConversationView {
     if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
     this.scrolledTo = this.element.scrollTop;
     this.lastContentHeight = this.element.scrollHeight;
-    this.following = shouldFollowTail(this.element);
-    this.jump.hidden = this.following;
+    // Loading may still fit in the viewport. Opening work is reading intent:
+    // its later detail must not resume tail-following when it grows.
+    this.following = false;
+    this.jump.hidden = shouldFollowTail(this.element);
     this.notePlace();
   }
 
@@ -1771,7 +1830,7 @@ export class ConversationView {
   private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): { bubble: HTMLElement; sheets: HTMLElement[] } {
     const kind = reply.kind ?? "answer";
     const context = this.context(document, turn, reply);
-    const custom = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind)?.(reply, context) : undefined;
+    const custom = kind === "ask" || kind === "blocker" || kind === "secret" ? turnRenderers.get(kind)?.(reply, context) : undefined;
     const sheetRenderer = turnRenderers.get("attachment");
     const sheets: HTMLElement[] = [];
     const bubble = custom ?? document.createElement("div");
@@ -1850,12 +1909,19 @@ export class ConversationView {
       if (this.disposed) return;
       // cas-c2cb: a reader who moved focus off the tail meanwhile stopped
       // following it; the frame-late re-pin leaves them where they went.
-      if (this.following) this.element.scrollTop = this.element.scrollHeight;
+      if (this.following) {
+        this.element.scrollTop = this.element.scrollHeight;
+        // Late preview layout can shrink this pin before another resize.
+        // Its queued scroll must compare against this position, not the
+        // synchronous pin's older offset and appear to be a reader's scroll.
+        this.scrolledTo = this.element.scrollTop;
+        this.lastContentHeight = this.element.scrollHeight;
+      }
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }
 
-  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
+  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.contentChanges?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */
@@ -1907,7 +1973,7 @@ function timeElement(document: Document, time: string, clockAhead: boolean | und
 
 function paragraphs(document: Document, text: string): HTMLElement[] {
   return text.split(/\n{2,}/).map((chunk) => chunk.trim()).filter(Boolean).map((chunk) => {
-    const p = document.createElement("p"); p.textContent = chunk; return p;
+    const p = document.createElement("p"); appendEmojiText(document, p, chunk); return p;
   });
 }
 

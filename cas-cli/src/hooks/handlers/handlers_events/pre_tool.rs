@@ -192,6 +192,9 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
         if relative.is_empty() || relative.starts_with(".cas/") || relative.starts_with("target/") {
             continue;
         }
+        if changelog_append_only_edit(input, &relative, &file) {
+            continue;
+        }
         let crate::cloud::file_leases::FileLease::HeldBy(holder) =
             crate::cloud::file_leases::claim(cas_root, &agent_id, &agent_name, &task.id, &relative)
         else {
@@ -206,6 +209,240 @@ fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> V
         }
     }
     notes
+}
+
+fn changelog_append_only_edit(input: &HookInput, relative: &str, file: &Path) -> bool {
+    if relative != "CHANGELOG.md" {
+        return false;
+    }
+    let Some(tool_input) = input.tool_input.as_ref() else {
+        return false;
+    };
+    let Ok(old_text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let new_text = match input.tool_name.as_deref() {
+        Some("Edit") => apply_changelog_string_edit(&old_text, tool_input),
+        Some("MultiEdit") => tool_input
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+            .filter(|edits| !edits.is_empty())
+            .and_then(|edits| {
+                edits.iter().try_fold(old_text.clone(), |text, edit| {
+                    apply_changelog_string_edit(&text, edit)
+                })
+            }),
+        Some("Write") => tool_input
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        Some("apply_patch") => tool_input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|patch| apply_changelog_patch(&old_text, patch)),
+        _ => None,
+    };
+    new_text.is_some_and(|new| changelog_diff_adds_whole_lines(&old_text, &new))
+}
+
+fn apply_changelog_string_edit(text: &str, edit: &serde_json::Value) -> Option<String> {
+    let old = edit.get("old_string")?.as_str()?;
+    let new = edit.get("new_string")?.as_str()?;
+    if old.is_empty() {
+        return None;
+    }
+    let count = text.matches(old).count();
+    let replace_all = edit
+        .get("replace_all")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if count == 0 || (count != 1 && !replace_all) {
+        return None;
+    }
+    Some(if replace_all {
+        text.replace(old, new)
+    } else {
+        text.replacen(old, new, 1)
+    })
+}
+
+fn changelog_diff_adds_whole_lines(old: &str, new: &str) -> bool {
+    use similar::{ChangeTag, TextDiff};
+    let mut inserted = false;
+    let diff = TextDiff::from_lines(old, new);
+    let changes: Vec<_> = diff.iter_all_changes().collect();
+    let mut previous_equal: Option<&str> = None;
+    let mut index = 0;
+    while index < changes.len() {
+        match changes[index].tag() {
+            ChangeTag::Delete => return false,
+            ChangeTag::Equal => {
+                previous_equal = Some(changes[index].value());
+                index += 1;
+            }
+            ChangeTag::Insert => {
+                let start = index;
+                while index < changes.len() && changes[index].tag() == ChangeTag::Insert {
+                    if !changes[index].value().ends_with('\n') {
+                        return false;
+                    }
+                    index += 1;
+                }
+                let block = changes[start..index]
+                    .iter()
+                    .map(|change| change.value())
+                    .collect::<String>();
+                let next_nonblank_equal = changes[index..]
+                    .iter()
+                    .find(|change| {
+                        change.tag() == ChangeTag::Equal && !change.value().trim().is_empty()
+                    })
+                    .map(|change| change.value());
+                if !is_changelog_entry_block(&block)
+                    || !is_changelog_entry_boundary(previous_equal, next_nonblank_equal)
+                {
+                    return false;
+                }
+                inserted = true;
+            }
+        }
+    }
+    inserted
+}
+
+fn is_changelog_entry_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    if !is_changelog_heading(first) && !is_changelog_bullet(first) {
+        return false;
+    }
+
+    let mut follows_inserted_bullet = is_changelog_bullet(first);
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            if !follows_inserted_bullet {
+                return false;
+            }
+            continue;
+        }
+        if is_changelog_heading(line) {
+            follows_inserted_bullet = false;
+        } else if is_changelog_bullet(line) {
+            follows_inserted_bullet = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_changelog_entry_boundary(previous: Option<&str>, next: Option<&str>) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    if previous.trim().is_empty() || is_changelog_heading(previous) {
+        return true;
+    }
+    // A following indented line is still part of the preceding wrapped entry.
+    // Ignore blank separators when deciding whether the insertion split it.
+    let next_nonblank = next.filter(|line| !line.trim().is_empty());
+    !next_nonblank.is_some_and(|line| line.starts_with([' ', '\t']))
+}
+
+fn is_changelog_heading(line: &str) -> bool {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&hashes) && line[hashes..].starts_with(' ')
+}
+
+fn is_changelog_bullet(line: &str) -> bool {
+    line.starts_with("- ") || line.starts_with("* ") || line.starts_with("1. ")
+}
+
+fn apply_changelog_patch(text: &str, patch: &str) -> Option<String> {
+    let mut current = text.to_owned();
+    let mut in_changelog = false;
+    let mut hunk: Vec<(char, String)> = Vec::new();
+    let mut changed = false;
+    for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            if in_changelog && !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+                return None;
+            }
+            in_changelog = path.trim().trim_start_matches("./") == "CHANGELOG.md";
+            changed |= in_changelog;
+            continue;
+        }
+        if line.starts_with("*** Add File: ")
+            || line.starts_with("*** Delete File: ")
+            || line.starts_with("*** Move to: ")
+            || line == "*** End Patch"
+        {
+            if in_changelog && !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+                return None;
+            }
+            in_changelog = false;
+            continue;
+        }
+        if !in_changelog {
+            continue;
+        }
+        if line.starts_with("@@") {
+            if !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+                return None;
+            }
+            continue;
+        }
+        let mut chars = line.chars();
+        if let Some(tag @ (' ' | '+' | '-')) = chars.next() {
+            hunk.push((tag, chars.as_str().to_owned()));
+        }
+    }
+    if in_changelog && !apply_changelog_patch_hunk(&mut current, &mut hunk) {
+        return None;
+    }
+    changed.then_some(current)
+}
+
+fn apply_changelog_patch_hunk(text: &mut String, hunk: &mut Vec<(char, String)>) -> bool {
+    if hunk.is_empty() {
+        return true;
+    }
+    let rows = std::mem::take(hunk);
+    let old: Vec<&str> = rows
+        .iter()
+        .filter(|(tag, _)| *tag != '+')
+        .map(|(_, row)| row.as_str())
+        .collect();
+    let new: Vec<&str> = rows
+        .iter()
+        .filter(|(tag, _)| *tag != '-')
+        .map(|(_, row)| row.as_str())
+        .collect();
+    if old.is_empty() {
+        return false;
+    }
+    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
+    let matches = lines
+        .windows(old.len())
+        .enumerate()
+        .filter_map(|(at, window)| {
+            window
+                .iter()
+                .zip(&old)
+                .all(|(line, expected)| line.trim_end_matches(['\r', '\n']) == *expected)
+                .then_some(at)
+        })
+        .collect::<Vec<_>>();
+    let [at] = matches.as_slice() else { return false; };
+    let inserted = new.into_iter().map(|line| format!("{line}\n")).collect::<Vec<_>>();
+    lines.splice(*at..*at + old.len(), inserted);
+    *text = lines.concat();
+    true
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.
@@ -1479,7 +1716,7 @@ fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> 
     // Single quotes make the mandatory filter a literal shell argument. Match
     // the suffix after the filter so '&' within a filter is not backgrounding.
     if command.starts_with("cargo nextest ") {
-        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
+        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_@.+-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
         let matched = pattern.captures(command)?;
         let mut args = vec![
             "nextest".into(),
@@ -2056,12 +2293,18 @@ fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
 
         if name == "set" {
             let enables_auto_export = args.iter().any(|argument| {
-                matches!(argument.as_str(), "-a" | "--allexport")
+                argument == "--allexport"
+                    || argument.strip_prefix('-').is_some_and(|flags| {
+                        !flags.starts_with('-') && flags.contains('a')
+                    })
             }) || args
                 .windows(2)
                 .any(|options| options[0] == "-o" && options[1] == "allexport");
             let disables_auto_export = args.iter().any(|argument| {
-                matches!(argument.as_str(), "+a" | "--no-allexport")
+                argument == "--no-allexport"
+                    || argument.strip_prefix('+').is_some_and(|flags| {
+                        !flags.starts_with('+') && flags.contains('a')
+                    })
             }) || args
                 .windows(2)
                 .any(|options| options[0] == "+o" && options[1] == "allexport");
@@ -2082,9 +2325,12 @@ fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
         }
 
         if matches!(name, "declare" | "typeset")
-            && args
-                .iter()
-                .any(|argument| matches!(argument.as_str(), "-x" | "--export"))
+            && args.iter().any(|argument| {
+                matches!(argument.as_str(), "--export")
+                    || argument.strip_prefix('-').is_some_and(|flags| {
+                        !flags.starts_with('-') && flags.contains('x')
+                    })
+            })
         {
             exported_override |= git_config_environment_override(args)
                 || args.iter().any(|argument| {
@@ -2184,6 +2430,14 @@ fn git_invocation_writes_hooks_path(git_words: &[String]) -> bool {
     }
 
     let arguments = &git_words[operation_index + 1..];
+    let section_operation = arguments.iter().position(|argument| {
+        matches!(argument.as_str(), "--remove-section" | "remove-section" | "rename-section")
+    });
+    if let Some(index) = section_operation {
+        return arguments
+            .get(index + 1)
+            .is_some_and(|section| section.eq_ignore_ascii_case("core"));
+    }
     let Some(key_index) = arguments
         .iter()
         .position(|argument| argument.eq_ignore_ascii_case("core.hooksPath"))
@@ -3061,6 +3315,8 @@ struct ShellLexed {
     /// Byte after each token in the original source, including removed quotes.
     ends: Vec<usize>,
     unresolved_at: Option<usize>,
+    /// Raw parameter bodies: numeric operand checks must retain source quoting.
+    parameters: Vec<(usize, usize)>,
 }
 
 fn factory_shell_tokens_for_projection(
@@ -3071,6 +3327,54 @@ fn factory_shell_tokens_for_projection(
     (lexed.tokens, lexed.literals)
 }
 
+/// ANSI-C quoting is a constant word part, not a parameter or command
+/// substitution. Unsupported escapes, NULs and non-UTF8 bytes stay unresolved
+/// so the effect guard refuses them rather than matching a different word.
+fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = command.as_bytes();
+    if bytes.get(start..start + 2) != Some(b"$'") {
+        return None;
+    }
+    let mut decoded = Vec::new();
+    let mut index = start + 2;
+    while let Some(&ch) = bytes.get(index) {
+        index += 1;
+        match ch {
+            b'\'' => return Some((String::from_utf8(decoded).ok()?, index)),
+            b'\\' => {
+                let escape = *bytes.get(index)?;
+                index += 1;
+                let value = match escape {
+                    b'a' => 7, b'b' => 8, b'e' | b'E' => 27, b'f' => 12,
+                    b'n' => b'\n', b'r' => b'\r', b't' => b'\t', b'v' => 11,
+                    b'\\' | b'\'' | b'"' | b'?' => escape,
+                    b'x' | b'0'..=b'7' => {
+                        let (radix, limit, mut value, mut digits) = if escape == b'x' {
+                            (16, 2, 0, 0)
+                        } else {
+                            (8, 3, u32::from(escape - b'0'), 1)
+                        };
+                        while digits < limit {
+                            let Some(digit) = bytes.get(index).and_then(|ch| (*ch as char).to_digit(radix)) else { break };
+                            value = value * radix + digit;
+                            digits += 1;
+                            index += 1;
+                        }
+                        if digits == 0 { return None; }
+                        value as u8
+                    }
+                    _ => return None,
+                };
+                if value == 0 { return None; }
+                decoded.push(value);
+            }
+            0 => return None,
+            _ => decoded.push(ch),
+        }
+    }
+    None
+}
+
 /// The same lexer backs ordinary commands and substitution boundaries. Source
 /// positions avoid recovering syntax from cooked words or quoted/comment text.
 fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> ShellLexed {
@@ -3078,6 +3382,7 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
     let mut literals = Vec::new();
     let mut ends = Vec::new();
     let mut unresolved_at = None;
+    let mut parameters = Vec::new();
     let mut word = String::new();
     let mut literal = true;
     let mut word_quoted = false;
@@ -3134,12 +3439,49 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
             escaped = false;
             continue;
         }
+        // Escaped ${ is literal data inside a double-quoted word. Its braces
+        // must not manufacture a parameter quoting context for later text.
+        if quote == Some('"') && expansions.is_empty() && ch == '\\'
+            && command.as_bytes().get(index + 1..index + 3) == Some(b"${")
+        {
+            word.push_str("\\$");
+            chars.next();
+            continue;
+        }
         if let Some(expansion) = expansions.last_mut() && expansion.escaped {
             word.push(ch);
             expansion.escaped = false;
             continue;
         }
         let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        // Single quotes inside a double-quoted parameter default differ
+        // across Bash modes. Retain potentially active nested operands too.
+        if quote == Some('"') && active_quote == Some('\'') && !expansions.is_empty()
+            && ch == '$' && command.as_bytes().get(index + 1) == Some(&b'{')
+            && command.as_bytes()[..index].iter().rev().take_while(|&&ch| ch == b'\\').count() % 2 == 0
+        {
+            let end = command[index + 2..].find('}').map_or(command.len(), |end| index + 2 + end);
+            parameters.push((index + 2, end));
+        }
+        // Shell line continuations disappear before word matching, including
+        // inside double quotes; single-quoted backslash/newline stays data.
+        if active_quote != Some('\'') && ch == '\\'
+            && chars.peek().is_some_and(|(_, next)| *next == '\n')
+        {
+            chars.next();
+            continue;
+        }
+        if quote.is_none() && expansions.is_empty() && ch == '$'
+            && chars.peek().is_some_and(|(_, next)| *next == '\'')
+        {
+            if let Some((decoded, end)) = shell_ansi_c_word(command, index) {
+                word.push_str(&decoded);
+                for _ in command[index + 1..end].chars() { chars.next(); }
+                word_quoted = true;
+                continue;
+            }
+            unresolved_at.get_or_insert(index);
+        }
         if active_quote != Some('\'') && ch == '$' {
             let expansion = match command.as_bytes().get(index + 1..) {
                 Some([b'{', ..]) => Some(('{', '}', 1, 1)),
@@ -3204,7 +3546,12 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
                 None if ch == expansion.opening => expansion.balance += 1,
                 None if ch == expansion.closing => {
                     expansion.balance -= 1;
-                    if expansion.balance == 0 { expansions.pop(); }
+                    if expansion.balance == 0 {
+                        if expansion.opening == '{' {
+                            parameters.push((expansion.start + 2, index));
+                        }
+                        expansions.pop();
+                    }
                 }
                 _ => {},
             }
@@ -3226,6 +3573,15 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         }
         match quote {
             Some(active) if ch == active => quote = None,
+            Some('"') if ch == '\\'
+                && chars.peek().is_some_and(|(_, next)| matches!(next, '`' | '\\')) =>
+            {
+                // Escaped backticks are data; a doubled backslash leaves the
+                // next backtick executable. Retain the source escape spelling
+                // for consumers that inspect substitutions in dynamic words.
+                word.push(ch);
+                word.push(chars.next().unwrap().1);
+            }
             Some(_) => word.push(ch),
             None => match ch {
                 '\\' => {
@@ -3299,7 +3655,7 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         &mut word_quoted,
         &mut ends, command.len(),
     );
-    ShellLexed { tokens, literals, ends, unresolved_at }
+    ShellLexed { tokens, literals, ends, unresolved_at, parameters }
 }
 
 /// Return shell statements with heredoc bodies and comments removed. Quoted
@@ -3456,11 +3812,34 @@ fn env_split_string_payload(words: &[String]) -> Option<String> {
 }
 
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
+    executable_word_index_with_alternatives(words, &mut |_| {})
+}
+
+fn executable_word_index_with_alternatives(
+    words: &[String],
+    alternative: &mut dyn FnMut(usize),
+) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
         match shell_word_basename(word) {
-            "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
+            "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
+            "coproc" => {
+                index += 1;
+                // A name can precede any compound command. Otherwise the
+                // policy scanner must inspect both possible command words.
+                if words.get(index).is_some_and(|name| is_shell_variable_name(name))
+                    && words.get(index + 1).is_some_and(|word| matches!(word.as_str(),
+                        "{" | "}" | "(" | "((" | "[[" | "]]" | "while" | "until" | "if"
+                        | "then" | "elif" | "else" | "fi" | "for" | "select" | "case" | "in"
+                        | "esac" | "do" | "done" | "function" | "coproc" | "time" | "!"))
+                {
+                    index += 1;
+                } else if index + 1 < words.len() {
+                    alternative(index + 1);
+                }
+            }
+            "function" => index += 2, // Skip the function name to inspect its body.
             "env" => {
                 // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
                 // value; skipping only the flag made `env -u X cargo …` name
@@ -3499,7 +3878,23 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
                     };
                 }
             }
-            "command" => index += 1,
+            "command" | "builtin" => {
+                let command = word == "command";
+                index += 1;
+                while command && let Some(option) = words.get(index)
+                    && option.starts_with('-') && option != "--"
+                {
+                    // Query/invalid flags do not invoke an operand. Repeated
+                    // and combined -p flags still select the real command.
+                    if option.len() == 1 || !option[1..].bytes().all(|ch| ch == b'p') {
+                        return None;
+                    }
+                    index += 1;
+                }
+                if words.get(index).is_some_and(|word| word == "--") {
+                    index += 1;
+                }
+            }
             _ if word
                 .split_once('=')
                 .is_some_and(|(name, _)| is_shell_variable_name(name)) =>
@@ -4015,37 +4410,49 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
                 while chars.get(index).is_some_and(|ch| ch.is_whitespace()) {
                     index += 1;
                 }
-                let Some(&first) = chars.get(index) else {
-                    continue;
-                };
-                let (value, next_index) = if first == '\'' || first == '"' {
-                    index += 1;
-                    let start = index;
-                    while index < chars.len() && chars[index] != first {
+                // Bash removes quoting from the entire delimiter word. Any
+                // quoted/escaped character makes the complete body literal.
+                let mut value = String::new();
+                let mut quote = None;
+                let mut literal_body = false;
+                while let Some(&ch) = chars.get(index) {
+                    if quote == Some('\'') {
+                        if ch == '\'' { quote = None; } else { value.push(ch); }
+                        index += 1;
+                    } else if quote == Some('"') {
+                        if ch == '"' {
+                            quote = None;
+                            index += 1;
+                        } else if ch == '\\' && chars.get(index + 1)
+                            .is_some_and(|next| matches!(next, '$' | '`' | '"' | '\\'))
+                        {
+                            value.push(chars[index + 1]);
+                            index += 2;
+                        } else {
+                            value.push(ch);
+                            index += 1;
+                        }
+                    } else if matches!(ch, '\'' | '"') {
+                        literal_body = true;
+                        quote = Some(ch);
+                        index += 1;
+                    } else if ch == '\\' {
+                        literal_body = true;
+                        index += 1;
+                        if let Some(&next) = chars.get(index) {
+                            value.push(next);
+                            index += 1;
+                        }
+                    } else if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                        break;
+                    } else {
+                        value.push(ch);
                         index += 1;
                     }
-                    if index >= chars.len() {
-                        continue;
-                    }
-                    (chars[start..index].iter().collect::<String>(), index + 1)
-                } else {
-                    let start = index;
-                    while index < chars.len()
-                        && !chars[index].is_whitespace()
-                        && !matches!(chars[index], ';' | '|' | '&' | '<' | '>')
-                    {
-                        index += 1;
-                    }
-                    (chars[start..index].iter().collect(), index)
-                };
-                if !value.is_empty() {
-                    delimiters.push(HeredocDelimiter {
-                        value,
-                        strip_leading_tabs,
-                        literal_body: matches!(first, '\'' | '"'),
-                    });
                 }
-                index = next_index;
+                if quote.is_none() && (!value.is_empty() || literal_body) {
+                    delimiters.push(HeredocDelimiter { value, strip_leading_tabs, literal_body });
+                }
             }
             _ => index += 1,
         }
@@ -4201,6 +4608,30 @@ impl ParenPositions {
     }
 }
 
+/// A redirect's filename is not the command: `>out touch /x` runs touch. Leaves
+/// command position as it was.
+fn skip_redirect(tokens: &[ShellToken], index: &mut usize, parens: &mut ParenPositions) {
+    while let Some(ShellToken::Operator('<' | '>' | '&' | '|')) = tokens.get(*index) {
+        parens.operator();
+        *index += 1;
+    }
+    if matches!(tokens.get(*index), Some(ShellToken::Word(_))) {
+        parens.word(false);
+        *index += 1;
+    }
+}
+
+/// The descriptor in `2>out touch /x` or `{fd}>out touch /x`, which is not the
+/// command either.
+fn is_redirect_descriptor(word: &str, next: Option<&ShellToken>) -> bool {
+    let numbered = !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit());
+    let named = word
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(is_shell_variable_name);
+    (numbered || named) && matches!(next, Some(ShellToken::Operator('<' | '>')))
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
@@ -4221,6 +4652,14 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     for (index, token) in tokens.iter().enumerate() {
         if token == &ShellToken::Operator('>') {
             if let Some(ShellToken::Word(target)) = tokens.get(index + 1) {
+                add_target(target);
+            }
+            // `>|file` and `>&file` write too; `>&2` and `>&-` name a descriptor.
+            if let (Some(ShellToken::Operator('|' | '&')), Some(ShellToken::Word(target))) =
+                (tokens.get(index + 1), tokens.get(index + 2))
+                && target != "-"
+                && !target.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 add_target(target);
             }
         }
@@ -4252,8 +4691,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                 command_position = true;
                 index += 1;
             }
+            ShellToken::Operator('<' | '>') => skip_redirect(&tokens, &mut index, &mut parens),
             ShellToken::Operator(_) => {
                 parens.operator();
+                index += 1;
+            }
+            ShellToken::Word(word) if command_position && is_redirect_descriptor(word, tokens.get(index + 1)) => {
+                parens.word(false);
                 index += 1;
             }
             ShellToken::Word(command) if command_position => {
@@ -4424,8 +4868,13 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
                 command_position = true;
                 index += 1;
             }
+            ShellToken::Operator('<' | '>') => skip_redirect(&tokens, &mut index, &mut parens),
             ShellToken::Operator(_) => {
                 parens.operator();
+                index += 1;
+            }
+            ShellToken::Word(word) if command_position && is_redirect_descriptor(word, tokens.get(index + 1)) => {
+                parens.word(false);
                 index += 1;
             }
             ShellToken::Word(word) if command_position => {
@@ -5413,6 +5862,7 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
 struct ShellInvocationScan {
     commands: Vec<(String, Vec<String>)>,
     unresolved_heredoc: bool,
+    unresolved_ansi_c: bool,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5438,28 +5888,40 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
         }
-        let Some(index) = unwrapped_command_index(&words) else {
-            continue;
-        };
-        let args = &words[index + 1..];
-        let name = shell_word_basename(&words[index]);
-        match name {
-            // Wrappers whose option value is itself a shell command.
-            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
-                for (position, arg) in args.iter().enumerate() {
-                    let flags_c =
-                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
-                    if (flags_c || arg == "--command")
-                        && let Some(payload) = args.get(position + 1)
-                    {
-                        collect_shell_invocations(payload, depth + 1, found);
+        let mut pending = vec![0];
+        let mut visited = vec![false; words.len()];
+        let mut indices = Vec::new();
+        while let Some(start) = pending.pop() {
+            if start >= words.len() || visited[start] { continue; }
+            visited[start] = true;
+            if let Some(relative) = unwrapped_command_index_with_alternatives(
+                &words[start..], &mut |offset| pending.push(start + offset),
+            ) {
+                let index = start + relative;
+                if !indices.contains(&index) { indices.push(index); }
+            }
+        }
+        for index in indices {
+            let args = &words[index + 1..];
+            let name = shell_word_basename(&words[index]);
+            match name {
+                // Wrappers whose option value is itself a shell command.
+                "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
+                    for (position, arg) in args.iter().enumerate() {
+                        let flags_c =
+                            arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                        if (flags_c || arg == "--command")
+                            && let Some(payload) = args.get(position + 1)
+                        {
+                            collect_shell_invocations(payload, depth + 1, found);
+                        }
                     }
                 }
+                "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
+                _ => {}
             }
-            "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
-            _ => {}
+            found.commands.push((name.to_string(), args.to_vec()));
         }
-        found.commands.push((name.to_string(), args.to_vec()));
     }
 }
 
@@ -5504,6 +5966,15 @@ fn collect_shell_substitutions(
             }
             continue;
         }
+        if quote.is_none() && bytes.get(index..index + 2) == Some(b"$'") {
+            let Some((_, end)) = shell_ansi_c_word(command, index) else {
+                found.unresolved_ansi_c = true;
+                break;
+            };
+            index = end;
+            word_start = false;
+            continue;
+        }
         let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
             let end = shell_effects::literal_cat_heredoc_end(&command[index..])
                 .map(|end| index + end)
@@ -5525,7 +5996,12 @@ fn collect_shell_substitutions(
             continue;
         };
         let Some(end) = end else { break };
-        collect_shell_invocations(&command[start..end], depth + 1, found);
+        if ch == b'`' {
+            let body = shell_effects::backquote_body(&command[start..end]);
+            collect_shell_invocations(&body, depth + 1, found);
+        } else {
+            collect_shell_invocations(&command[start..end], depth + 1, found);
+        }
         word_start = false;
         index = end + 1;
     }
@@ -5575,7 +6051,12 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvo
             found.unresolved_heredoc = true;
             break;
         };
-        collect_shell_invocations(&logical[start..end], depth + 1, found);
+        if bytes[index] == b'`' {
+            let body = shell_effects::backquote_body(&logical[start..end]);
+            collect_shell_invocations(&body, depth + 1, found);
+        } else {
+            collect_shell_invocations(&logical[start..end], depth + 1, found);
+        }
         index = end + 1;
     }
 }
@@ -5604,6 +6085,9 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
+    if scan.unresolved_ansi_c {
+        return Some("🚫 OPERATOR-ONLY: Cannot inspect an unsupported ANSI-C shell word.".into());
+    }
     if scan.unresolved_heredoc {
         return Some("🚫 Cannot inspect an unresolved command substitution in an expanding heredoc.".into());
     }
@@ -5693,7 +6177,14 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
 pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
-    let mut index = executable_word_index(words)?;
+    unwrapped_command_index_with_alternatives(words, &mut |_| {})
+}
+
+fn unwrapped_command_index_with_alternatives(
+    words: &[String],
+    alternative: &mut dyn FnMut(usize),
+) -> Option<usize> {
+    let mut index = executable_word_index_with_alternatives(words, alternative)?;
     for _ in 0..16 {
         let name = shell_word_basename(&words[index]);
         if !COMMAND_WRAPPERS.contains(&name) {
@@ -5726,7 +6217,9 @@ pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
             }
         }
         let rest = words.get(next..)?;
-        index = next + executable_word_index(rest)?;
+        index = next + executable_word_index_with_alternatives(
+            rest, &mut |offset| alternative(next + offset),
+        )?;
     }
     Some(index)
 }
@@ -7036,6 +7529,7 @@ fn factory_workspace_contract_denial(
         | "an unresolved shell payload"
         | "an unresolved shell executable"
         | "an unresolved shell write target"
+        | "an unresolved arithmetic operand"
         | "a shell command without a resolvable payload"
         | "a shell payload beyond the resolution limit"
         | "an unmatched shell scope") {
@@ -7295,6 +7789,145 @@ mod workspace_contract_tests {
         assert_eq!(worker_edit_targets(&input), ["src/a.rs", "src/b.rs"]);
         let edit = tool_input("Edit", serde_json::json!({"file_path": "/repo/src/c.rs"}), Path::new("/repo"));
         assert_eq!(worker_edit_targets(&edit), ["/repo/src/c.rs"]);
+    }
+
+    #[test]
+    fn changelog_new_bullet_is_append_only() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n  Wrapped detail.\n\n").unwrap();
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n ## [Unreleased]\n \n - Existing delivery entry.\n   Wrapped detail.\n \n+### Fixed — Factory QA\n+- Added this task's entry.\n*** End Patch",
+            }),
+            root.path(),
+        );
+        assert!(changelog_append_only_edit(
+            &input,
+            "CHANGELOG.md",
+            &file
+        ));
+    }
+
+    #[test]
+    fn changelog_existing_bullet_edit_is_not_append_only() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n-- Existing delivery entry.\n+- Reworded existing delivery entry.\n*** End Patch",
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(
+            &input,
+            "CHANGELOG.md",
+            &file
+        ));
+    }
+
+    #[test]
+    fn changelog_patch_continuation_of_existing_bullet_warns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({
+                "command": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n - Existing delivery entry.\n+  Added continuation to another delivery's bullet.\n*** End Patch"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
+    fn changelog_edit_rewrite_plus_add_warns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        let old = "the unknown-session fallback stays unchanged.";
+        std::fs::write(&file, format!("{old}\n")).unwrap();
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "old_string": old,
+                "new_string": "the unknown-session fallback stays unchanged. (Superseded by 3.92.)\n\n- **New entry** — mine.\n"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
+    fn changelog_edit_continuation_plus_new_bullet_warns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CHANGELOG.md");
+        let old = "- Existing delivery entry.\n  Existing wrapped detail.\n";
+        std::fs::write(&file, old).unwrap();
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "old_string": old,
+                "new_string": "- Existing delivery entry.\n  Existing wrapped detail.\n  Continuation edited by another delivery.\n\n- New task entry.\n"
+            }),
+            root.path(),
+        );
+        assert!(!changelog_append_only_edit(&input, "CHANGELOG.md", &file));
+    }
+
+    #[test]
+    fn worker_file_lease_notes_checks_changelog_edit_before_claim() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project)
+            .status()
+            .unwrap();
+        let project = project.canonicalize().unwrap();
+        let file = project.join("CHANGELOG.md");
+        std::fs::write(&file, "## [Unreleased]\n\n- Existing delivery entry.\n").unwrap();
+        let cas_root = crate::store::init_cas_dir(env.home()).unwrap();
+        assert_eq!(
+            std::env::var_os("CAS_ROOT").as_deref(),
+            Some(cas_root.as_os_str()),
+            "fixture stores and production hook root must share TestEnvGuard's canonical CAS_ROOT"
+        );
+        crate::cloud::set_canonical_id_in_config_toml(&cas_root, "github.com/acme/lease-test").unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: "http://127.0.0.1:9".into(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&cas_root)
+        .unwrap();
+        let mut task = cas_types::Task::new("cas-lease-changelog".into(), "Lease test".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("lease-test-session".into());
+        crate::store::open_task_store(&cas_root).unwrap().add(&task).unwrap();
+        let project_path = project.to_string_lossy().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "lease-test-worker");
+        env.set("CAS_SESSION_ID", "lease-test-session");
+        env.set("CAS_CLONE_PATH", &project_path);
+        env.remove("CAS_USER_CLOUD_JSON");
+        let input = tool_input(
+            "Edit",
+            serde_json::json!({
+                "file_path": file,
+                "old_string": "- Existing delivery entry.",
+                "new_string": "- Existing delivery entry. (edited)\n\n- New entry.\n"
+            }),
+            &project,
+        );
+        assert!(worker_file_lease_notes(&input, &cas_root, false).is_empty());
+        assert!(crate::cloud::file_leases::ledger_path(&cas_root, "lease-test-session").exists(),
+            "a rewrite-plus-add must not bypass the file-lease check");
     }
 
     fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {
@@ -8198,6 +8831,193 @@ mod workspace_contract_tests {
         }
     }
 
+    #[test]
+    fn cas_3147_heredoc_expansions_obey_workspace_contract() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let operand = "a[$(touch /outside/cas-b8ae-must-not-execute)]";
+        let prefix = format!("x='{operand}'; ");
+        let mut failures = Vec::new();
+        for (case, command, denied) in [
+            ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), true),
+            ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), true),
+            ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), true),
+            ("literal subscript", format!("cat <<EOF\n$(( {operand} ))\nEOF\n"), true),
+            ("command substitution", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("tab stripping", format!("{prefix}cat <<-EOF\n\t$(( x ))\n\tEOF\n"), true),
+            ("redirected receiver", format!("{prefix}cat > /dev/null <<EOF\n$(( x ))\nEOF\n"), true),
+            // cas-e586: a case arm's `)` is syntax, and what it guards is still code.
+            ("case arm heredoc", "case x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), false),
+            ("case arms", "case x in\n  (a|b) cat <<'EOF'\nhello\nEOF\n  ;;\n  *) true ;;\nesac\n".into(), false),
+            ("case arm substitution", "case x in x) cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n;; esac\n".into(), true),
+            ("case arm write", "case x in x) touch /outside/cas-b8ae-must-not-execute ;; esac\n".into(), true),
+            ("case pattern substitution", "case x in $(touch /outside/p)) true ;; esac\n".into(), true),
+            ("case pattern backticks", "case x in `touch /outside/p`) true ;; esac\n".into(), true),
+            ("case subject substitution", "case $(touch /outside/p) in x) true ;; esac\n".into(), true),
+            ("unterminated case", "case x in x) cat <<EOF\nhello\nEOF\n;;\n".into(), true),
+            ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), true),
+            ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), true),
+            ("earlier arm directory", format!("cd /outside; case x in a) cd {} ;; b) touch p ;; esac\n", project.path().display()), true),
+            // ver-e69b5575c18c: a redirect's filename is no keyword, so bash runs
+            // `touch in /outside/p` here; it must not be read as a case statement.
+            ("redirect target named case", "(>case touch in /outside/p) >esac\n".into(), true),
+            ("substituted redirect target named case", "echo \"$(>case touch in /outside/p) >esac)\"\n".into(), true),
+            ("append target named case", "(>>case touch in /outside/p) >esac\n".into(), true),
+            ("fd redirect target named case", "(>&case touch in /outside/p) >&esac\n".into(), true),
+            ("clobber target named case", "(>|case touch in /outside/p) >|esac\n".into(), true),
+            ("input target named case", "(<case touch in /outside/p) <esac\n".into(), true),
+            ("subshell after a redirect target named case", ">case x in\n(touch /outside/p)\nesac\n".into(), true),
+            ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
+            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
+            ("redirect before a write", ">out touch /outside/p\n".into(), true),
+            ("clobber redirect", "echo hi >|/outside/p\n".into(), true),
+            ("combined redirect", "echo hi >&/outside/p\n".into(), true),
+            ("redirect before a delete", ">out rm -rf /outside/p\n".into(), true),
+            ("descriptor redirect before a write", "2>out touch /outside/p\n".into(), true),
+            ("redirect before a directory change", ">out cd /outside; touch p\n".into(), true),
+            ("redirect target substitution", "echo hi > \"$(touch /outside/p)\"\n".into(), true),
+            ("redirect before a harmless command", ">out.txt echo hi\n".into(), false),
+            ("descriptor duplication", ">&2 echo hi\n".into(), false),
+            // ver-94604cd718e7: bash runs the `touch` in `{fd}>/dev/null touch x`.
+            ("named descriptor before a write", "{fd}>/dev/null touch /outside/x\n".into(), true),
+            ("named descriptor before a delete", "{fd}>/dev/null rm -rf /outside/x\n".into(), true),
+            ("named descriptor before a directory change", "{fd}>/dev/null cd /outside && touch y\n".into(), true),
+            ("named descriptor redirect target named case", "({fd}>case touch in /outside/p) {fd}>esac\n".into(), true),
+            ("substituted named descriptor target named case", "echo \"$({fd}>case touch in /outside/p) {fd}>esac)\"\n".into(), true),
+            ("named descriptor before a harmless command", "{fd}>out.txt echo hi\n".into(), false),
+            ("backticks", "cat <<EOF\n`touch /outside/cas-b8ae-must-not-execute`\nEOF\n".into(), true),
+            ("body quotes", "cat <<EOF\n'$(touch /outside/cas-b8ae-must-not-execute)'\nEOF\n".into(), true),
+            ("joined marker", "cat <<EOF\n$\\\n(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("unterminated body", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\n".into(), true),
+            ("single quoted delimiter", format!("{prefix}cat <<'EOF'\n$(( x )) $(touch /outside/p)\nEOF\n"), false),
+            ("double quoted delimiter", "cat <<\"EOF\"\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("numeric arithmetic", "cat <<EOF\n$(( (1+2)*3 )) $[ (1+2)*3 ]\nEOF\n".into(), false),
+            ("literal text", "cat <<EOF\ntouch /outside/p; 'unbalanced quote\nEOF\n".into(), false),
+            ("escaped markers", r"cat <<EOF
+\$(touch /outside/p) \`touch /outside/p\` \$(( x ))
+EOF
+".into(), false),
+            ("mixed delimiters", "cat <<'DATA' <<RUN\n$(touch /outside/ignored)\nDATA\n$(touch /outside/cas-b8ae-must-not-execute)\nRUN\n".into(), true),
+            ("effective directory", "cd /outside && cat <<EOF\n$(touch cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("comment marker desync", "echo hi # <<'X'\nX\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("missing quoted body", "echo see <<'X' # doc\ncat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("backtick marker desync", "x=`cat <<'A'\nA\n`; cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("arithmetic marker desync", "echo $((1<<2)); cat <<EOF\n2))\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
+            ("unclaimed quoted body", "echo hi # <<'X'\ntouch /outside/cas-b8ae-must-not-execute\nX\n".into(), true),
+            ("unclaimed shift body", "echo $(( 1<<2 ))\ntouch /outside/cas-b8ae-must-not-execute\n2\n".into(), true),
+            ("joined terminator", "cat <<EOF\nEO\\\nF\ntouch /outside/cas-b8ae-must-not-execute\nEOF\n".into(), true),
+            ("escaped delimiter", "cat <<\\EOF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially single quoted delimiter", "cat <<E'O'F\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("partially double quoted delimiter", "cat <<\"E\"OF\n$(touch /outside/p)\nEOF\n".into(), false),
+            ("CR terminator", "cat <<EOF\nok\nEOF\r\necho '$(touch /outside/p)'\nEOF\n".into(), true),
+            ("CR delimiter suffix", "cat <<EOF\r\nok\nEOF\necho '$(touch /outside/p)'\nEOF\r\n".into(), true),
+            ("CR delimiter interior", "cat <<EOF\rX\nok\nEOF\necho '$(touch /outside/p)'\nEOF\rX\n".into(), true),
+            ("non-ASCII delimiter space", "cat <<EOF\u{a0}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{a0}\n".into(), true),
+            ("ANSI-C delimiter desync", "cat <<$'EOF'\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
+            ("locale delimiter desync", "cat <<$\"EOF\"\nok\nEOF\ntouch /outside/p\n$EOF\n".into(), true),
+            ("split heredoc operator", "cat <\\\n<EOF\necho '$(touch /outside/p)'\nEOF\n".into(), true),
+            ("quoted CR body refused conservatively", "cat <<'EOF'\r\n$(touch /outside/p)\r\nEOF\r\n".into(), true),
+            ("vertical tab delimiter", "cat <<EOF\u{b}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{b}\n".into(), true),
+            ("form feed delimiter", "cat <<EOF\u{c}\nok\nEOF\necho '$(touch /outside/p)'\nEOF\u{c}\n".into(), true),
+            ("midword locale delimiter", "cat <<E$\"O\"F\nok\nEOF\ntouch /outside/p\nE$OF\n".into(), true),
+            ("quoted CR terminator swallowing command", "cat <<'EOF'\nok\nEOF\r\necho '\nEOF\ntouch /outside/p\n#'\n".into(), true),
+            ("tab stripped literal", "cat <<-'EOF'\n\t$(touch /outside/p)\n\tEOF\n".into(), false),
+            ("tab stripped numeric", "cat <<-EOF\n\t$(( 1+2 ))\n\tEOF\n".into(), false),
+        ] {
+            // These are JSON request strings only. Never execute their payloads.
+            let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            let decision = &response["hookSpecificOutput"]["permissionDecision"];
+            let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
+            if (decision == "deny") != denied || (denied && !reason.contains("FACTORY WORKSPACE CONTRACT")) {
+                failures.push(format!("{case}: {decision}: {reason}"));
+            }
+        }
+        assert!(failures.is_empty(), "heredoc expansion decisions: {failures:#?}");
+    }
+
+    #[test]
+    fn cas_3147_arithmetic_subscript_sources_are_denied() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let operand = "a[$(touch /outside/cas-a3ac-must-not-execute)]";
+        let output = format!("$(cat <<'A3AC'\n{operand}\nA3AC\n)");
+        let mut failures = Vec::new();
+        for (source, prefix, value, expanding) in [
+            ("literal", String::new(), operand.to_owned(), false),
+            ("variable", format!("x='{operand}'; "), "x".to_owned(), false),
+            ("substitution", String::new(), output, true),
+        ] {
+            let quoted = if expanding { format!("\"{value}\"") } else { format!("'{value}'") };
+            let let_operand = if expanding { format!("\"y={value}\"") } else { format!("'y={value}'") };
+            for (context, command) in [
+                ("expansion", format!("echo \"$(( {value} ))\"")),
+                ("bracket", format!("echo \"$[ {value} ]\"")),
+                ("let", format!("let {let_operand}")),
+                ("command", format!("(( y={value} ))")),
+                ("integer", format!("declare -i y={quoted}")),
+            ] {
+                // Request data only: the hook parses these strings; no payload is executed.
+                let request = bash_input(&format!("{prefix}{command}"), project.path());
+                let response = handle_pre_tool_use(&request, Some(&root)).unwrap();
+                let response = serde_json::to_value(response).unwrap();
+                let decision = &response["hookSpecificOutput"]["permissionDecision"];
+                let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str().unwrap_or("");
+                if decision != "deny" || !reason.contains("FACTORY WORKSPACE CONTRACT") {
+                    failures.push(format!("{source}/{context}: {decision}: {reason}"));
+                }
+            }
+        }
+        // Ambient values and persistent integer attributes are also unknown;
+        // shell quoting does not make their secondary evaluation inert.
+        for command in [
+            "echo \"$(( ambient ))\"".to_owned(),
+            format!("declare -i y=1; y='{operand}'"),
+            format!("flag=-i; declare \"$flag\" y='{operand}'"),
+            format!("typeset -ix y='{operand}'"),
+            format!("builtin -- let 'y={operand}'"),
+            format!("command -pp -p -- let 'y={operand}'"),
+            format!("op=declare; builtin \"$op\" -i y='{operand}'"),
+        ] {
+            let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            if command.contains("ambient") && !response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str().unwrap_or("")
+                .contains("cannot resolve shell filesystem effects (an unresolved arithmetic operand)")
+            {
+                failures.push(format!("arithmetic diagnostic {command}: {response}"));
+            }
+            if response["hookSpecificOutput"]["permissionDecision"] != "deny" {
+                failures.push(format!("{command}: {response}"));
+            }
+        }
+        for command in [
+            "echo $(( (1+2)*3 ))",
+            "echo \"$(( (1+2)*3 ))\"",
+            "echo $((1 + (2)))",
+            "echo \"$[ (1+2)*3 ]\"",
+            "let '(1+2)*3'",
+            "(( (1+2)*3 ))",
+            "echo '$(( x ))' '$[ x ]'",
+        ] {
+            let response = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            if response["hookSpecificOutput"]["permissionDecision"] == "deny" {
+                failures.push(format!("inert {command}: {response}"));
+            }
+        }
+        assert!(failures.is_empty(), "arithmetic re-expansion must be refused: {failures:#?}");
+    }
+
     /// cas-3147: an agent shell cannot run the operator-only commands,
     /// however the command is wrapped.
     #[test]
@@ -8222,11 +9042,33 @@ mod workspace_contract_tests {
                     .to_string(),
             )
         };
+        // cas-9685: each independent spelling/command-position bypass must
+        // reach the real hook; collect failures so RED proves every vector.
+        let mut bypasses = Vec::new();
+        for (vector, command) in [
+            ("brace command position", "{ cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("continued verb", "cas config gr\\\nant-write --task cas-1234 --path /x --reason r"),
+            ("ANSI-C verb", r"cas config $'gr\x61nt-write' --task cas-1234 --path /x --reason r"),
+            ("coproc group", "coproc { cas config gr''ant-write --task cas-1234 --path /x --reason r; }"),
+            ("coproc command", "coproc cas config gr''ant-write --task cas-1234 --path /x --reason r"),
+            ("function body", "function f { cas config gr''ant-write --task cas-1234 --path /x --reason r; }; f"),
+            ("named coproc while", "coproc NAME while cas config gr''ant-write --task cas-1234 --path /x --reason r; do :; done"),
+            ("named coproc until", "coproc NAME until cas config gr''ant-write --task cas-1234 --path /x --reason r; do :; done"),
+            ("named coproc if", "coproc NAME if cas config gr''ant-write --task cas-1234 --path /x --reason r; then :; fi"),
+        ] {
+            let (status, reason) = decision(command);
+            if status != "deny" || !reason.contains("operator") {
+                bypasses.push(format!("{vector}: {status}: {reason}"));
+            }
+        }
+        assert!(bypasses.is_empty(), "operator-policy bypasses: {bypasses:#?}");
         for command in [
             "cas config set factory.write_roots ~/soundwave-config",
             "/home/u/.local/bin/cas config set factory.write_roots ''",
             "env -u CLAUDECODE -u CAS_AGENT_ROLE cas config set factory.write_roots /x",
             "cas config grant-write --task cas-1 --path /x --reason r",
+            // cas-9685: the second possible command is denied too (native RED).
+            "coproc NAME cas config gr''ant-write --task cas-1234 --path /x --reason r",
             "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",
@@ -8235,6 +9077,8 @@ mod workspace_contract_tests {
             r#"echo "$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
             r#"echo "$(printf '%s' "$(cas co"nfig" gr''ant-write --task cas-1234 --path /x --reason r)")""#,
             r#"echo "`cas config gr''ant-write --task cas-1234 --path /x --reason r`""#,
+            // Backquotes remove an escape layer before shell word parsing.
+            r#"echo "`cas config gr\\ant-write --task cas-1234 --path /x --reason r`""#,
             // cas-a809: the structural check must reach expanding bodies,
             // even when shell quoting hides the textual policy spelling.
             "cat <<EOF\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
@@ -8256,12 +9100,111 @@ mod workspace_contract_tests {
             "echo \"$((1 + $(cas config gr''ant-write --task cas-1234 --path /x --reason r)))\"",
             "echo \"$[1 + $(cas config gr''ant-write --task cas-1234 --path /x --reason r)]\"",
             "echo ${x:-$(cas config gr''ant-write --task cas-1234 --path /x --reason r)}",
+            "echo \"$((true #)\ncas config gr''ant-write x\n))\"",
         ] {
             let (status, denial) = decision(command);
             assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
+        // Backquote bodies remove one shell escape layer before parsing.
+        // These are inert hook inputs: no command payload is ever executed.
+        for command in [
+            r#"echo `echo "\`touch /outside/cas-6e99-nested\`"`"#,
+            r#"echo `echo "\`cas config gr''ant-write --task cas-1234 --path /x --reason r\`"`"#,
+            r#"echo `echo \`touch /outside/cas-6e99-nested\``"#,
+            r#"echo "`echo \\"\`touch /outside/cas-6e99-nested\`\\"`""#,
+            r#"x=`echo "\`touch /outside/cas-6e99-nested\`"`"#,
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+        }
+        // Executable backticks and arithmetic data still undergo filesystem
+        // checks. A separated closing pair can denote a subshell substitution.
+        for command in [
+            r#"echo "`touch /outside/cas-6e99-must-not-execute`""#,
+            r#"echo "\\`touch /outside/cas-6e99-must-not-execute`""#,
+            r#"echo "$(( (1+2)*$(touch /outside/cas-0c9c-must-not-execute) ))""#,
+            r#"echo "$((touch /outside/cas-0c9c-must-not-execute) )""#,
+            // Rejected review: a nearby final pair does not prove arithmetic.
+            // Shell comments and quotes cannot certify arithmetic boundaries.
+            "echo $((touch /outside/cas-0c9c-p\\) && (true))",
+            "echo \"$[ $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ]\"",
+            "x=$((true #)\ntouch /outside/cas-0c9c-p\n))",
+            "echo $((true #)\ntouch /outside/cas-0c9c-p\n))",
+            "echo \"$((true #))\nrm -rf /outside/cas-0c9c-dir\n))\"",
+            "echo \"$((true #))\ntouch /outside/cas-0c9c-p\n))\"",
+            "echo \"$((true #)\ntouch /outside/cas-0c9c-p\n))\"",
+            "echo \"$((touch /outside/cas-0c9c-p) #)\n)\"",
+            "echo $((touch /outside/cas-0c9c-p #)\n) )",
+            "echo \"$((touch /outside/cas-0c9c-p #)\n) )\"",
+            "echo \"$((true #)\necho hi > /outside/cas-0c9c-p\n))\"",
+            "echo \"$((true #)\nrm -rf /outside/cas-0c9c-dir\n))\"",
+            "echo \"$(( 1 #)\ntouch /outside/cas-0c9c-p\n))\"",
+            "echo \"$((touch /outside/cas-0c9c-p \") && (\"true))\"",
+            "echo \"$(( \")\" ) && (true))\"",
+            "echo \"$((touch /outside/cas-0c9c-p \")\" ) && (true))\"",
+            "echo $(( ' ) && (touch /outside/cas-0c9c-p) ' ))",
+            "echo \"$(( ' ) && (touch /outside/cas-0c9c-p) ' ))\"",
+            "echo $((touch /outside/cas-0c9c-p ')' ) && (true))",
+            "echo \"$((touch /outside/cas-0c9c-p ') && ('true))\"",
+            "echo $((touch /outside/cas-0c9c-p ') && ('true))",
+            "echo \"$((touch /outside/cas-0c9c-p ')' ) && (true))\"",
+            "echo \"$(( $(cat <<'EOF'\n> /outside/cas-0c9c-p\nEOF\n) ))\"",
+            "echo \"$((touch /outside/cas-0c9c-p) && (true))\"",
+            "echo $((touch /outside/cas-0c9c-p) && (true))",
+            "echo \"$((touch /outside/cas-0c9c-p)|(true))\"",
+            "echo \"$((touch /outside/cas-0c9c-p);(true))\"",
+            "echo $((touch /outside/cas-0c9c-p);(true))",
+            "echo \"$((touch /outside/cas-0c9c-p)$(true))\"",
+            "echo \"$((rm -rf /outside/cas-0c9c-dir) && (true))\"",
+            "echo \"$((echo hi > /outside/cas-0c9c-p) && (true))\"",
+            "echo \"$(( $(cat <<'EOF'\n1\nEOF\n) ))\"",
+            "echo \"$(( $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ))\"",
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
+        // cas-d6f2: these operands recursively evaluate subscript text.
+        let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
+        for expression in [
+            "[[ x -eq 0 ]]",
+            "[[ 0 -ge x ]]",
+            "[[ 1 -eq 1 && x -ne 0 ]]",
+            "function f { [[ x -eq 0 ]]; }; f",
+            "function f { if [[ x -eq 0 ]]; then :; fi; }; f",
+            "function f [[ x -eq 0 ]]\nf",
+            "coproc [[ x -eq 0 ]]",
+            "coproc C { [[ x -eq 0 ]]; }",
+            "coproc { [[ x -eq 0 ]]; }",
+            "echo [[ x -eq 0 ]]",
+            "echo \"$(function f { [[ x -eq 0 ]]; }; f)\"",
+            "test x -eq 0",
+            "echo \"${b[x]}\"",
+            "echo \"${s:x}\"",
+            "echo \"${s:0:x}\"",
+            "echo \"${!x}\"",
+            "cat <<EOF\n${b[x]}\nEOF",
+            "cat <<EOF\n$(function f { [[ x -eq 0 ]]; }; f)\nEOF",
+            r#"echo "\${default:-'${b[x]}'}""#,
+            r#"echo "${default:-'${b[x]}'}""#,
+        ] {
+            let command = format!("{indirect}{expression}");
+            let (status, reason) = decision(&command);
+            assert_eq!(status, "deny", "{command}: {reason}");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+        }
         for allowed in [
+            "[[ 1 -eq 1 ]]",
+            "test 1 -eq 1",
+            "test -n -eq",
+            "echo '[[ x -eq 0 ]]'",
+            "echo \"${b[0]}\"",
+            "echo \"${s:0:2}\"",
+            "cat <<EOF\n${s:0:2}\nEOF",
+            "[[ \"literal\" == \"-eq\" ]]",
+            r#"echo "\${b[x]}""#,
+            r#"echo '${b[x]}'"#,
             "cas config get factory.write_roots",
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",
@@ -8271,6 +9214,8 @@ mod workspace_contract_tests {
             "echo '$(cas config grant-write --task cas-1234 --path /x --reason r)'",
             "echo '`cas config grant-write --task cas-1234 --path /x --reason r`'",
             r#"echo "\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)""#,
+            // cas-6e99: escaped backticks in double quotes are literal data.
+            r#"echo "\`cas config gr''ant-write --task cas-1234 --path /x --reason r\`""#,
             "cat <<'EOF'\n$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\$(cas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "cat <<EOF\n\\`cas config gr''ant-write --task cas-1234 --path /x --reason r\\`\nEOF",
@@ -8279,8 +9224,15 @@ mod workspace_contract_tests {
             "cat <<'EOF'\n$(: # )\ncas config gr''ant-write --task cas-1234 --path /x --reason r)\nEOF",
             "echo \"$(echo ${x:-\"a)b\"})\"",
             "echo \"$(echo ${x:-${y:-)}})\"",
+            // Keep the release-pinned balanced-parentheses controls beside
+            // the arithmetic multiplication and command-substitution cases.
             "echo \"$((1 + (2)))\"",
             "echo \"$[1 + (2)]\"",
+            // cas-0c9c: multiplication is arithmetic, never a glob executable.
+            "echo $(( (1+2)*3 ))",
+            "echo \"$(( (1+2)*3 ))\"",
+            "echo $[ (1+2)*3 ]",
+            "echo \"$[ (1+2)*3 ]\"",
         ] {
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");
@@ -11505,6 +12457,15 @@ mod worker_commit_guard_tests {
             "GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/tmp/empty-hooks; export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; git push origin factory/guard-test".to_string(),
             "declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
             "set -a; GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp/empty-hooks'\"; git push origin factory/guard-test".to_string(),
+            "set -ae; GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "set -euax; GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "set -o allexport; GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "declare -gx GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "declare -g -x GIT_CONFIG_KEY_0=core.hooksPath; git push origin factory/guard-test".to_string(),
+            "git config --remove-section core".to_string(),
+            "git config --worktree --remove-section core".to_string(),
+            "git config remove-section core".to_string(),
+            "git config rename-section core oldcore".to_string(),
         ];
 
         let mut mismatches = Vec::new();
@@ -11587,6 +12548,18 @@ mod worker_commit_guard_tests {
             value["hookSpecificOutput"]["permissionDecision"], "deny",
             "plain worker push remains allowed: {value}"
         );
+
+        let mut input = hook_git_write_input(
+            &repo_path,
+            "GIT_CONFIG_KEY_0=core.hooksPath git status; git push origin factory/guard-test",
+        );
+        input.agent_role = Some("worker".to_string());
+        let output = handle_pre_tool_use(&input, None).expect("prefixed read then push");
+        let value = serde_json::to_value(output).expect("serialize hook result");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "one-command environment prefix must not persist: {value}"
+        );
     }
 
     #[test]
@@ -11596,6 +12569,44 @@ mod worker_commit_guard_tests {
         add_linked_worktree(repo.path(), linked.path(), "factory/linked-worker");
         let repo_path = repo.path().to_string_lossy().to_string();
         let linked_path = linked.path().to_string_lossy().to_string();
+        let remote = tempfile::tempdir().expect("bare remote path");
+        let remote_init = std::process::Command::new("git")
+            .args(["init", "--bare", &remote.path().to_string_lossy()])
+            .output()
+            .expect("initialize probe remote");
+        assert!(remote_init.status.success());
+        let remote_add = std::process::Command::new("git")
+            .args(["remote", "add", "origin", &remote.path().to_string_lossy()])
+            .current_dir(linked.path())
+            .output()
+            .expect("add probe remote");
+        assert!(remote_add.status.success());
+        let failing_hooks = tempfile::tempdir().expect("failing hooks path");
+        let pre_push = failing_hooks.path().join("pre-push");
+        std::fs::write(
+            &pre_push,
+            "#!/bin/sh\necho 'probe pre-push hook refused' >&2\nexit 1\n",
+        )
+        .expect("write failing probe hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &pre_push,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("make probe hook executable");
+        }
+        let hook_config = std::process::Command::new("git")
+            .args([
+                "config",
+                "core.hooksPath",
+                &failing_hooks.path().to_string_lossy(),
+            ])
+            .current_dir(linked.path())
+            .output()
+            .expect("configure failing probe hook");
+        assert!(hook_config.status.success());
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
@@ -11611,6 +12622,13 @@ mod worker_commit_guard_tests {
             (ledger.to_string(), false),
             ("printf '%s' git commit".to_string(), false),
             (format!("git -C '{repo_path}' log --grep commit"), false),
+            ("GIT_CONFIG_KEY_0=core.hooksPath git status".to_string(), false),
+            (format!("git -C '{linked_path}' push origin factory/linked-worker"), false),
+            (format!("git -C '{linked_path}' config --remove-section core"), true),
+            (format!("git -C '{linked_path}' config --worktree --remove-section core"), true),
+            (format!("set -ae; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
+            (format!("set -euax; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
+            (format!("declare -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; git -C '{linked_path}' push origin factory/linked-worker"), true),
             (format!("git -C '{linked_path}' commit -m work"), false),
             (format!("{ledger}\ngit -C '{repo_path}' commit -m work"), true),
             (format!("cat > LEDGER.md <<EOF\n$(git -C '{repo_path}' commit -m work)\nEOF"), true),
@@ -11623,6 +12641,18 @@ mod worker_commit_guard_tests {
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/linked-worker"])
+            .current_dir(linked.path())
+            .output()
+            .expect("run baseline push against failing probe hook");
+        assert!(!push.status.success(), "the probe pre-push hook must fail");
+        assert!(
+            String::from_utf8_lossy(&push.stderr).contains("probe pre-push hook refused"),
+            "push must reach the configured failing probe hook: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
     }
 
     #[test]

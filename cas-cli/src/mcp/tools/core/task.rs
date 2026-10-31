@@ -18,7 +18,7 @@ pub(crate) fn caller_note_marker_rejection(text: &str) -> Option<&'static str> {
         Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).")
     } else if crate::artifacts::proof::contains_proof_marker(text) {
         Some("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.")
-    } else if text.lines().any(|line| line.starts_with("QA_PASS_PROOF:") || line.starts_with("QA_EVIDENCE_PROOF:")) {
+    } else if text.lines().any(|line| line.starts_with("QA_PASS_PROOF:") || line.starts_with("QA_EVIDENCE_PROOF:") || line.starts_with("QA_BATCH_RECEIPT_PROOF:")) {
         Some("Task notes cannot contain QA proof markers; Cassy records QA verdicts and published evidence itself.")
     } else {
         None

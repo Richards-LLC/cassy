@@ -1006,13 +1006,12 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
     assert!(
-        text.contains("Merge policy: merge proceeded because CI is advisory."),
-        "worktree_merge without a GitHub origin must state its advisory policy.\nGot:\n{text}"
+        text.contains("CI admission: advisory") && text.contains("Push state:"),
+        "trunk fallback and unavailable publication keep full actionable details.\nGot:\n{text}"
     );
-    assert!(
-        text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"),
-        "worktree_merge CI diagnostics must name the endpoint and source SHA.\nGot:\n{text}"
-    );
+
+    assert!(text.contains("Merge policy: merge proceeded because CI is advisory."), "{text}");
+    assert!(text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"), "{text}");
 
     // The merge actually landed: content reachable from the checked-out repo.
     assert!(
@@ -1154,6 +1153,62 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     );
 }
 
+fn contains_fixture_home(text: &str, home: &Path) -> bool {
+    let canonical = std::fs::canonicalize(home).expect("canonical fixture HOME");
+    text.contains(home.to_string_lossy().as_ref())
+        || text.contains(canonical.to_string_lossy().as_ref())
+}
+
+fn portable_close_detail(close_text: &str, home: &Path) -> Result<String, String> {
+    let (summary, reference) = close_text
+        .split_once("\nDetails: ")
+        .ok_or("compact close receipt references its full detail")?;
+    let (detail_path, digest) = reference
+        .split_once(" (SHA-256 ")
+        .ok_or("detail reference carries its integrity receipt")?;
+    let digest = digest.strip_suffix(')').ok_or("detail digest must end the receipt")?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("detail reference must end with only its SHA-256 digest".into());
+    }
+    let detail = std::fs::read_to_string(detail_path).map_err(|error| error.to_string())?;
+    for text in [summary, detail.as_str()] {
+        if contains_fixture_home(text, home) {
+            return Err(format!("fixture HOME leaked in receipt: {text}"));
+        }
+    }
+    Ok(detail)
+}
+
+#[cfg(unix)]
+#[test]
+fn close_binding_check_rejects_canonical_home() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home-link");
+    let actual = root.path().join("actual-home");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &home).unwrap();
+    let canonical = std::fs::canonicalize(&home).unwrap();
+    let detail = root.path().join("detail.txt");
+    std::fs::write(&detail, "Closed task: fixture").unwrap();
+    let receipt = format!(
+        "Closed task: fixture; binding {}\nDetails: {} (SHA-256 {})",
+        canonical.display(), detail.display(), "0".repeat(64),
+    );
+    assert!(portable_close_detail(&receipt, &home).is_err(), "canonical HOME leak accepted: {receipt}");
+}
+
+#[test]
+fn close_binding_check_rejects_home_after_details_digest() {
+    let home = TempDir::new().unwrap();
+    let detail = home.path().join("detail.txt");
+    std::fs::write(&detail, "Closed task: fixture").unwrap();
+    let receipt = format!(
+        "Closed task: fixture\nDetails: {} (SHA-256 {})\n{}",
+        detail.display(), "0".repeat(64), home.path().display(),
+    );
+    assert!(portable_close_detail(&receipt, home.path()).is_err(), "digest suffix leak accepted: {receipt}");
+}
+
 #[tokio::test]
 async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
     let mut env = test_env();
@@ -1242,11 +1297,13 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
         "normal close must resolve the intended bound clone: {close_text}"
     );
     assert!(!close_text.contains("AMBIGUOUS WORK TARGET"));
-    assert!(!close_text.contains(home.path().to_string_lossy().as_ref()));
+    // The local Details artifact may live under HOME; the binding itself must not.
+    let detail = portable_close_detail(&close_text, home.path()).expect("portable close receipt");
+    assert!(detail.contains(&format!("Closed task: {task_id} - Bound lifecycle updated")), "{detail}");
 
     let persisted = task_store.get(&task_id).unwrap();
     let portable = serde_json::to_string(&persisted.deliverables).unwrap();
-    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&portable, home.path()), "{portable}");
     assert!(!portable.contains("repo_root"));
     assert!(!portable.contains("git_common_dir"));
 }
@@ -1479,7 +1536,7 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
         "rejection created delivery state"
     );
     let portable = serde_json::to_string(&task_store.get(&task.id).unwrap().deliverables).unwrap();
-    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&portable, home.path()), "{portable}");
     assert!(!portable.contains("repo_root"));
     assert!(!portable.contains("git_common_dir"));
 }
@@ -1597,7 +1654,7 @@ async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_aft
     );
     assert_eq!(evidence.task_tip.as_deref(), Some(own_tip.as_str()));
     let json = serde_json::to_string(&persisted.deliverables).unwrap();
-    assert!(!json.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&json, home.path()), "{json}");
     assert!(!json.contains(unrelated_path.to_string_lossy().as_ref()));
 }
 
@@ -4061,6 +4118,10 @@ async fn post_merge_generated_tip_preserves_changed_bug_case_cas_3712() {
             assert_eq!(final_task.status, TaskStatus::Open, "{case}: {text}");
         }
         env.set_current_dir(cas::test_paths::runtime_fixture_parent());
+        // TempDir::drop ignores cleanup failures. A passing integration must
+        // not leave a fixture that invalidates the runner's clean-tip receipt.
+        repo._temp.close().expect("remove merged delivery fixture");
+        remote.close().expect("remove merged delivery remote");
     }
 }
 
@@ -7674,6 +7735,43 @@ fn c85e_trunk_target() -> WorkTarget {
         repo_selector: C85E_SELECTOR.to_string(),
         target_branch: "main".to_string(),
     }
+}
+
+/// Routine receipts must be exercised through the merge handler, not its formatter.
+#[tokio::test]
+async fn validated_epic_merge_returns_compact_receipt() {
+    let (repo, _env, cas_root, wt, _origin) = c85e_repo_with_alice_work();
+    let source_sha = git_stdout(&wt, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("compact-merge".into(), "Compact merge".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("alice".into());
+    task.depth = TaskDepth::Light;
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: C85E_SELECTOR.into(), target_branch: "epic/c85e".into(),
+    });
+    tasks.add(&task).unwrap();
+    park_merge_fixture(&cas_root, &wt, "alice", &task.id);
+    let service = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".into());
+    req.task_id = Some(task.id);
+    req.cleanup = Some(false);
+    let text = get_text(&service.factory(Parameters(req)).await.unwrap());
+    eprintln!("real merge reply: {} chars\n{text}", text.chars().count());
+    assert!(text.chars().count() <= 800, "{text}");
+    assert_eq!(tasks.get("compact-merge").unwrap().status, TaskStatus::Closed);
+    assert!(text.contains("next: none."), "{text}");
+    let path = text.split_once("Details: ").expect("immutable detail reference").1
+        .split_once(" (SHA-256 ").unwrap().0;
+    let detail = std::fs::read_to_string(path).unwrap();
+    // pin: immutable details retain the original successful merge receipt.
+    assert!(detail.contains("Merged worktree") && detail.contains(&source_sha), "{detail}");
+    // pin: the public receipt must state why CI admitted this merge.
+    assert!(text.contains("Merge policy: merge proceeded on successful validation."), "{text}");
+    assert!(text.contains(&format!("CI SHA: {source_sha}")), "{text}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+        git_stdout(_origin.path(), &["rev-parse", "refs/heads/epic/c85e"]));
 }
 
 /// cas-c85e (GH #997), the incident shape end to end through the public

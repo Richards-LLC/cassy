@@ -8,6 +8,13 @@ use serde_yaml::{Mapping, Value};
 
 pub const DEFAULT_PATH: &str = "docs/qa/journeys.yaml";
 
+#[derive(Debug, thiserror::Error)]
+#[error("duplicate bug family {key:?} in {path}; family keys must be unique across inline and file entries")]
+pub(crate) struct DuplicateBugFamily {
+    pub(crate) key: String,
+    pub(crate) path: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Selection {
@@ -454,7 +461,10 @@ pub(crate) fn load_with(
     for (path, key) in families {
         anyhow::ensure!(
             !registry.bug_families.contains_key(key),
-            "duplicate bug family {key:?} in {path}; family keys must be unique across inline and file entries"
+            DuplicateBugFamily {
+                key: key.into(),
+                path: path.clone(),
+            }
         );
         let contents = read(path)?.with_context(|| format!("missing bug family file {path}"))?;
         let family: BugFamily = serde_yaml::from_str(&contents)

@@ -70,7 +70,14 @@ export interface HubSession {
   effort?: string;
   account_email?: string;
   project?: string;
+  /** The project's human name (cas-6f79): its configured display name, else its
+   * folder; never the canonical id. Older hubs omit it. */
+  project_name?: string;
   machine_online?: boolean;
+  /** This supervisor's observed MCP binary, never the hub's running version. */
+  mcp_version?: string;
+  /** The Cassy binary installed on this supervisor's machine. */
+  installed_version?: string;
 }
 
 export interface PaneInfo {
@@ -90,7 +97,7 @@ export interface SessionState {
   rows: number;
 }
 
-export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker";
+export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker" | "secret";
 
 export interface ArtifactRef {
   artifact_id: string;

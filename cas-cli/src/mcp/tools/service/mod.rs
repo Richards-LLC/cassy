@@ -1256,13 +1256,16 @@ impl CasService {
             // was exactly `shutdown_workers id=...` falling through to ALL).
             let allowed: Option<&[&str]> = match action.as_str() {
                 "recycle_worker" => Some(&["action", "target"]),
+                "restart_supervisor" => Some(&["action"]),
                 "shutdown_workers" => {
                     Some(&["action", "id", "count", "worker_names", "force", "reason"])
                 }
                 "sync_all_workers" => {
                     Some(&["action", "id", "branch", "worker_names", "force"])
                 }
-                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts", "reclaim_unknown_target"]),
+                // Presentation flags are consumed by the cleanup projector;
+                // they never alter the existing mutation consent gates.
+                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts", "reclaim_unknown_target", "full", "json"]),
                 "server_stop" => Some(&["action", "id"]),
                 "worktree_cleanup" => {
                     Some(&["action", "id", "all", "orphans", "dry_run", "force"])
@@ -1422,7 +1425,7 @@ impl CasService {
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"
-                | "restart_spawn_queue" => {
+                | "restart_spawn_queue" | "restart_supervisor" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
                         "spawn_workers" => this.factory_spawn_workers(factory_req).await,
@@ -1457,6 +1460,7 @@ impl CasService {
                         "restart_spawn_queue" => {
                             this.factory_restart_spawn_queue(factory_req).await
                         }
+                        "restart_supervisor" => this.factory_restart_supervisor(factory_req).await,
                         _ => unreachable!(),
                     }
                 }
@@ -1636,6 +1640,7 @@ impl CasService {
                     | "server_stop"
                     | "server_list"
                     | "restart_spawn_queue"
+                    | "restart_supervisor"
                     | "record_test_receipt"
                     | "db_branch_create"
                     | "db_branch_show"
@@ -1689,6 +1694,7 @@ impl CasService {
             "remind" => self.factory_remind(req).await,
             "remind_list" => self.factory_remind_list(req).await,
             "restart_spawn_queue" => self.factory_restart_spawn_queue(req).await,
+            "restart_supervisor" => self.factory_restart_supervisor(req).await,
             "remind_cancel" => self.factory_remind_cancel(req).await,
             "server_start" => self.factory_server_start(req).await,
             "server_stop" => self.factory_server_stop(req).await,

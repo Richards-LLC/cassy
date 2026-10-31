@@ -41,7 +41,40 @@ describe("project-first navigation", () => {
     expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");
   });
 
-  it("keeps a collapsed project on this device and retains its keyed toggle through a catalog tick and search", () => {
+  it("orders cards by project name and rows by supervisor, and activity never moves either (cas-ade2)", () => {
+    const nav = setup();
+    const navigation = new ProjectNavigation();
+    const machines = [{ id: "soundwave", label: "soundwave · Linux", online: true }, { id: "prowl", label: "prowl · macOS", online: true }];
+    const rows = (tick: number): ConversationRow[] => [
+      row("zesty-otter-2", { projectDir: "/projects/widget", activityAt: tick % 2 ? 9 : 1 }),
+      row("quiet-heron-7", { project: "cas-src", projectName: "cassy", machineId: "prowl", host: "prowl · macOS", activityAt: tick % 2 ? 1 : 9 }),
+      row("bright-lynx-4", { project: "cas-src", projectName: "cassy", activityAt: tick % 2 ? 9 : 1 }),
+      row("amber-fox-1", { projectDir: "/projects/Atlas", activityAt: tick }),
+    ];
+    const layout = () => [...nav.querySelectorAll<HTMLElement>(".project-card")].map((card) => [
+      card.querySelector(".project-card-name")!.textContent,
+      ...[...card.querySelectorAll<HTMLElement>(".conversation-row")].map((node) => node.dataset.threadKey),
+    ]);
+    navigation.render(nav, rows(0), vi.fn(), undefined, { machines });
+    const first = layout();
+    expect(first).toEqual([["Atlas", "amber-fox-1"], ["cassy", "bright-lynx-4", "quiet-heron-7"], ["widget", "zesty-otter-2"]]);
+    const nodes = [...nav.querySelectorAll(".conversation-row")];
+    for (let tick = 1; tick <= 4; tick++) {
+      navigation.render(nav, tick % 2 ? [...rows(tick)].reverse() : rows(tick), vi.fn(), undefined, { machines });
+      expect(layout(), `update ${tick}`).toEqual(first);
+      expect([...nav.querySelectorAll(".conversation-row")], `update ${tick} keeps each row's node in place`).toEqual(nodes);
+    }
+  });
+
+  it("names a project card by its display name, else its folder, never its identity (cas-6f79)", () => {
+    const nav = setup();
+    new ProjectNavigation().render(nav, [row("named", { project: "cas-src", projectName: "Cassy", projectDir: "/home/me/cassy" }), row("unnamed", { project: "github.com/acme/widget", projectDir: "/projects/widget" })], vi.fn());
+    const names = [...nav.querySelectorAll<HTMLElement>(".project-card-name")];
+    expect(names.map((name) => name.textContent)).toEqual(["Cassy", "widget"]);
+    expect(names.map((name) => name.title)).toEqual(["cas-src", "github.com/acme/widget"]);
+  });
+
+  it("keeps a collapsed project on this device and retains focused controls through a catalog tick and search", () => {
     const nav = setup(); const list = new ProjectNavigation(); const rows = [row("one")];
     list.render(nav, rows, vi.fn());
     const toggle = nav.querySelector<HTMLButtonElement>(".project-card-toggle")!;
@@ -50,6 +83,10 @@ describe("project-first navigation", () => {
     expect(nav.querySelector<HTMLElement>(".project-card-rows")!.hidden).toBe(true);
     list.render(nav, rows, vi.fn());
     expect(document.activeElement).toBe(toggle);
+    const chip = nav.querySelector<HTMLButtonElement>(".project-machine-chip")!;
+    chip.focus();
+    list.render(nav, rows, vi.fn());
+    expect(document.activeElement).toBe(chip);
     list.render(nav, [], vi.fn(), undefined, { searchActive: true });
     list.render(nav, rows, vi.fn());
     expect(nav.querySelector(".project-card-toggle")).toBe(toggle);

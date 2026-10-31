@@ -69,6 +69,7 @@ enum BranchCiState {
 struct BranchCiLookup {
     state: BranchCiState,
     repo: Option<String>,
+    repository_lookup_attempted: bool,
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/check-runs";
@@ -164,11 +165,21 @@ fn ci_git(
 ) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command.current_dir(cwd).args(args);
+    let subcommand = args.first().copied().unwrap_or("<unknown>");
     let output =
         crate::bounded_process::run_command(&mut command, deadline, BRANCH_CI_LOOKUP_TIMEOUT)
-            .map_err(|_| "could not inspect delivery Git range".to_string())?;
+            .map_err(|error| {
+                let cause = match error {
+                    crate::bounded_process::BoundedCommandError::TimedOut => "timed out",
+                    crate::bounded_process::BoundedCommandError::Io => "could not start or complete",
+                };
+                format!("git {subcommand} {cause} while inspecting delivery Git range")
+            })?;
     if !output.status.success() {
-        return Err("could not inspect delivery Git range".to_string());
+        return Err(format!(
+            "git {subcommand} failed while inspecting delivery Git range ({})",
+            output.status
+        ));
     }
     Ok(output.stdout)
 }
@@ -398,6 +409,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     reason,
                 },
                 repo: None,
+                repository_lookup_attempted: false,
             };
         }
     };
@@ -412,6 +424,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     None => BranchCiState::Unknown { sha: tip, reason },
                 },
                 repo: None,
+                repository_lookup_attempted: true,
             };
         }
     };
@@ -426,11 +439,15 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
             let state = if code_sha == tip || tip_has_code_checks {
                 tip_state
             } else {
-                classify_branch_ci_response(
-                    branch,
-                    &code_sha,
-                    fetch_branch_ci(&code_sha, cwd, &repo, &binary),
-                )
+                let output = fetch_branch_ci(&code_sha, cwd, &repo, &binary);
+                let settled = matches!(tip_state, BranchCiState::Green { .. })
+                    .then(|| {
+                        superseded_code_ci(branch, &code_sha, &output, |run_id| {
+                            workflow_run_cancelled(run_id, cwd, &repo, &binary)
+                        })
+                    })
+                    .flatten();
+                settled.unwrap_or_else(|| classify_branch_ci_response(branch, &code_sha, output))
             };
             require_code_validation(state)
         }
@@ -438,18 +455,91 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     BranchCiLookup {
         state,
         repo: Some(repo),
+        repository_lookup_attempted: true,
     }
+}
+
+/// cas-c59e: the lane's concurrency group cancels a commit's run when a newer push
+/// starts, so once the tip's run has finished, a code commit's cancelled jobs will
+/// never finish or rerun. That is not pending; judge what the run did prove. A docs
+/// tip proves nothing about the code, so with no passed code check this needs the
+/// same override as docs-only success. `None` when nothing was superseded, or a job
+/// is still running in a run that was not cancelled.
+fn superseded_code_ci(
+    branch: &str,
+    sha: &str,
+    output: &GhApiOutput,
+    run_cancelled: impl Fn(&str) -> bool,
+) -> Option<BranchCiState> {
+    if !output.success {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let mut superseded = false;
+    let mut kept = Vec::new();
+    for run in parsed.get("check_runs")?.as_array()? {
+        if run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled") {
+            superseded = true;
+        } else if check_run_unfinished(run) {
+            // GitHub can keep listing a job of a cancelled run as in progress.
+            if !check_run_workflow_id(run).is_some_and(&run_cancelled) {
+                return None;
+            }
+            superseded = true;
+        } else {
+            kept.push(run.clone());
+        }
+    }
+    if !superseded {
+        return None;
+    }
+    let remaining = GhApiOutput {
+        success: true,
+        status: output.status.clone(),
+        stdout: serde_json::json!({ "check_runs": kept }).to_string().into_bytes(),
+        stderr: Vec::new(),
+    };
+    let executed_code_check = has_code_check_runs(&remaining);
+    Some(match classify_branch_ci_response(branch, sha, remaining) {
+        state @ BranchCiState::Red { .. } => state,
+        state @ BranchCiState::Green { .. } if executed_code_check => state,
+        _ => BranchCiState::UnvalidatedCode {
+            sha: sha.to_string(),
+            reason: "a newer push cancelled its CI run before any code check passed".to_string(),
+        },
+    })
+}
+
+/// The workflow run in a check-run's Actions URL, which is `.../actions/runs/<id>/job/<job>`.
+fn check_run_workflow_id(run: &serde_json::Value) -> Option<&str> {
+    let tail = run
+        .get("html_url")
+        .and_then(serde_json::Value::as_str)?
+        .split_once("/actions/runs/")?
+        .1;
+    let id = tail.split('/').next()?;
+    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(id)
+}
+
+fn workflow_run_cancelled(run_id: &str, cwd: &Path, repo: &str, binary: &Path) -> bool {
+    let output = gh_api_get(&format!("repos/{repo}/actions/runs/{run_id}"), cwd, binary);
+    output.success
+        && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .is_ok_and(|run| run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled"))
 }
 
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
-    let endpoint = format!("repos/{repo}/commits/{sha}/check-runs");
+    gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
+}
+
+fn gh_api_get(endpoint: &str, cwd: &Path, binary: &Path) -> GhApiOutput {
     let mut command = Command::new(binary);
     command
         .current_dir(cwd)
         .env("GH_HOST", "github.com")
         .args(["api", "--method", "GET"]);
-    command.arg(&endpoint).args(["-F", "per_page=100"]);
+    command.arg(endpoint).args(["-F", "per_page=100"]);
     match crate::bounded_process::run_command(
         &mut command,
         crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
@@ -897,6 +987,10 @@ fn describe_branch_ci_lookup(branch: &str, lookup: &BranchCiLookup) -> String {
     let receipt = describe_branch_ci_state(branch, &lookup.state);
     match lookup.repo.as_deref() {
         Some(repo) => receipt.replace("repos/<unresolved-repository>/", &format!("repos/{repo}/")),
+        None if !lookup.repository_lookup_attempted => receipt.replace(
+            "gh endpoint queried: GET",
+            "gh endpoint not queried: delivery Git inspection failed; intended GET",
+        ),
         None => receipt.replace(
             "gh endpoint queried: GET",
             "gh endpoint unavailable: repository unresolved; intended GET",
@@ -5580,6 +5674,7 @@ impl CasCore {
         } else {
             cas_types::MergeCiAdmission::Advisory
         };
+        let mut close_gate_held = false;
         let push_note = match (task_id, merge_commit.as_deref()) {
             (Some(task_id), Some(merge_sha))
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
@@ -5596,6 +5691,8 @@ impl CasCore {
                     .close_after_published_merge(task_id, merge_sha, ci_admission, lane)
                     .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
+                close_gate_held = matches!(outcome,
+                    crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::Held(_));
                 format!("{push_note}\nCI admission: {}\n{}", ci_admission.label(), outcome.receipt(task_id))
             }
             _ => push_note,
@@ -5671,26 +5768,13 @@ impl CasCore {
             return Ok(close_result);
         }
 
-        // Promote entries if configured
-        if wt_config.promote_entries_on_merge {
-            if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
-                if count > 0 {
-                    return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
-                        worktree.id,
-                        worktree.parent_branch,
-                        target_suffix,
-                        merge_commit.as_deref().unwrap_or("none"),
-                        cleanup_note,
-                        reconcile_note,
-                        push_note,
-                        count
-                    )));
-                }
-            }
-        }
-
-        Ok(Self::success(format!(
+        // Promote entries if configured.
+        let promoted = if wt_config.promote_entries_on_merge {
+            self.promote_branch_entries(&worktree.branch).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut detail = format!(
             "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
@@ -5699,7 +5783,61 @@ impl CasCore {
             cleanup_note,
             reconcile_note,
             push_note
-        )))
+        );
+        if promoted > 0 {
+            detail.push_str(&format!("\nPromoted {promoted} entries from branch scope."));
+        }
+        let status = task_id.and_then(|id| {
+            self.open_task_store()
+                .ok()?
+                .get(id)
+                .ok()
+                .map(|task| task.status)
+        });
+        let next = match (task_id, status) {
+            (_, Some(cas_types::TaskStatus::Closed)) | (None, _) => "none".to_string(),
+            (Some(id), Some(status)) => format!("review task {id} (status {status})"),
+            (Some(id), None) => format!("inspect task {id}"),
+        };
+        let ci_sha = match &branch_ci_state {
+            BranchCiState::Green { sha, .. } | BranchCiState::Red { sha, .. }
+            | BranchCiState::Pending { sha, .. } | BranchCiState::CodePending { sha, .. }
+            | BranchCiState::NoChecks { sha, .. } | BranchCiState::GhFailure { sha, .. }
+            | BranchCiState::Unknown { sha, .. } | BranchCiState::UnvalidatedCode { sha, .. }
+            | BranchCiState::CodeValidationUnconfirmed { sha, .. }
+            | BranchCiState::MissingCommit { sha, .. } => sha,
+        };
+        let summary = format!(
+            "Merged worktree {} to {}{}; commit {}; CI {}; push {}; next: {next}.\n{}\nCI SHA: {ci_sha}",
+            worktree.id,
+            worktree.parent_branch,
+            target_suffix,
+            merge_commit.as_deref().unwrap_or("none"),
+            ci_admission.label(),
+            if push_outcome.is_published() { "published" } else { "not published" },
+            ci_policy_notice.trim(),
+        );
+        // Policy and the bound CI SHA belong in routine receipts. Overrides,
+        // unfinished worker deliveries and publication/close failures retain
+        // their complete actionable diagnostics.
+        if let Some(task_id) = task_id
+            && trunk_notice.is_empty()
+            && !ci_override
+            && unparked_notice.is_empty()
+            && push_outcome.is_published()
+            && !close_gate_held
+            && let Ok(compact) = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::compact_receipt(
+                &cas_root,
+                config.factory().artifacts_root.as_deref(),
+                task_id,
+                "merge",
+                &summary,
+                &detail,
+            )
+        {
+            detail = compact;
+        }
+        Ok(Self::success(detail))
     }
 
     /// Get current worktree status
@@ -5860,6 +5998,23 @@ mod tests {
 
     #[cfg(unix)]
     fn delivery_ci_fixture(code: bool, conclusion: Option<&str>) -> (TempDir, String, String) {
+        let code_response = serde_json::json!({"check_runs": [{
+            "name": "Scoped Validation (factory/PR)",
+            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
+            "conclusion": conclusion,
+            "html_url": "https://github.com/acme/cas/actions/runs/100"
+        }]})
+        .to_string();
+        delivery_ci_fixture_with(code, &code_response, "")
+    }
+
+    /// `extra_cases` adds shell `case` arms to the fake gh, before its refusal.
+    #[cfg(unix)]
+    fn delivery_ci_fixture_with(
+        code: bool,
+        code_response: &str,
+        extra_cases: &str,
+    ) -> (TempDir, String, String) {
         let temp = TempDir::new().unwrap();
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
@@ -5893,19 +6048,60 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-qm", "docs tip"]);
         let tip = git(&["rev-parse", "HEAD"]);
-        let code_response = serde_json::json!({"check_runs": [{
-            "name": "Scoped Validation (factory/PR)",
-            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
-            "conclusion": conclusion,
-            "html_url": "https://github.com/acme/cas/actions/runs/100"
-        }]})
-        .to_string();
         let docs_response = r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
         let fake_gh = temp.path().join("gh-fixture");
         crate::test_paths::warm_stub(&fake_gh, &format!(
-            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n*) exit 97 ;;\nesac\n"
+            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n{extra_cases}*) exit 97 ;;\nesac\n"
         ));
         (temp, code_sha, tip)
+    }
+
+    /// cas-c59e: a newer push cancels the code commit's lane run, and the docs tip
+    /// runs Docs Lint only. Nothing can finish at that commit any more, so it is not
+    /// pending. What the cancelled run did prove decides; the docs tip proves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_code_run_under_a_green_docs_tip_is_not_pending_cas_c59e() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let job = |name: &str, status: &str, conclusion: Option<&str>| serde_json::json!({
+            "name": name, "status": status, "conclusion": conclusion,
+            "html_url": "https://github.com/acme/cas/actions/runs/100/job/1"
+        });
+        let validated = job("Scoped Validation (factory/PR)", "completed", Some("success"));
+        let lingering = job("Scoped Validation (fast)", "in_progress", None);
+        let cancelled = job("Scoped Validation (factory/PR)", "completed", Some("cancelled"));
+        for (jobs, workflow_conclusion, expected) in [
+            // The incident: one job passed; GitHub still lists another as running.
+            (vec![validated.clone(), lingering.clone()], "\"cancelled\"", "green"),
+            (vec![cancelled], "\"cancelled\"", "unvalidated"),
+            (vec![lingering.clone()], "\"cancelled\"", "unvalidated"),
+            // That job's own run is still going, so this is genuinely pending.
+            (vec![validated, lingering], "null", "pending"),
+        ] {
+            let (repo, code_sha, _tip) = delivery_ci_fixture_with(
+                true,
+                &serde_json::json!({"check_runs": jobs}).to_string(),
+                &format!("*/actions/runs/100) printf '%s\\n' '{{\"conclusion\":{workflow_conclusion}}}' ;;\n"),
+            );
+            env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            match expected {
+                "green" => {
+                    assert!(matches!(&state, BranchCiState::Green { sha, .. } if *sha == code_sha), "{state:?}");
+                    assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                }
+                "unvalidated" => {
+                    let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+                    assert!(refusal.starts_with("CODE CI REQUIRED"), "{refusal}");
+                    assert_eq!(admit_branch_ci(&state, true, Some("reviewed")), Ok(true));
+                }
+                _ => {
+                    let refusal = admit_branch_ci(&state, true, Some("ship it")).unwrap_err();
+                    assert!(refusal.starts_with("CI PENDING"), "{refusal}");
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -6279,11 +6475,23 @@ mod tests {
             crate::github_issue_attach::GH_BIN_ENV,
             repo.path().join("gh-fixture"),
         );
-        let state = super::lookup_branch_ci("factory/ci-fixture", "missing-target", repo.path()).state;
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-        assert!(
-            !describe_branch_ci_state("factory/ci-fixture", &state).contains("CI state: green")
-        );
+        for (branch, target, subcommand) in [
+            ("factory/ci-fixture", "missing-target", "merge-base"),
+            ("missing-branch", "main", "rev-parse"),
+        ] {
+            let lookup = super::lookup_branch_ci(branch, target, repo.path());
+            assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
+            let receipt = super::describe_branch_ci_lookup(branch, &lookup);
+            assert!(!receipt.contains("CI state: green"), "{receipt}");
+            assert!(receipt.contains("gh endpoint not queried: delivery Git inspection failed"), "{receipt}");
+            assert!(receipt.contains(&format!("git {subcommand} failed while inspecting delivery Git range (exit status: 128)")), "{receipt}");
+            assert!(!receipt.contains("repository unresolved"), "{receipt}");
+            assert!(!receipt.contains("fatal:"), "Git stderr must stay private: {receipt}");
+        }
+        let timed_out = super::ci_git(repo.path(), &["status"], crate::bounded_process::Deadline::after(std::time::Duration::ZERO)).unwrap_err();
+        assert!(timed_out.contains("git status timed out"), "{timed_out}");
+        let unavailable = super::ci_git(&repo.path().join("missing-directory"), &["status"], crate::bounded_process::Deadline::after(std::time::Duration::from_secs(2))).unwrap_err();
+        assert!(unavailable.contains("git status could not start or complete"), "{unavailable}");
         assert!(!repo.path().join("gh-requests.log").exists());
     }
 

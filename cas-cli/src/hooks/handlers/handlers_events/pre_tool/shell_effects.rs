@@ -35,12 +35,21 @@ fn quote(word: &str) -> String {
 fn render(tokens: &[ShellToken]) -> String {
     let mut command = String::new();
     let mut previous_operator = false;
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         let operator = matches!(token, ShellToken::Operator(_));
-        if !command.is_empty() && !(operator && previous_operator) {
+        // `<<-` is one operator, but the tokenizer leaves its dash on the delimiter
+        // word. A space or a quoted dash would make the delimiter `-EOF`.
+        let tab_stripping_delimiter = matches!(token, ShellToken::Word(word) if word.starts_with('-'))
+            && index >= 2
+            && tokens[index - 2..index] == [ShellToken::Operator('<'), ShellToken::Operator('<')];
+        if !command.is_empty() && !(operator && previous_operator) && !tab_stripping_delimiter {
             command.push(' ');
         }
         match token {
+            ShellToken::Word(word) if tab_stripping_delimiter => {
+                command.push('-');
+                command.push_str(&quote(&word[1..]));
+            }
             ShellToken::Word(word) => command.push_str(&quote(word)),
             ShellToken::Operator(ch) => command.push(*ch),
         }
@@ -73,13 +82,232 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
-/// Extract substitutions kept opaque inside a quoted shell word. Unquoted
-/// substitutions are already split into subprocess scopes by the tokenizer.
-fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
+/// Only numeric source is inert under arithmetic's recursive evaluation. Even
+/// a bare variable can contain an array subscript that executes a substitution.
+fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
+    if expression.bytes().all(|ch| ch.is_ascii_digit() || ch.is_ascii_whitespace()
+        || b"()+-*/%<>=!&|^~?:,".contains(&ch))
+    {
+        Ok(())
+    } else {
+        Err("an unresolved arithmetic operand")
+    }
+}
+
+/// Validate arithmetic commands before their operators become shell scopes.
+/// Use source positions: quoted/comment parentheses are ordinary word data.
+fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'static str> {
+    let mut index = 0;
+    while index + 1 < lexed.tokens.len() {
+        if lexed.tokens[index..index + 2] != [ShellToken::Operator('('), ShellToken::Operator('(')]
+            || lexed.ends[index] + 1 != lexed.ends[index + 1]
+        {
+            index += 1;
+            continue;
+        }
+        let start = lexed.ends[index + 1];
+        let mut balance = 2;
+        let mut closing = None;
+        for end in index + 2..lexed.tokens.len() {
+            match lexed.tokens[end] {
+                ShellToken::Operator('(') => balance += 1,
+                ShellToken::Operator(')') => {
+                    balance -= 1;
+                    if balance == 0 {
+                        closing = Some(end);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = closing.ok_or("an unresolved arithmetic operand")?;
+        let offset = lexed.ends[end];
+        if lexed.tokens[end - 1] != ShellToken::Operator(')')
+            || lexed.ends[end - 1] + 1 != offset
+        {
+            return Err("an unresolved arithmetic operand");
+        }
+        numeric_arithmetic(&source[start..offset - 2])?;
+        // Numeric arithmetic has no filesystem effects. Leave the enclosing
+        // command and its redirections in place for the ordinary collector.
+        lexed.tokens.splice(index..=end, [ShellToken::Word("true".into())]);
+        lexed.literals.splice(index..=end, [true]);
+        lexed.ends.splice(index..=end, [offset]);
+        index += 1;
+    }
+    Ok(())
+}
+
+/// Numeric comparisons evaluate both operands recursively, even when quoted.
+/// Inspect a whole conditional before command separators split its &&/|| arms.
+fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'static str> {
+    let raw = |index: usize| {
+        let start = if index == 0 { 0 } else { lexed.ends[index - 1] };
+        source[start..lexed.ends[index]].trim()
+    };
+    let arithmetic = |word: &str| matches!(word, "-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge");
+    let other_binary = |word: &str| matches!(word, "=" | "==" | "!=" | "=~" | "-nt" | "-ot" | "-ef");
+    let mut index = 0;
+    while index < lexed.tokens.len() {
+        if !matches!(&lexed.tokens[index], ShellToken::Word(word) if word == "[[")
+            || raw(index) != "[["
+        {
+            index += 1;
+            continue;
+        }
+        // Any raw unquoted conditional is checked, including function and
+        // coprocess bodies whose command prefixes this recognizer cannot prove.
+        let end = (index + 1..lexed.tokens.len()).find(|&at| {
+            matches!(&lexed.tokens[at], ShellToken::Word(word) if word == "]]") && raw(at) == "]]"
+        }).ok_or("an unresolved conditional operand")?;
+        let mut operand = true;
+        let mut at = index + 1;
+        while at < end {
+            // Executable substitutions have their own conditional grammar.
+            // The ordinary recursive collector checks their bodies separately.
+            if matches!(lexed.tokens[at], ShellToken::Operator('('))
+                && at > 0 && matches!(&lexed.tokens[at - 1],
+                    ShellToken::Word(word) if word.ends_with('$'))
+            {
+                let close = substitution_end(source.as_bytes(), lexed.ends[at], 0)
+                    .ok_or("an unresolved conditional operand")?;
+                at = (at + 1..end).find(|&next| lexed.ends[next] == close + 1)
+                    .ok_or("an unresolved conditional operand")?;
+                operand = false;
+            } else {
+                match &lexed.tokens[at] {
+                    ShellToken::Operator('&' | '|' | '(') => operand = true,
+                    ShellToken::Operator(')') => operand = false,
+                    ShellToken::Operator('<' | '>') if !operand => {
+                        at += 1;
+                        operand = false;
+                    }
+                    ShellToken::Word(word) => {
+                        let binary_follows = at + 2 < end
+                            && matches!(&lexed.tokens[at + 1], ShellToken::Word(next)
+                                if arithmetic(next) || other_binary(next))
+                            && !matches!(lexed.tokens[at + 2], ShellToken::Operator('&' | '|' | ')'));
+                        if operand && raw(at) == "!" && !binary_follows {
+                            // Conditional negation, not an operand.
+                        } else if operand && word.len() == 2 && word.starts_with('-')
+                            && !word.as_bytes()[1].is_ascii_digit() && !binary_follows
+                        {
+                            at += 1; // An ordinary unary test consumes its data operand.
+                            operand = false;
+                        } else if !operand && arithmetic(word) {
+                            let (Some(ShellToken::Word(left)), Some(ShellToken::Word(right))) =
+                                (lexed.tokens.get(at - 1), lexed.tokens.get(at + 1).filter(|_| at + 1 < end))
+                            else { return Err("an unresolved conditional operand"); };
+                            numeric_arithmetic(left)?;
+                            numeric_arithmetic(right)?;
+                            at += 1;
+                            operand = false;
+                        } else if !operand && other_binary(word) {
+                            at += 1; // String/file comparisons do not reevaluate arithmetic.
+                            operand = false;
+                        } else {
+                            operand = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            at += 1;
+        }
+        index = end + 1;
+    }
+    Ok(())
+}
+
+/// Parameter syntax comes from the lexer's original source spans, never
+/// cooked words that have lost the distinction between data and expansion.
+fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
+    if matches!(body, "!" | "#") { return Ok(()); } // PID/count, not indirection.
+    if let Some(target) = body.strip_prefix('!') {
+        numeric_arithmetic(target)?;
+        // Even a numeric parameter name reads an unknown value as syntax.
+        return Err("an unresolved indirect parameter");
+    }
+    let body = body.strip_prefix('#').unwrap_or(body);
+    let mut name = body.bytes().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == b'_').count();
+    if name == 0 && body.as_bytes().first().is_some_and(|ch| b"@*?$-".contains(ch)) {
+        name = 1;
+    }
+    if name == 0 { return Err("an unresolved parameter operand"); }
+    let mut rest = &body[name..];
+    while let Some(subscript) = rest.strip_prefix('[') {
+        let end = subscript.find(']').ok_or("an unresolved parameter operand")?;
+        let index = &subscript[..end];
+        if !matches!(index, "@" | "*") { numeric_arithmetic(index)?; }
+        rest = &subscript[end + 1..];
+    }
+    if let Some(position) = rest.strip_prefix(':') {
+        // The four default-value operators do not evaluate arithmetic.
+        if !position.starts_with(['-', '+', '=', '?']) {
+            numeric_arithmetic(position)?;
+        }
+    } else if !rest.is_empty() && !rest.starts_with(['-', '+', '=', '?', '/', '#', '%']) {
+        return Err("an unresolved parameter operand");
+    }
+    Ok(())
+}
+
+/// Extract executable substitutions from a shell word. Arithmetic operands
+/// must be numeric source, never values obtained from shell expansion.
+fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
+        let bracket = bytes.get(index..index + 2) == Some(b"$[");
+        let prefix = if bytes.get(index..index + 3) == Some(b"$((") {
+            Some(3)
+        } else if bracket {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(prefix) = prefix {
+            // Arithmetic has different comment/quote rules across shells.
+            // Recognize only plain balanced spans, without shell lexing.
+            let mut parentheses = 0;
+            let mut brackets = 0;
+            let mut end = None;
+            for (offset, &byte) in bytes.iter().enumerate().skip(index + prefix) {
+                match byte {
+                    b'#' | b'\n' | b'\r' | b'\'' | b'"' | b'`' | b'\\' => {
+                        return Err("an unresolved arithmetic operand");
+                    }
+                    b'(' => parentheses += 1,
+                    b')' if parentheses > 0 => parentheses -= 1,
+                    b')' => {
+                        if !bracket && bytes.get(offset + 1) == Some(&b')') {
+                            end = Some(offset + 1);
+                        }
+                        break;
+                    }
+                    b'[' if bracket => brackets += 1,
+                    b']' if bracket && brackets > 0 => brackets -= 1,
+                    b']' if bracket => {
+                        if parentheses == 0 { end = Some(offset); }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(end) = end {
+                let operand_end = if bracket { end } else { end - 1 };
+                numeric_arithmetic(&word[index + prefix..operand_end])?;
+                index = end + 1;
+                continue;
+            }
+            if bracket {
+                return Err("an unresolved arithmetic operand");
+            }
+            // An unmatched $(( is a command substitution containing a
+            // subshell, so retain the ordinary executable-effects path.
+        }
         if bytes.get(index..index + 2) == Some(b"$(") {
             let literal_heredoc = literal_cat_heredoc_end(&word[index..]);
             let end = match literal_heredoc {
@@ -94,7 +322,7 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             {
                 return Err("an unresolved shell payload");
             }
-            bodies.push(&word[index + 2..end]);
+            bodies.push(word[index + 2..end].to_owned());
             index = end + 1;
         } else if bytes[index] == b'`' {
             let start = index + 1;
@@ -105,11 +333,89 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
             if index >= bytes.len() {
                 return Err("an unresolved shell payload");
             }
-            bodies.push(&word[start..index]);
+            bodies.push(backquote_body(&word[start..index]));
             index += 1;
         } else {
             index += 1;
         }
+    }
+    Ok(bodies)
+}
+
+/// Backquotes remove one escape layer before parsing their command, even
+/// inside its quotes. Other backslashes must survive for the inner parser.
+pub(super) fn backquote_body(source: &str) -> String {
+    let mut body = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '`' | '\\' | '$')) {
+            body.push(chars.next().unwrap());
+        } else {
+            body.push(ch);
+        }
+    }
+    body
+}
+
+/// Heredoc quotes are data, but escaped markers are inert. Remove shell
+/// line continuations, then pass only complete, unescaped expansions through
+/// the ordinary substitution/arithmetic checks without rewriting their source.
+fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Result<Vec<String>, &'static str> {
+    let mut logical = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'\n') {
+            chars.next();
+            continue;
+        }
+        logical.push(ch);
+        if ch == '\\' && let Some(next) = chars.next() {
+            logical.push(next);
+        }
+    }
+    // A joined terminator ends the real heredoc before the line-based
+    // extractor expects. Its remaining text may be executable shell source.
+    if logical.lines().any(|line| {
+        let line = line.trim_end_matches('\r');
+        let line = if delimiter.strip_leading_tabs { line.trim_start_matches('\t') } else { line };
+        line == delimiter.value
+    }) {
+        return Err("an unresolved shell payload");
+    }
+    let bytes = logical.as_bytes();
+    let mut bodies = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes.get(index..index + 2) == Some(b"${") {
+            let tail = &logical[index + 2..];
+            let end = tail.find('}').ok_or("an unresolved parameter operand")?;
+            parameter_arithmetic(&tail[..end])?;
+            index += 2; // Nested parameter expansions retain their own checks.
+            continue;
+        }
+        let end = if bytes.get(index..index + 2) == Some(b"$(") {
+            literal_cat_heredoc_end(&logical[index..])
+                .map(|end| index + end)
+                .or_else(|| substitution_end(bytes, index + 2, 0))
+        } else if bytes.get(index..index + 2) == Some(b"$[") {
+            logical[index + 2..].find(']').map(|end| index + 2 + end)
+        } else if bytes[index] == b'`' {
+            let mut end = index + 1;
+            while end < bytes.len() && bytes[end] != b'`' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            (end < bytes.len()).then_some(end)
+        } else {
+            index += 1;
+            continue;
+        };
+        let end = end.ok_or("an unresolved shell payload")?;
+        bodies.extend(substitution_bodies(&logical[index..=end])?);
+        index = end + 1;
     }
     Ok(bodies)
 }
@@ -149,6 +455,41 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Marks each token that belongs to a redirect rather than the command: its
+/// filename, and a numbered or named descriptor in front of it. Bash runs `>out touch /x` as
+/// `touch /x`, so neither may be mistaken for the executable or an operand.
+fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
+    let redirect = |token: Option<&ShellToken>| matches!(token, Some(ShellToken::Operator('<' | '>')));
+    let mut marked = vec![false; tokens.len()];
+    let mut index = 0;
+    while index < tokens.len() {
+        if !redirect(tokens.get(index)) {
+            if let ShellToken::Word(word) = &tokens[index]
+                && is_redirect_descriptor(word, tokens.get(index + 1))
+            {
+                marked[index] = true;
+            }
+            index += 1;
+            continue;
+        }
+        while matches!(tokens.get(index), Some(ShellToken::Operator('<' | '>' | '&' | '|'))) {
+            index += 1;
+        }
+        if matches!(tokens.get(index), Some(ShellToken::Word(_))) {
+            marked[index] = true;
+            index += 1;
+        }
+    }
+    marked
+}
+
+/// Whether this operator continues a redirect, as in `>&` and `>|`. The next word
+/// is that redirect's filename, so it is not in command position and cannot be a
+/// keyword. Bash runs `>case touch in /outside/p` as `touch in /outside/p`.
+fn after_redirect(previous: Option<(char, usize)>, end: usize) -> bool {
+    matches!(previous, Some(('<' | '>', at)) if at + 1 == end)
 }
 
 /// Resolve a substitution with the ordinary shell lexer. Only real operator
@@ -257,11 +598,150 @@ pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Opti
                 return (cases.is_empty() && lexed.unresolved_at.is_none_or(|at| at >= end))
                     .then_some(index + end - 1);
             }
-            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
             _ => {}
         }
     }
     None
+}
+
+/// What a token means to the enclosing `case`. Code keeps its ordinary handling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaseSyntax {
+    Code,
+    /// Pattern text, which runs nothing.
+    Hidden,
+    /// The `)` that opens an arm, which is not a subshell's end.
+    FirstArm,
+    NextArm,
+    Esac,
+}
+
+/// Classify `case` syntax, so that a pattern's `)` closes no scope and its words
+/// run no command. Everything an arm guards stays code. A pattern that can execute
+/// something when matched (a substitution, or anything else this cannot read) and
+/// an unterminated `case` are refused, like any payload this cannot resolve.
+fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'static str> {
+    enum Phase {
+        Subject,
+        In,
+        Pattern { started: bool, first: bool },
+        Body,
+    }
+    struct Case {
+        level: usize,
+        phase: Phase,
+    }
+    let mut syntax = vec![CaseSyntax::Code; lexed.tokens.len()];
+    let mut cases: Vec<Case> = Vec::new();
+    let mut level = 0;
+    let mut command_start = true;
+    let mut previous_operator = None;
+    let mut start = 0;
+    for (index, (token, &end)) in lexed.tokens.iter().zip(&lexed.ends).enumerate() {
+        // A quoted keyword is an ordinary word, as in substitution_end.
+        let raw = source.get(start..end).unwrap_or("").trim();
+        start = end;
+        let previous = previous_operator;
+        previous_operator = match token {
+            ShellToken::Operator(ch) => Some((*ch, end)),
+            _ => None,
+        };
+        if let Some(case) = cases.last_mut().filter(|case| case.level == level) {
+            match (&mut case.phase, token) {
+                (Phase::Subject, ShellToken::Word(_)) => {
+                    case.phase = Phase::In;
+                    continue;
+                }
+                (Phase::In, ShellToken::Word(word)) => {
+                    if word == "in" && raw == word {
+                        case.phase = Phase::Pattern { started: false, first: true };
+                    }
+                    continue;
+                }
+                (Phase::Pattern { started, first }, ShellToken::Word(word)) => {
+                    if !*started && word == "esac" && raw == word {
+                        // With no arm there is no entry to restore.
+                        syntax[index] = if *first { CaseSyntax::Hidden } else { CaseSyntax::Esac };
+                        cases.pop();
+                        command_start = false;
+                        continue;
+                    }
+                    // Words in a pattern are joined by `|`. Two in a row are a command
+                    // this has misread, and must never be hidden as pattern text.
+                    let after_word = index > 0
+                        && syntax[index - 1] == CaseSyntax::Hidden
+                        && matches!(lexed.tokens[index - 1], ShellToken::Word(_));
+                    if after_word || word.contains(['`', '$']) {
+                        return Err("an unresolved shell payload");
+                    }
+                    *started = true;
+                    syntax[index] = CaseSyntax::Hidden;
+                    continue;
+                }
+                (Phase::Pattern { started, .. }, ShellToken::Operator('(')) => {
+                    if *started {
+                        return Err("an unresolved shell payload");
+                    }
+                    *started = true;
+                    syntax[index] = CaseSyntax::Hidden;
+                    continue;
+                }
+                (Phase::Pattern { started: true, .. }, ShellToken::Operator('|')) => {
+                    syntax[index] = CaseSyntax::Hidden;
+                    continue;
+                }
+                (Phase::Pattern { started: true, first }, ShellToken::Operator(')')) => {
+                    syntax[index] = if *first { CaseSyntax::FirstArm } else { CaseSyntax::NextArm };
+                    case.phase = Phase::Body;
+                    command_start = true;
+                    continue;
+                }
+                (Phase::Pattern { started: false, .. }, ShellToken::Operator(';' | '&')) => continue,
+                (Phase::Pattern { .. }, _) => return Err("an unresolved shell payload"),
+                (Phase::Body, ShellToken::Word(word))
+                    if command_start && word == "esac" && raw == word =>
+                {
+                    syntax[index] = CaseSyntax::Esac;
+                    cases.pop();
+                    command_start = false;
+                    continue;
+                }
+                (Phase::Body, ShellToken::Operator(';' | '&'))
+                    if previous == Some((';', end - 1))
+                        && matches!(source.as_bytes().get(end.saturating_sub(2)..end), Some(b";;" | b";&")) =>
+                {
+                    case.phase = Phase::Pattern { started: false, first: false };
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match token {
+            ShellToken::Word(word) => {
+                if command_start && word == "case" && raw == word {
+                    cases.push(Case { level, phase: Phase::Subject });
+                }
+                command_start = command_start
+                    && raw == word
+                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
+            }
+            ShellToken::Operator('(') => {
+                level += 1;
+                command_start = true;
+            }
+            ShellToken::Operator(')') => {
+                // A stray close stays for the caller's scope check to refuse.
+                level = level.saturating_sub(1);
+                command_start = false;
+            }
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
+            _ => {}
+        }
+    }
+    if cases.is_empty() { Ok(syntax) } else { Err("an unmatched shell scope") }
 }
 
 fn pwd_values(dirs: &Directories) -> Vec<String> {
@@ -283,11 +763,12 @@ fn resolve_executable(
     values: &HashMap<String, Vec<String>>,
 ) -> Result<(), &'static str> {
     for _ in 0..16 {
+        let redirects = redirect_words(tokens);
         let positions: Vec<_> = tokens
             .iter()
             .enumerate()
             .filter_map(|(position, token)| match token {
-                ShellToken::Word(word) => Some((position, word.clone())),
+                ShellToken::Word(word) if !redirects[position] => Some((position, word.clone())),
                 _ => None,
             })
             .collect();
@@ -319,6 +800,63 @@ fn resolve_executable(
     Err("an unresolved shell executable")
 }
 
+/// The line-based extractor cannot prove Bash boundaries for these forms.
+/// Refuse them before projection can hide executable text as heredoc data.
+fn check_heredoc_boundaries(script: &str) -> Result<(), &'static str> {
+    let joined = script.replace("\\\n", "");
+    let projected = shell_command_without_heredoc_bodies(&joined);
+    let delimiters: Vec<_> = projected.split('\n').flat_map(heredoc_delimiters).collect();
+    if !delimiters.is_empty()
+        && script.chars().any(|ch| ch.is_whitespace() && !matches!(ch, ' ' | '\t' | '\n'))
+    {
+        return Err("an unresolved shell payload");
+    }
+    // ANSI-C quoting needs escape decoding and locale quoting can translate
+    // the delimiter. Removing a leading dollar alone cannot prove either.
+    if !delimiters.is_empty() && projected.split("<<").skip(1).any(|tail| {
+        let tail = tail.strip_prefix('-').unwrap_or(tail).trim_start_matches([' ', '\t']);
+        // Stop at an unquoted word boundary, preserving quoted blanks and
+        // fragments such as E$"O"F in the same raw delimiter word.
+        let mut quote = None;
+        let mut escaped = false;
+        let end = tail.char_indices().find_map(|(index, ch)| {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' && quote != Some('\'') {
+                escaped = true;
+            } else if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                if matches!(ch, '\'' | '"') {
+                    quote = Some(ch);
+                } else if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                    return Some(index);
+                }
+            }
+            None
+        }).unwrap_or(tail.len());
+        tail[..end].contains("$'") || tail[..end].contains("$\"")
+    }) {
+        return Err("an unresolved shell payload");
+    }
+    let mut logical_line = String::new();
+    let mut continued = false;
+    for line in script.split_inclusive('\n') {
+        if let Some(prefix) = line.strip_suffix("\\\n") {
+            logical_line.push_str(prefix);
+            continued = true;
+            continue;
+        }
+        logical_line.push_str(line);
+        if continued && !heredoc_delimiters(&logical_line).is_empty() {
+            return Err("an unresolved shell payload");
+        }
+        logical_line.clear();
+        continued = false;
+    }
+    Ok(())
+}
+
 fn collect_script(
     script: &str,
     mut dirs: Directories,
@@ -330,11 +868,18 @@ fn collect_script(
     if depth > 8 {
         return Err("a shell payload beyond the resolution limit");
     }
+    check_heredoc_boundaries(script)?;
     let projected = shell_command_without_heredoc_bodies(script);
-    let lexed = factory_shell_lex(&projected, false, 0);
+    let mut lexed = factory_shell_lex(&projected, false, 0);
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");
     }
+    conditional_arithmetic(&projected, &lexed)?;
+    for &(start, end) in &lexed.parameters {
+        parameter_arithmetic(&projected[start..end])?;
+    }
+    arithmetic_commands(&projected, &mut lexed)?;
+    let case_tokens = case_syntax(&projected, &lexed)?;
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
@@ -352,29 +897,58 @@ fn collect_script(
     let conditional_bindings = tokens.iter().any(|token| matches!(token,
         ShellToken::Word(word) if matches!(word.as_str(), "if" | "while" | "until" | "for" | "case")));
     let mut alternatives = Vec::new();
-    let mut heredocs = shell_heredoc_bodies(script).into_iter();
+    // Rendering quotes every word, including originally unquoted delimiters.
+    // Keep the source's expansion provenance paired with the shared extractor.
+    let delimiters: Vec<_> = projected.lines().flat_map(heredoc_delimiters).collect();
+    let bodies = shell_heredoc_bodies(script);
+    if delimiters.len() != bodies.len() {
+        return Err("an unresolved shell payload");
+    }
+    let mut heredocs = delimiters.into_iter().zip(bodies);
     let mut scopes = Vec::new();
+    // The directories on entry to each open `case`. Only one arm runs, so no arm
+    // sees a `cd` from an earlier one and any of them may be the one that ran.
+    let mut case_entries: Vec<Directories> = Vec::new();
     let mut continuation = false;
     let mut start: usize = 0;
     for end in 0..=tokens.len() {
-        let separator = match tokens.get(end) {
-            Some(ShellToken::Operator(ch @ (';' | '&' | '|' | '(' | ')'))) => Some(*ch),
-            None => None,
-            _ => continue,
+        let syntax = case_tokens.get(end).copied().unwrap_or(CaseSyntax::Code);
+        let separator = match (syntax, tokens.get(end)) {
+            (CaseSyntax::Esac, _) => {
+                for directory in case_entries.pop().unwrap_or_default() {
+                    add_directory(&mut dirs, directory);
+                }
+                continue;
+            }
+            (CaseSyntax::Hidden, _) => continue,
+            (CaseSyntax::FirstArm | CaseSyntax::NextArm, _) => Some(';'),
+            // The `&` of `>&file` and the `|` of `>|file` belong to the redirect.
+            (CaseSyntax::Code, Some(ShellToken::Operator('&' | '|')))
+                if end > 0 && matches!(tokens[end - 1], ShellToken::Operator('<' | '>')) =>
+            {
+                continue;
+            }
+            (CaseSyntax::Code, Some(ShellToken::Operator(ch @ (';' | '&' | '|' | '(' | ')')))) => Some(*ch),
+            (CaseSyntax::Code, None) => None,
+            (CaseSyntax::Code, _) => continue,
         };
         let assignment_may_skip = conditional_bindings
             || matches!(
                 tokens.get(start.wrapping_sub(1)),
                 Some(ShellToken::Operator('&' | '|'))
             );
-        let mut statement_start = start;
-        let mut statement = &tokens[start..end];
+        // Pattern text and `esac` are not operands of anything.
+        let visible: Vec<usize> =
+            (start..end).filter(|index| case_tokens[*index] == CaseSyntax::Code).collect();
+        let visible_tokens: Vec<ShellToken> = visible.iter().map(|&index| tokens[index].clone()).collect();
+        let mut statement = visible_tokens.as_slice();
+        let mut skipped_keywords = 0;
         start = end + 1;
         while matches!(statement.first(), Some(ShellToken::Word(word))
             if matches!(word.as_str(), "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"))
         {
             statement = &statement[1..];
-            statement_start += 1;
+            skipped_keywords += 1;
         }
         let substitution_scope = separator == Some('(')
             && matches!(statement.last(), Some(ShellToken::Word(word)) if word.ends_with('$'));
@@ -383,7 +957,8 @@ fn collect_script(
             separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
         if !statement.is_empty() {
             let mut statement = statement.to_vec();
-            let mut statement_literals = literal_words[statement_start..end].to_vec();
+            let mut statement_literals: Vec<bool> =
+                visible[skipped_keywords..].iter().map(|&index| literal_words[index]).collect();
             if !continuation {
                 resolve_executable(&mut statement, &mut statement_literals, &directory_values)?;
             }
@@ -396,18 +971,26 @@ fn collect_script(
             }
             // The existing script-write recognizer needs the body attached to
             // its receiving command, rather than interpreted as shell words.
-            for delimiter in heredoc_delimiters(&command) {
-                if let Some(body) = heredocs.next() {
-                    command.push('\n');
-                    command.push_str(&body);
-                    command.push_str(&delimiter.value);
-                    command.push('\n');
+            let mut expanding_bodies = Vec::new();
+            for expected in heredoc_delimiters(&command) {
+                let (delimiter, body) = heredocs.next().ok_or("an unresolved shell payload")?;
+                if expected.value != delimiter.value || expected.strip_leading_tabs != delimiter.strip_leading_tabs {
+                    return Err("an unresolved shell payload");
+                }
+                command.push('\n');
+                command.push_str(&body);
+                command.push_str(&delimiter.value);
+                command.push('\n');
+                if !delimiter.literal_body {
+                    expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter)?);
                 }
             }
+            let redirects = redirect_words(&statement);
             let words: Vec<String> = statement
                 .iter()
-                .filter_map(|token| match token {
-                    ShellToken::Word(word) => Some(word.clone()),
+                .enumerate()
+                .filter_map(|(index, token)| match token {
+                    ShellToken::Word(word) if !redirects[index] => Some(word.clone()),
                     _ => None,
                 })
                 .collect();
@@ -415,7 +998,19 @@ fn collect_script(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, token)| {
-                    matches!(token, ShellToken::Word(_)).then_some(statement_literals[index])
+                    (matches!(token, ShellToken::Word(_)) && !redirects[index])
+                        .then_some(statement_literals[index])
+                })
+                .collect();
+            // A redirect's filename is no operand, but its substitutions still run.
+            let redirect_targets: Vec<(&str, bool)> = statement
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| match token {
+                    ShellToken::Word(word) if redirects[index] => {
+                        Some((word.as_str(), statement_literals[index]))
+                    }
+                    _ => None,
                 })
                 .collect();
             let index = if continuation {
@@ -425,6 +1020,49 @@ fn collect_script(
             };
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
+            if matches!(name, Some("test" | "[")) {
+                let args = if name == Some("[") && args.last().is_some_and(|arg| arg == "]") {
+                    &args[..args.len() - 1]
+                } else { args };
+                let mut at = 0;
+                while at < args.len() {
+                    // Binary operators consume both data operands. In
+                    // particular, a string comparison's RHS may be "-eq".
+                    let binary = args.get(at + 1).map(String::as_str);
+                    if at + 2 < args.len()
+                        && matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge"))
+                    {
+                        numeric_arithmetic(&args[at])?;
+                        numeric_arithmetic(args.get(at + 2)
+                            .ok_or("an unresolved conditional operand")?)?;
+                        at += 3;
+                    } else if matches!(binary, Some("=" | "==" | "!=" | "-nt" | "-ot" | "-ef")) {
+                        at += 3;
+                    } else if matches!(args[at].as_str(), "!" | "(" | ")" | "-a" | "-o") {
+                        at += 1;
+                    } else if args[at].len() == 2 && args[at].starts_with('-')
+                        && !args[at].as_bytes()[1].is_ascii_digit()
+                    {
+                        at += 2; // A unary predicate consumes one data operand.
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
+            if name == Some("let") {
+                for arg in args.iter().filter(|arg| arg.as_str() != "--") {
+                    numeric_arithmetic(arg)?;
+                }
+            }
+            // Integer attributes persist into later ordinary assignments.
+            // Without modeling those attributes/namerefs, even an initially
+            // numeric declaration cannot establish inert future operands.
+            if name == Some("integer") || (matches!(name, Some("declare" | "typeset" | "local"))
+                && args.iter().any(|arg| arg.contains(['$', '`'])
+                    || (arg.starts_with('-') && !arg.contains('=') && arg.contains('i'))))
+            {
+                return Err("an unresolved arithmetic operand");
+            }
             // A cwd-changing wrapper is scoped to the invoked command. Its
             // computed directory cannot be attributed to the hook's cwd.
             let wrapper_changes_directory = words.iter().take(index.unwrap_or(0)).any(|word| {
@@ -438,15 +1076,31 @@ fn collect_script(
                 dirs.clone()
             };
 
+            for body in expanding_bodies {
+                collect_script(
+                    &body,
+                    statement_dirs.clone(),
+                    original,
+                    &directory_values,
+                    depth + 1,
+                    effects,
+                )?;
+            }
+
             // A quoted argument may execute a substitution even though the
             // outer tokenizer correctly keeps it as one word. Its filesystem
             // effects are checked in a subprocess scope; its output remains
             // unresolved when used as an executable, directory or write path.
-            for (word, literal) in words.iter().zip(&word_literals) {
+            let every_word = words
+                .iter()
+                .map(String::as_str)
+                .zip(word_literals.iter().copied())
+                .chain(redirect_targets.iter().copied());
+            for (word, literal) in every_word {
                 if !literal {
                     for body in substitution_bodies(word)? {
                         collect_script(
-                            body,
+                            &body,
                             statement_dirs.clone(),
                             original,
                             &directory_values,
@@ -668,6 +1322,15 @@ fn collect_script(
                 }
             }
         }
+        match syntax {
+            CaseSyntax::FirstArm => case_entries.push(dirs.clone()),
+            CaseSyntax::NextArm => {
+                for directory in case_entries.last().cloned().unwrap_or_default() {
+                    add_directory(&mut dirs, directory);
+                }
+            }
+            _ => {}
+        }
         match separator {
             Some('(') => {
                 if scopes.len() >= 8 {
@@ -708,6 +1371,11 @@ fn collect_script(
             }
             _ => {}
         }
+    }
+    // Even a quoted body left unclaimed proves that projection/splitting
+    // disagreed about shell syntax; it may have hidden subsequent commands.
+    if heredocs.next().is_some() {
+        return Err("an unresolved shell payload");
     }
     if !scopes.is_empty() {
         return Err("an unmatched shell scope");

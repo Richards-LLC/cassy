@@ -65,7 +65,7 @@ class BudgetBreach(unittest.TestCase):
         self.gh.write_text(textwrap.dedent('''\
             #!/usr/bin/env bash
             case "$1 $2" in
-              "run list") printf '[{"databaseId":7,"status":"completed","conclusion":"success","headBranch":"v9.99.8","headSha":"%s","createdAt":"2026-10-14T15:10:00Z"}]\\n' "$(cat "$LANDED")" ;;
+              "run list") printf '[{"databaseId":7,"status":"completed","conclusion":"success","event":"push","headBranch":"main","headSha":"%s","createdAt":"2026-10-14T15:10:00Z"}]\\n' "$(cat "$LANDED")" ;;
               "release view") printf '2026-10-14T15:12:16Z\\n' ;;
               "api repos"*) printf '{"workflow_runs":[{"id":7,"created_at":"2026-10-14T15:10:00Z"}]}\\n' ;;
               *) exit 2 ;;
@@ -75,7 +75,17 @@ class BudgetBreach(unittest.TestCase):
         self.published = self.tmp / "published.sh"
         self.published.write_text("#!/usr/bin/env bash\nprintf 'TAG=%s\\n' \"$1\"\n")
         self.published.chmod(0o755)
-        (self.run_dir / "landed-main.sha").write_text("a" * 40 + "\n")
+        # Drive the stage's real annotated-tag/landed-main prerequisite rather
+        # than failing before any budget-filing behavior can be exercised.
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.tmp), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "release")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "tag.gpgsign=false", "tag", "-am", "release", "v9.99.8")
+        (self.run_dir / "landed-main.sha").write_text(git("rev-parse", "HEAD") + "\n")
 
     def post_publication(self, events: str) -> subprocess.CompletedProcess:
         (self.run_dir / "stage-events.tsv").write_text(events)

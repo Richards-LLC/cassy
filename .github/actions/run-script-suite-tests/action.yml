@@ -1,0 +1,75 @@
+name: Run selected script suites
+description: Provision only changed-input script suites inside an existing CI job.
+inputs:
+  base-sha:
+    description: Shared classifier comparison base; an unknown base selects all suites.
+    required: false
+    default: ''
+  full-tier:
+    description: Provision the exhaustive Makefile tier; the caller runs that target.
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - id: script-tests
+      name: Select suites and tool requirements
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        FULL_TIER: ${{ inputs.full-tier }}
+      run: |
+        comparison=(--all)
+        cohort=()
+        if [[ "$FULL_TIER" != true ]]; then
+          cohort=(--provisioned)
+          if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+        fi
+        python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" "${cohort[@]}" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - uses: actions/setup-node@v4
+      if: steps.script-tests.outputs.web == 'true'
+      with:
+        node-version: '22'
+
+    - name: Provision selected suite dependencies
+      if: steps.script-tests.outputs.needed == 'true'
+      shell: bash
+      env:
+        FULL_TIER: ${{ inputs.full-tier }}
+        NEED_LINT: ${{ steps.script-tests.outputs.lint }}
+        NEED_WEB: ${{ steps.script-tests.outputs.web }}
+        NEED_BROWSER: ${{ steps.script-tests.outputs.browser }}
+        NEED_PDF: ${{ steps.script-tests.outputs.pdf }}
+      run: |
+        if [[ "$NEED_LINT" == true && "$FULL_TIER" != true ]]; then
+          npm ci --no-audit --no-fund
+        fi
+        if [[ "$NEED_PDF" == true ]]; then
+          python3 -m venv "$RUNNER_TEMP/script-suite-venv"
+          "$RUNNER_TEMP/script-suite-venv/bin/pip" install --disable-pip-version-check --quiet \
+            -r scripts/ci_tiers/requirements.txt 'PyMuPDF==1.27.2.3'
+          echo "$RUNNER_TEMP/script-suite-venv/bin" >> "$GITHUB_PATH"
+        fi
+        if [[ "$NEED_WEB" == true ]]; then
+          npm ci --prefix hub-web --no-audit --no-fund
+          echo "PLAYWRIGHT_MODULE=$GITHUB_WORKSPACE/hub-web/node_modules/playwright" >> "$GITHUB_ENV"
+        fi
+        if [[ "$NEED_BROWSER" == true ]]; then
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "CHROME_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          else
+            npm exec --prefix hub-web -- playwright install --with-deps chromium
+          fi
+        fi
+
+    - name: Run selected suites
+      if: inputs.full-tier != 'true' && steps.script-tests.outputs.needed == 'true'
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+      run: |
+        comparison=(--all)
+        if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+        python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" --provisioned

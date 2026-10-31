@@ -696,38 +696,6 @@ impl SqliteTaskStore {
         Ok(())
     }
 
-    /// Generate a hash-based ID like cas-a1b2
-    fn generate_hash_id(&self) -> Result<String> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        Utc::now().timestamp_nanos_opt().hash(&mut hasher);
-        std::process::id().hash(&mut hasher);
-
-        let hash = hasher.finish();
-        let chars: Vec<char> = format!("{hash:016x}").chars().collect();
-
-        // Try 4-char, then 5-char, then 6-char IDs
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        for len in 4..=6 {
-            let id = format!("cas-{}", chars[..len].iter().collect::<String>());
-            let exists: bool = conn
-                .query_row("SELECT 1 FROM tasks WHERE id = ?", params![&id], |_| {
-                    Ok(true)
-                })
-                .optional()?
-                .unwrap_or(false);
-
-            if !exists {
-                return Ok(id);
-            }
-        }
-
-        // Fallback to full hash
-        Ok(format!("cas-{}", &chars[..8].iter().collect::<String>()))
-    }
-
     fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         Ok(Task {
             id: row.get(0)?,
@@ -1135,7 +1103,8 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        self.generate_hash_id()
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::hash_id::generate_hash_id(&conn, crate::hash_id::IdKind::Task)
     }
 
     fn add(&self, task: &Task) -> Result<()> {

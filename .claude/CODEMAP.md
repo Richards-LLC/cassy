@@ -22,6 +22,7 @@
 - `cas-cli/` - Rust binary `cas` and composed application library.
 - `crates/cas-types/` - task, agent, delivery, provenance, event and wire types.
 - `crates/cas-store/` - SQLite stores, task/QA queues, verification, knowledge and vectors.
+- `crates/cas-store/src/hash_id.rs` - shared counter-mixed ID generation and format policies for task, skill, spec and code stores.
 - `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
 - `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
 - `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.

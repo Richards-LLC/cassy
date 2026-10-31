@@ -59,6 +59,7 @@ mod external_task_dependency_store;
 mod external_verification_gate;
 mod file_change_store;
 mod fts_query;
+mod hash_id;
 mod history_provenance;
 mod history_store;
 mod knowledge_store;

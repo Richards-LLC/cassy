@@ -230,6 +230,7 @@ struct CheckRow {
     pass: u32,
     fail: u32,
     flaky: u32,
+    error: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -359,6 +360,7 @@ fn aggregate(
                     CheckOutcome::Pass => row.pass += 1,
                     CheckOutcome::Fail => row.fail += 1,
                     CheckOutcome::Flaky => row.flaky += 1,
+                    CheckOutcome::Error => row.error += 1,
                 }
             }
             QualityPayload::Escape { found_in, missed_stage } => report.escapes.push(EscapeRow {
@@ -463,12 +465,12 @@ fn render(report: &LedgerReport) -> String {
         );
     }
 
-    let _ = writeln!(out, "\nChecks (pass/fail/flaky)");
+    let _ = writeln!(out, "\nChecks (pass/fail/flaky/could not run)");
     if report.checks.is_empty() {
         let _ = writeln!(out, "  none recorded");
     }
     for (stage, row) in &report.checks {
-        let _ = writeln!(out, "  {stage:<10}{}/{}/{}", row.pass, row.fail, row.flaky);
+        let _ = writeln!(out, "  {stage:<10}{}/{}/{}/{}", row.pass, row.fail, row.flaky, row.error);
     }
 
     let _ = writeln!(out, "\nFeature feedback");

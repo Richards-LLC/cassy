@@ -72,6 +72,8 @@ pub enum CheckOutcome {
     Pass,
     Fail,
     Flaky,
+    /// The check itself could not finish, so it says nothing about the delivery.
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

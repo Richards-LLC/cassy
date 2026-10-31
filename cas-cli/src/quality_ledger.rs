@@ -434,12 +434,13 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
                 },
             )
         } else {
+            let Some(outcome) = verifier_outcome(verification.status) else { continue };
             NewQualityEvent::new(
                 format!("verifier|{}", verification.id),
                 QualityPayload::CheckRun {
                     check_id: "task_verifier".to_string(),
                     stage: CheckStage::Verifier,
-                    outcome: verifier_outcome(verification.status),
+                    outcome,
                     sha: None,
                     minutes: None,
                 },
@@ -469,10 +470,14 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
     Ok(inserted)
 }
 
-pub(crate) fn verifier_outcome(status: cas_types::VerificationStatus) -> CheckOutcome {
+/// `None` for a skipped verification: it ran no check.
+pub(crate) fn verifier_outcome(status: cas_types::VerificationStatus) -> Option<CheckOutcome> {
+    use cas_types::VerificationStatus as Status;
     match status {
-        cas_types::VerificationStatus::Approved => CheckOutcome::Pass,
-        _ => CheckOutcome::Fail,
+        Status::Approved => Some(CheckOutcome::Pass),
+        Status::Rejected => Some(CheckOutcome::Fail),
+        Status::Error => Some(CheckOutcome::Error),
+        Status::Skipped => None,
     }
 }
 

@@ -389,6 +389,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       const card = list.getByRole("group", { name: /^pulse-card ·/ });
       const idle = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Idle", exact: true });
       const offline = card.locator(".conversation-row").filter({ hasText: "watchful-heron-16" }).getByRole("img", { name: "Offline", exact: true });
+      await card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
       await expect(idle).toHaveAttribute("title", "Idle");
       await expect(offline).toHaveAttribute("title", "Offline");
       const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });

@@ -3481,9 +3481,14 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media (forced-colors: active) {
   .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }
   .conversation-filter[aria-pressed="true"] { border-color: Highlight; background: Canvas; color: Highlight; }
-  .supervisor-state { forced-color-adjust: none; border-color: Canvas; background: CanvasText; }
-  .supervisor-state.idle { background: Canvas; outline-color: CanvasText; border-radius: 0; }
-  .supervisor-state.offline { background: Canvas; outline: var(--line-width) solid CanvasText; }
+  .supervisor-state,
+  .supervisor-state.working,
+  .supervisor-state.needs-you,
+  .conversation-row[aria-current="true"] .supervisor-state { forced-color-adjust: none; border-color: Canvas; background: CanvasText; }
+  .supervisor-state.idle,
+  .conversation-row[aria-current="true"] .supervisor-state.idle { background: Canvas; outline-color: CanvasText; border-radius: 0; }
+  .supervisor-state.offline,
+  .conversation-row[aria-current="true"] .supervisor-state.offline { background: Canvas; outline: var(--line-width) solid CanvasText; }
   .status-chip--waiting { color: CanvasText; text-decoration: underline; }
   .status-chip--offline { color: GrayText; }
   .machine-online-dot.online { background: CanvasText; border-color: CanvasText; }

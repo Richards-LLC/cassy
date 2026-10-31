@@ -26,6 +26,8 @@ The command palette owns filtering and keyboard selection. The existing conversa
 
 A submission progresses through submitted, observed, refused or unconfirmed. Native model controls use a separate fixed allowlist while the model chooser is open. Output evidence names an opened chooser or displayed usage; only a native confirmation can claim a changed model. Exit follows the authenticated session-ended receipt. Finish requires its own completed native request; its receipt asks the operator to review the reply for the wrap-up result and does not imply session exit.
 
+Unconfirmed Usage retains only Close. The daemon verifies that the native Usage view is still open before sending Escape; closing never replays the uncertain command or sends a key to a running turn.
+
 ## Design provenance
 
 Uses hub-web/DESIGN.md, hub-web/src/tokens.css and hub-web/src/glass.css. Reuses the current header action, composer, dialog and receipt vocabulary in both schemes.

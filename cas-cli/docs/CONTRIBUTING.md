@@ -1064,6 +1064,19 @@ not change Git, assignment, leases or claims,
 and it does not waive proof, merge, QA or verification. The worker closes normally;
 the supervisor merges the recorded branch with an explicit task id.
 
+For a gone worker's parked delivery, spawn a replacement with the task id (or
+transfer the task to a fresh worker with `adopt_branch=true`). Spawn preassignment
+force-releases the stale holder while retaining its start as evidence. Restore
+the delivery on the replacement's own task branch in its clean registered
+checkout, then start the task. For a transfer that remains parked, use
+`request_changes` before starting. The supervisor can now approve that branch with
+`rebind_branch`, even though the recorded start names the prior assignee. Rebind
+validates the current assignee, lease, repository and task history and records the
+prior owner, base, tip and anchor in its audit. The replacement can continue and
+close to park; merge its new recorded branch with the task id to finish delivery.
+An adoption still refuses a receiver carrying unrelated unmerged work; preserve
+that work and use a fresh checkout rather than moving it into this task.
+
 CAS measures the recorded delivery anchor (or the assigned worker branch before
 parking) against the fresh integration target. Every unmerged commit must touch
 only regular, non-executable evidence formats under `docs/` or `artifacts/`:

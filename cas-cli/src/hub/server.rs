@@ -34,6 +34,9 @@ mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
 
+#[path = "dismissed_sessions.rs"]
+mod dismissed_sessions;
+
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
 
@@ -201,6 +204,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             get(sessions::<R>)
                 .post(launch_session::<R>)
                 .options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/dismiss",
+            post(dismissed_sessions::dismiss::<R>).options(preflight::<R>),
         )
         .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
         .route(
@@ -976,7 +983,16 @@ async fn sessions<R: SessionReadModel>(
         return with_cors(unauthorized_for(&error), &headers);
     }
     match state.catalog.list().await {
-        Ok(sessions) => with_cors(
+        Ok(mut sessions) => {
+            if let Some(auth) = &state.auth {
+                for session in &mut sessions {
+                    match dismissed_sessions::is_dismissed(auth.root(), session) {
+                        Ok(dismissed) => session.dismissed = dismissed,
+                        Err(error) => return internal_error(error),
+                    }
+                }
+            }
+            with_cors(
             Json(SessionsResponse {
                 schema_version: super::HUB_SCHEMA_VERSION,
                 freshness_threshold_secs:
@@ -985,7 +1001,8 @@ async fn sessions<R: SessionReadModel>(
             })
             .into_response(),
             &headers,
-        ),
+        )
+        },
         Err(error) => internal_error(error),
     }
 }

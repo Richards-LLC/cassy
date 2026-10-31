@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map reconciled against the 3.88 epic at `7e5bebbc3`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map of Cassy's Rust workspace and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -55,7 +55,7 @@
 - `cas-cli/src/factory_preflight.rs`, `cas-cli/src/capability.rs` - account/root validation, cached probes and readiness.
 - `cas-cli/src/claude_credentials.rs` - shared Keychain service identity; native capacity does not read its secrets.
 - `cas-cli/src/cli/hook.rs`, `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/` - hooks, native dispatch, generation and policy.
-- `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation measurements.
+- `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/hooks/handlers/handlers_events/codemap.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
 - `cas-cli/src/cloud/`, `cas-cli/src/coordination/`, `cas-cli/src/notifications/` - sync/presence, binding intake, ownership and notification queues.
 - `cas-cli/src/worktree/`, `cas-cli/src/store/`, `cas-cli/src/migration/migrations/` - Git lifecycle, store decorators and numbered migrations.
 - `cas-cli/src/artifacts/`, `cas-cli/src/artifacts/qa.rs` - portable proofs and task-bound QA file export/recovery.
@@ -68,7 +68,7 @@
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
-- `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup, events, probes, relays and rendering schedule.
+- `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup, events, probes, relays and rendering schedule; `fixtures/claude-2.1.312-usage.txt` records the native Claude Usage screen.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
 - `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminders and task-wait defaults.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` - Slack intake and ordered wake recovery.
@@ -89,7 +89,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - worktree-keyed receipts and introducing-merge boundaries.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep modules.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.
-- `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited replacement delivery branches.
+- `cas-cli/src/mcp/tools/core/task/rebind.rs` - supervisor-approved replacement branch takeover, checked against the prior start and retained in the audit trail.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
 
 ## QA, storage and Commander
@@ -107,7 +107,8 @@
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - startup, selected conversation state and reply grants.
 - `hub-web/src/project-navigation.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/machine-version.ts` - grouped navigation, machine versions and release lookup.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - authenticated streams, recovery and session subscriptions.
-- `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - history paging, receipt progress and windowed turns.
+- `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/dismissed-asks.ts` - history paging, receipt progress, windowed turns and per-thread dismissal persistence.
+- `hub-web/src/provider-mark.ts` - harness/provider avatar marks, state dots and model/effort header labels.
 - `hub-web/src/supervisor-commands.ts` - slash palette, confirmations, native chooser controls and command receipts.
 - `hub-web/src/live-phase.ts`, `hub-web/src/status-refresh.ts` - measured phase/elapsed view with explicit waiting, stale and unreported states; session-scoped latest status response ownership.
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/team-view.ts` - shared release/task state, lazy Team and receipt trail.
@@ -119,6 +120,7 @@
 - `hub-web/src/image-viewer.ts`, `hub-web/src/image-viewer.css` - lazy image inspection dialog, turn gallery and pointer/keyboard controls; rationale in `hub-web/src/image-viewer.brief.md`.
 - `hub-web/src/accounts-panel.ts`, `hub-web/src/accounts-model.ts` - per-machine account ledger, confirmations and launch-choice invalidation.
 - `cas-cli/src/hub/accounts.rs`, `cas-cli/src/hub/account_routes.rs` - non-secret account projection and audited typed lifecycle routes.
+- `cas-cli/src/hub/dismissed_sessions.rs` - authenticated ended-session dismissal route and atomic generation-scoped tombstones shared across paired devices.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth cache, durable phone input and recovery audits.
 - `cas-cli/src/hub/composer_upload.rs`, `hub-web/src/composer-uploads.ts`, `hub-web/src/upload-transport.ts`, `hub-web/src/sent-attachments.ts` - byte progress, bounded upload identity and persistent sent-file presentation.
 - `cas-cli/src/hub/secret_request.rs`, `cas-cli/src/config/meta/seed/secrets.rs` - Commander secret requests: the value is saved to a mode-600 file in `secrets.destination` and only its path is replied.
@@ -132,7 +134,7 @@
 
 - **Rust proof:** inline modules, `crates/cas-store/tests/`, explicit `cas-cli/tests/` harnesses and `cas-cli/tests/integration/`; isolation in `cas-cli/src/test_env_guard.rs`.
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright, `scripts/journey-eval.sh` affected selection and `hub-web/scripts/` visual/performance probes.
-- **Real-machine QA:** `scripts/qa-rig/commander-two-machine/` and `docs/qa/` journeys, sidecar cases and batch evaluations.
+- **Real-machine QA:** `scripts/qa-rig/commander-two-machine/` and `docs/qa/` journeys, sidecar cases and batch evaluations; `docs/qa/bug-families/supervisor-command-usage-screen.yaml` selects the native Claude Usage journey.
 - **Contributor contracts:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`; design/terminal briefs and captures under `docs/design/`.
 - **Release records:** `CHANGELOG.md`, `docs/release-notes/`, `docs/release-reports/` for titled entries, Slack drafts and Markdown/HTML/PDF proof.
 - **Release tools:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`.

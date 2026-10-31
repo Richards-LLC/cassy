@@ -17,6 +17,7 @@ use crate::ui::factory::DaemonMessage;
 pub enum MachineEventKind {
     SessionAdded,
     SessionRemoved,
+    SessionDismissed,
     PaneAdded,
     PaneExited,
     PaneRemoved,
@@ -339,6 +340,10 @@ impl MachineEventBus {
             None,
             None,
         );
+    }
+
+    pub(crate) fn session_dismissed(&self, session: &str) {
+        self.emit(MachineEventKind::SessionDismissed, Some(session.to_owned()), None, None, None);
     }
 
     pub(crate) fn controller_changed(&self, session: &str) {

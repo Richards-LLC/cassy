@@ -297,6 +297,7 @@ One card pattern serves the project register, Needs you, Tasks & progress worker
 Three kinds, distinguishable without reading them:
 
 - **Status pill** (`.status-chip`). `--pill-status-height` 24px, `--radius-pill`, `--bg-panel` fill, 12px uppercase label in the state's text colour (`--state-ok`, `--state-warn` with `--tint-warn`, `--ink-mid` for idle/open). It states a fact and is never a button: no hover, no border, no pointer.
+- **Team Waiting and Offline.** Waiting is live-idle and uses `--state-ok` text; Offline uses gray `--state-idle`. In forced colours, Waiting is underlined `CanvasText` and Offline is `GrayText`, so the words and treatment distinguish them even when the system colours coincide.
 - **Action pill** (a `button` in a card header or row). `--pill-action-height` 32px, `--radius-pill`, `--look-glass-strong` fill with a 1px `--line-strong` edge, `--ink` text at `--fs-meta` 500; hover is `--bg-hover`, never brighter. On a phone its hit area reaches 44px with padding, not a taller face. Only one `.primary` (Send gradient) per surface; a destructive action is the `--crit-bg` outlined pill.
 - **Chip** (filters, machine chips, badges). `--radius-pill`, 28–32px tall, `--bg-raised` fill with a `--line-subtle` edge; pressed filters take `--bg-active` and the action edge. A **machine chip** is a pill: the connection dot, the machine name in `--font-ui`, then the runtime in quiet mono `--ink-mid`; it never uses `--radius-control`.
 - Default and Recommended are verdict-coloured text badges (`--color-verdict` on `--bg-active`), never status colours.
@@ -308,7 +309,11 @@ An avatar names who is working, and the model's provider is that identity.
 
 - **Provider mark.** Sessions and workers that report a harness show its provider's mark: Claude (Claude Code), OpenAI (Codex, including the Sol and Luna models) and Grok, as clean single-colour SVG on a `--bg-panel` disc. Sizes: `--avatar-size` 42px with a `--avatar-mark` 24px mark in conversation rows and project cards; `--avatar-lane-size` 32px with an 18px mark in Team lanes and worker cards. Marks are `aria-hidden`; the harness is spoken in the row's name.
 - **Fallback.** An unknown or unsupported harness shows its name's first two letters in `--font-ui` 600 (OpenCode → "OC"); a session with no harness shows the machine monogram on its machine accent. Never a single tiny glyph (✳, `>_`) in a dark circle.
-- **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it; its colour is the state (`--state-ok` working, `--state-warn` needs you, `--state-idle` idle or offline). The dot is never the only carrier of the state: the row text or a status pill says it too.
+- **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it. Every dot has a state name for assistive technology and hover; the row text or status pill also says the state.
+  - **Working:** a solid `--state-ok` green circle; solid `CanvasText` in forced colours.
+  - **Idle:** a hollow green circle, `--bg-raised` fill and a 2px inset `--state-ok` outline; a hollow square with `Canvas` fill and `CanvasText` outline in forced colours, distinct from both circles even if system colours coincide. A live supervisor never gets a gray dot.
+  - **Offline:** the hollow neutral circle, `--bg-raised` fill with a 1px inset `--ink-mid` outline. Gray is reserved for offline; in forced colours it retains its `Canvas` fill and `CanvasText` outline. Ended rows retain their hollow neutral dot.
+  - **Needs you:** solid `--state-warn`, with the existing worded reason.
 
 ### Conversation header
 

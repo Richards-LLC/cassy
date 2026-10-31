@@ -8369,4 +8369,232 @@ mod tests {
             "unknown harness string must fall back to SupervisorCli::Claude"
         );
     }
+
+    /// Exercise the daemon's real force-release/preassign seam, then the MCP
+    /// recovery route through park and merge. No PTY or host factory is needed.
+    #[tokio::test]
+    async fn recycled_worker_takeover_rebinds_and_delivers_cas_d6b1() {
+        use crate::mcp::{CasCore, CasService};
+        use crate::store::{init_cas_dir, open_task_store};
+        use crate::test_env_guard::TestEnvGuard;
+        use cas_types::{Agent, AgentRole, AgentStatus, FactoryBranchStart, TaskDepth, WorkTarget};
+        use rmcp::handler::server::wrapper::Parameters;
+        use std::path::Path;
+        use std::process::Command;
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let git = |root: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&project, &["init", "-b", "epic/takeover"]);
+        git(&project, &["config", "user.name", "Takeover fixture"]);
+        git(&project, &["config", "user.email", "takeover@example.test"]);
+        std::fs::write(project.join(".gitignore"), ".cas/\n").unwrap();
+        git(&project, &["add", ".gitignore"]);
+        git(&project, &["commit", "-qm", "base"]);
+        let base = git(&project, &["rev-parse", "HEAD"]);
+        let root = init_cas_dir(&project).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            concat!(
+                "[project]\ncanonical_id = 'takeover-fixture'\n",
+                "[verification]\nenabled = false\n",
+                "[qa]\nmode = 'batch'\nindependent_pass = false\nevidence_gate = false\n",
+            ),
+        )
+        .unwrap();
+        let origin = root.join("origin.git");
+        git(&project, &["init", "--bare", origin.to_str().unwrap()]);
+        git(
+            &project,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&project, &["push", "-q", "origin", "epic/takeover"]);
+        let old_branch = "factory/retired-worker-cas-d6b1";
+        git(&project, &["switch", "-c", old_branch]);
+        std::fs::write(project.join("delivery.txt"), "preserved original work\n").unwrap();
+        git(&project, &["add", "delivery.txt"]);
+        git(&project, &["commit", "-qm", "cas-d6b1: original delivery"]);
+        let anchor = git(&project, &["rev-parse", "HEAD"]);
+        git(&project, &["push", "-q", "origin", old_branch]);
+        git(&project, &["switch", "epic/takeover"]);
+        let branch = "factory/replacement-worker-cas-d6b1";
+        let checkout = root.join("worktrees/replacement-worker");
+        git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                old_branch,
+            ],
+        );
+        let agents = open_agent_store(&root).unwrap();
+        for (id, name, role, gone) in [
+            ("supervisor-id", "supervisor", AgentRole::Supervisor, false),
+            ("retired-id", "retired-worker", AgentRole::Worker, true),
+            (
+                "replacement-id",
+                "replacement-worker",
+                AgentRole::Worker,
+                false,
+            ),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("takeover-session".into());
+            if gone {
+                agent.status = AgentStatus::Shutdown;
+                agent.last_heartbeat -= chrono::Duration::hours(1);
+            }
+            if name == "replacement-worker" {
+                agent
+                    .metadata
+                    .insert("clone_path".into(), checkout.display().to_string());
+            }
+            agents.register(&agent).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-d6b1".into(), "Recover retired worker delivery".into());
+        task.depth = TaskDepth::Light;
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("retired-worker".into());
+        let target = WorkTarget {
+            repo_selector: "project:takeover-fixture".into(),
+            target_branch: "epic/takeover".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: target,
+            assignee: "retired-worker".into(),
+            branch: old_branch.into(),
+            base_sha: base.clone(),
+        });
+        task.deliverables.parked_branch = Some(old_branch.into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        tasks.add(&task).unwrap();
+        assert!(
+            agents
+                .try_claim(&task.id, "retired-id", 600, None)
+                .unwrap()
+                .is_success()
+        );
+        assert!(assign_task_to_new_worker(
+            &root,
+            &task.id,
+            "replacement-worker",
+        ));
+        let reassigned = tasks.get(&task.id).unwrap();
+        assert_eq!(reassigned.status, TaskStatus::Open);
+        assert!(reassigned.notes.contains("force-released"));
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
+        assert_eq!(
+            reassigned.deliverables.factory_branch_start,
+            task.deliverables.factory_branch_start
+        );
+        let service = |id: &str| {
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing(id.into());
+            CasService::new(core, None)
+        };
+        let worker = service("replacement-id");
+        let supervisor = service("supervisor-id");
+        let request = |value| Parameters(serde_json::from_value(value).unwrap());
+        env.set_current_dir(&checkout);
+        worker
+            .task(request(
+                serde_json::json!({"action": "start", "id": task.id}),
+            ))
+            .await
+            .unwrap();
+        supervisor
+            .task(request(serde_json::json!({
+                "action": "rebind_branch", "id": task.id, "branch": branch,
+                "reason": "Original worker retired; approve replacement delivery",
+            })))
+            .await
+            .expect("supervisor can approve the new assignee's preserved delivery");
+        let rebound = tasks.get(&task.id).unwrap();
+        let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
+        assert_eq!(start.assignee, "replacement-worker");
+        assert_eq!(start.branch, branch);
+        assert_eq!(start.base_sha, base);
+        assert!(
+            rebound
+                .deliverables
+                .handoff_branches
+                .contains(&old_branch.into())
+        );
+        assert!(
+            rebound
+                .deliverables
+                .historical_factory_branch_anchors
+                .contains(&anchor)
+        );
+        let audit = rebound
+            .notes
+            .lines()
+            .find_map(|line| line.split_once("DELIVERY BRANCH REBOUND: "))
+            .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).unwrap())
+            .unwrap();
+        assert_eq!(
+            audit["previous_start"],
+            serde_json::to_value(task.deliverables.factory_branch_start).unwrap()
+        );
+        assert_eq!(audit["previous_tip"], anchor);
+        // The replacement can now continue, park and merge under its own name.
+        std::fs::write(checkout.join("recovery.txt"), "replacement work\n").unwrap();
+        git(&checkout, &["add", "recovery.txt"]);
+        git(&checkout, &["commit", "-qm", "cas-d6b1: complete takeover"]);
+        let tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", branch]);
+        worker
+            .task(request(
+                serde_json::json!({"action": "close", "id": task.id, "reason": "Takeover validated"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks.get(&task.id).unwrap().status,
+            TaskStatus::AwaitingMerge
+        );
+        env.set_current_dir(&project);
+        let merged = supervisor
+            .coordination(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "worktree_merge", "id": branch, "task_id": task.id, "cleanup": false,
+                }))
+                .unwrap(),
+            ))
+            .await
+            .expect("recorded replacement source resolves and merges");
+        assert_ne!(merged.is_error, Some(true), "{merged:?}");
+        assert_eq!(
+            git(&project, &["show", "epic/takeover:recovery.txt"]),
+            "replacement work"
+        );
+        git(
+            &project,
+            &["merge-base", "--is-ancestor", &tip, "epic/takeover"],
+        );
+        assert_eq!(
+            tasks.get(&task.id).unwrap().status,
+            TaskStatus::Closed,
+            "{merged:?}"
+        );
+    }
+
 }

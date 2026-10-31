@@ -6,14 +6,14 @@ export interface NavigationMachine { id: string; label: string; online?: boolean
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
-interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[] }
+interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[]; dismissEnded?: (row: ConversationRow) => Promise<void> }
 interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
 const projectName = (row: ConversationRow) => rowProjectName(row) || row.supervisor;
 const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.key;
-const endedSessionKey = (row: ConversationRow) => `${row.key}\u0000${row.ended?.at ?? ""}`;
+const endedSessionKey = (row: ConversationRow) => `${row.machineId}\u0000${row.session}\u0000${row.startedAt ?? ""}`;
 
 /**
  * cas-ade2: the register's order is alphabetical and never follows activity,
@@ -43,6 +43,8 @@ export class ProjectNavigation {
   private filter: Filter = "all";
   private collapsed = new Set<string>();
   private dismissedEnded = new Set<string>();
+  private pendingDismissals = new Set<string>();
+  private syncAttempted = new Set<string>();
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: Open; end?: End; options: Options };
 
   constructor() {
@@ -65,25 +67,45 @@ export class ProjectNavigation {
   }
 
   private isDismissedEnded(row: ConversationRow): boolean {
-    return row.ended !== undefined && this.dismissedEnded.has(endedSessionKey(row));
+    return row.ended !== undefined && (row.dismissed === true || this.dismissedEnded.has(endedSessionKey(row)));
   }
 
   private dismissEnded(row: ConversationRow): void {
     if (!row.ended) return;
-    this.dismissedEnded.add(endedSessionKey(row));
+    void this.persistDismissal(row);
+  }
+
+  private async persistDismissal(row: ConversationRow, keepHidden = false): Promise<void> {
+    const key = endedSessionKey(row);
+    if (row.dismissed || this.pendingDismissals.has(key)) return;
+    this.pendingDismissals.add(key);
+    this.dismissedEnded.add(key);
     this.saveDismissedEnded();
     const latest = this.latest;
-    if (latest) this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    if (!latest) { this.pendingDismissals.delete(key); return; }
+    this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    try {
+      await latest.options.dismissEnded?.(row);
+    } catch {
+      if (!keepHidden) this.dismissedEnded.delete(key);
+      this.saveDismissedEnded();
+      const current = this.latest!;
+      this.render(current.container, current.rows, current.open, current.end, current.options);
+      const error = current.container.ownerDocument.createElement("p");
+      error.setAttribute("role", "alert");
+      error.textContent = keepHidden
+        ? `Could not save the dismissal for ${row.supervisor} on your other devices. It stays hidden here; reload after reconnecting to sync it.`
+        : `Could not dismiss ${row.supervisor}. Try Dismiss again to save it on your other devices.`;
+      current.container.append(error);
+    } finally { this.pendingDismissals.delete(key); }
   }
 
   private clearProjectEnded(project: string): void {
     const latest = this.latest;
     if (!latest) return;
     for (const row of latest.options.allRows ?? latest.rows) {
-      if (row.ended && projectKey(row) === project) this.dismissedEnded.add(endedSessionKey(row));
+      if (row.ended && projectKey(row) === project) void this.persistDismissal(row);
     }
-    this.saveDismissedEnded();
-    this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
     const target = this.cards.get(project)?.toggle ?? latest.container;
     if (!(target instanceof HTMLButtonElement) && !target.hasAttribute("tabindex")) target.tabIndex = -1;
     target.focus({ preventScroll: true });
@@ -121,6 +143,20 @@ export class ProjectNavigation {
 
   render(container: HTMLElement, rows: readonly ConversationRow[], open: Open, end?: End, options: Options = {}): void {
     this.latest = { container, rows, open, end, options };
+    // Carry forward a pre-upgrade dismissal only when its exact receipt matches.
+    // A different birth with the same supervisor must never inherit it.
+    for (const row of options.allRows ?? rows) {
+      const legacy = `${row.key}\u0000${row.ended?.at ?? ""}`;
+      const migrated = row.ended && this.dismissedEnded.delete(legacy);
+      if (migrated) this.saveDismissedEnded();
+      const key = endedSessionKey(row);
+      if (row.ended && !row.dismissed && (migrated || this.dismissedEnded.has(key)) && !this.syncAttempted.has(key)) {
+        // A tab can close between saving locally and the hub's receipt. Replay
+        // that preference on reload, once per page, without resurrecting it.
+        this.syncAttempted.add(key);
+        void this.persistDismissal(row, true);
+      }
+    }
     const document = container.ownerDocument;
     const machines = options.machines ?? [...new Map(rows.map((row) => [row.machineId, { id: row.machineId, label: row.host, online: row.machine_online }])).values()];
     const filters = document.getElementById("conversation-filters");

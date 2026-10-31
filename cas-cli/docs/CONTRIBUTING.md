@@ -3196,9 +3196,9 @@ throwaway `dryrun-` prerelease that it deletes at the end; `cas update` never
 sees a prerelease.
 Dry runs never run the hosted hub job or send any Vercel requests.
 
-The release train and gate scripts (`release-train.sh`, `release-gate.sh`) stay
-on disk while hosts still run binaries that call them; the release path above
-does not call them.
+The retired release train has been removed. `release-gate.sh --fast-rows`
+remains the factory pre-push gate; its no-build row catalog lives in
+`scripts/release-integration-gates.py`.
 
 ### Task close delivery attribution
 

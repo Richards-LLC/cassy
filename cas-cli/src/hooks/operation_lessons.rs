@@ -40,7 +40,9 @@ pub(crate) fn operation(
                         .all(|(offset, arg)| words.get(index + 1 + offset) == Some(arg))
             })
         };
-        if starts("release-train.sh", &[]) && words.contains(&"--cut") {
+        if starts("release.sh", &[])
+            && !words.iter().any(|word| matches!(*word, "--next-version" | "--help" | "-h"))
+        {
             return Some("release-cut");
         }
         return starts("cas", &["release", "report"]).then_some("report");

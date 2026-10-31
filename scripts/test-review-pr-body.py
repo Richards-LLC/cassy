@@ -51,35 +51,6 @@ class ReviewBodyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "could not derive"):
             review.release_body(CHANGELOG, "3.29.2")
 
-    def test_real_release_stage_output_and_untrusted_changelog(self):
-        with tempfile.TemporaryDirectory(prefix="cas-review-body-") as directory:
-            root = Path(directory)
-            worktree = root / "worktree with spaces"
-            run = root / "run with spaces"
-            worktree.mkdir()
-            run.mkdir()
-            (worktree / "CHANGELOG.md").write_text(CHANGELOG)
-            (run / "gate.log").write_text("PASS workspace-tests\nFAIL nextest\n")
-            env = dict(os.environ, REVIEW_ROOT=str(ROOT), REVIEW_WT=str(worktree), REVIEW_RUN=str(run),
-                       CAS_RELEASE_TRAIN_TASK_RISK="platform, concurrency", CAS_RELEASE_TRAIN_TASK_DOOR="two-way")
-            result = subprocess.run(["bash", "-c", '''
-script_dir="$REVIEW_ROOT/scripts"
-worktree="$REVIEW_WT"
-run_dir="$REVIEW_RUN"
-version=3.29.0
-source "$script_dir/release-train.d/pr-body.sh"
-cut_has_external_stage() { return 1; }
-cut_stage_pr_body
-'''], env=env, cwd=root, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            body = (run / "pr-body.md").read_text()
-            self.assertIn("## Summary\n", body)
-            self.assertIn("## Evidence\n", body)
-            self.assertIn("## Merge Danger\n", body)
-            self.assertIn("**Door:** two-way", body)
-            self.assertIn("**Risk:** platform, concurrency", body)
-            self.assertIn("FAIL nextest", body)
-            self.assertFalse((root / "escaped").exists())
 
     def test_cli_rejects_invalid_door_and_risk_without_output(self):
         with tempfile.TemporaryDirectory(prefix="cas-review-validation-") as directory:

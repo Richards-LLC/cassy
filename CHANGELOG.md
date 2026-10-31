@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Removed — Release tooling
+
+- **Retired local release train** — Removed the unused release train, its lane checkers and train-only tests. Release lessons now follow `scripts/release.sh`; CI and the factory pre-push gate keep their shared fast-row catalog.
+
 ### Fixed — Store IDs
 
 - **Rapid creates use one collision-resistant generator** — Tasks, skills, specs and indexed code now share the counter mixed into generated IDs. Creates during the same clock tick no longer reuse identical candidates, and occupied fallback IDs are retried. Existing ID prefixes and lengths stay unchanged.

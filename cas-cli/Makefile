@@ -242,7 +242,6 @@ test-ci-tiers:
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-self-hosted-rust-setup.sh
 	cd .. && python3 scripts/test-release-learning.py
-	cd .. && python3 scripts/test-release-publish-toolchain.py
 	cd .. && python3 scripts/test-release-binary-artifact.py
 	cd .. && ./scripts/test-check-operator-launch.sh
 	cd .. && ./scripts/test-release.sh

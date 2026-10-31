@@ -1577,6 +1577,7 @@ journeys:
   - hub-web/src/conversation-list.ts
   - hub-web/src/connection.ts
   - hub-web/e2e/journeys/session-identity.journey.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/artifact-open.ts
@@ -2309,6 +2310,7 @@ journeys:
   owner_groups: [commander_runtime]
   owners:
   - hub-web/src/team-view.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/progress-model.ts
   - hub-web/src/progress-view.ts
   - hub-web/src/conversation-shell.ts

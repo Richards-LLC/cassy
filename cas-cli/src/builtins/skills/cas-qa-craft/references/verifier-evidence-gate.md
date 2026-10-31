@@ -96,3 +96,15 @@ With a merge queue, the queue owns the full suite; without one, the full suite m
 ## Scratch checkout lifetime
 
 The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). A verdict or task close reclaims disposable `target/` output once the dispatch is resolved (or a terminal task has no active dispatch), with no lease or live user; existing GC/admission retries deferred cleanup. Source and its Git worktree registration retain the two-hour idle grace period before GC removes them. Checkouts with source changes are kept. This ownership record makes cleanup independent of whether your session exits normally.
+
+## Candidate fixture isolation
+
+Before running a candidate `serve` or any stateful command, create a disposable
+project with an empty `.cas` directory and a disposable HOME outside the source
+checkout. Set `CAS_ROOT` to that fixture `.cas`, `HOME` to the disposable home,
+and `XDG_CONFIG_HOME` beneath it for every candidate subprocess, including the
+fixture's `cas init`. Initialize the fixture store before serving it and record
+the resolved store path with the command receipt. A scratch Git worktree still
+discovers the main checkout's live `.cas`; unsetting `CAS_ROOT` does not isolate
+it. Keep these overrides scoped to candidate subprocesses so your authenticated
+reviewer MCP session retains its factory binding.

@@ -621,8 +621,8 @@ mod tests {
         );
         sentinel.title = Some("Current supervisor release recovery guidance".to_string());
         // The saved handoff must survive each harness's delivery channel.
-        sentinel.entry_type = crate::types::EntryType::Handoff;
-        sentinel.tags = vec!["release".to_string(), "recovery".to_string()];
+        sentinel.entry_type = crate::types::EntryType::Learning;
+        sentinel.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
         sentinel.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&sentinel).unwrap();
 

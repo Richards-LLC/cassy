@@ -4240,8 +4240,8 @@ mod tests {
         );
         entry.title = Some("Current Codex release recovery guidance".to_string());
         // Exercise launch delivery with evidence the supervisor policy admits.
-        entry.entry_type = crate::types::EntryType::Handoff;
-        entry.tags = vec!["release".to_string(), "recovery".to_string()];
+        entry.entry_type = crate::types::EntryType::Learning;
+        entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -4319,8 +4319,8 @@ mod tests {
             "Operator prefers Grok release recovery audit receipts that preserve intent".to_string(),
         );
         entry.title = Some("Current Grok release recovery guidance".to_string());
-        entry.entry_type = crate::types::EntryType::Handoff;
-        entry.tags = vec!["release".to_string(), "recovery".to_string()];
+        entry.entry_type = crate::types::EntryType::Learning;
+        entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 

@@ -521,9 +521,7 @@ impl EvalCorpus {
         }
         drop(store);
 
-        // `store_add` stamps `updated_at = now()`, which would make the ambient
-        // retriever's `ORDER BY coalesce(updated_at, created) DESC` reflect
-        // insertion order instead of the corpus's real recency order.
+        // Preserve corpus recency rather than the insertion timestamp.
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db"))
             .map_err(|e| EvalError::Store(format!("reopen: {e}")))?;
         conn.execute("UPDATE entries SET updated_at = created", [])
@@ -1531,8 +1529,8 @@ pub type CaseBreakdown = Vec<(String, Vec<CaseScore>)>;
 ///
 /// Owns its temp directories, so the harness can never touch a live store or
 /// the user's `~/.cas`. Each tier mode gets a corpus WITH a real Tantivy index,
-/// because that is what production reads; the Basic control and the ambient
-/// selectors are unaffected by its presence.
+/// because that is what production reads; the Basic control is unaffected
+/// by its presence.
 pub fn run_all(
     fixture: &EvalFixture,
 ) -> Result<(Vec<SelectorMetrics>, CaseBreakdown), EvalError> {

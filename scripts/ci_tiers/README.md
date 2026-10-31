@@ -32,7 +32,7 @@ packages are never modified.
 The shared `.github/actions/run-script-suite-tests` action also provisions the
 16 registered script/visual QA suites. PRs and factory pushes select each suite
 from its own test and input paths in `ci-script-tests-for-diff.py`, inside the
-existing classification job. An unrelated diff installs nothing and runs no
+existing scoped validation job. An unrelated diff installs nothing and runs no
 suite. Assembly retains every row in `test-ci-tiers`. Browser suites use the
 locked `hub-web` dependencies and Chromium; PDF checks use pinned PyMuPDF in a
 venv. The native terminal suite runs against the CLI the full lane already

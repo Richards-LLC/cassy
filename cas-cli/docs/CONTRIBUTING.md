@@ -2259,7 +2259,7 @@ row. A changed `hub-web/package.json` runs the one named worker-memory weight
 assertion (0.001 s) rather than the full worker-memory suite.
 
 The provisioned script cohort in `scripts/ci-script-tests-for-diff.py` runs
-inside the existing classification jobs in both `ci.yml` and slim `lane.yml`.
+inside the existing scoped validation jobs in both `ci.yml` and slim `lane.yml`.
 The shared `run-script-suite-tests` action installs only selected suites'
 dependencies; unrelated inputs run no suite, Node setup, pip or npm install.
 These suites are deferred out of the bounded fast rows, then included in the

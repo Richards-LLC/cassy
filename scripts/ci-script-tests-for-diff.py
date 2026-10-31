@@ -14,7 +14,7 @@ minutes, so merge admission runs only the entries whose subject changed:
 Entries in HEAVY take longer than lane admission's budget allows (about 90 s
 for every fast row together). They are reported as deferred to the full
 `ci-script-tests` row, which the integration sweep and the cut still run.
-Provisioned suites run in the existing CI classification job on changed
+Provisioned suites run in the existing scoped validation job on changed
 inputs. The source-built terminal suite also runs after the full-lane build.
 
 Exit 0 when every selected test passes, 1 when one fails, 2 when the tier
@@ -54,7 +54,7 @@ TERMINAL_QA_TEST = "scripts/terminal-qa.test.mjs"
 TERMINAL_QA_BUILTIN = "cas-cli/src/builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"
 
 # These suites need provisioned tools or exceed fast-row admission's budget.
-# The existing classification job runs just their changed inputs on PRs/pushes;
+# The existing scoped validation job runs just their changed inputs on PRs/pushes;
 # test-ci-tiers retains every command for assembly. Directory globs include
 # fixture additions/deletions, not just the runner's similarly named script.
 VISUAL_INPUTS = (
@@ -219,7 +219,7 @@ def main() -> int:
     failed = []
     for test, command in selected:
         if test in PROVISIONED_INPUTS and not (args.provisioned or args.all or args.only):
-            print(f"ci-script-tests-changed: DEFERRED {test} to the path-scoped CI classification step")
+            print(f"ci-script-tests-changed: DEFERRED {test} to the path-scoped CI validation step")
             continue
         if test in HEAVY and not args.all:
             print(f"ci-script-tests-changed: DEFERRED {test} (~{HEAVY[test]}s) to the full "

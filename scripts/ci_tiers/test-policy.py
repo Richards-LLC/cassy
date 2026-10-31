@@ -201,7 +201,7 @@ fi
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
             return body  # a literal such as runs-on: ubuntu-latest
-        body = re.sub(r'\b(?:github|needs|steps|vars|inputs)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
         return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads})
@@ -325,10 +325,14 @@ fi
         jobs = self.ci()['jobs']
         def runs(job, name, slim, fast, event='push', ref='refs/heads/factory/w'):
             step = next(s for s in jobs[job]['steps'] if s.get('name') == name)
-            return self.gh_expr(step['if'], {
+            context = {
+                'needs.ci-diff.outputs.class': 'rust-touched',
                 'github.event_name': event, 'github.ref': ref, 'vars.CAS_LANE_SLIM': slim,
                 'steps.classify-diff.outputs.fast-admission': fast,
-                'steps.classify-diff.outputs.rust-unaffected': 'false'})
+                'steps.classify-diff.outputs.rust-unaffected': 'false'}
+            for key, value in jobs[job].get('env', {}).items():
+                context[f'env.{key}'] = str(self.gh_value(value, context)).lower()
+            return self.gh_expr(step['if'], context)
         rust = 'Run change-scoped tests with impact evidence'
         for job, name, fast in [
             ('docs-lint', 'Run no-build release gate rows', 'true'), ('docs-lint', 'Markdown lint', 'true'),
@@ -493,6 +497,11 @@ else:
 
     def test_real_required_rollup_rejects_every_failed_or_cancelled_dependency(self):
         job = self.ci()['jobs']['fast-validation']
+        pr = next(s for s in job['steps'] if 'SCOPED' in s.get('env', {}))
+        self.assertIn('scoped-validation-fast', job['needs'])
+        for state in ['success', 'skipped', 'failure', 'cancelled', '']:
+            self.assertEqual(self.run_body(pr['run'], {'CI_DIFF': 'success', 'SCOPED': state}).returncode == 0,
+                             state in ['success', 'skipped'])
         step = next(s for s in job['steps'] if 'test "$PREFLIGHT" = success' in s.get('run', ''))
         healthy = dict(PREFLIGHT='success', SUITE='success', DOCS='success',
                        CI_TIERS='success', SLACK_BRIDGE='success', WEB='success', JOURNEYS='success')
@@ -526,9 +535,10 @@ else:
         action = '.github/actions/run-script-suite-tests'
         jobs = self.ci()['jobs']
         lane = policy.load(self.root / '.github/workflows/lane.yml')
-        for job in [jobs['ci-diff'], lane['jobs']['ci-diff'], jobs['fast-validation-ci-tiers']]:
+        for job in [jobs['scoped-validation-fast'], lane['jobs']['scoped-validation-fast'], jobs['fast-validation-ci-tiers']]:
             self.assertEqual(sum(step.get('uses') == f'./{action}' for step in job['steps']), 1)
-        admission = next(step for step in jobs['ci-diff']['steps'] if step.get('uses') == f'./{action}')
+        admission = jobs['scoped-validation-fast']
+        self.assertFalse(any(step.get('uses') == f'./{action}' for step in jobs['ci-diff']['steps']))
         # Full Rust lanes run the Makefile tier, so their classifier must not
         # run the provisioned suites a second time. PRs and web-only queues do.
         for event, ref, unaffected, expected in [
@@ -538,9 +548,11 @@ else:
             ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'true', True),
         ]:
             self.assertEqual(self.gh_expr(admission['if'], {'github.event_name': event, 'github.ref': ref,
-                'steps.classify-diff.outputs.rust-unaffected': unaffected}), expected)
+                'needs.ci-diff.outputs.class': 'docs-only' if unaffected == 'true' else 'rust-touched',
+                'needs.ci-diff.outputs.script-tests-needed': 'true',
+                'needs.ci-diff.outputs.rust-unaffected': unaffected}), expected)
         steps = policy.load(self.root / action / 'action.yml')['runs']['steps']
-        select = next(s for s in steps if s.get('id') == 'script-tests')
+        select = next(s for s in jobs['ci-diff']['steps'] if s.get('id') == 'script-tests')
         run = steps[-1]
         for path in ['scripts/ci-script-tests-for-diff.py', 'cas-cli/Makefile']:
             destination = self.root / path
@@ -576,6 +588,16 @@ else:
                                  dict(web='false', browser='false', pdf='false', lint='false'))
                 context = {'inputs.full-tier': 'false', **{
                     f'steps.script-tests.outputs.{key}': val for key, val in signals.items()}}
+                routing = {'github.event_name': 'pull_request', 'github.ref': 'refs/pull/1/merge',
+                           'needs.ci-diff.outputs.class': 'docs-only',
+                           'needs.ci-diff.outputs.script-tests-needed': signals['needed']}
+                self.assertEqual(self.gh_expr(admission['if'], routing), expected)
+                self.assertFalse(self.gh_expr(admission['env']['LEGACY_SCOPED'], routing))
+                # Reusing the job for PR suites must not start its legacy Rust
+                # or release checks for events that previously skipped them.
+                for step in admission['steps'][1:]:
+                    if step.get('uses') != f'./{action}':
+                        self.assertFalse(self.gh_expr(step['if'], {**routing, 'env.LEGACY_SCOPED': 'false'}))
                 # Unrelated PRs select no setup, install, or suite step.
                 for step in steps[1:]:
                     self.assertEqual(self.gh_expr(step['if'], context),

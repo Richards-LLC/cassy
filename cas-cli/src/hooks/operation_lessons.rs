@@ -170,7 +170,7 @@ mod tests {
 
         let cut = input(
             "Bash",
-            serde_json::json!({ "command": "cd /wt && scripts/release-train.sh 9.99.3 /wt --cut > cut.log 2>&1 &" }),
+            serde_json::json!({ "command": "cd /wt && scripts/release.sh > cut.log 2>&1 &" }),
         );
         let context = surfaced(temp.path(), &cut);
         let scratch_at = context.find(&scratch).expect("scratch-base lesson surfaced");
@@ -181,7 +181,7 @@ mod tests {
         assert!(surfaced(temp.path(), &skill).contains(&scratch));
         let status = input(
             "Bash",
-            serde_json::json!({ "command": "scripts/release-train.sh 9.99.3 /wt --status" }),
+            serde_json::json!({ "command": "scripts/release.sh --next-version" }),
         );
         assert!(!surfaced(temp.path(), &status).contains("[operation lessons"));
     }

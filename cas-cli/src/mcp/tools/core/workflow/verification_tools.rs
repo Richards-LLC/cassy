@@ -229,10 +229,25 @@ impl CasCore {
         let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(
-                "Invalid verification status. Expected: approved, rejected, error, or skipped.",
+                "Invalid verification status. Expected: approved, rejected, supervisor_call, error, or skipped.",
             ),
             data: None,
         })?;
+
+        if status == VerificationStatus::Pending {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Invalid verification status: pending is reserved for system dispatch markers.",
+            ));
+        }
+        if status == VerificationStatus::SupervisorCall
+            && authored_content.summary.trim().is_empty()
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "A supervisor_call requires the question in summary.",
+            ));
+        }
 
         // Resolve authority only from the server's registered caller identity.
         // Caller-supplied names, models, verifier types, task ownership, harness
@@ -727,14 +742,18 @@ impl CasCore {
                         retry_note
                     )));
                 }
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(concat!(
-                        "Supervisor-direct verification rejected: the exact dispatch was ",
-                        "already resolved with a different verdict."
-                    )),
-                    data: None,
-                });
+                // A question is retained as history, not a final verdict. The
+                // supervisor answers it using this exact proof boundary.
+                if existing.status != VerificationStatus::SupervisorCall {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(concat!(
+                            "Supervisor-direct verification rejected: the exact dispatch was ",
+                            "already resolved with a different verdict."
+                        )),
+                        data: None,
+                    });
+                }
             }
         }
 
@@ -882,80 +901,87 @@ impl CasCore {
                 data: None,
             })?;
 
-            cas_store::resolve_verification_dispatch_with_conn(
-                &tx,
-                &dispatch.id,
-                &caller_id,
-                verification.capability_id.as_deref(),
-                supervisor_direct,
-            )
-            .map_err(|_| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Verification dispatch resolution rejected: caller is not the bound verifier or a registered supervisor-direct authority.",
-                ),
-                data: None,
-            })?;
-
-            let approved_delivery = matches!(
-                verification.status,
-                VerificationStatus::Approved | VerificationStatus::Skipped
-            );
-            let delivery_transitioned = if let Some(delivery_transaction_id) =
-                dispatch.delivery_transaction_id.as_deref()
-                && cas_store::transition_worker_delivery_verification_with_conn(
+            // A question transfers the decision to the supervisor. The child
+            // authority is spent, but the dispatch, delivery and pending task
+            // remain unchanged until the supervisor records the answer/verdict.
+            if verification.status != VerificationStatus::SupervisorCall {
+                cas_store::resolve_verification_dispatch_with_conn(
                     &tx,
-                    delivery_transaction_id,
-                    &verification.id,
-                    approved_delivery,
+                    &dispatch.id,
                     &caller_id,
+                    verification.capability_id.as_deref(),
+                    supervisor_direct,
                 )
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to advance transactional worker delivery: {e}"
-                    )),
-                    data: None,
-                })?
-                .is_some()
-            {
-                true
-            } else {
-                false
-            };
-
-            if delivery_transitioned {
-                tx.execute(
-                    "UPDATE tasks
-                     SET status = ?2, pending_verification = 0, updated_at = ?3
-                     WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
-                    rusqlite::params![
-                        req.task_id,
-                        if approved_delivery {
-                            "awaiting_merge"
-                        } else {
-                            "blocked"
-                        },
-                        chrono::Utc::now().to_rfc3339(),
-                    ],
-                )
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to project delivery verification state: {e}"
-                    )),
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verification dispatch resolution rejected: caller is not the bound verifier or a registered supervisor-direct authority.",
+                    ),
                     data: None,
                 })?;
-            }
 
-            if task.pending_verification {
-                cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
-                    |e| McpError {
+                let approved_delivery = matches!(
+                    verification.status,
+                    VerificationStatus::Approved | VerificationStatus::Skipped
+                );
+                let delivery_transitioned = if let Some(delivery_transaction_id) =
+                    dispatch.delivery_transaction_id.as_deref()
+                    && cas_store::transition_worker_delivery_verification_with_conn(
+                        &tx,
+                        delivery_transaction_id,
+                        &verification.id,
+                        approved_delivery,
+                        &caller_id,
+                    )
+                    .map_err(|e| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to clear pending_verification: {e}")),
+                        message: Cow::from(format!(
+                            "Failed to advance transactional worker delivery: {e}"
+                        )),
                         data: None,
-                    },
-                )?;
+                    })?
+                    .is_some()
+                {
+                    true
+                } else {
+                    false
+                };
+
+                if delivery_transitioned {
+                    tx.execute(
+                        "UPDATE tasks
+                         SET status = ?2, pending_verification = 0, updated_at = ?3
+                         WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
+                        rusqlite::params![
+                            req.task_id,
+                            if approved_delivery {
+                                "awaiting_merge"
+                            } else {
+                                "blocked"
+                            },
+                            chrono::Utc::now().to_rfc3339(),
+                        ],
+                    )
+                    .map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to project delivery verification state: {e}"
+                        )),
+                        data: None,
+                    })?;
+                }
+
+                if task.pending_verification {
+                    cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
+                        |e| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to clear pending_verification: {e}"
+                            )),
+                            data: None,
+                        },
+                    )?;
+                }
             }
 
             tx.commit().map_err(|e| McpError {
@@ -965,7 +991,9 @@ impl CasCore {
             })?;
         }
 
-        crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
+        if verification.status != VerificationStatus::SupervisorCall {
+            crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
+        }
 
         // Emit VerificationAdded event for task lifecycle tracking
         if let Ok(event_store) = cas_store::SqliteEventStore::open(&self.cas_root) {
@@ -974,6 +1002,8 @@ impl CasCore {
             let status_str = match verification.status {
                 VerificationStatus::Approved => "approved",
                 VerificationStatus::Rejected => "rejected",
+                VerificationStatus::SupervisorCall => "supervisor_call",
+                VerificationStatus::Pending => "pending",
                 VerificationStatus::Error => "error",
                 VerificationStatus::Skipped => "skipped",
             };
@@ -1014,7 +1044,14 @@ impl CasCore {
         let cassy_merged = task.deliverables.green_merge_commit.is_some()
             && task.deliverables.effective_merge_ci_admission()
                 != cas_types::MergeCiAdmission::Override;
-        let close_retry = if verification.status == VerificationStatus::Approved
+        let close_retry = if verification.status == VerificationStatus::SupervisorCall {
+            format!(
+                "\nSupervisor decision required. Answer on this dispatch: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<answer and final verdict>\". No re-dispatch is needed.",
+                crate::mcp::tools::core::guidance::caller_prefix(),
+                req.task_id,
+                requested_dispatch_id,
+            )
+        } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
             && proof_dispatch.delivery_transaction_id.is_none()
@@ -1061,17 +1098,20 @@ impl CasCore {
         };
 
         if let Some(outcome) = crate::quality_ledger::verifier_outcome(verification.status) {
-            crate::quality_ledger::check_run(&self.cas_root, crate::quality_ledger::Check {
-                natural_key: format!("verifier|{id}"),
-                check_id: "task_verifier",
-                stage: cas_store::CheckStage::Verifier,
-                outcome,
-                task_id: Some(&req.task_id),
-                sha: None,
-                minutes: req.duration_ms.map(|ms| ms as f64 / 60_000.0),
-                link: None,
-                actor: Some(&caller_id),
-            });
+            crate::quality_ledger::check_run(
+                &self.cas_root,
+                crate::quality_ledger::Check {
+                    natural_key: format!("verifier|{id}"),
+                    check_id: "task_verifier",
+                    stage: cas_store::CheckStage::Verifier,
+                    outcome,
+                    task_id: Some(&req.task_id),
+                    sha: None,
+                    minutes: req.duration_ms.map(|ms| ms as f64 / 60_000.0),
+                    link: None,
+                    actor: Some(&caller_id),
+                },
+            );
         }
 
         Ok(Self::success(format!(
@@ -1116,6 +1156,9 @@ impl CasCore {
             output.push_str(&format!("Verified by: {agent_id}\n"));
         }
         output.push_str(&format!("Provenance: {}\n", verification.provenance));
+        if let Some(dispatch_id) = &verification.dispatch_id {
+            output.push_str(&format!("Dispatch: {dispatch_id}\n"));
+        }
         if let Some(capability_id) = &verification.capability_id {
             output.push_str(&format!("Verifier capability: {capability_id}\n"));
         }
@@ -1207,12 +1250,7 @@ impl CasCore {
         );
 
         for v in verifications.iter().take(limit) {
-            let status_icon = match v.status {
-                VerificationStatus::Approved => "✅",
-                VerificationStatus::Rejected => "❌",
-                VerificationStatus::Error => "⚠️",
-                VerificationStatus::Skipped => "⏭️",
-            };
+            let status_icon = verification_status_emoji(v.status);
             let issues_info = if v.issues.is_empty() {
                 String::new()
             } else {
@@ -1251,12 +1289,7 @@ impl CasCore {
             })? {
             Some(mut v) => {
                 v.sanitize_verifier_authored_content();
-                let status_icon = match v.status {
-                    VerificationStatus::Approved => "✅",
-                    VerificationStatus::Rejected => "❌",
-                    VerificationStatus::Error => "⚠️",
-                    VerificationStatus::Skipped => "⏭️",
-                };
+                let status_icon = verification_status_emoji(v.status);
                 let issues_info = if v.issues.is_empty() {
                     String::new()
                 } else {
@@ -1368,6 +1401,8 @@ fn verification_status_emoji(status: VerificationStatus) -> &'static str {
     match status {
         VerificationStatus::Approved => "✅",
         VerificationStatus::Rejected => "❌",
+        VerificationStatus::SupervisorCall => "❓",
+        VerificationStatus::Pending => "⏳",
         VerificationStatus::Error => "⚠️",
         VerificationStatus::Skipped => "⏭️",
     }

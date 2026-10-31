@@ -68,10 +68,13 @@ from the close verifier or substitute the children's ledgers for the epic walk.
 Neither approve nor reject a ledger because of its `NOT EXERCISED` rows. When
 the evidence gate otherwise passes and at least one row is `NOT EXERCISED`
 (including rows you downgraded for a weak label), stop and escalate: record
-`status=error` with a summary that starts
+`status=supervisor_call` with a summary that starts
 `SUPERVISOR CALL: <n> NOT EXERCISED row(s)` and lists each row ID, cell, and
 why it was not exercised, then say the same in your final output. The
-supervisor decides whether the owed rows block the close.
+supervisor decides whether the owed rows block the close, then answers with
+`verification action=add` on the same `dispatch_id`, the final `approved` or
+`rejected` status, and the answer in `summary`. The dispatch stays open; no
+re-dispatch is needed.
 
 ## Measurable claims: same-command baseline and treatment
 

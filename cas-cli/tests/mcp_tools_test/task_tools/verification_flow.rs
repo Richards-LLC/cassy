@@ -9845,7 +9845,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         .expect("dispatch row exists");
     assert_eq!(
         legacy_dispatch.status,
-        cas::types::VerificationStatus::Error
+        cas::types::VerificationStatus::Pending
     );
     assert!(legacy_dispatch.summary.starts_with("Dispatch requested"));
 

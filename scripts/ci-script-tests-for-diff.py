@@ -49,7 +49,6 @@ NAMED = {
     "hub-web/package.json": "python3 scripts/test-worker-memory.py "
                             "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
 }
-RELEASE_TRAIN_TEST = "scripts/test-release-portable.py"
 TERMINAL_QA_TEST = "scripts/terminal-qa.test.mjs"
 TERMINAL_QA_BUILTIN = "cas-cli/src/builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"
 
@@ -79,8 +78,7 @@ PROVISIONED_INPUTS = {
     "scripts/test-opencode-slack-policy.mjs": ("crates/cas-mux/src/opencode.rs",),
     "scripts/test-release-budget-breach.py": (
         "scripts/release-metrics.py", "scripts/release-budget-breach.py",
-        "scripts/release-stage-budgets.json", "scripts/release-train.d/post-publication.sh",
-        "scripts/release-train.d/announce.sh", "scripts/release-portable.sh",
+        "scripts/release-stage-budgets.json", "scripts/release-portable.sh",
         "scripts/release-latency-receipt.sh", "scripts/release-train-announce.py"),
     "scripts/test-release-report-post.py": (
         "scripts/release-report-post.py", "docs/release-reports/v3.19.0.pdf",
@@ -162,12 +160,6 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         if not test:
             continue
         subject = stem(test).removeprefix("test-")
-        # cas-850b: stem matching misses both release-train.sh and
-        # release-train.d/post-publication.sh, although the portable suite
-        # exercises their release/report lifecycle.
-        release_train_related = test == RELEASE_TRAIN_TEST and any(
-            path.startswith("scripts/release-train") for path in changed
-        )
         terminal_qa_related = test == TERMINAL_QA_TEST and any(
             path.startswith("scripts/terminal-qa") or path == TERMINAL_QA_BUILTIN for path in changed
         )
@@ -178,7 +170,7 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         # outside scripts/ must not select an unrelated suite.
         stem_related = test not in PROVISIONED_INPUTS and any(
             path.startswith("scripts/") and stem(path) in {subject, stem(test)} for path in changed)
-        if test in changed or stem_related or provisioned_related or release_train_related or terminal_qa_related:
+        if test in changed or stem_related or provisioned_related or terminal_qa_related:
             selected.append((test, command))
     return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
 

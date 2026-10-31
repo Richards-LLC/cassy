@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable timestamp/path contracts and the real train report-stage boundary."""
+"""Portable timestamp/path contracts."""
 import json
 import hashlib
 import os
@@ -11,7 +11,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/release-portable.sh'
-TRAIN = ROOT / 'scripts/release-train.sh'
 
 
 class Fixture(unittest.TestCase):
@@ -88,106 +87,6 @@ class Portable(Fixture):
                                 env=env, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split()[0], hashlib.sha256(b'fixture').hexdigest())
-
-    def test_train_stat_fixture_uses_native_host_fallback(self):
-        source = (ROOT / 'scripts/test-release-train.sh').read_text()
-        start = source.index('# cas-fed5: the train and gate run on stock macOS.')
-        end = source.index('# setsid absent (macOS):', start)
-        fixture = ('set -euo pipefail\n' + f'tmp={shlex.quote(str(self.root))}\n'
-                   + f'repo_root={shlex.quote(str(ROOT))}\n'
-                   + 'ok() { echo PASS; }; bad() { echo "$1" >&2; exit 1; }\n'
-                   + source[start:end])
-        result = subprocess.run(['/bin/bash', '-c', fixture], env=self.env, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('PASS\n', result.stdout)
-
-
-class Report(Fixture):
-    def setUp(self):
-        super().setUp()
-        self.repo = self.root / 'repo'
-        self.repo.mkdir()
-        for args in [('init', '-q'), ('config', 'user.name', 'Fixture'), ('config', 'user.email', 'fixture@example.invalid'),
-                     ('commit', '--allow-empty', '-qm', 'fixture'), ('tag', '-a', 'v9.99.7', '-m', 'fixture')]:
-            subprocess.run(['git', '-C', str(self.repo), *args], check=True, capture_output=True)
-        sha = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
-        self.run = self.root / 'artifacts/v9.99.7-repo'
-        self.run.mkdir(parents=True)
-        (self.run / 'landed-main.sha').write_text(sha + '\n')
-        (self.run / 'release-workflow.json').write_text(json.dumps(
-            dict(headBranch='main', event='push', headSha=sha, status='completed', conclusion='success')))
-        self.receipts('2026-10-02T19:28:19Z')
-        self.renderer = self.root / 'render'
-        self.executable(self.renderer, '#!/bin/sh\necho reached >"$RENDER_MARKER"\nexit 7\n')
-        self.env.update(CAS_RELEASE_ARTIFACTS_ROOT=str(self.root / 'artifacts'),
-                        CAS_RELEASE_TRAIN_REPORT_CMD=str(self.renderer), RENDER_MARKER=str(self.root / 'render.called'),
-                        CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO='')
-
-    def receipts(self, timestamp):
-        (self.run / 'release-published.receipt').write_text(
-            f'TAG=v9.99.7\nPUBLISHED_AT={timestamp}\nLINUX_SHA256={"a" * 64}\nMACOS_SHA256={"b" * 64}\n')
-        (self.run / 'release-latency.receipt').write_text(
-            f'TAG=v9.99.7\nPUBLISHED_AT={timestamp}\nPUBLISH_LATENCY_SECONDS=25\n')
-
-    def train(self, action):
-        return subprocess.run(['bash', str(TRAIN), '9.99.7', str(self.repo), action],
-                              env=self.env, text=True, capture_output=True)
-
-    def test_report_verifies_publication_and_reaches_renderer_with_bsd_date(self):
-        result = self.train('--report')
-        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
-        self.assertIn('publication: verified at 2026-10-02T19:28:19Z', result.stdout)
-        self.assertTrue((self.root / 'render.called').is_file())
-
-    def test_invalid_timestamp_still_blocks_renderer(self):
-        self.receipts('not-a-date')
-        result = self.train('--report')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('PUBLISHED_AT is invalid', result.stdout)
-        self.assertFalse((self.root / 'render.called').exists())
-
-    def report_files(self):
-        directory = self.repo / 'docs/release-reports'
-        directory.mkdir(parents=True)
-        pdf = b'%PDF-1.7\n/Type /Page\n'
-        html = b'<html>fixture</html>\n'
-        prefix = directory / 'v9.99.7'
-        Path(str(prefix) + '.md').write_text('fixture\n')
-        Path(str(prefix) + '.pdf').write_bytes(pdf)
-        Path(str(prefix) + '.html').write_bytes(html)
-        pdf_sha = hashlib.sha256(pdf).hexdigest()
-        fields = dict(TAG='v9.99.7', PDF_PATH='docs/release-reports/v9.99.7.pdf',
-                      HTML_PATH='docs/release-reports/v9.99.7.html', PDF_SHA256=pdf_sha,
-                      PDF_SIZE_BYTES=len(pdf), PDF_REMOTE_SHA256=pdf_sha, PDF_REMOTE_SIZE_BYTES=len(pdf),
-                      PDF_REMOTE_PAGE_COUNT=1, HTML_SHA256=hashlib.sha256(html).hexdigest(),
-                      PAGE_COUNT=1, PDF_FILE_PERMALINK='https://example.invalid/fixture',
-                      PDF_FILE_ID='pdf-fixture', PDF_MESSAGE_ID='pdf-message',
-                      PDF_MESSAGE_PERMALINK='https://example.invalid/pdf-message', HTML_FILE_ID='html-fixture', USER_THREAD_TS='1.2', DEV_THREAD_TS='3.4')
-        (self.run / 'release-report.receipt').write_text(''.join(f'{k}={v}\n' for k, v in fields.items()))
-        # Exercise receipt routing without rendering or posting a PDF.
-        self.executable(self.bin / 'pdfinfo', '#!/bin/sh\necho "Pages: 1"\n')
-        return directory
-
-    def test_report_receipt_accepts_symlinked_checkout_without_realpath(self):
-        self.report_files()
-        alias = self.root / 'alias/repo'
-        alias.parent.mkdir()
-        alias.symlink_to(self.repo, target_is_directory=True)
-        self.repo = alias
-        result = self.train('--report')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('release report: verified PDF=', result.stdout)
-        self.assertFalse((self.root / 'render.called').exists())
-
-    def test_report_receipt_rejects_symlink_escape(self):
-        directory = self.report_files()
-        outside = self.root / 'outside.pdf'
-        pdf = directory / 'v9.99.7.pdf'
-        pdf.rename(outside)
-        pdf.symlink_to(outside)
-        result = self.train('--report')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('PDF_PATH or HTML_PATH escapes the release worktree', result.stdout)
 
 
 class MacReceipts(Fixture):

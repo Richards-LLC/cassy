@@ -1550,11 +1550,13 @@ pub(super) fn merge_tip_content_presence(
                         append_unique(&mut dropped_paths, vec![path]);
                         continue;
                     }
-                    // GH #1404: an exact rename made inside this delivery's
-                    // anchor merge is absent from the ordinary rename walk.
-                    // Prove ownership up to its first parent before carrying
-                    // that content to the unchanged destination on target.
-                    if let Some((first, renamed)) = exact_anchor_rename(repo, merge_tip, &path)
+                    // cas-68d2 / GH #1404: a rename inside the anchor may
+                    // also edit a migration ID. Prove the earlier task owns
+                    // the source up to the merge, then measure the net
+                    // base..anchor destination, not the obsolete source blob.
+                    // The anchor-to-target walk still rejects a later loss,
+                    // including deletion followed by identical recreation.
+                    if let Some((first, renamed)) = anchor_rename(repo, merge_tip, &path)
                         && git_commit_is_ancestor(repo, commit, &first)
                         && git_diff_is_empty(repo, merge_tip, &target_ref, &renamed) == Some(true)
                         && matches!(
@@ -1564,13 +1566,17 @@ pub(super) fn merge_tip_content_presence(
                             DeliveryContentPresence::Present { .. }
                                 | DeliveryContentPresence::Superseded { .. }
                         )
-                        && matches!(
-                            super::delivery_content_presence_in_parent_for_paths(
-                                repo, merge_tip, &target_ref, Some(std::slice::from_ref(&renamed)), false,
-                            ),
-                            DeliveryContentPresence::Present { .. }
-                                | DeliveryContentPresence::Superseded { .. }
-                        )
+                        && let Some(base) = git_text(repo, &["rev-parse", &format!("{commit}^1")])
+                        && match delivery_evolution::line_content_presence(
+                            repo, &base, merge_tip, &target_ref, &renamed,
+                        ) {
+                            Ok(Some(DeliveryContentPresence::Present { .. }
+                                | DeliveryContentPresence::Superseded { .. })) => true,
+                            Ok(None) => super::reverse_delivery_path_applies_to_tree(
+                                repo, &base, merge_tip, &target_ref, &renamed,
+                            ).unwrap_or(false),
+                            _ => false,
+                        }
                     {
                         append_unique(&mut superseded_paths, vec![path]);
                         append_unique(&mut superseding_commits, vec![merge_tip.to_string()]);
@@ -1710,10 +1716,11 @@ pub(super) fn merge_tip_content_presence(
     }
 }
 
-/// Only the supplied anchor's first-parent exact rename can carry the old
-/// path here. Copies, edited renames and arbitrary merge history retain the
-/// ordinary ownership rules. NUL-delimited records preserve unusual paths.
-fn exact_anchor_rename(repo: &Path, anchor: &str, path: &str) -> Option<(String, String)> {
+/// Only a rename in the supplied anchor's first-parent diff can carry an
+/// earlier path here. The caller proves attribution before the rename and
+/// the net final content after it; similarity alone never proves delivery.
+/// NUL-delimited records preserve unusual paths.
+fn anchor_rename(repo: &Path, anchor: &str, path: &str) -> Option<(String, String)> {
     let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", anchor])?;
     let parents: Vec<_> = parents.split_whitespace().collect();
     if parents.len() != 3 {
@@ -1721,12 +1728,12 @@ fn exact_anchor_rename(repo: &Path, anchor: &str, path: &str) -> Option<(String,
     }
     let first = parents[1];
     let listing = git_text(repo, &[
-        "diff", "--find-renames=100%", "--diff-filter=R", "--name-status", "-z",
+        "diff", "--find-renames", "--diff-filter=R", "--name-status", "-z",
         first, anchor, "--",
     ])?;
     let fields: Vec<_> = listing.split('\0').collect();
     for entry in fields.chunks_exact(3) {
-        if entry[0] == "R100" && entry[1] == path && !entry[2].is_empty() {
+        if entry[0].starts_with('R') && entry[1] == path && !entry[2].is_empty() {
             return Some((first.to_string(), entry[2].to_string()));
         }
     }

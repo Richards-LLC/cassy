@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""A release over its stage budget files one P0 task (cas-2bef).
-
-Drives the real post-publication stage with a recorded stage-events.tsv: the
-real latency receipt (release-metrics.py) names the breach, and the breach
-filer creates the task through a fake `cas serve` that speaks MCP stdio.
-"""
-
+"""Measure release-stage budgets and file breaches through standalone helpers."""
 from __future__ import annotations
 
 import json
@@ -72,11 +66,7 @@ class BudgetBreach(unittest.TestCase):
             esac
             '''))
         self.gh.chmod(0o755)
-        self.published = self.tmp / "published.sh"
-        self.published.write_text("#!/usr/bin/env bash\nprintf 'TAG=%s\\n' \"$1\"\n")
-        self.published.chmod(0o755)
-        # Drive the stage's real annotated-tag/landed-main prerequisite rather
-        # than failing before any budget-filing behavior can be exercised.
+        # Keep the release's real annotated tag and landed-main identity.
         def git(*args):
             return subprocess.run(["git", "-C", str(self.tmp), *args], check=True,
                                   capture_output=True, text=True).stdout.strip()
@@ -87,26 +77,24 @@ class BudgetBreach(unittest.TestCase):
             "-c", "tag.gpgsign=false", "tag", "-am", "release", "v9.99.8")
         (self.run_dir / "landed-main.sha").write_text(git("rev-parse", "HEAD") + "\n")
 
-    def post_publication(self, events: str) -> subprocess.CompletedProcess:
+    def file_breach(self, events: str) -> subprocess.CompletedProcess:
         (self.run_dir / "stage-events.tsv").write_text(events)
-        script = f'''
-            source "{SCRIPTS}/release-train.d/post-publication.sh"
-            version=9.99.8 worktree="{self.tmp}" run_dir="{self.run_dir}" script_dir="{SCRIPTS}"
-            release_train_post_publication
-        '''
-        env = dict(os.environ, FAKE_CAS_LOG=str(self.log), LANDED=str(self.run_dir / "landed-main.sha"),
-                   CAS_RELEASE_TRAIN_GH=str(self.gh), CAS_RELEASE_TRAIN_CAS=str(self.cas),
-                   CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS="0",
-                   CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES="1",
-                   CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD=str(self.published),
-                   CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD=str(SCRIPTS / "release-latency-receipt.sh"))
-        return subprocess.run(["bash", "-c", script], cwd=self.tmp, env=env, capture_output=True, text=True)
+        env = dict(os.environ, FAKE_CAS_LOG=str(self.log),
+                   LANDED=str(self.run_dir / "landed-main.sha"), GH_BIN=str(self.gh))
+        measured = subprocess.run(
+            ["bash", str(SCRIPTS / "release-latency-receipt.sh"), "v9.99.8",
+             "--run-dir", str(self.run_dir)], cwd=self.tmp, env=env, capture_output=True, text=True)
+        self.assertEqual(measured.returncode, 0, measured.stdout + measured.stderr)
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "release-budget-breach.py"), "v9.99.8",
+             str(self.run_dir), "--cas-bin", str(self.cas)],
+            cwd=self.tmp, env=env, capture_output=True, text=True)
 
     def calls(self) -> list[dict]:
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def test_over_budget_release_files_one_p0_in_the_budget_epic(self):
-        result = self.post_publication(STAGE_EVENTS)
+        result = self.file_breach(STAGE_EVENTS)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         receipt = (self.run_dir / "release-latency.receipt").read_text()
         self.assertIn("BUDGET_BREACHES=gate:3029/900,publish:1526/1200\n", receipt)
@@ -118,24 +106,26 @@ class BudgetBreach(unittest.TestCase):
         self.assertIn("gate 50m 29s > 15m 00s", arguments["title"])
         self.assertIn("- publish: measured 1526 s, budget 1200 s (326 s over)", arguments["description"])
         self.assertIn(str(self.run_dir / "release-latency.receipt"), arguments["description"])
+        # pin: resumed runs consume the newline-delimited task ID marker written from the MCP reply.
         self.assertEqual((self.run_dir / "budget-breach.task").read_text(), "cas-f00d\n")
-        # A resumed post-publication stage never files the same breach twice.
-        self.assertEqual(self.post_publication(STAGE_EVENTS).returncode, 0)
+        # A resumed helper never files the same breach twice.
+        self.assertEqual(self.file_breach(STAGE_EVENTS).returncode, 0)
         self.assertEqual(len(self.calls()), 1)
 
     def test_release_within_budget_files_nothing(self):
         fast = "1791997729\tgate\tstart\n1791998329\tgate\tdone\n"
-        result = self.post_publication(fast)
+        result = self.file_breach(fast)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # pin: the receipt protocol uses BUDGET_BREACHES=none to suppress task creation.
         self.assertIn("BUDGET_BREACHES=none\n", (self.run_dir / "release-latency.receipt").read_text())
         self.assertEqual(self.calls(), [])
         self.assertFalse((self.run_dir / "budget-breach.task").exists())
 
     def test_a_failed_filing_keeps_the_stage_resumable(self):
         self.cas.write_text("#!/usr/bin/env bash\nexit 3\n")
-        result = self.post_publication(STAGE_EVENTS)
+        result = self.file_breach(STAGE_EVENTS)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("could not file the stage-budget breach", result.stderr)
+        self.assertIn("cas serve exited", result.stderr)
         self.assertFalse((self.run_dir / "budget-breach.task").exists())
 
 

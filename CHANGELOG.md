@@ -17,6 +17,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   verifier error counts. → Now: New markers are pending, and historical backfill
   excludes old synthetic markers while retaining real failed checks.
 
+## [3.94.0] - 2026-10-31
+
+### Fixed — Task close
+
+- **Renumbered migrations close normally** — Was: Adding a migration and then
+  renaming and renumbering it in the delivery's merge commit could falsely
+  report dropped content. → Now: Close proves the final migration against the
+  delivery's base and still refuses content lost after integration.
+
+### Removed — Release tooling
+
+- **Retired local release train** — Removed the unused release train, its lane checkers and train-only tests. Release lessons now follow `scripts/release.sh`; CI and the factory pre-push gate keep their shared fast-row catalog.
+
 ### Fixed — CLI security
 
 - **Secret environment values stay out of help** — Was: Login and bridge server

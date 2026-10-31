@@ -3808,21 +3808,6 @@ mod tests {
     // ── cas-6462: TeamInfo + CloudConfig.teams / default_team_id ───────────
 
     #[test]
-    fn test_team_info_roundtrip() {
-        // TeamInfo serialises and deserialises cleanly.
-        let _guard = TestEnvGuard::new();
-        let team = TeamInfo {
-            id: "tid-abc".to_string(),
-            slug: "petra-stella".to_string(),
-            name: "Petra Stella".to_string(),
-            role: "admin".to_string(),
-        };
-        let json = serde_json::to_string(&team).unwrap();
-        let back: TeamInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, team);
-    }
-
-    #[test]
     fn test_teams_and_default_team_id_roundtrip() {
         // CloudConfig with populated teams[] and default_team_id survives
         // save/load without data loss.

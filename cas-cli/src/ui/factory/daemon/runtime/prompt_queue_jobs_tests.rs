@@ -525,48 +525,6 @@ fn flv2_retraction_reads_fresh() {
     }
 }
 
-#[test]
-fn config_cache_reloads_only_when_the_file_changes() {
-    let (_root, cas_dir) = project();
-    let mut cache = ConfigCache::default();
-    let first = cache.get(&cas_dir);
-    let again = cache.get(&cas_dir);
-    assert!(Arc::ptr_eq(&first, &again), "an unchanged file is not parsed again");
-    std::fs::write(cas_dir.join("config.toml"), "[factory]\n# changed\n").unwrap();
-    let reloaded = cache.get(&cas_dir);
-    assert!(!Arc::ptr_eq(&first, &reloaded), "a changed file is reloaded");
-}
-
-#[test]
-fn transcript_probe_reads_again_only_after_the_transcript_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    std::fs::write(&path, "{}\n").unwrap();
-    let cache: TranscriptProbeCache<usize> = TranscriptProbeCache::default();
-    let resolves = AtomicUsize::new(0);
-    let probes = AtomicUsize::new(0);
-    let t0 = Instant::now();
-    let run = |now: Instant| {
-        cache.probe(
-            "worker-a",
-            now,
-            || {
-                resolves.fetch_add(1, Ordering::SeqCst);
-                Some((path.clone(), cas_mux::SupervisorCli::Claude))
-            },
-            |_, _| probes.fetch_add(1, Ordering::SeqCst) + 1,
-        )
-    };
-    assert_eq!(run(t0), Some(1));
-    assert_eq!(run(t0 + Duration::from_millis(10)), Some(1), "unchanged transcript: cached");
-    assert_eq!(probes.load(Ordering::SeqCst), 1);
-    assert_eq!(resolves.load(Ordering::SeqCst), 1);
-    std::fs::write(&path, "{}\n{\"more\":1}\n").unwrap();
-    assert_eq!(run(t0 + Duration::from_millis(20)), Some(2), "a grown transcript is read again");
-    assert_eq!(run(t0 + PROBE_RESOLUTION_TTL + Duration::from_millis(20)), Some(2));
-    assert_eq!(resolves.load(Ordering::SeqCst), 2, "the path is re-resolved after its TTL");
-    assert_eq!(probes.load(Ordering::SeqCst), 2, "re-resolving the same path keeps the result");
-}
 
 #[test]
 fn another_childs_jobs_share_the_runtime_and_come_back_typed() {

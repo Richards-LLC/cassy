@@ -990,6 +990,15 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
     let id =
         create_started_and_closed_light_task(&core, "start-on-closed supervisor message").await;
 
+    let agents = cas::store::open_agent_store(&temp.path().join(".cas")).unwrap();
+    let agent_id = format!("test-session-{}", std::process::id());
+    let mut agent = agents.get(&agent_id).unwrap();
+    agent.metadata.insert("halt_task_work".into(), "1".into());
+    agent
+        .metadata
+        .insert("halt_task_work_gen".into(), "42".into());
+    agents.update(&agent).unwrap();
+
     let result = {
         test_env.set("CAS_AGENT_ROLE", "supervisor");
         let r = core
@@ -998,6 +1007,19 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
         test_env.remove("CAS_AGENT_ROLE");
         r
     };
+
+    let persisted = agents.get(&agent_id).unwrap();
+    assert_eq!(
+        persisted.metadata.get("halt_task_work").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        persisted
+            .metadata
+            .get("halt_task_work_gen")
+            .map(String::as_str),
+        Some("42")
+    );
 
     let _ = temp; // keep tempdir alive for the duration of the call above
     match result {

@@ -38,10 +38,6 @@ grep-searcher = "0.1"
 grep-regex = "0.1"
 ignore = "0.4"
 
-# Metrics storage
-rusqlite = { version = "0.39", features = ["bundled"] }
-chrono = { version = "0.4", features = ["serde"] }
-
 # Async parallel search (optional)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"], optional = true }
 
@@ -50,6 +46,7 @@ default = []
 parallel = ["tokio"]
 
 [dev-dependencies]
+chrono = "0.4"
 tempfile = "3.14"
 
 [[test]]

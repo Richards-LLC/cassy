@@ -385,6 +385,7 @@ pub(crate) fn needs_durable_followup(delivered: bool, durable: bool) -> bool {
 /// write or a durable queue wake-time flush. Missing or unreadable state is
 /// uncertainty and deliberately delivers; only positive terminal evidence
 /// suppresses the stale `task start` imperative.
+#[cfg(test)]
 pub(crate) fn assignment_terminal_status(
     cas_dir: &Path,
     prompt: &str,

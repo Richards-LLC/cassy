@@ -1456,6 +1456,42 @@ fn retired_merge_sweep_keys_load_and_are_dropped_on_save_cas_fd0a() {
     assert!(Config::load(temp.path()).unwrap().factory().retired_keys().is_empty());
 }
 
+/// cas-49de: the TUI pop-up notification keys were removed with their
+/// never-wired pipeline. An older config carrying them still loads with its
+/// live hook keys intact, cannot read them back, and loses them both on the
+/// next save and through the update-time retirement edit.
+#[test]
+fn retired_notification_keys_load_and_are_dropped_cas_49de() {
+    let raw = "[notifications]\nenabled = false\nsound_enabled = true\nmax_visible = 3\n\
+               on_idle_prompt = true # keep comment\n\n[notifications.tasks]\non_created = true\n\n\
+               [notifications.skills]\non_disabled = false\n";
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, raw).unwrap();
+
+    let loaded = Config::load(temp.path()).expect("an old config with pop-up keys still loads");
+    let notifications = loaded.notifications.clone().unwrap();
+    assert_eq!(notifications.retired_keys(), vec!["sound_enabled", "max_visible", "tasks", "skills"]);
+    assert!(!notifications.enabled && notifications.on_idle_prompt, "live hook keys are kept");
+    assert_eq!(loaded.get("notifications.sound_enabled"), None, "a retired key is not readable");
+    assert_eq!(loaded.get("notifications.tasks.on_created"), None);
+    assert!(loaded.list().iter().all(|(key, _)| !key.starts_with("notifications.tasks")));
+
+    let receipt = crate::config::retire_config(temp.path(), false);
+    assert_eq!(receipt.status, "repaired", "{receipt:?}");
+    let retired = std::fs::read_to_string(&path).unwrap();
+    assert!(retired.contains("# keep comment"), "{retired}");
+    for gone in ["sound_enabled", "max_visible", "on_created", "notifications.tasks", "notifications.skills"] {
+        assert!(!retired.contains(gone), "{gone} survived the retirement edit: {retired}");
+    }
+
+    std::fs::write(&path, raw).unwrap();
+    loaded.save(temp.path()).unwrap();
+    let reloaded = Config::load(temp.path()).unwrap();
+    assert!(reloaded.notifications.as_ref().unwrap().retired_keys().is_empty());
+    assert_eq!(reloaded.get("notifications.on_idle_prompt").as_deref(), Some("true"));
+}
+
 #[test]
 fn unset_issue_repo_resolves_local_origin_without_persisting_cas_f398() {
     let _env = TestEnvGuard::new();

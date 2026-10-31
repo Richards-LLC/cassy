@@ -684,6 +684,7 @@ impl WorkerExitCause {
 
 /// Render a worker-death relay for PTY injection into the supervisor's session.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn format_worker_died_relay(
     worker_id: &str,
     worker_name: &str,
@@ -1557,6 +1558,7 @@ fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[start..end])
 }
 
+#[cfg(test)]
 pub(crate) fn revalidate_lifecycle_prompt(
     prompt: &str,
     current_status: TaskStatus,

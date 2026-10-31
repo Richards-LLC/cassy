@@ -1,14 +1,11 @@
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { applyHistoryCursor, ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking, type HistoryCursor } from "./conversation-history";
 import { ConversationList, ROW_TAP_CLICK_WAIT_MS, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow, conversationRowSpokenName } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { applePlatform, appearanceButtonMarkup, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
+import { applePlatform, appearanceButtonMarkup, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
-import { projectName, projectBadge } from "./cloud-brand";
+import { projectName } from "./cloud-brand";
 
 import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
 
@@ -308,7 +305,6 @@ describe('conversation evidence', () => {
     expect(projectName('/home/Projects/cas-src/')).toBe('cas-src');
     expect(projectName('C:\\Projects\\Studio One\\')).toBe('Studio One');
     expect(projectName(undefined)).toBe('Project unavailable');
-    expect(projectBadge('/home/<img>')).toContain('&lt;img&gt;');
   });
   it('preserves a focused row across catalog updates and isolates identical session names', () => {
     const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
@@ -692,8 +688,6 @@ describe('conversation evidence', () => {
     expect(app.querySelector<HTMLElement>('#conversation-attention-slot > #attention-panel')?.hidden).toBe(false);
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
-    // The existing clip becomes a working keyboard-reachable file picker.
-    expect(ATTACH_SUPPORTED).toBe(true);
     expect(composer.querySelector<HTMLButtonElement>('.composer-clip')?.disabled).toBe(false);
     expect(composer.querySelector('.composer-clip')?.getAttribute('aria-label')).toBe('Attach files');
     const mic = composer.querySelector<HTMLButtonElement>('#message-mic')!;
@@ -788,17 +782,6 @@ describe("hostMarkup (journey F14)", () => {
     expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
     expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
   });
-  it("keeps the machine ahead of the codename at every width (cas-766c)", () => {
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
-    expect(css).toContain(".conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }");
-    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }");
-    // The OS word goes whenever the line is short of room, not only on a phone.
-    // cas-8526: hidden from sight only, so the OS word is still heard; since
-    // cas-0546 fitMachineLine marks it .sr-only (the house accessibility helper).
-    expect(css).toMatch(/\n\.sr-only \{/);
-    expect(css).not.toContain("  .conversation-identity .host-os { display: none; }");
-  });
 });
 
 describe("fitMachineLine (cas-766c)", () => {
@@ -856,15 +839,6 @@ describe("fitMachineLine (cas-766c)", () => {
     const fits = line({ machine: 160, machineNoOs: 120, codename: 50 });
     fitMachineLine(fits, 200, true);
     expect(state(fits)).toEqual(["os-dropped", "machine-long"]);
-  });
-  it("hides the codename, not the machine, in the stylesheet, header and empty card alike", () => {
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    // cas-8526: the codename steps aside from sight only; it is still heard.
-    expect(css).toContain(".conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
-    expect(css).toContain(".thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
-    expect(css).not.toMatch(/(host-where|proj2)\.(os-dropped|codename-squeezed)[^{]*\{ display: none; \}/);
-    expect(css).not.toContain(".conversation-identity .conversation-host { display: none; }");
-    expect(css).not.toContain("machine-squeezed > :is(");
   });
 });
 

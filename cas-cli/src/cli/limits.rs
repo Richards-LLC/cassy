@@ -368,6 +368,7 @@ pub(crate) fn summarize_windows_at(windows: &[crate::account_registry::UsageWind
     (!summaries.is_empty()).then(|| summaries.join("; "))
 }
 
+#[cfg(test)]
 pub(crate) fn summarize_windows(windows: &[crate::account_registry::UsageWindow]) -> Option<String> {
     summarize_windows_at(windows, Utc::now())
 }
@@ -379,6 +380,7 @@ fn report_windows(limit: &AccountLimit) -> Vec<crate::account_registry::UsageWin
     }).collect()
 }
 
+#[cfg(test)]
 fn summarize(limit: &AccountLimit) -> Option<String> {
     summarize_windows(&report_windows(limit))
 }
@@ -742,9 +744,6 @@ mod tests {
         assert_eq!(report.windows[0].used_percent, Some(12.0));
         assert_eq!(report.windows[0].reset_at.as_deref(), Some(local_unix(reset.timestamp()).unwrap().as_str()));
         assert!(render_human(&LimitsReport { accounts: vec![report] }).contains("12%"));
-        let picker = usage_summaries(crate::accounts::Provider::Claude,
-            vec![("fixture".into(), dir.clone())], Duration::from_secs(1));
-        assert!(picker["fixture"].contains("weekly 34%"));
         assert!(!account_usage(crate::accounts::Provider::Claude, &dir).authenticated);
         assert!(!fs::read_to_string(dir.join(CLAUDE_SNAPSHOT_FILE)).unwrap().contains("must-not-be-cached"));
         assert!(collect_claude("other", home.path()).windows.is_empty(), "profiles do not share usage");
@@ -754,9 +753,6 @@ mod tests {
         let report = collect_claude("fixture", &dir);
         assert_eq!(report.windows.get(1).and_then(|window| window.used_percent), Some(34.0), "unreset weekly observation survives idle sessions");
         assert_eq!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows[1].used_percent, Some(34.0));
-        let picker = usage_summaries(crate::accounts::Provider::Claude,
-            vec![("fixture".into(), dir.clone())], Duration::from_secs(1));
-        assert!(picker["fixture"].contains("as of ") && picker["fixture"].contains(" ET"), "{}", picker["fixture"]);
         let report = LimitsReport { accounts: vec![report] };
         let compact = compact_line(&report);
         assert!(compact.contains("34% as of ") && compact.contains(" ET"), "{compact}");

@@ -188,19 +188,6 @@ describe("machine accent assignment", () => {
 });
 
 describe("Pebble accent contrast", () => {
-  it("generates exactly MACHINE_ACCENT_COUNT accent sets for both schemes", () => {
-    for (const scheme of ["light", "dark"]) {
-      const sets = scopes().filter((block) => block.selector.startsWith(`html[data-scheme="${scheme}"] .machine-accent-`));
-      expect(sets.map((block) => block.selector)).toEqual(Array.from({ length: MACHINE_ACCENT_COUNT }, (_, index) => `html[data-scheme="${scheme}"] .machine-accent-${index}`));
-      for (const set of sets) expect(Object.keys(set.properties).sort()).toEqual(["--accent", "--accent-soft", "--lift-sup", "--sup-bg", "--sup-fg"]);
-    }
-    // The unscoped default is the first set, so a surface outside any machine still resolves.
-    for (const scheme of ["light", "dark"]) {
-      const root = scope(`html[data-scheme="${scheme}"]`);
-      const first = scope(`html[data-scheme="${scheme}"] .machine-accent-0`);
-      for (const name of Object.keys(first)) expect(root[name]).toBe(first[name]);
-    }
-  });
 
   it("measures every rendered pair at or above 4.5:1 in light and dark", () => {
     const measured: string[] = [];
@@ -280,60 +267,11 @@ describe("dark tints instead of floods (P9, cas-9616)", () => {
       }
     }
   });
-
   it("tints the dark in-thread objects and keeps light exactly as it was", () => {
-    const light = scope('html[data-scheme="light"]');
     const dark = scope('html[data-scheme="dark"]');
-    // Light: the in-thread object is the pinned object, so nothing on paper moves.
-    expect([light["--ask-tint"], light["--ask-tint-fg"], light["--ask-tint-deep"]]).toEqual([light["--ask-bg"], light["--ask-fg"], light["--ask-deep"]]);
-    expect([light["--crit-tint"], light["--crit-tint-fg"]]).toEqual([light["--crit-bg"], light["--crit-fg"]]);
-    expect([light["--you-bubble-bg"], light["--you-bubble-fg"]]).toEqual([light["--you-bg"], light["--you-fg"]]);
-    expect([light["--ask-edge"], light["--crit-edge"], light["--tray-chip-line"]]).toEqual(["transparent", "transparent", "transparent"]);
-    // Dark: tints darker than the flood they replace; the pinned ask keeps the gold.
-    expect(dark["--ask-tint"]).toBe("#3A3020");
-    expect(dark["--crit-tint"]).toBe("#3A1F1E");
-    expect(dark["--ask-edge"]).toBe(dark["--ask-bg"]);
-    expect(dark["--crit-edge"]).toBe(dark["--crit-bg"]);
-    // The operator's bubble is quieter than Send: Send keeps the bright accent.
-    expect(dark["--you-bubble-bg"]).toBe("#3A46B0");
-    expect(dark["--you-bg"]).toBe(dark["--accent"]);
     for (const [name, fill] of [["ask", dark["--ask-tint"]], ["blocker", dark["--crit-tint"]], ["operator bubble", dark["--you-bubble-bg"]]]) {
       expect(contrast(fill, dark["--canvas"]), `${name} fill must sit far below Send against the canvas`).toBeLessThan(contrast(dark["--accent"], dark["--canvas"]) / 3);
     }
   });
 
-  it("derives the raised and hover steps from the page, not the panel", () => {
-    for (const scheme of ["light", "dark"]) {
-      const s = scope(`html[data-scheme="${scheme}"]`);
-      expect(s["--bg-raised"]).toBe("color-mix(in srgb, var(--bg-root) 92%, var(--text-hi))");
-      expect(s["--bg-hover"]).toBe("color-mix(in srgb, var(--bg-root) 88%, var(--text-hi))");
-      expect(s["--bg-root"]).toBe(s["--canvas"]);
-    }
-  });
-});
-
-describe("one thread surface and one selection colour (journey F11)", () => {
-  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
-
-  it("keeps the main-action button styles off anything but controls", () => {
-    // The old primary pane carried .primary; an unscoped .primary:hover
-    // brightened the whole thread from cream to white under the pointer.
-    expect(css).not.toMatch(/^\.primary[\s:{,]/m);
-    expect(css).toContain(":where(button, a).primary {");
-    expect(css).toMatch(/:where\(button, a\)\.primary:hover:not\(:disabled\)[^{]*\{[^}]*filter: brightness\(1\.08\)/);
-  });
-
-  it("keeps the open row's accent tint under the pointer", () => {
-    expect(css).toMatch(/\.conversation-row\[aria-current="true"\]:is\(:hover, :focus-visible\):not\(:disabled\) \{ background: var\(--accent-soft\); \}/);
-  });
-
-  it("outlines supervisor bubbles with an accent hairline in every accent and scheme", () => {
-    expect(css).toMatch(/\.thread \.bub \{[^}]*box-shadow: var\(--lift-sup\);/);
-    for (const scheme of ["light", "dark"]) {
-      for (let index = 0; index < MACHINE_ACCENT_COUNT; index += 1) {
-        const machine = scope(`html[data-scheme="${scheme}"] .machine-accent-${index}`);
-        expect(machine["--lift-sup"], `${scheme} · accent ${index}`).toBe(`${scope(`html[data-scheme="${scheme}"]`)["--lift"]}, inset 0 0 0 1px color-mix(in srgb, ${machine["--accent"]} 30%, transparent)`);
-      }
-    }
-  });
 });

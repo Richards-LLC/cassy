@@ -39,7 +39,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
 - **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.
 - **Worker isolation** - on Linux, workers cannot read operator credential stores such as Neon and Vercel, and see only the connectors an operator grants a dedicated worker account.
-- **Memory, Rule, Skill** - durable facts, versioned instructions that sync into agent harnesses, and procedural playbooks agents load for a kind of work.
+- **Memory, Rule, Skill** - durable facts, versioned instructions that sync into agent harnesses, and procedural playbooks agents load for a kind of work. Session start restores the current role's handoff; explicit memory/search tools and task-create related context retrieve prior knowledge.
 - **DESIGN.md first** - every report, page, chart, note, UI, terminal output, drawing or image an agent produces wears the target project's `DESIGN.md`; a project without one gets one through `design-spec`, and the task records which file and revision it used.
 - **Knowledge page** - a distilled, source-linked page about the current repository; the code index connects symbols to that context.
 

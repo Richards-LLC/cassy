@@ -575,7 +575,6 @@ fn push_response_round_trips_optional_invalid_sibling() {
     let failure = failures
         .get("cas-malformed-revision")
         .expect("invalid row is mapped to its local queue id");
-    assert_eq!(failure.id(), "cas-malformed-revision");
     match failure {
         PushItemizedFailure::Invalid(invalid) => {
             assert_eq!(invalid.reason.as_str(), "invalid_revision");

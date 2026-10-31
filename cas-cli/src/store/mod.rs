@@ -75,8 +75,6 @@ pub use cas_store::{
     PromptStore,
     // Prompt queue types
     QueuedPrompt,
-    // Recording store for terminal recordings
-    RecordingStore,
     // Reminder store for supervisor reminders
     Reminder,
     ReminderStatus,
@@ -100,7 +98,6 @@ pub use cas_store::{
     SqliteLoopStore,
     SqlitePromptQueueStore,
     SqlitePromptStore,
-    SqliteRecordingStore,
     SqliteReminderStore,
     SqliteRuleStore,
     SqliteSkillStore,
@@ -145,10 +142,6 @@ mod cached_task;
 pub mod detect;
 pub mod foreign_project_guard;
 pub mod known_repos;
-mod notifying_entry;
-mod notifying_rule;
-mod notifying_skill;
-mod notifying_task;
 mod quarantine_task;
 // `cli/memory.rs` (T5 cas-07d7) and the syncing-store wrappers all
 // call the predicate directly — keeping it in one `pub(crate)` module
@@ -167,16 +160,12 @@ pub use detect::{
     has_project_cas, init_cas_dir,
     open_agent_store, open_code_store, open_commit_link_store, open_entity_store, open_event_store,
     open_file_change_store, open_loop_store, open_prompt_queue_store, open_prompt_store,
-    open_recording_store, open_reminder_store, open_rule_store, open_rule_store_local,
+open_reminder_store, open_rule_store, open_rule_store_local,
     open_skill_store, open_skill_store_local, open_spawn_queue_store, open_spec_store, open_store,
     open_store_local, open_supervisor_queue_store, open_task_store, open_task_store_local,
     open_verification_store, open_worktree_store,
 };
 pub(crate) use detect::find_cas_root_ignoring_env;
-pub use notifying_entry::NotifyingEntryStore;
-pub use notifying_rule::NotifyingRuleStore;
-pub use notifying_skill::NotifyingSkillStore;
-pub use notifying_task::NotifyingTaskStore;
 pub use quarantine_task::QuarantineFilteringTaskStore;
 pub use syncing::SyncingRuleStore;
 pub use syncing_entry::SyncingEntryStore;

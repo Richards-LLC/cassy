@@ -332,7 +332,6 @@ fn enqueue_worker_attention_relay_for_episode(
 }
 
 
-
 /// Persist one confirmed worker stoppage through the same durable supervisor
 /// relay used by director-detected idle and stall events.  This is deliberately
 /// narrower than a normal-message delivery failure: callers invoke it only
@@ -392,6 +391,7 @@ pub(super) fn enqueue_worker_unavailable_relay(
 /// cas-2ffe (GH #915): several workers' harnesses exited within the
 /// correlation window. One wake names every worker and its exit status, keyed
 /// on the first exit so a retry or daemon restart cannot repeat it.
+#[cfg(test)]
 pub(super) fn enqueue_correlated_worker_deaths_relay(
     cas_dir: &std::path::Path,
     group: &[super::queue_and_events::ObservedWorkerExit],
@@ -4539,6 +4539,7 @@ impl FactoryDaemon {
 impl FactoryDaemon {
     /// One loop pass's share of the two-second director refresh (cas-ee9ab).
     /// Returns true when a director read was applied.
+    #[cfg(test)]
     pub(super) async fn director_refresh_pass(
         &mut self,
         refresh: &mut super::director_refresh::DirectorRefresh,

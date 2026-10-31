@@ -228,14 +228,5 @@ mod tests {
         assert_eq!(add, vec![span("new text", true)]);
     }
 
-    #[test]
-    fn inline_span_serde_roundtrip() {
-        let span = InlineSpan {
-            text: "hello".into(),
-            highlighted: true,
-        };
-        let json = serde_json::to_string(&span).unwrap();
-        let back: InlineSpan = serde_json::from_str(&json).unwrap();
-        assert_eq!(span, back);
-    }
+
 }

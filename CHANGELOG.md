@@ -28,6 +28,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   live, limited to metrics, timings, titles and links. Reasons and notes never
   leave the machine, and until the route is live the client holds its place.
 
+### Fixed — Store IDs
+
+- **Rapid creates use one collision-resistant generator** — Tasks, skills, specs and indexed code now share the counter mixed into generated IDs. Creates during the same clock tick no longer reuse identical candidates, and occupied fallback IDs are retried. Existing ID prefixes and lengths stay unchanged.
+
 ### Changed — Test-hygiene rules in the shipped test guidance
 
 - **Builtin test guidance names six measured bad-test patterns** — Was: The
@@ -39,6 +43,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Proof claims name what ran** — Was: A subset could be reported as the full
   suite. → Now: Worker test discipline reports a subset by its counts, and the
   verifier treats an overstated "full suite" claim as an incomplete close reason.
+
+### Changed — Visual QA
+
+- **Parallel resting captures** — Visual QA now captures up to three pages at once in one Chromium process, preserving report order, deduplication and strict failures. Set `VISUAL_QA_CONCURRENCY=1` to run captures sequentially; journeys keep their existing sequence.
+
+### Removed — Ambient memory recall
+
+- **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
+
+### Fixed — Commander connection replacement
+
+- **Stopped connections cancel pending catalog reads** — Replacing or stopping a live connection now cancels its startup and heartbeat catalog reads, including a request still signing its proof, so the retired connection cannot send that read afterward. Lifecycle tests await catalog delivery before measuring heartbeat and event refresh requests.
+
+### Fixed — Factory merge admission
+
+- **Factory merges report missing code validation accurately** — Was: a failed change classifier with every validation job skipped appeared as failed code CI after a documentation repair. Now: admission reports unconfirmed code validation with the classifier run link and requires code CI or a supervisor-reviewed local receipt. Target-only imports are excluded from delivery classification; lane-owned code and merge resolutions still require validation.
+
+### Removed — Dead subsystems
+
+- **TUI pop-up notification settings retired** — Was: `cas config` listed 16
+  `notifications.*` settings (sound, display duration, maximum visible, and the
+  task, entry, rule and skill events) that changed nothing, because the pop-up
+  pipeline they configured never ran. → Now: Those settings are gone. A config
+  file that still sets them loads normally, prints one note naming them, and
+  drops them on the next save or `cas update`. `notifications.enabled`,
+  `webhook_url` and the permission, idle and sign-in prompt settings are unchanged.
+- **Unused recording index tables dropped** — Was: Every store carried six
+  empty recording index tables, and nightly maintenance scanned them. → Now: A
+  schema migration drops the tables once. Factory session recordings are files
+  and are unaffected.
+- **Unused internal code removed** — Was: A second factory session manager, a
+  second search scorer and two search metrics stores were compiled into every
+  build without being called. → Now: They are removed, with no change in behavior.
 
 ## [3.93.0] - 2026-10-31
 

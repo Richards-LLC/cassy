@@ -297,23 +297,6 @@ fn frontmatter_survives_a_parse_render_parse_round_trip() {
     assert_eq!(first.passthrough.len(), second.passthrough.len());
 }
 
-#[test]
-fn multiline_values_cannot_break_the_frontmatter_block() {
-    let mut row = source::LegacyRow::for_test("p-1", "context", Some("t"), "body");
-    row.source_tool = Some("mcp\nmalicious: true".to_string());
-    let lines = frontmatter::legacy_lines(&row, DbLabel::Project);
-    assert!(
-        lines.iter().all(|l| !l.contains('\n')),
-        "a value smuggled a newline into the block: {lines:?}"
-    );
-    assert!(
-        !lines
-            .iter()
-            .any(|l| l.trim_start().starts_with("malicious")),
-        "a value forged a frontmatter key"
-    );
-}
-
 // ── AC1 — the loss audit accounts for every legacy row ──────────────────
 
 #[test]

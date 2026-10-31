@@ -2,11 +2,9 @@ use crate::Result;
 use crate::agent_store::{AGENT_SCHEMA, SqliteAgentStore};
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
-use crate::recording_store::capture_agent_event;
 use crate::shared_db::ImmediateTx;
 use cas_types::{
     Agent, AgentStatus, DEFAULT_LEASE_DURATION_SECS, Event, EventEntityType, EventType,
-    RecordingEventType,
 };
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -210,9 +208,6 @@ pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Resu
         )
         .with_session(agent.cc_session_id.as_deref().unwrap_or(&agent.id));
         let _ = record_event_with_conn(conn, &event); // Best-effort, don't fail on event recording
-
-        // Capture event for recording playback
-        let _ = capture_agent_event(conn, RecordingEventType::AgentJoined, &agent.id, None);
     }
 
     Ok(())
@@ -341,9 +336,6 @@ impl SqliteAgentStore {
             )
             .with_metadata(serde_json::json!({"retired_agent": identity, "end_reason": end_reason}));
             let _ = record_event_with_conn(&tx, &event);
-
-            // Capture event for recording playback
-            let _ = capture_agent_event(&tx, RecordingEventType::AgentLeft, id, None);
 
             tx.commit()?;
             Ok(())

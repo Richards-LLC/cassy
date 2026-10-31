@@ -9,6 +9,7 @@ import { supervisorVersion } from "./machine-version";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
+  dismissed?: boolean;
   key: string;
   machineId: string;
   session: string;

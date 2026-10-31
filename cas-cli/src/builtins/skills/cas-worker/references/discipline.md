@@ -8,8 +8,8 @@ covers capped check/test evidence and non-Rust suites without restating those ru
 
 Run affected targeted tests: the whole test module of each changed production
 function plus every integration harness that calls it. `CONTRIBUTING` names the
-scoped commands. Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) for test
-design and failing-first cases; scope determines existing tests to run, not new
+scoped commands. Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
+[Test hygiene](../../cas-tdd/SKILL.md#test-hygiene) for test design and failing-first cases; scope determines existing tests to run, not new
 tests to add. Docs-only and no-code tasks prove their acceptance check instead
 (e.g. markdownlint, `cas codemap status`, a published artifact); don't add code
 tests to them. Record non-Rust exit status and actual test count; zero tests

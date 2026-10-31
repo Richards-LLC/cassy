@@ -13,8 +13,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   TDD skill warned against sleeps but not against CSS or source-text assertions,
   in-test dynamic imports, per-test expensive setup, assertion-free screenshot
   tests or deleting a "duplicate" that other tests import. → Now: The TDD skill
-  states each rule with its measured cost, the worker's test-design pointer links
-  to it, and the task verifier reviews each pattern.
+  states each rule with its measured cost, worker test discipline links to it,
+  and the task verifier reviews each pattern.
 - **Proof claims name what ran** — Was: A subset could be reported as the full
   suite. → Now: Worker test discipline reports a subset by its counts, and the
   verifier treats an overstated "full suite" claim as an incomplete close reason.

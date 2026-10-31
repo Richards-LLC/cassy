@@ -9144,7 +9144,7 @@ mod team_cmd_tests {
             .to_string();
         assert!(err.contains("missing-team"));
         assert!(err.contains("petra-stella"));
-        assert!(err.contains("cas cloud login"));
+        assert!(err.contains("cas login"));
         assert!(!err.contains("Slug resolution is not yet supported"));
     }
 
@@ -9189,7 +9189,7 @@ mod team_cmd_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("No cached team memberships"));
-        assert!(err.contains("cas cloud login"));
+        assert!(err.contains("cas login"));
     }
 
     #[test]

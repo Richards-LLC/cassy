@@ -104,6 +104,10 @@ import sys
 assert sys.argv[1:] in (['playwright', 'install', 'chromium'],
                         ['playwright', 'install', '--with-deps', 'chromium']), sys.argv
 ''')
+        # The journey step hands the shard to the real queue-flake runner,
+        # which needs a clean tracked tree; outside the queue it runs the
+        # journeys once through the same locked npm.
+        self.write('scripts/ci-queue-flakes.py', (ROOT / 'scripts/ci-queue-flakes.py').read_text())
         workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         bodies = [step['run'] for job in workflow['jobs'].values()
                   for step in job.get('steps', []) if 'playwright install' in step.get('run', '')]
@@ -112,10 +116,12 @@ assert sys.argv[1:] in (['playwright', 'install', 'chromium'],
             self.write('bin/sudo', f'#!/bin/sh\nexit {sudo}\n')
             for name in ('npm', 'npx', 'sudo'):
                 (self.repo / 'bin' / name).chmod(0o755)
+            self.commit()
             for body in bodies:
                 with self.subTest(sudo=sudo, body=body):
                     result = subprocess.run(['bash', '-eu', '-c', body], cwd=self.repo / 'hub-web',
-                                            env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'], SHARD='1'),
+                                            env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'], SHARD='1',
+                                                     GITHUB_WORKSPACE=str(self.repo), GITHUB_EVENT_NAME='pull_request'),
                                             text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

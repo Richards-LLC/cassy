@@ -135,6 +135,17 @@ async fn cas_8095_team_only_daemon_makes_only_team_calls() {
             .mount(&server)
             .await;
     }
+    // The paced quality-ledger round is team-scoped too: with an empty local
+    // ledger it skips the push and makes one pull of the team's events.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{team}/quality-events")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"events": [], "next_cursor": null})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
     let temp = TempDir::new().unwrap();
     let root = init_cas_dir(temp.path()).unwrap();
     crate::cloud::set_canonical_id_in_config_toml(&root, "daemon-team-only").unwrap();
@@ -178,7 +189,7 @@ async fn cas_8095_team_only_daemon_makes_only_team_calls() {
     assert_eq!(result.pushed_entries, 1);
     assert!(queue.pending_for_team(team, 100, 5).unwrap().is_empty());
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(requests.iter().all(|request| {
         request
             .url

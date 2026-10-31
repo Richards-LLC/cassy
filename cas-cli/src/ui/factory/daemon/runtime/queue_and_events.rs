@@ -1959,6 +1959,7 @@ impl PaneWakeState {
     /// and is a deliberate tightening of cas-893c: an idle-looking worker
     /// blocked on an approval dialog is silent too, and the injected payload
     /// ends in a submit CR that would answer it.
+    #[cfg(test)]
     fn is_safe_to_type_into(self) -> bool {
         self.veto_for_idle_recipient().is_none()
     }
@@ -2424,6 +2425,7 @@ fn claude_redelivery_delay(attempts: u32) -> std::time::Duration {
 /// Unlike [`lifecycle_redelivery_decision`], this consumes the durable
 /// `wake_gate_declines` and `wake_attempt_at` values. A daemon restart therefore
 /// cannot reset the budget and append the same supervisor dispatch again.
+#[cfg(test)]
 pub(super) fn claude_redelivery_decision(
     acked: bool,
     attempts: u32,
@@ -7160,6 +7162,7 @@ impl FactoryDaemon {
     /// One seam so the two rules cannot drift: a worker target keeps the
     /// original cas-893c behavior byte-for-byte, and a supervisor target is
     /// eligible only under [`Self::supervisor_wake_is_eligible`].
+    #[cfg(test)]
     fn delivery_should_nudge_pane(
         data: &crate::ui::factory::director::DirectorData,
         pane_target: &str,
@@ -21837,9 +21840,7 @@ mod stall_nudge_rework_tests {
         let pane = cas_mux::Pane::with_pty("worker-a", cas_mux::PaneKind::Worker,
             pty, 24, 80, harness).unwrap();
         daemon.app.adopt_worker_pane_for_test(pane);
-        tokio::time::sleep(Duration::from_millis(5100)).await;
-        for pane in daemon.app.mux.panes_mut() { pane.drain_output(); }
-        let bytes = daemon.app.mux.pane_bytes_received("worker-a").unwrap();
+        let bytes = super::super::provisioning_tests::await_ready_fixture_pane(daemon, "worker-a").await;
         assert!(bytes > 0);
         daemon.last_pane_output_bytes.insert("worker-a".into(), bytes);
         daemon.pane_silent_since.insert("worker-a".into(), Instant::now() - Duration::from_secs(46));

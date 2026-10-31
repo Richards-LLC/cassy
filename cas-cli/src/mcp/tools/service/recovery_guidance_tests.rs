@@ -76,7 +76,7 @@ async fn recovery_guidance_missing_parameters_four_harnesses() {
         );
         assert!(!error.message.contains("task ID"), "{error}");
         let error = service
-            .coordination(Parameters(
+            .factory(Parameters(
                 serde_json::from_value(serde_json::json!({"action": "epic_status"})).unwrap(),
             ))
             .await

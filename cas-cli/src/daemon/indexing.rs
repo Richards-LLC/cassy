@@ -458,6 +458,30 @@ pub(crate) fn is_index_lock_busy(error: &str) -> bool {
 /// How long one indexing run may spend, in total, waiting for the BM25 writer.
 pub(crate) const WRITER_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[cfg(test)]
+thread_local! {
+    static WRITER_LOCK_BUDGET_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Shorten [`WRITER_LOCK_BUDGET`] for indexing runs on the calling thread, so
+/// tests that hold the writer need not wait out the production ten seconds.
+#[cfg(test)]
+pub(crate) fn set_writer_lock_budget_for_tests(budget: std::time::Duration) {
+    // pin: shortening the budget in tests must not lower the production one.
+    assert_eq!(WRITER_LOCK_BUDGET, std::time::Duration::from_secs(10));
+    WRITER_LOCK_BUDGET_OVERRIDE.with(|cell| cell.set(Some(budget)));
+}
+
+/// The writer-lock budget for one indexing run.
+pub(crate) fn writer_lock_budget() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(budget) = WRITER_LOCK_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return budget;
+    }
+    WRITER_LOCK_BUDGET
+}
+
 /// A wait budget for BM25 writer-lock contention, shared by every retirement in
 /// one indexing run.
 ///
@@ -783,7 +807,7 @@ pub fn index_code_files_with(
     // One BM25 commit for the whole batch — the singular per-symbol form commits per document.
     // A writer lock held by a concurrent `cas serve` is waited out, not turned
     // into a lost batch (cas-8a03).
-    let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
+    let mut writer_budget = WriterLockBudget::new(writer_lock_budget());
     if let Err(error) = writer_budget.run(|| publish_code_symbols(cas_root, &published, &retired)) {
         result.errors.push(format!("code search index: {error}"));
     }
@@ -856,7 +880,7 @@ pub fn reconcile_code_tree(
     let code_store = open_code_store(cas_root)?;
     // One shared wait budget for the whole retirement sweep: see
     // [`WriterLockBudget`] — 592 files must not each wait out the same lock.
-    let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
+    let mut writer_budget = WriterLockBudget::new(writer_lock_budget());
 
     let mut by_repo: std::collections::HashMap<(String, PathBuf), HashSet<String>> =
         std::collections::HashMap::new();

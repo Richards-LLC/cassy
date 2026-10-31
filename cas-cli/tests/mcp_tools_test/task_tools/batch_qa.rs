@@ -608,7 +608,6 @@ impl Fx {
             commit_receipt: task.deliverables.factory_branch_anchor,
             stranded_branch_override: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
         };
         match self.core.cas_task_close(Parameters(req)).await {
@@ -671,6 +670,12 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
         .await
         .expect("one supervisor receipt must cover the staging walk");
     assert!(extract_text(recorded).contains("Batch QA receipt"));
+    let ledger = cas_store::quality_events_for_task(&fx.repo.join(".cas"), "cas-bq01").unwrap();
+    assert!(
+        ledger.iter().any(|event| matches!(&event.payload,
+            cas_store::QualityPayload::CheckRun { check_id, .. } if check_id == "qa_batch")),
+        "{ledger:?}"
+    );
     let receipt = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(
         (receipt[0].ledger_author_id.as_deref(), receipt[0].ledger_author_role.as_deref()),
@@ -1201,7 +1206,6 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         commit_receipt: Some(merged),
         stranded_branch_override: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     };
     let closed = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());
@@ -1228,7 +1232,6 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         commit_receipt: sibling,
         stranded_branch_override: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     };
     let refused = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());

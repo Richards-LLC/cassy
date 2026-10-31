@@ -800,48 +800,6 @@ fn clean_head(repo: &Path) -> Result<String> {
     git(repo, &["rev-parse", "HEAD"])
 }
 
-/// cas-f616: set by a caller continuing a multi-step proof at one commit
-/// (`scripts/check-lane-compile.py --prove` runs `--lib`, then `--tests`).
-pub(crate) const CONTINUATION_ENV: &str = "CAS_WORKER_CHECK_CONTINUES_PASS";
-/// How recent the preceding PASS must be to carry its load admission.
-const CONTINUATION_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-/// cas-f616: whether this check continues a proof whose previous capped step
-/// just passed, so it inherits that step's load admission instead of being
-/// refused for the load the step itself raised. Requires the caller's
-/// explicit [`CONTINUATION_ENV`] opt-in and a fresh PASS receipt for the
-/// same worktree, commit and packages; an independent check never qualifies.
-fn continuation_admits_load(
-    receipt: &Path,
-    repo: &Path,
-    head: &str,
-    packages: &[String],
-    now: std::time::SystemTime,
-) -> bool {
-    let Ok(metadata) = std::fs::metadata(receipt) else {
-        return false;
-    };
-    // A receipt stamped up to a minute ahead (filesystem/clock skew) is fresh.
-    let fresh = metadata
-        .modified()
-        .ok()
-        .is_some_and(|written| match now.duration_since(written) {
-            Ok(age) => age <= CONTINUATION_WINDOW,
-            Err(ahead) => ahead.duration() <= std::time::Duration::from_secs(60),
-        });
-    let Some(record) = std::fs::read(receipt)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok())
-    else {
-        return false;
-    };
-    fresh
-        && record.test.is_none()
-        && record.repo == repo
-        && record.head == head
-        && record.packages == packages
-}
-
 fn receipt_path(cas_root: &Path, repo: &Path, head: &str) -> PathBuf {
     let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
     cas_root
@@ -1839,10 +1797,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Some(test) => test_receipt_path(&cas_root, &repo, &head, test),
         None => receipt_path(&cas_root, &repo, &head),
     };
-    // cas-f616: decided before the earlier PASS is removed below.
-    let load_admitted = test.is_none()
-        && std::env::var_os(CONTINUATION_ENV).is_some_and(|value| value == "1")
-        && continuation_admits_load(&receipt, &repo, &head, &packages, std::time::SystemTime::now());
     // A failed retry must not leave an earlier PASS at this SHA.
     match std::fs::remove_file(&receipt) {
         Ok(()) => {}
@@ -1861,17 +1815,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
-    let violations = snapshot.admission_violations(load_admitted);
+    let violations = snapshot.violations();
     if !violations.is_empty() {
         let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "));
         drop(admission);
         return Err(refusal);
-    }
-    if load_admitted && !snapshot.violations().is_empty() {
-        println!(
-            "Worker check: continuing the proof that just passed at {head}; its CPU admission carries over (load_1m={:?}, cpu_count={})",
-            snapshot.load_1m, snapshot.cpu_count
-        );
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
@@ -3309,68 +3257,6 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]
             .map(str::to_string);
         execute_at_with_scope(&root, &args, &checkout.path, &fake, None, None).unwrap();
-    }
-
-    /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at
-    /// the same commit; anything else is an independent check and stays gated.
-    #[test]
-    fn continuation_carries_load_admission_only_for_the_same_fresh_pass_cas_f616() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("preview");
-        let receipt = dir.path().join("head.json");
-        let packages = vec!["cas".to_string()];
-        let write = |record: &CheckReceipt| std::fs::write(&receipt, serde_json::to_vec(record).unwrap()).unwrap();
-        let pass = |head: &str, packages: &[String], test: Option<TestReceipt>| CheckReceipt {
-            head: head.into(),
-            repo: repo.clone(),
-            packages: packages.to_vec(),
-            test,
-        };
-        let now = std::time::SystemTime::now();
-
-        assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "no earlier PASS");
-        write(&pass("abc", &packages, None));
-        assert!(continuation_admits_load(&receipt, &repo, "abc", &packages, now));
-        assert!(!continuation_admits_load(&receipt, &repo, "def", &packages, now), "other commit");
-        assert!(
-            !continuation_admits_load(&receipt, &repo, "abc", &["cas".into(), "cas-pty".into()], now),
-            "other packages"
-        );
-        assert!(
-            !continuation_admits_load(&receipt, &dir.path().join("other"), "abc", &packages, now),
-            "other worktree"
-        );
-        let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
-        assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
-        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None, supervisor_recorded: None })));
-        assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
-    }
-
-    /// cas-f616: a load reading above the cap between the proof's steps does
-    /// not refuse the continuation, but the builder cap still does, and an
-    /// independent check is still refused on load.
-    #[test]
-    fn admitted_continuation_waives_only_the_load_reading_cas_f616() {
-        let snapshot = crate::factory_build_guard::BuildGuardSnapshot {
-            cpu_count: 32,
-            load_1m: Some(41.5),
-            live_cargo_workers: 0,
-            requested_workers: 1,
-            requested_builders: 1,
-            expected_build: "yes",
-            max_concurrent_builders: 2,
-            disabled: false,
-            pressure: Default::default(),
-            limits: Default::default(),
-            disk: None,
-        };
-        assert_eq!(snapshot.admission_violations(false).len(), 1, "independent checks stay load-gated");
-        assert!(snapshot.violations()[0].contains("exceeds 32 CPUs"));
-        assert!(snapshot.admission_violations(true).is_empty(), "the continuation proceeds");
-        let crowded = crate::factory_build_guard::BuildGuardSnapshot { live_cargo_workers: 2, ..snapshot };
-        let violations = crowded.admission_violations(true);
-        assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("max_concurrent_builders"), "{violations:?}");
     }
 
     #[cfg(unix)]

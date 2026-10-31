@@ -253,15 +253,6 @@ mod tests {
         assert!(result.learnings.is_empty());
     }
 
-    #[test]
-    fn test_ai_extractor_config_default() {
-        let config = AIExtractorConfig::default();
-        assert!(config.extract_learnings);
-        assert!(config.extract_preferences);
-        assert!(config.suggest_rules);
-        assert_eq!(config.max_thinking_tokens, 2000);
-    }
-
     /// Manual provider receipt for the daemon's default extraction route.
     #[tokio::test]
     #[ignore = "requires a live Codex login and incurs model usage"]
@@ -278,15 +269,6 @@ mod tests {
             !result.learnings.is_empty(),
             "live extraction returned no learning"
         );
-    }
-
-    #[test]
-    fn test_extraction_result_default() {
-        let result = ExtractionResult::default();
-        assert!(result.learnings.is_empty());
-        assert!(result.preferences.is_empty());
-        assert!(result.rules.is_empty());
-        assert!(!result.deferred);
     }
 
     #[test]

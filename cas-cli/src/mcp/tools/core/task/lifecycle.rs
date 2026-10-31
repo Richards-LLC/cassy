@@ -51,6 +51,7 @@ impl TaskLifecycleGateError {
 pub(crate) mod close_ops;
 pub(crate) mod epic_lane;
 mod epic_overlap;
+mod recall_terms;
 pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
@@ -1071,7 +1072,7 @@ fn recent_other_epic_planner(
 }
 
 /// cas-3e41 (GH #993): the recall query for a task: the content terms of its
-/// title, labels and description, filtered by the ambient-recall stopword
+/// title, labels and description, filtered by a shared stopword
 /// floor so filler and harness words cannot carry a match. Labels come first
 /// so a domain label such as `qa` is never cut by the term cap.
 pub(crate) fn task_recall_query(title: &str, labels: &[String], description: &str) -> String {
@@ -1082,7 +1083,7 @@ pub(crate) fn task_recall_query(title: &str, labels: &[String], description: &st
             terms.push(label);
         }
     }
-    for term in crate::ambient_recall::content_terms(&format!("{title}\n{description}")) {
+    for term in recall_terms::content_terms(&format!("{title}\n{description}")) {
         if !terms.contains(&term) {
             terms.push(term);
         }
@@ -1739,8 +1740,7 @@ impl CasCore {
         task.notes.push_str(&predicted);
 
         // Associate the creation event and dependency metadata with the
-        // current session. This is used by ambient recall to avoid feeding a
-        // task back to the agent that just authored it.
+        // current session for the durable task audit trail.
         task_store
             .create_atomic(
                 &task,
@@ -2075,6 +2075,14 @@ impl CasCore {
                 receipt
             })
             .unwrap_or_default();
+        crate::quality_ledger::bug_labelled(
+            &self.cas_root,
+            &id,
+            &task.title,
+            task.task_type,
+            &task.labels,
+            None,
+        );
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}{}{}{}{}",
             id,

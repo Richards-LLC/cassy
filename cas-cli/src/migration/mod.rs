@@ -2154,6 +2154,63 @@ mod tests {
         );
     }
 
+    /// cas-49de: a store upgraded from before m289 carries the recording
+    /// tables built by m167 and m171-m180's own DDL, with their ledger rows.
+    /// The drop runs once, and a later start neither replays the old DDL nor
+    /// reports the drop as unreplayable.
+    #[test]
+    fn recording_index_drop_upgrades_an_old_store_once_cas_49de() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+            conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
+            conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
+        }
+        assert!(run_migrations(temp.path(), false).unwrap().errors.is_empty());
+        let recording_objects = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%recording%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        {
+            let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+            assert_eq!(recording_objects(&conn), 0, "a fresh store never builds them");
+            for migration in MIGRATIONS.iter().filter(|m| m.id == 167 || (171..=180).contains(&m.id)) {
+                for sql in migration.up {
+                    conn.execute_batch(sql).unwrap();
+                }
+            }
+            conn.execute_batch(
+                "INSERT INTO recordings (id, session_id, started_at, file_path)
+                     VALUES ('rec-1', 's', '2026-01-01T00:00:00Z', '/tmp/r');
+                 INSERT INTO recording_text (recording_id, agent_name, timestamp_ms, text_content)
+                     VALUES ('rec-1', 'worker', 1, 'old transcript');
+                 DELETE FROM cas_migrations WHERE id = 289;",
+            )
+            .unwrap();
+            assert!(recording_objects(&conn) > 6, "old tables, indexes and triggers exist");
+        }
+
+        let upgrade = run_migrations(temp.path(), false).unwrap();
+        assert!(upgrade.errors.is_empty(), "{:?}", upgrade.errors);
+        assert_eq!(upgrade.applied_names, ["drop_recording_index"]);
+        let restart = run_migrations(temp.path(), false).unwrap();
+        assert!(restart.errors.is_empty(), "{:?}", restart.errors);
+        assert_eq!(restart.applied_count, 0);
+
+        let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+        assert_eq!(recording_objects(&conn), 0);
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        let status = check_migrations(temp.path()).unwrap();
+        assert_eq!(status.current_version, status.latest_version);
+    }
+
     /// cas-cbf1: the knowledge store lands on a DB that predates it — the
     /// acceptance criterion "migration applies cleanly on existing DBs".
     #[test]

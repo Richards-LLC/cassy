@@ -14,7 +14,7 @@ use cas_store::{
 };
 
 use crate::daemon::indexing::{
-    WRITER_LOCK_BUDGET, WriterLockBudget, canonical_source_path, code_index_dir,
+    WriterLockBudget, writer_lock_budget, canonical_source_path, code_index_dir,
     code_project_root_from, code_scan_key, is_index_lock_busy, publish_code_symbols,
     resolve_repository, retire_cached_code_vectors,
 };
@@ -234,7 +234,7 @@ fn purge_scope(
         return Ok(outcome);
     };
     let bm25_present = code_index_dir(cas_root).join("meta.json").exists();
-    let mut budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
+    let mut budget = WriterLockBudget::new(writer_lock_budget());
     let mut after = 0;
     loop {
         let batch = store

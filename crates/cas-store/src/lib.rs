@@ -59,6 +59,7 @@ mod external_task_dependency_store;
 mod external_verification_gate;
 mod file_change_store;
 mod fts_query;
+mod hash_id;
 mod history_provenance;
 mod history_store;
 mod knowledge_store;
@@ -69,8 +70,7 @@ mod prompt_queue_store;
 mod prompt_store;
 mod qa_batch_store;
 mod qa_pass_store;
-mod recording_store;
-mod recording_text_store;
+mod quality_event_store;
 mod reminder_store;
 pub mod retention;
 mod retrieval_store;
@@ -180,6 +180,14 @@ pub use qa_pass_store::{
     withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task, waive_qa_pass_reporting_superseded,
     obsolete_qa_task_passes, qa_task_has_current_round,
 };
+pub use quality_event_store::{
+    CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
+    QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
+    QualityPayload, ensure_quality_event_schema, import_quality_events,
+    normalize_release_version, quality_events_after, quality_events_between,
+    quality_events_for_task, quality_interventions_since, quality_release_events,
+    record_quality_event, sanitize_quality_link, sanitize_quality_title,
+};
 pub use rule_candidate_store::{
     RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
     list_rule_candidates, observe_rule_candidate, rule_candidate_similarity,
@@ -269,15 +277,6 @@ pub use worktree_store::{SqliteWorktreeStore, WORKTREE_SCHEMA, WorktreeStore};
 mod known_repo_store;
 pub use known_repo_store::{KnownRepo, KnownRepoBinding, KnownRepoStore, SqliteKnownRepoStore};
 
-// Recording store for terminal recording metadata
-pub use recording_store::{
-    RecordingStore, SqliteRecordingStore, capture_agent_event, capture_memory_event,
-    capture_message_event, capture_recording_event, capture_task_event,
-    get_active_recording_with_conn, get_any_active_recording_with_conn,
-    record_agent_event_with_conn, record_memory_event_with_conn, record_message_event_with_conn,
-    record_recording_event_with_conn, record_task_event_with_conn,
-};
-
 // Supervisor queue store for factory sessions
 pub use supervisor_queue_store::{
     AlarmClass, NotificationPriority, NotifyIdempotentResult, SqliteSupervisorQueueStore,
@@ -349,12 +348,6 @@ pub use file_change_store::{
 pub use commit_link_store::{
     COMMIT_LINK_LINK_METHOD_STATEMENTS, COMMIT_LINK_SCHEMA, CommitLinkStore, SqliteCommitLinkStore,
     add_commit_link_with_conn,
-};
-
-// Recording text store for full-text search in factory recordings
-pub use recording_text_store::{
-    RecordingSearchResult, RecordingTextEntry, RecordingTextStore, SqliteRecordingTextStore,
-    format_timestamp,
 };
 
 // Core stores

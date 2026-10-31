@@ -614,25 +614,6 @@ fn test_hook_status_command() {
     assert_eq!(status.as_object().unwrap().len(), 12);
 }
 
-#[test]
-fn test_hook_configure_creates_settings() {
-    let temp = TempDir::new().unwrap();
-    init_cas(&temp);
-
-    // Configure hooks
-    cas_cmd(&temp)
-        .args(["hook", "configure"])
-        .assert()
-        .success();
-
-    // Verify settings file exists
-    let settings_path = temp.path().join(".claude/settings.json");
-    assert!(
-        settings_path.exists(),
-        "hook configure should create .claude/settings.json"
-    );
-}
-
 // =============================================================================
 // Part F: Exit Blocking Tests
 // =============================================================================

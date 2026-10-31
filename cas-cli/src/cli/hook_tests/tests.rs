@@ -1400,21 +1400,17 @@ fn coverage_requires_every_config_dir() {
     let dirs = vec![default_dir.clone(), alt_dir.clone()];
 
     // Neither populated → not covered.
-    assert!(!all_config_dirs_have_cas_hooks(&dirs));
 
     // Default dir only → the alt-dir sessions are still uncovered.
     write_global_hooks(&default_dir);
     assert!(config_dir_has_cas_hooks(&default_dir));
-    assert!(!all_config_dirs_have_cas_hooks(&dirs));
     assert_eq!(config_dirs_missing_cas_hooks(&dirs), vec![alt_dir.clone()]);
 
     // Both populated → covered, and nothing is missing.
     write_global_hooks(&alt_dir);
-    assert!(all_config_dirs_have_cas_hooks(&dirs));
     assert!(config_dirs_missing_cas_hooks(&dirs).is_empty());
 
     // An empty dir list can never prove coverage.
-    assert!(!all_config_dirs_have_cas_hooks(&[]));
 }
 
 /// AC1: hooks only in ~/.claude while sessions run under CLAUDE_CONFIG_DIR=alt

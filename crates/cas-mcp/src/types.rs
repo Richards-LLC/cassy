@@ -381,16 +381,6 @@ pub struct TaskRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,
 
-    /// One-release compatibility alias for `supervisor_override`.
-    #[schemars(skip)]
-    #[serde(
-        default,
-        rename = "bypass_code_review",
-        skip_serializing,
-        deserialize_with = "deser::option_bool"
-    )]
-    pub legacy_bypass_code_review: Option<bool>,
-
     /// Supervisor override for the epic close stranded-branch gate (cas-b192).
     ///
     /// A narrative string, not a boolean: the value IS the audit record of what
@@ -1334,16 +1324,6 @@ pub struct PatternRequest {
     #[schemars(description = "Include dismissed suggestions in listing (default: false)")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_dismissed: Option<bool>,
-}
-
-impl TaskRequest {
-    pub fn effective_supervisor_override(&self) -> Option<bool> {
-        self.supervisor_override.or(self.legacy_bypass_code_review)
-    }
-
-    pub fn used_deprecated_supervisor_override_alias(&self) -> bool {
-        self.legacy_bypass_code_review.is_some()
-    }
 }
 
 pub(crate) mod deser;

@@ -142,13 +142,26 @@ def check_exit(binary, case, out):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cas", default="cas", help="installed binary or supervisor candidate")
+    parser.add_argument("--cas", default=os.environ.get("CAS_TEST_BINARY", "target/debug/cas"),
+                        help="source-built binary (default: CAS_TEST_BINARY or target/debug/cas)")
+    parser.add_argument("--if-available", action="store_true",
+                        help="log deferral when the source-built binary is absent (script-only CI)")
     parser.add_argument("--case", choices=CASES, action="append", dest="cases")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     binary = shutil.which(args.cas)
     if not binary:
+        if args.if_available:
+            print(f"SKIP factory-client-terminal: source-built {args.cas} unavailable; "
+                  "the existing full-lane build runs all five PTY cases")
+            return 0
         parser.error(f"binary not found: {args.cas}")
+    # The client keeps an inherited SIG_IGN, as nohup and `cmd &` expect. Model
+    # an interactive terminal: a proof launched from a background shell would
+    # otherwise hand the client an ignored SIGINT and time out that case.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
     args.out.mkdir(parents=True, exist_ok=True)
     results = [check_exit(str(Path(binary).resolve()), case, args.out) for case in args.cases or CASES]
     (args.out / "report.json").write_text(json.dumps({"binary": binary, "results": results}, indent=2) + "\n")

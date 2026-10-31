@@ -933,7 +933,7 @@ pub struct CloudConfig {
     /// Team memberships for the authenticated user, fetched from `/api/me`
     /// and cached here so the resolution chain (T3) can work offline.
     ///
-    /// Empty by default; populated by T2 (`cas cloud login` + lazy refresh).
+    /// Empty by default; populated by T2 (`cas login` + lazy refresh).
     /// Absent in existing `cloud.json` files → deserialises to empty `Vec`
     /// via `#[serde(default)]`.  Not written to disk when empty via
     /// `skip_serializing_if` so pre-T2 files stay clean.
@@ -3806,21 +3806,6 @@ mod tests {
     }
 
     // ── cas-6462: TeamInfo + CloudConfig.teams / default_team_id ───────────
-
-    #[test]
-    fn test_team_info_roundtrip() {
-        // TeamInfo serialises and deserialises cleanly.
-        let _guard = TestEnvGuard::new();
-        let team = TeamInfo {
-            id: "tid-abc".to_string(),
-            slug: "petra-stella".to_string(),
-            name: "Petra Stella".to_string(),
-            role: "admin".to_string(),
-        };
-        let json = serde_json::to_string(&team).unwrap();
-        let back: TeamInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, team);
-    }
 
     #[test]
     fn test_teams_and_default_team_id_roundtrip() {

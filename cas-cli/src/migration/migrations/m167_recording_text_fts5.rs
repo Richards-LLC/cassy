@@ -41,5 +41,7 @@ pub const MIGRATION: Migration = Migration {
         "CREATE INDEX IF NOT EXISTS idx_recording_text_agent ON recording_text(agent_name)",
         "CREATE INDEX IF NOT EXISTS idx_recording_text_timestamp ON recording_text(timestamp_ms)",
     ],
-    detect: Some("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='recording_text_fts'"),
+    // Retired by m289, which drops the recording tables: always detected, so an
+    // upgraded store never recreates it and a fresh store never builds it.
+    detect: Some(super::m289_drop_recording_index::RETIRED_DETECT),
 };

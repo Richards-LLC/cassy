@@ -290,6 +290,7 @@ impl AttentionInputs {
 }
 
 impl FactoryDaemon {
+    #[cfg(test)]
     pub(super) fn message_attention_decisions(
         &self,
         queue: &dyn cas_store::PromptQueueStore,

@@ -9,11 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
-use crate::recording_store::capture_task_event;
 use crate::{Result, TaskStore};
 use cas_types::{
-    Dependency, DependencyType, Event, EventEntityType, EventType, Priority, RecordingEventType,
-    Scope, Task, TaskDeliverables, TaskRisk, TaskStatus, TaskTerminalOutcome, TaskType,
+    Dependency, DependencyType, Event, EventEntityType, EventType, Priority, Scope, Task, TaskDeliverables, TaskRisk, TaskStatus, TaskTerminalOutcome, TaskType,
 };
 
 /// SQLite DDL for the `tasks` and `dependencies` tables.
@@ -429,43 +427,34 @@ impl SqliteTaskStore {
             if let Some(prev) = prev_status {
                 let prev_status: TaskStatus = prev.parse().unwrap_or(TaskStatus::Open);
                 if prev_status != task.status {
-                    let (event_type, summary, recording_event_type) = match task.status {
+                    let (event_type, summary) = match task.status {
                         TaskStatus::InProgress => (
                             EventType::TaskStarted,
                             format!("Task started: {}", task.title),
-                            RecordingEventType::TaskStarted,
                         ),
                         TaskStatus::Closed => (
                             EventType::TaskCompleted,
                             format!("Task completed: {}", task.title),
-                            RecordingEventType::TaskCompleted,
                         ),
                         TaskStatus::Cancelled => (
                             EventType::TaskBlocked,
                             format!("Task cancelled without delivery: {}", task.title),
-                            RecordingEventType::TaskBlocked,
                         ),
                         TaskStatus::Blocked => (
                             EventType::TaskBlocked,
                             format!("Task blocked: {}", task.title),
-                            RecordingEventType::TaskBlocked,
                         ),
                         TaskStatus::Open => (
                             EventType::TaskCreated,
                             format!("Task reopened: {}", task.title),
-                            RecordingEventType::TaskCreated,
                         ),
                         TaskStatus::AwaitingMerge => (
                             EventType::TaskBlocked,
                             format!("Task awaiting merge: {}", task.title),
-                            RecordingEventType::TaskBlocked,
                         ),
                     };
                     let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
                     let _ = record_event_with_conn(&tx, &event);
-
-                    // Capture event for recording playback
-                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
                 }
             }
 
@@ -694,38 +683,6 @@ impl SqliteTaskStore {
             ));
         }
         Ok(())
-    }
-
-    /// Generate a hash-based ID like cas-a1b2
-    fn generate_hash_id(&self) -> Result<String> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        Utc::now().timestamp_nanos_opt().hash(&mut hasher);
-        std::process::id().hash(&mut hasher);
-
-        let hash = hasher.finish();
-        let chars: Vec<char> = format!("{hash:016x}").chars().collect();
-
-        // Try 4-char, then 5-char, then 6-char IDs
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        for len in 4..=6 {
-            let id = format!("cas-{}", chars[..len].iter().collect::<String>());
-            let exists: bool = conn
-                .query_row("SELECT 1 FROM tasks WHERE id = ?", params![&id], |_| {
-                    Ok(true)
-                })
-                .optional()?
-                .unwrap_or(false);
-
-            if !exists {
-                return Ok(id);
-            }
-        }
-
-        // Fallback to full hash
-        Ok(format!("cas-{}", &chars[..8].iter().collect::<String>()))
     }
 
     fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
@@ -964,9 +921,6 @@ impl SqliteTaskStore {
         };
         let _ = record_event_with_conn(conn, &event);
 
-        // Capture event for recording playback
-        let _ = capture_task_event(conn, RecordingEventType::TaskCreated, &task.id, None);
-
         Ok(())
     }
 
@@ -1135,7 +1089,8 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        self.generate_hash_id()
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::hash_id::generate_hash_id(&conn, crate::hash_id::IdKind::Task)
     }
 
     fn add(&self, task: &Task) -> Result<()> {
@@ -1377,9 +1332,6 @@ impl TaskStore for SqliteTaskStore {
                 );
                 let _ = record_event_with_conn(&tx, &event);
             }
-
-            // Capture event for recording playback
-            let _ = capture_task_event(&tx, RecordingEventType::TaskDeleted, id, None);
 
             tx.commit()?;
             Ok(())

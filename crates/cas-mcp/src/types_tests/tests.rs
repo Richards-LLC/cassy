@@ -14,14 +14,13 @@ fn cas_8405_peers_accepts_string_booleans() {
 }
 
 #[test]
-fn cas_8405_hidden_legacy_bool_alias_keeps_string_coercion() {
+fn cas_8405_supervisor_override_keeps_string_coercion() {
     for (wire, expected) in [("true", true), ("false", false)] {
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
-            "action": "close", "bypass_code_review": wire
+            "action": "close", "supervisor_override": wire
         }))
         .unwrap();
-        assert_eq!(request.legacy_bypass_code_review, Some(expected));
-        assert_eq!(request.effective_supervisor_override(), Some(expected));
+        assert_eq!(request.supervisor_override, Some(expected));
     }
 }
 
@@ -196,13 +195,15 @@ fn test_task_request_with_options() {
         r#"{
             "action": "create",
             "title": "Test task",
-            "priority": 1
+            "priority": 1,
+            "task_type": "bug"
         }"#,
     )
     .unwrap();
     assert_eq!(req.action, "create");
     assert_eq!(req.title, Some("Test task".to_string()));
     assert_eq!(req.priority, Some(1));
+    assert_eq!(req.task_type.as_deref(), Some("bug"));
 }
 
 #[test]
@@ -215,12 +216,14 @@ fn close_request_rejects_removed_findings_field() {
 }
 
 #[test]
-fn close_request_maps_deprecated_bypass_alias_to_supervisor_override() {
-    let request: TaskRequest =
-        serde_json::from_str(r#"{"action":"close","id":"cas-close","bypass_code_review":true}"#)
-            .unwrap();
-    assert_eq!(request.effective_supervisor_override(), Some(true));
-    assert!(request.used_deprecated_supervisor_override_alias());
+fn close_request_rejects_retired_bypass_alias() {
+    let error = serde_json::from_str::<TaskRequest>(
+        r#"{"action":"close","id":"cas-close","bypass_code_review":true}"#,
+    )
+    .expect_err("retired override alias must fail at the request boundary");
+    let message = error.to_string();
+    assert!(message.contains("unknown field `bypass_code_review`"), "{message}");
+    assert!(message.contains("supervisor_override"), "replacement must be named: {message}");
 }
 
 #[test]
@@ -229,13 +232,15 @@ fn test_system_request_reindex() {
         r#"{
             "action": "reindex",
             "bm25": true,
-            "embeddings": false
+            "embeddings": false,
+            "missing_only": true
         }"#,
     )
     .unwrap();
     assert_eq!(req.action, "reindex");
     assert_eq!(req.bm25, Some(true));
     assert_eq!(req.embeddings, Some(false));
+    assert_eq!(req.missing_only, Some(true));
 }
 
 #[test]

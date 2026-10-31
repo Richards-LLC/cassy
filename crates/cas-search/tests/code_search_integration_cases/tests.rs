@@ -301,6 +301,7 @@ fn test_code_search_1k_symbols_no_n_plus_1() {
     let kinds = [SymbolKind::Function, SymbolKind::Struct, SymbolKind::Trait];
     let languages = [Language::Rust, Language::Python, Language::TypeScript];
 
+    let mut symbols = Vec::with_capacity(1000);
     for i in 0..1000 {
         let symbol = CodeSymbol {
             id: format!("sym-{i:04}"),
@@ -317,8 +318,13 @@ fn test_code_search_1k_symbols_no_n_plus_1() {
             ..Default::default()
         };
         code_store.insert_symbol(symbol.clone());
-        bm25_index.index(&SymbolDoc { symbol: &symbol }).unwrap();
+        symbols.push(symbol);
     }
+    // One commit for the corpus: the N+1 checks below count search-time fetches.
+    let docs: Vec<SymbolDoc> = symbols.iter().map(|symbol| SymbolDoc { symbol }).collect();
+    bm25_index
+        .index_batch(docs.iter().map(|doc| doc as &dyn SearchDocument))
+        .unwrap();
 
     let search: CodeSearch<MockCodeStore, MockVectorStore, Bm25Index> =
         CodeSearch::new(code_store.clone(), vector_store, bm25_index, None);

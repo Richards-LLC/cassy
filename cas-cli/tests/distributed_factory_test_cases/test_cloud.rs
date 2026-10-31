@@ -758,9 +758,11 @@ fn a_rate_limited_teardown_still_shuts_every_agent_down() {
     let mut coordinator = CloudCoordinator::new(cloud.config()).unwrap();
     coordinator.register(&Agent::new("a".into(), "sup-a".into())).unwrap();
     coordinator.register(&Agent::new("b".into(), "sup-b".into())).unwrap();
+    // The fake answers these 429s with Retry-After: 0.
     fake.inject_failure("POST", "/shutdown", 429, 2);
     drop(cloud);
     let state = fake.state.lock().unwrap();
+    assert!(state.injected.iter().all(|(.., left)| *left == 0), "both 429s were retried");
     assert!(state.agents.values().all(|agent| agent["_shutdown"] == true), "every agent shut down");
 }
 

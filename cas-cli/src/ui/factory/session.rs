@@ -4,7 +4,7 @@
 //! functionality to find running factory daemons by checking PIDs and sockets.
 //!
 //! For unified session metadata (worker count, epic ID, etc.), use
-//! `cas_factory::SessionSummary` and `cas_factory::UnifiedSessionManager`.
+//! `cas_factory::SessionSummary`.
 
 use crate::store::{find_cas_root_from, find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};
@@ -669,7 +669,7 @@ impl SessionInfo {
     /// Convert to a unified SessionSummary with full metadata.
     ///
     /// This method bridges the daemon discovery info with the unified
-    /// session model used by `cas_factory::UnifiedSessionManager`.
+    /// `cas_factory::SessionSummary` model.
     pub fn to_session_summary(&self) -> SessionSummary {
         let created_at = chrono::DateTime::parse_from_rfc3339(&self.metadata.created_at)
             .map(|dt| dt.with_timezone(&Utc))

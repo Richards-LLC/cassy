@@ -873,6 +873,8 @@ expiry received after acceptance releases the recipient's own split claims.
 
 ## Adding Features
 
+**Friction ledger event**: Emit from the code path that observed the fact, through `cas-cli/src/quality_ledger.rs`, after that path has succeeded. Emission fails open and never changes the action it measures. The natural key names the fact, so a retry collapses to one row. Payload fields are metrics, enums and slugs (scope A); free text goes in `local_note`, which has no wire field. An escape is a bug labelled `found-in:vX.Y.Z`, optionally `missed-by:<stage>`.
+
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.
 
 **New MCP tool**: Add handler in `cas-cli/src/mcp/tools/core/` (data tools) or `cas-cli/src/mcp/tools/service/` (orchestration tools). Request types go in `cas-cli/src/mcp/tools/types/`. Register in the tool list via the `CasService` impl.
@@ -1248,7 +1250,7 @@ already pre-seeded by `codex_trust.rs`).
 
 ### Factory worker account selection
 
-`coordination action=spawn_workers` accepts an optional `config_dir` for all
+`factory action=spawn_workers` accepts an optional `config_dir` for all
 workers in the request. Claude workers use the tilde-expanded directory as
 `CLAUDE_CONFIG_DIR`; an explicit parameter wins over the requesting
 supervisor's own `CLAUDE_CONFIG_DIR`, which is captured when the request is
@@ -2258,6 +2260,17 @@ Entries that take over 20 seconds alone are reported as deferred to the full
 row. A changed `hub-web/package.json` runs the one named worker-memory weight
 assertion (0.001 s) rather than the full worker-memory suite.
 
+The provisioned script cohort in `scripts/ci-script-tests-for-diff.py` runs
+inside the existing scoped validation jobs in both `ci.yml` and slim `lane.yml`.
+The shared `run-script-suite-tests` action installs only selected suites'
+dependencies; unrelated inputs run no suite, Node setup, pip or npm install.
+These suites are deferred out of the bounded fast rows, then included in the
+exhaustive `test-ci-tiers` assembly target. Visual QA uses the locked web
+Playwright package; the PDF renderer checks receive pinned PyMuPDF. The terminal
+PTY suite reuses the CLI already built by full-lane preflight, with no additional
+Rust build. Script-only contexts log its missing source binary explicitly;
+native Codex cases likewise report explicit skips when Codex is unavailable.
+
 Fast rows include the no-build checks below. The factory pre-push hook, or lane
 CI for a pull request, selects each row when its inputs change; the merge queue
 runs its required fast-row job on the final tree:
@@ -3196,9 +3209,9 @@ throwaway `dryrun-` prerelease that it deletes at the end; `cas update` never
 sees a prerelease.
 Dry runs never run the hosted hub job or send any Vercel requests.
 
-The release train and gate scripts (`release-train.sh`, `release-gate.sh`) stay
-on disk while hosts still run binaries that call them; the release path above
-does not call them.
+The retired release train has been removed. `release-gate.sh --fast-rows`
+remains the factory pre-push gate; its no-build row catalog lives in
+`scripts/release-integration-gates.py`.
 
 ### Task close delivery attribution
 

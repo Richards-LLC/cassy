@@ -185,10 +185,10 @@ recovery for any held tasks; live worker termination stays with the daemon.
 
 Claude's `UserPromptSubmit` remains the primary context channel. If it does
 not run, the first synchronous `PostToolUse` hook or successful CAS MCP tool
-response recovers inbox messages and local ambient recall. Both channels use
+response recovers inbox messages. Both channels use
 `hooks/turn_context.rs`: the latest external prompt in a bounded Claude
 transcript tail supplies `promptId`, and a locked per-session receipt prevents
-repeated tools from reopening the inbox or retrievers. Normal prompt hooks
+repeated tools from reopening the inbox. Normal prompt hooks
 record the same identifier. Recovery performs no embedding-provider requests
 and never captures transcript text into attribution or memory stores.
 

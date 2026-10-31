@@ -665,7 +665,7 @@ fn handle_pre_tool_use_inner(
     // ========================================================================
     // SUPERVISOR DISCIPLINE: Block Agent(isolation="worktree") for supervisors
     //
-    // Supervisors must spawn workers via `mcp__cas__coordination spawn_workers`
+    // Supervisors must spawn workers via `mcp__cas__factory spawn_workers`
     // so worktrees are factory-tracked and garbage-collected. Raw `Agent` calls
     // with `isolation: "worktree"` create worktrees Claude Code cleans up only
     // on process exit — which leaks across Petrastella repos when the session
@@ -2914,10 +2914,12 @@ fn get_branch_at_rebase_git_target(target: &GitCommandTarget) -> Option<String> 
     None
 }
 
+#[cfg(test)]
 fn check_worker_git_commit_scope_for_command(cwd: &str, command: &str) -> Option<String> {
     worker_git_scope_violation_for_command(cwd, command).map(|(_, message)| message)
 }
 
+#[cfg(test)]
 fn worker_git_scope_violation_for_command(
     cwd: &str,
     command: &str,
@@ -2956,6 +2958,7 @@ fn worker_git_scope_violation_for_command_with_worktree(
 /// Note: `--no-verify` does NOT bypass this guard — it only skips git's own
 /// commit-msg/pre-commit hooks, not the Claude Code PreToolUse harness.
 /// Switching to a non-protected branch is the only way to unblock.
+#[cfg(test)]
 pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
     check_worker_git_commit_scope_at_target(&GitCommandTarget::from_cwd(cwd), None)
 }
@@ -4824,6 +4827,7 @@ pub(crate) fn is_harness_session_scratchpad(path: &std::path::Path, session_id: 
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+#[cfg(test)]
 fn factory_unsanctioned_write_path(
     input: &HookInput,
     configured_artifacts_root: &Option<String>,
@@ -7336,6 +7340,7 @@ fn apply_patch_write_targets(patch: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn unsanctioned_factory_path(
     input: &HookInput,
     configured_artifacts_root: &Option<String>,
@@ -11334,12 +11339,9 @@ EOF
 /// CALLING process's own harness actually named the tool).
 fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix: &str) -> bool {
     let task_tool = format!("{tool_prefix}task");
-    let coordination_tool = format!("{tool_prefix}coordination");
-    // cas-8563b: spawn_workers lives on `factory`; the coordination alias
-    // still runs it for one release, so both names are gated.
     let factory_tool = format!("{tool_prefix}factory");
     (tool_name == task_tool && action == Some("create"))
-        || ((tool_name == coordination_tool || tool_name == factory_tool)
+        || (tool_name == factory_tool
             && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
 }
 
@@ -11726,18 +11728,6 @@ mod worker_commit_guard_tests {
 
     // ── get_branch_at_cwd tests ───────────────────────────────────────────
 
-    #[test]
-    fn get_branch_returns_branch_name() {
-        let tmp = make_git_repo();
-        let branch = get_branch_at_cwd(&tmp.path().to_string_lossy());
-        assert_eq!(branch.as_deref(), Some("main"));
-    }
-
-    #[test]
-    fn get_branch_returns_none_for_nonexistent_dir() {
-        let branch = get_branch_at_cwd("/nonexistent/path/12345");
-        assert!(branch.is_none());
-    }
 
     // ── check_worker_git_commit_scope tests ──────────────────────────────
 
@@ -12978,7 +12968,7 @@ mod worker_commit_guard_tests {
     #[test]
     fn codemap_gate_recognizes_codex_spawn_workers() {
         assert!(is_codemap_gated_tool_call(
-            "mcp__cs__coordination",
+            "mcp__cs__factory",
             Some("spawn_workers"),
             "mcp__cs__"
         ));
@@ -12990,19 +12980,14 @@ mod worker_commit_guard_tests {
     /// the CODEMAP freshness gate was silently inert for every non-Claude
     /// supervisor.
     #[test]
-    fn codemap_gate_recognizes_grok_task_create_and_spawn_worker() {
+    fn codemap_gate_recognizes_grok_task_create_and_spawn_workers() {
         assert!(is_codemap_gated_tool_call(
             "cas__task",
             Some("create"),
             "cas__"
         ));
         assert!(is_codemap_gated_tool_call(
-            "cas__coordination",
-            Some("spawn_worker"),
-            "cas__"
-        ));
-        assert!(is_codemap_gated_tool_call(
-            "cas__coordination",
+            "cas__factory",
             Some("spawn_workers"),
             "cas__"
         ));
@@ -13027,7 +13012,7 @@ mod worker_commit_guard_tests {
     }
 
     /// Sanity check that the full `handle_pre_tool_use` entrypoint reaches
-    /// the codemap-gate matcher for a Grok supervisor's `cas__coordination`
+    /// the codemap-gate matcher for a Grok supervisor's `cas__factory`
     /// call at all (rather than short-circuiting on role/tool checks
     /// upstream) and, with no CODEMAP.md present to be stale against,
     /// doesn't false-positive deny. The matcher's actual gate/no-gate logic
@@ -13045,7 +13030,7 @@ mod worker_commit_guard_tests {
 
         let mut input = crate::hooks::handlers::HookInput::default();
         input.hook_event_name = "PreToolUse".to_string();
-        input.tool_name = Some("cas__coordination".to_string());
+        input.tool_name = Some("cas__factory".to_string());
         input.cwd = tmp.path().to_string_lossy().to_string();
         input.tool_input = Some(serde_json::json!({"action": "spawn_workers"}));
 

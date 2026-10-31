@@ -236,7 +236,6 @@ async fn close_output(fixture: &Recovery) -> String {
                 commit_receipt: Some(fixture.final_tip.clone()),
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -383,7 +382,6 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
                     no_delivery: None,
                     supervisor_override: None,
                     stranded_branch_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                 }))
                 .await
@@ -477,7 +475,6 @@ async fn first_close_explicit_final_receipt_binds_qa_and_merge_request_gh1389() 
             no_delivery: None,
             supervisor_override: None,
             stranded_branch_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
         })).await.unwrap());
         assert!(output.contains("REJECTED") || output.contains("REFUSED"), "{label}: {output}");
@@ -571,7 +568,6 @@ async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
             no_delivery: None,
             supervisor_override: None,
             stranded_branch_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
         })).await.unwrap();
         let output = text(result);
@@ -875,7 +871,6 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
                 commit_receipt: None,
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -978,7 +973,6 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
         commit_receipt: None,
         supervisor_override: None,
         stranded_branch_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     })).await.unwrap());
     let parked = tasks.get(TASK).unwrap();
@@ -1021,7 +1015,6 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
                 commit_receipt: Some(final_tip.clone()),
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -1041,7 +1034,6 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
                 commit_receipt: Some(final_tip),
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -1596,7 +1588,6 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         commit_receipt: Some(f.final_tip.clone()),
         supervisor_override: Some(true),
         stranded_branch_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     }));
     let invalid = text(reviewed_close(format!("reviewed-drop: {} -- not a replacement", f.final_tip)).await.unwrap());
@@ -1622,4 +1613,14 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     assert_eq!(closed.status, TaskStatus::Closed, "{reviewed}");
     assert!(closed.notes.contains(&replacement) && closed.notes.contains("reviewed delivery content supersession accepted"), "{}", closed.notes);
 
+    // The override is an intervention and the independent verdict is a check.
+    let ledger = cas_store::quality_events_for_task(&cas_dir, TASK).unwrap();
+    let interventions: Vec<_> = ledger.iter().filter_map(|event| match event.payload {
+        cas_store::QualityPayload::Intervention { intervention, .. } => Some(intervention),
+        _ => None,
+    }).collect();
+    assert!(interventions.contains(&cas_store::InterventionKind::OverrideClose), "{ledger:?}");
+    assert!(ledger.iter().any(|event| matches!(&event.payload,
+        cas_store::QualityPayload::CheckRun { check_id, outcome: cas_store::CheckOutcome::Pass, .. } if check_id == "task_verifier")),
+        "{ledger:?}");
 }

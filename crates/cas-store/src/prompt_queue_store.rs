@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::recording_store::capture_message_event;
 use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::NotificationPriority;
 mod recipient_delivery;
@@ -6572,7 +6571,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     },
                 )?;
             }
-            let _ = capture_message_event(&tx, source, target);
             tx.commit()?;
             Ok(EnqueueOutcome::Created(id))
         })?;
@@ -6632,8 +6630,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![source, recipient, prompt, now_text, factory_session, summary, priority, i64::from(urgent), origin_agent_id, origin_kind],
             )?;
             let recipient_id = tx.last_insert_rowid();
-            let _ = capture_message_event(&tx, source, supervisor);
-            let _ = capture_message_event(&tx, source, recipient);
             tx.commit()?;
             Ok(WorkerPeerMessageEnqueue {
                 recipient_id,
@@ -6768,7 +6764,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
 
             let id = tx.last_insert_rowid();
-            let _ = capture_message_event(&tx, source, target);
             tx.commit()?;
             Ok(EnqueueOutcome::Created(id))
         })?; // with_write_retry
@@ -6864,7 +6859,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             if changed > 0 {
                 let id = tx.last_insert_rowid();
-                let _ = capture_message_event(&tx, source, target);
                 tx.commit()?;
                 return Ok(EnqueueIdempotentResult::Created(id));
             }
@@ -6950,7 +6944,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![target, prompt, Utc::now().to_rfc3339(), factory_session,
                     summary, i32::from(NotificationPriority::Normal), dedupe_key])?;
             let id = tx.last_insert_rowid();
-            let _ = capture_message_event(&tx, "director", target);
             tx.commit()?;
             Ok(EnqueueIdempotentResult::Created(id))
         })?;

@@ -297,7 +297,7 @@ def warn_tooling(root):
             introduced = set()
             for base in git(root, 'merge-base', '--all', main, sha).splitlines():
                 introduced.update(git(root, 'diff', '--name-only', base, sha, '--',
-                                      'scripts/release*.sh', 'scripts/release*.py', 'scripts/release-train.d',
+                                      'scripts/release*.sh', 'scripts/release*.py',
                                       'cas-cli/src/builtins/skills/cas-cut-release').splitlines())
             changed = set(git(root, 'diff', '--name-only', main, sha, '--',
                               *sorted(introduced)).splitlines()) if introduced else set()

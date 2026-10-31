@@ -7,6 +7,119 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.94.0] - 2026-10-31
+
+### Fixed — Task close
+
+- **Renumbered migrations close normally** — Was: Adding a migration and then
+  renaming and renumbering it in the delivery's merge commit could falsely
+  report dropped content. → Now: Close proves the final migration against the
+  delivery's base and still refuses content lost after integration.
+
+### Removed — Release tooling
+
+- **Retired local release train** — Removed the unused release train, its lane checkers and train-only tests. Release lessons now follow `scripts/release.sh`; CI and the factory pre-push gate keep their shared fast-row catalog.
+
+### Fixed — CLI security
+
+- **Secret environment values stay out of help** — Was: Login and bridge server
+  help printed exported authentication tokens. → Now: Help lists the environment
+  variable names while hiding their values, matching the setup command.
+
+### Added — Friction ledger, phase 1
+
+- **Every check and supervisor rescue is measured** — Was: Interventions, escapes
+  and what each Cassy feature contributed were reconstructed by hand after a
+  session. → Now: Merge gates, queue results, verifier and QA verdicts, journeys,
+  overrides, rebinds, respawns, stall alerts, tagged escapes (`found-in:vX.Y.Z` on
+  a bug), releases and per-feature verdicts land automatically in an append-only
+  `quality_events` table.
+- **`cas ledger report --release vX`** — Was: No release-level view of friction. →
+  Now: One command prints interventions by kind, commit-to-main and
+  main-to-published minutes, escapes, checks and feature verdicts across every
+  synced project. `cas ledger backfill` turns existing history into events.
+- **Supervisors can rate a feature in one line** — Was: "What helped, what was
+  noise" lived in prose. → Now: A handoff line
+  `feature_feedback: <feature> <helped|noise|harmful|unused> [note]` records a
+  verdict next to the measured injected, opened and used counts.
+- **Fleet-wide over Cloud, metrics only** — Was: Each project's numbers stayed on
+  one machine. → Now: Events sync in batches to the team's Cloud route once it is
+  live, limited to metrics, timings, titles and links. Reasons and notes never
+  leave the machine, and until the route is live the client holds its place.
+
+### Fixed — Store IDs
+
+- **Rapid creates use one collision-resistant generator** — Tasks, skills, specs and indexed code now share the counter mixed into generated IDs. Creates during the same clock tick no longer reuse identical candidates, and occupied fallback IDs are retried. Existing ID prefixes and lengths stay unchanged.
+
+### Changed — MCP
+
+- **Retired factory and close aliases** — Was: Factory actions still ran through
+  `coordination`, and task close still accepted a hidden review-bypass alias. →
+  Now: Factory actions require `factory`; retired calls fail with the replacement
+  route, and task close accepts `supervisor_override`. Tests and live guidance use
+  the current routes.
+
+### Changed — Test-hygiene rules in the shipped test guidance
+
+- **Builtin test guidance names six measured bad-test patterns** — Was: The
+  TDD skill warned against sleeps but not against CSS or source-text assertions,
+  in-test dynamic imports, per-test expensive setup, assertion-free screenshot
+  tests or deleting a "duplicate" that other tests import. → Now: The TDD skill
+  states each rule with its measured cost, worker test discipline links to it,
+  and the task verifier reviews each pattern.
+- **Proof claims name what ran** — Was: A subset could be reported as the full
+  suite. → Now: Worker test discipline reports a subset by its counts, and the
+  verifier treats an overstated "full suite" claim as an incomplete close reason.
+
+### Changed — Visual QA
+
+- **Parallel resting captures** — Visual QA now captures up to three pages at once in one Chromium process, preserving report order, deduplication and strict failures. Set `VISUAL_QA_CONCURRENCY=1` to run captures sequentially; journeys keep their existing sequence.
+
+### Removed — Ambient memory recall
+
+- **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
+
+### Fixed — Commander connection replacement
+
+- **Stopped connections cancel pending catalog reads** — Replacing or stopping a live connection now cancels its startup and heartbeat catalog reads, including a request still signing its proof, so the retired connection cannot send that read afterward. Lifecycle tests await catalog delivery before measuring heartbeat and event refresh requests.
+
+### Fixed — Factory merge admission
+
+- **Factory merges report missing code validation accurately** — Was: a failed change classifier with every validation job skipped appeared as failed code CI after a documentation repair. Now: admission reports unconfirmed code validation with the classifier run link and requires code CI or a supervisor-reviewed local receipt. Target-only imports are excluded from delivery classification; lane-owned code and merge resolutions still require validation.
+- **Pending tip CI holds a code merge when the code commit has no runs** — Was: when code commits were pushed together with later documentation commits, the code commit had no CI runs of its own, so admission called the delivery advisory and merged it while the tip's run was still in progress. Now: the newest run that includes the code decides, so a pending run refuses the merge and a documentation-only run requires code validation. Admission stays advisory only when no run covers the code.
+
+### Removed — Dead subsystems
+
+- **TUI pop-up notification settings retired** — Was: `cas config` listed 16
+  `notifications.*` settings (sound, display duration, maximum visible, and the
+  task, entry, rule and skill events) that changed nothing, because the pop-up
+  pipeline they configured never ran. → Now: Those settings are gone. A config
+  file that still sets them loads normally, prints one note naming them, and
+  drops them on the next save or `cas update`. `notifications.enabled`,
+  `webhook_url` and the permission, idle and sign-in prompt settings are unchanged.
+- **Unused recording index tables dropped** — Was: Every store carried six
+  empty recording index tables, and nightly maintenance scanned them. → Now: A
+  schema migration drops the tables once. Factory session recordings are files
+  and are unaffected.
+- **Unused internal code removed** — Was: A second factory session manager, a
+  second search scorer and two search metrics stores were compiled into every
+  build without being called. → Now: They are removed, with no change in behavior.
+
+### Fixed — Cloud
+
+- **Cloud login instructions** — Was: Missing or expired authentication and team
+  membership errors, plus the Violet contract, suggested an unavailable login
+  subcommand. → Now: Every affected remedy names `cas login`, which opens the
+  existing Cloud authentication flow.
+
+### Fixed — Release gate cancellation
+
+- **Aborted rows finish child cleanup** — Was: The gate could report cancellation while Cargo descendants kept running. → Now: It freezes the row tree, waits for descendants to terminate, and kills children that outlast the graceful shutdown window before releasing row resources.
+
+### Fixed — Release quality recording
+
+- **Published receipts feed the friction ledger** — Was: Release events were recorded only by the retired train. → Now: The existing published-receipt step records actual landing and publication timings with current tag history. A recording failure warns and preserves the verified receipt and draft.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

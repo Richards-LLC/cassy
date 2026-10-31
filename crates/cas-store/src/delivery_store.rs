@@ -119,6 +119,20 @@ CREATE INDEX IF NOT EXISTS idx_pending_observed_delivery_merges_task
 // retry the exact intent/observation/clear after the foreign writer finishes.
 const OBSERVED_MERGE_WAIT_BUDGET: Duration = Duration::from_secs(2);
 
+#[cfg(test)]
+thread_local! {
+    static OBSERVED_MERGE_WAIT_BUDGET_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn observed_merge_wait_budget() -> Duration {
+    #[cfg(test)]
+    if let Some(budget) = OBSERVED_MERGE_WAIT_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return budget;
+    }
+    OBSERVED_MERGE_WAIT_BUDGET
+}
+
 /// Persist an authenticated worktree_merge observation after Git has advanced
 /// the task's declared target. This is a delivery fact, not worker proof.
 pub fn record_observed_delivery_merge(
@@ -149,7 +163,7 @@ pub fn record_observed_delivery_merge(
     // The merge and push already happened when this observation is written.
     // Retry the whole one-statement write on SQLITE_BUSY; INSERT OR IGNORE
     // keeps a retry after an ambiguous completion idempotent.
-    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    let _wait = crate::wait_budget::bound_waits_for(observed_merge_wait_budget());
     crate::shared_db::with_write_retry(|| {
         let conn = open(root)?;
         conn.execute(
@@ -196,7 +210,7 @@ pub fn record_pending_observed_delivery_merge(
                 .to_string(),
         ));
     }
-    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    let _wait = crate::wait_budget::bound_waits_for(observed_merge_wait_budget());
     crate::shared_db::with_write_retry(|| {
         let conn = open(root)?;
         conn.execute(
@@ -224,7 +238,7 @@ pub fn has_pending_observed_delivery_merge(
     target_branch: &str,
     source_commit_sha: &str,
 ) -> Result<bool> {
-    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    let _wait = crate::wait_budget::bound_waits_for(observed_merge_wait_budget());
     // open() installs the schema on the first call after an upgrade, so even
     // this read must retry the whole operation on a transient SQLITE_BUSY.
     crate::shared_db::with_write_retry(|| {
@@ -250,7 +264,7 @@ pub fn clear_pending_observed_delivery_merge(
     target_branch: &str,
     source_commit_sha: &str,
 ) -> Result<()> {
-    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    let _wait = crate::wait_budget::bound_waits_for(observed_merge_wait_budget());
     crate::shared_db::with_write_retry(|| {
         let conn = open(root)?;
         conn.execute(
@@ -2028,6 +2042,8 @@ mod tests {
 
     #[test]
     fn observed_delivery_merge_contention_is_bounded_and_recoverable() {
+        // pin: the shortened test budget must not lower the production one.
+        assert_eq!(OBSERVED_MERGE_WAIT_BUDGET, Duration::from_secs(2));
         // Exercise all observation operations, including first-use schema
         // installation by the pending check on an upgraded database.
         for operation in ["check", "intent", "observe", "clear"] {
@@ -2050,6 +2066,9 @@ mod tests {
             let path = root.path().to_path_buf();
             let (sent, received) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
+                // A shortened budget on this thread; the production one is 2 s.
+                OBSERVED_MERGE_WAIT_BUDGET_OVERRIDE
+                    .with(|budget| budget.set(Some(Duration::from_millis(250))));
                 let result = match operation {
                     "check" => has_pending_observed_delivery_merge(
                         &path,

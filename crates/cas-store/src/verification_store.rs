@@ -19,14 +19,13 @@ use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
 use std::fmt;
 
-use crate::recording_store::capture_task_event;
 use crate::supervisor_queue_store::{
     NotificationPriority, SqliteSupervisorQueueStore, SupervisorQueueStore,
 };
 use crate::task_store::SqliteTaskStore;
 use cas_types::{
     Agent, AgentRole, AgentStatus, AgentType, Dependency, DependencyType, Event, EventEntityType,
-    EventType, IssueSeverity, RecordingEventType, Task, TaskDeliverables, TaskStatus, Verification,
+    EventType, IssueSeverity, Task, TaskDeliverables, TaskStatus, Verification,
     VerificationDispatch, VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
     VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
     VerifierCapability, WorkerDeliveryState,
@@ -1661,14 +1660,6 @@ pub fn reopen_terminal_task_atomic(
         format!("Task reopened: {}", task.title),
     );
     record_event_with_conn(&tx, &event)?;
-    let recording_schema_exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recordings')",
-        [],
-        |row| row.get(0),
-    )?;
-    if recording_schema_exists {
-        capture_task_event(&tx, RecordingEventType::TaskCreated, &task.id, None)?;
-    }
 
     if let Some(outbox) = lifecycle_outbox {
         tx.execute(
@@ -1773,7 +1764,6 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
         format!("Task reopened: {}", task.title),
     );
     let _ = record_event_with_conn(&tx, &event);
-    let _ = capture_task_event(&tx, RecordingEventType::TaskCreated, &task.id, None);
     tx.commit()?;
     Ok(dispatch)
 }
@@ -2078,7 +2068,6 @@ fn correct_parked_delivery_proof_scope_inner(
         corrected_task.notes.clone(),
     );
     record_event_with_conn(&tx, &event)?;
-    let _ = capture_task_event(&tx, RecordingEventType::Custom, &corrected_task.id, None);
     tx.commit()?;
     Ok(ProofScopeCorrectionOutcome {
         delivery_transaction_id: delivery.map(|(id, _)| id),
@@ -2327,7 +2316,6 @@ pub fn request_changes_for_parked_delivery(
         note,
     );
     record_event_with_conn(&tx, &event)?;
-    let _ = capture_task_event(&tx, RecordingEventType::Custom, task_id, None);
     tx.commit()?;
     Ok(RequestChangesOutcome {
         boundary,

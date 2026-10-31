@@ -141,7 +141,7 @@ factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol ef
 
 Pass `lane=` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_workers` call, never both; these controls apply to the workers spawned by this call only. Omitted controls resolve through the config cascade and the acknowledgement warns. Copy-paste recipes: [workflow.md](workflow.md#phase-2-coordinate).
 
-**On `task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are coordination actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
+**On `task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are factory actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
 
 **Priority** is `0=Critical, 1=High, 2=Medium (default), 3=Low, 4=Backlog`. Accepts numeric OR named alias: `priority=1` ≡ `priority="high"`. Other aliases: `critical`, `medium`, `low`, `backlog`, `p0`-`p4`.
 

@@ -113,6 +113,7 @@ pub(crate) fn latest_turn_observations(
 /// Keep this evidence separate from message-specific reaction: a completed
 /// turn may have been unrelated to the queued row, but it still establishes
 /// the turn boundary the gate was waiting for.
+#[cfg(test)]
 pub(crate) fn turn_completed_after(
     artifact_path: &Path,
     cli: cas_mux::SupervisorCli,

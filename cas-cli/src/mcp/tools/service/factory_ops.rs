@@ -3433,6 +3433,12 @@ impl CasService {
             )
         };
 
+        crate::quality_ledger::worker_spawned(
+            &self.inner.cas_root,
+            req.task_id.as_deref(),
+            None,
+        );
+
         Ok(Self::success(msg))
     }
 
@@ -3753,6 +3759,22 @@ impl CasService {
                         .join("\n")
                 ),
             ));
+        }
+
+        // Force was needed and given: that is the intervention, whichever stop
+        // path follows. The respawn it causes is paired at the next spawn.
+        if force {
+            let forced_at = chrono::Utc::now().timestamp();
+            for snapshot in &unsafe_snapshots {
+                crate::quality_ledger::intervention(
+                    &self.inner.cas_root,
+                    cas_store::InterventionKind::ForceShutdown,
+                    format!("force_shutdown|{}|{forced_at}", snapshot.worker_id),
+                    None,
+                    None,
+                    None,
+                );
+            }
         }
 
         // Orphan PTYs cannot be attached to this daemon. Stop only durable,
@@ -9444,6 +9466,7 @@ fn sync_skip_reason_for_clone_resolve(
     }
 }
 
+#[cfg(test)]
 fn collect_worker_worktree_status(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
@@ -9552,6 +9575,7 @@ fn worker_worktree_status_fallback(
 
 /// The worker checkout can still point at an older lane after the task was
 /// delivered on `factory/<worker>-<task>`. Measure the bound delivery instead.
+#[cfg(test)]
 fn apply_task_delivery_git_status(
     repo: &std::path::Path,
     task: &cas_types::Task,
@@ -11963,6 +11987,7 @@ pub(crate) fn transcript_path_from_resolution(
 
 /// Resolve a live worker's real transcript/rollout path using the same
 /// harness-aware resolver as `cas factory is-wedged`.
+#[cfg(test)]
 pub(crate) fn resolve_worker_transcript_path(
     clone_path: Option<&str>,
     session_id: &str,
@@ -12001,6 +12026,7 @@ pub(crate) fn resolve_worker_transcript_path_for_account(
 /// `cas factory is-wedged`, otherwise this function stats a synthesized Claude
 /// path and returns `None` while the wedged classifier finds `updates.jsonl`.
 /// Claude alone retains the historical single-stat fast path.
+#[cfg(test)]
 fn worker_status_transcript_path(
     clone_path: Option<&str>,
     session_id: &str,

@@ -117,7 +117,6 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
                 reason: Some(reason.to_string()),
                 stranded_branch_override: None,
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))

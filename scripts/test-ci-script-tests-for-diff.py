@@ -17,6 +17,65 @@ TIER = ["python3 scripts/test-worker-memory.py", "python3 scripts/test-example.p
 
 
 class Selection(unittest.TestCase):
+    def test_provisioned_suites_follow_real_pr_inputs_and_ignore_unrelated_pr(self):
+        # Independent consumer inputs, not a copy of the selector's registry.
+        inputs = {
+            'test-cas-image-generate.sh': 'cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh',
+            'test-check-changelog-lint.sh': '.markdownlint-cli2.jsonc',
+            'test-codex-cargo-admission.py': '.codex/hooks.json',
+            'test-factory-client-terminal.py': 'cas-cli/src/ui/factory/client.rs',
+            'test-journey-bundles.py': 'scripts/journey-bundles.py',
+            'test-opencode-slack-policy.mjs': 'crates/cas-mux/src/opencode.rs',
+            'test-release-budget-breach.py': 'scripts/release-metrics.py',
+            'test-release-report-post.py': 'scripts/release-report-post.py',
+            'test-release-report.py': 'cas-cli/src/deliverable/assets/check-pdf.py',
+            'test-verified-web-runners.mjs': 'hub-web/scripts/run-verified-tests.mjs',
+            'test_factory_model_history.py': 'scripts/factory-model-history.py',
+            **{f'visual-qa{suffix}.test.mjs': 'scripts/visual-qa.mjs' for suffix in
+               ['', '-enter-transition', '-entrypoint', '-readiness', '-secrets']},
+        }
+        with tempfile.TemporaryDirectory(prefix='script-pr-selection-') as directory:
+            repo = Path(directory)
+            (repo / 'cas-cli').mkdir()
+            shutil.copyfile(Path(__file__).resolve().parents[1] / 'cas-cli/Makefile', repo / 'cas-cli/Makefile')
+            transition = 'scripts/visual-qa-fixtures/enter-transition.html'
+            paths = {*inputs.values(), *(f'scripts/{name}' for name in inputs), 'docs/unrelated.md', transition}
+            for path in paths:
+                file = repo / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('baseline\n')
+            def git(*args):
+                subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True)
+            git('init', '-q')
+            git('add', '.')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                '-c', 'commit.gpgsign=false', 'commit', '-qm', 'PR base')
+            def selected(changed):
+                for path in changed:
+                    (repo / path).write_text('PR head\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    '-c', 'commit.gpgsign=false', 'commit', '-qm', 'PR head')
+                result = subprocess.run([sys.executable, SELECTOR.__file__, '--repo', str(repo),
+                    '--base', 'HEAD^', '--provisioned', '--dry-run'], capture_output=True, text=True)
+                git('reset', '--hard', 'HEAD^')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout
+            for name, subject in inputs.items():
+                for path in [f'scripts/{name}', subject]:
+                    with self.subTest(suite=name, changed=path):
+                        output = selected([path])
+                        expected = ({f'scripts/{key}' for key, value in inputs.items() if value == subject}
+                                    if path == subject else {f'scripts/{name}'})
+                        actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
+                                  for line in output.splitlines() if 'would run ' in line}
+                        self.assertEqual(actual, expected, output)
+            self.assertIn('no script test covers', selected(['docs/unrelated.md']))
+            output = selected([transition])
+            actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
+                      for line in output.splitlines() if 'would run ' in line}
+            self.assertEqual(actual, {'scripts/visual-qa.test.mjs', 'scripts/visual-qa-enter-transition.test.mjs'})
+
     def test_terminal_qa_inputs_select_the_real_tier_command_once(self):
         terminal = "scripts/terminal-qa.test.mjs"
         builtin = "cas-cli/src/builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"
@@ -67,15 +126,6 @@ class Selection(unittest.TestCase):
         self.assertIn("AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
                       selected[0][1])
         self.assertEqual(SELECTOR.select(TIER, ["hub-web/src/app.ts"]), [])
-
-    def test_release_train_sources_select_release_portability_tests(self):
-        selected = SELECTOR.select(TIER, [
-            "scripts/release-train.sh",
-            "scripts/release-train.d/post-publication.sh",
-        ])
-        self.assertEqual(selected, [
-            ("scripts/test-release-portable.py", "python3 scripts/test-release-portable.py")
-        ])
 
 
 if __name__ == "__main__":

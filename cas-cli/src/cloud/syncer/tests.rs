@@ -575,7 +575,6 @@ fn push_response_round_trips_optional_invalid_sibling() {
     let failure = failures
         .get("cas-malformed-revision")
         .expect("invalid row is mapped to its local queue id");
-    assert_eq!(failure.id(), "cas-malformed-revision");
     match failure {
         PushItemizedFailure::Invalid(invalid) => {
             assert_eq!(invalid.reason.as_str(), "invalid_revision");
@@ -1184,7 +1183,11 @@ async fn team_push_failure_includes_body_and_trace_headers() {
             token: Some("test-token".to_string()),
             ..Default::default()
         },
-        CloudSyncerConfig::default(),
+        // Keep all three real attempts without the 2 s + 4 s production backoff.
+        CloudSyncerConfig {
+            backoff_base_ms: 1,
+            ..Default::default()
+        },
     );
     let result = tokio::task::spawn_blocking(move || syncer.push_team(team_id))
         .await

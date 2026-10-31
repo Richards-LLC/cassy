@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 use crate::hooks::handlers::handle_user_prompt_submit;
 use crate::test_support::TestEnvGuard;
-use crate::types::{Entry, EntryType, Task, TaskStatus};
+use crate::types::{EntryType, Task, TaskStatus};
 
 const SESSION: &str = "cas-src-happy-jay-91";
 const WORKER: &str = "ready-cheetah-71";
@@ -390,60 +390,6 @@ fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
     assert!(history[0].processed_at.is_some());
 }
 
-/// cas-0337: this is the actual factory supervisor turn path, not a direct
-/// retriever unit seam. A long active-task title must not hide a same-day
-/// Learning bound to the task explicitly named in the submitted turn.
-#[test]
-fn supervisor_turn_surfaces_matching_same_day_learnings() {
-    let mut env = TestEnvGuard::new();
-    supervisor_env(&mut env);
-    let project = TempDir::new().unwrap();
-    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    let entries = crate::store::open_store_local(&cas_root).unwrap();
-    let mut stale_refs = Entry::new(
-        "2026-08-14-5".into(),
-        "cas-ambient: epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into(),
-    );
-    stale_refs.entry_type = EntryType::Learning;
-    stale_refs.importance = 0.85;
-    entries.add(&stale_refs).unwrap();
-    let mut hermetic_ci = Entry::new(
-        "2026-08-14-3".into(),
-        "cas-ci: Local green is insufficient merge evidence: a populated developer HOME masks inherited git identity and CAS_AGENT_NAME failures that clean CI exposes".into(),
-    );
-    hermetic_ci.entry_type = EntryType::Learning;
-    hermetic_ci.importance = 0.90;
-    entries.add(&hermetic_ci).unwrap();
-
-    let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
-    let mut task = Task::new(
-        "cas-ambient".into(),
-        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".into(),
-    );
-    task.status = TaskStatus::InProgress;
-    tasks.add(&task).unwrap();
-    let mut ci_task = task.clone();
-    ci_task.id = "cas-ci".into();
-    tasks.add(&ci_task).unwrap();
-
-    // cab9d45f0 deliberately restricts supervisor procedure recall to exact
-    // task/epic bindings. Similar vocabulary alone must not recall another task.
-    let mut stale_input = input("supervisor");
-    stale_input.cwd = project.path().to_string_lossy().into_owned();
-    stale_input.user_prompt =
-        Some("Investigate cas-ambient epic_status before trusting stale refs on main".into());
-    let stale_context =
-        context_of(&handle_user_prompt_submit(&stale_input, Some(&cas_root)).unwrap());
-    assert!(stale_context.contains("2026-08-14-5"), "{stale_context}");
-    assert!(!stale_context.contains("2026-08-14-3"), "{stale_context}");
-
-    let mut ci_input = stale_input;
-    ci_input.user_prompt =
-        Some("For cas-ci, local green diverged from clean CI; audit inherited HOME, git identity, and CAS_AGENT_NAME".into());
-    let ci_context = context_of(&handle_user_prompt_submit(&ci_input, Some(&cas_root)).unwrap());
-    assert!(ci_context.contains("2026-08-14-3"), "{ci_context}");
-}
-
 /// cas-b657 (GH #375): the real UserPromptSubmit handler must preserve useful
 /// operator context in a factory worker session while rejecting every known
 /// machine origin. The test parses the actual hook wire shape and delivers it
@@ -655,27 +601,22 @@ fn captured_265_prompt_payload_reaches_handler_and_records_turn() {
 }
 
 #[test]
-fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
+fn post_tool_second_prompt_recovers_mail_and_skips_repeated_tools() {
     let mut env = TestEnvGuard::new();
     supervisor_env(&mut env);
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    let entries = crate::store::open_store_local(&cas_root).unwrap();
-    // cab9d45f0: recovery must obey the same current-task scope as turn-start recall.
-    let mut memory = Entry::new("recall-hook-recovery".into(), "cas-recall-hook: epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into());
-    memory.entry_type = EntryType::Learning;
-    memory.importance = 0.95;
-    entries.add(&memory).unwrap();
-    let mut task = Task::new("cas-recall-hook".into(), "Investigate stale refs".into());
-    task.status = TaskStatus::InProgress;
-    crate::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+    queue
+        .enqueue_with_session("peer", "supervisor", "mail-hook-recovery", SESSION)
+        .unwrap();
     let transcript = project.path().join("session.jsonl");
     let mut hook = input("supervisor");
     hook.cwd = project.path().to_string_lossy().into_owned();
     hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
     hook.prompt_id = Some("first".into());
     crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
-    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate cas-recall-hook epic_status before trusting stale refs on main\"}}}}\n", hook.session_id)).unwrap();
+    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate stale refs on main\"}}}}\n", hook.session_id)).unwrap();
     hook.hook_event_name = "PostToolUse".into();
     hook.tool_name = Some("Read".into());
     let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
@@ -683,10 +624,10 @@ fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
         additional_context: Some(additional_context),
     }) = output.hook_specific_output
     else {
-        panic!("missing recovered recall");
+        panic!("missing recovered mail");
     };
     assert!(
-        additional_context.contains("recall-hook-recovery"),
+        additional_context.contains("mail-hook-recovery"),
         "{additional_context}"
     );
     assert_eq!(

@@ -110,8 +110,7 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
 /// worktree, server, database, loop and queue control, plus Slack-thread
-/// authority. `coordination` accepts the original factory actions for one
-/// release as deprecated aliases; external-work actions are factory-only.
+/// authority. These actions are available only through `factory`.
 pub const FACTORY_ACTIONS: &[&str] = &[
     // Fleet
     "spawn_workers",

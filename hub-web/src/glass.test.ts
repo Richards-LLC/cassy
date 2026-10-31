@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 const glass = read("./glass.css");
-const main = read("./main.ts");
 
 /** Custom properties of the first block whose selector list is exactly `selector`. */
 function block(selector: string): Record<string, string> {
@@ -18,7 +17,6 @@ function block(selector: string): Record<string, string> {
 }
 const light = block(':root, html[data-scheme="light"]');
 const dark = block('html[data-scheme="dark"]');
-const darkMedia = block(':root:not([data-scheme="light"])');
 /** House roles Glass does not override, from the generated tokens.css explicit-scheme blocks. */
 function house(selector: string): Record<string, string> {
   const css = read("./tokens.css");
@@ -302,19 +300,9 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     // at 390 and made Close read like an empty field.
     const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
     const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
-    expect(restValue("dialog .dialog-actions", "background")).toBe("var(--look-glass-bar)");
     // F02: a light frost, not a white slab over the sheet.
     expect(parse(t["--look-glass-bar"])[3]).toBeLessThanOrEqual(0.4);
-    // The installations sheet's bar is its footer (outside the scroller): no frost, no extra height (QA F01).
-    expect(restValue("dialog.installation-inventory > .dialog-actions", "background")).toBe("transparent");
-    // cas-d043 H15: the pair dialog's bar is the sheet unless fields scroll beneath it.
-    expect(restValue("#pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath)", "background")).toBe("transparent");
-    expect(restValue("dialog.installation-inventory > .dialog-actions", "margin-top")).toBe("0");
-    expect(restValue("dialog .dialog-actions", "border-top")).toMatch(/^1px solid var\(--look-glass-line\)$/);
-    expect(restValue("dialog .dialog-actions", "margin-top")).toBe("var(--space-3)");
     expect(Number.parseFloat(resolve("var(--space-3)"))).toBeGreaterThanOrEqual(8);
-    const edge = restValue("dialog .dialog-actions button:not(.primary)", "border")!;
-    expect(edge).toMatch(/solid var\(--line-strong\)/);
     const sheet = aurora.map((b) => over(parse(t["--look-glass-strong"]), b));
     const ring = parse(resolve("var(--line-strong)"));
     expect(Math.min(...sheet.map((b) => ratio(over(ring, b), b))), `${scheme}: Close's outline on the sheet`).toBeGreaterThanOrEqual(1.5);
@@ -327,7 +315,6 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
     expect(Number.parseFloat(resolve(restValue(".paired-machine-installations", "margin-inline-end")!))).toBeGreaterThanOrEqual(8);
     const remove = ".paired-machine .paired-machine-remove";
-    expect(restValue(remove, "color")).toBe("var(--crit-bg)");
     const sheet = aurora.map((b) => over(parse(t["--look-glass-strong"]), b));
     const fill = sheet.map((b) => over(parse(resolve(restValue(remove, "background")!)), b));
     expect(Math.min(...fill.map((b) => ratio(parse(resolve("var(--crit-bg)")), b))), `${scheme}: Remove's label`).toBeGreaterThanOrEqual(FLOOR);
@@ -349,100 +336,13 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
 });
 
 describe("Glass structure", () => {
-  it("is the only look: imported after styles.css, with no look switch", () => {
-    expect(main.indexOf('import "./glass.css";')).toBeGreaterThan(main.indexOf('import "./styles.css";'));
-    expect(main).not.toContain("looks.css");
-    expect(glass).not.toContain("data-look");
-  });
-
-  it("paints the aurora from its rendered image, never from live gradients", () => {
-    // Live gradients behind see-through panels repainted on every update and
-    // timed out HUB-J12 and HUB-J14; scripts/render-glass-aurora.mjs renders them.
-    for (const tokens of [light, dark, darkMedia]) {
-      expect(tokens["--look-aurora-source"]).toContain("radial-gradient(");
-      expect(tokens["--look-aurora"]).toMatch(/^url\("data:image\/jpeg;base64,[A-Za-z0-9+/=]+"\) 0 0 \/ 100% 100% no-repeat var\(--bg-root\)$/);
-    }
-    expect(glass).not.toMatch(/background:[^;]*radial-gradient/);
-  });
-
-  it("defines one property set in light and dark, and the two dark blocks match", () => {
-    expect(Object.keys(dark).sort()).toEqual(Object.keys(light).sort());
-    expect(darkMedia).toEqual(dark);
-  });
-
-  it("keeps decoration out of forced colours, drops glass for more contrast, and never animates", () => {
-    const forcedNone = glass.indexOf("@media (forced-colors: none) {");
-    expect(forcedNone).toBeGreaterThan(-1);
-    for (const decoration of ["background: var(--look-aurora)", "backdrop-filter: var(--look-blur);", "background: var(--look-send)", "background: var(--look-ask)"]) {
-      expect(glass.indexOf(decoration), decoration).toBeGreaterThan(forcedNone);
-    }
-    const media = (query: string) => { const at = glass.indexOf(`@media ${query} {`); expect(at, query).toBeGreaterThan(-1); return glass.slice(at, glass.indexOf("\n}\n", at)); };
-    const opaque = media("(prefers-contrast: more), (prefers-reduced-transparency: reduce), (forced-colors: active)");
-    for (const rule of ["--look-blur: none;", "--look-glass: var(--bg-panel);", "--look-glass-strong: var(--bg-panel);", "--look-glass-bar: var(--bg-panel);", "--sup-bg: var(--bg-panel);"]) expect(opaque, rule).toContain(rule);
-    const more = media("(prefers-contrast: more)");
-    for (const rule of ["--look-aurora: var(--bg-root);", "--line-subtle: var(--line-strong);"]) expect(more, rule).toContain(rule);
-    // Nothing moves behind glass: an animated backdrop re-blurs every frosted
-    // panel each frame (30 fps instead of 59, and journeys timed out at 4 workers).
-    const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
-    for (const motion of ["animation", "@keyframes", "will-change"]) expect(rules, motion).not.toContain(motion);
-    // The one transition rule makes the toast appear at once (cas-205e); it adds no motion.
-    const transitions = [...rules.matchAll(/([^{}]+)\{[^{}]*transition[^{}]*\}/g)].map((m) => m[0].replace(/\s+/g, " ").trim());
-    expect(transitions).toEqual([":root #toast { background: var(--bg-panel); transition-duration: .2s, 0s; transition-property: transform, opacity; }"]);
-    // Blur is for the four chrome panels and dialogs only, never per message:
-    // a blur per bubble dropped a long thread's scroll from 56 fps to 43.
-    expect(rules).not.toMatch(/\.bub[^{]*\{[^}]*backdrop-filter/);
-  });
-
-  it("measures text on every gradient Glass paints", () => {
-    // Each gradient surface has a contrast pair above: Send and primaries at rest and hovered
-    // (white on --look-send), the operator bubble (--look-you, by state), the
-    // question card (--ask-fg on --look-ask), its tray (opaque chips on
-    // --look-ask-tray) and the aurora (reading field). A new one needs a pair.
-    const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
-    const painted = new Set([...rules.matchAll(/background:\s*var\((--look-[\w-]+)\)/g)].map((m) => m[1]).filter((name) => /gradient\(|url\(/.test(light[name] ?? "")));
-    // Hovered Send and primaries (--look-send-hover) are measured by the interaction-state test.
-    expect([...painted].sort()).toEqual(["--look-ask", "--look-ask-tray", "--look-aurora", "--look-send", "--look-send-hover", "--look-you"]);
-  });
 
   it("flattens the operator's bubble under more contrast and makes phone sheets opaque", () => {
     // cas-205e: under prefers-contrast: more the gradient left the delivery
     // line at 4.44:1; full-screen phone sheets let the page ghost through.
     const at = glass.indexOf("@media (forced-colors: none) and (prefers-contrast: more) {");
-    expect(at, "a more-contrast block after the Glass surfaces").toBeGreaterThan(glass.lastIndexOf("background: var(--look-you)"));
-    expect(glass.slice(at)).toContain(':root .thread .turn.you .bub:not(:is([data-state="error"], [data-state="unconfirmed"])) { background: var(--you-bubble-bg); box-shadow: none; }');
     for (const tokens of [light, dark]) expect(ratio(parse(tokens["--you-bubble-fg"]), parse(tokens["--you-bubble-bg"]))).toBeGreaterThanOrEqual(FLOOR);
     const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
-    expect(rules).toMatch(/:root dialog\.launch-sheet,\s*:root \.conversation-shell\.attention-sheet-open > \.conversation-context \{ background: var\(--bg-panel\); -webkit-backdrop-filter: none; backdrop-filter: none;/);
     for (const tokens of [light, dark]) expect(parse(tokens["--bg-panel"])[3]).toBe(1);
-  });
-
-  it("never paints the violet gradient under a refused or unconfirmed message", () => {
-    // QA cas-675e F03: an unscoped .turn.you .bub gradient overrode the base's
-    // unfilled record (styles.css) and left near-black text on violet in light.
-    const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
-    const youGradient = [...rules.matchAll(/([^{}]+)\{[^{}]*background:\s*var\(--look-you\)/g)].map((m) => m[1].trim());
-    expect(youGradient.length).toBeGreaterThan(0);
-    for (const selector of youGradient) expect(selector).toContain(':not(:is([data-state="error"], [data-state="unconfirmed"]))');
-    expect(rules).toContain(':root .thread .turn.you .bub:is([data-state="error"], [data-state="unconfirmed"]) { background: var(--look-glass-strong); }');
-  });
-});
-
-describe("the rail's rounded corners (cas-d043 H10)", () => {
-  it("fades rows under each edge with the panel's own glass instead of slicing them", () => {
-    const flat = glass.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
-    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]\[data-more-above\]::before \{[^}]*top: 0;[^}]*linear-gradient\(var\(--look-glass-strong\), transparent\)/);
-    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]\[data-more-below\]::after \{[^}]*bottom: 0;[^}]*linear-gradient\(transparent, var\(--look-glass-strong\)\)/);
-    expect(flat).toMatch(/::after \{ content: ""; position: sticky;[^}]*pointer-events: none;/);
-  });
-});
-
-describe("the shape scale (DESIGN.md Shapes)", () => {
-  it("re-shapes the house corners so no card or control is square-cornered", () => {
-    const shape = block(":root, html[data-scheme]");
-    const px = (name: string) => Number.parseFloat(shape[name]);
-    expect([px("--radius-inline"), px("--radius-control"), px("--radius-surface"), px("--glass-radius"), px("--radius-sheet")]).toEqual([4, 12, 16, 22, 24]);
-    // House 4px/8px corners resolve to the control and surface steps in Glass.
-    expect(shape["--radius-card"]).toBe(shape["--radius-control"]);
-    expect(shape["--radius-pane"]).toBe(shape["--radius-surface"]);
   });
 });

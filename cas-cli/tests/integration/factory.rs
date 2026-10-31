@@ -41,8 +41,6 @@ mod verifier_handoff_cleanup_test;
 mod worker_hold_mcp_test;
 #[path = "../worktree_surface_test.rs"]
 mod worktree_surface_test;
-#[path = "../worktree_test.rs"]
-mod worktree_test;
 
 #[path = "../../src/test_env_guard.rs"]
 mod test_env_guard;

@@ -301,11 +301,6 @@ pub struct TaskCloseRequest {
     #[serde(default)]
     pub supervisor_override: Option<bool>,
 
-    /// One-release compatibility alias for `supervisor_override`.
-    #[schemars(skip)]
-    #[serde(default, rename = "bypass_code_review", skip_serializing)]
-    pub legacy_bypass_code_review: Option<bool>,
-
     /// Supervisor override for the epic close stranded-branch gate (cas-b192).
     ///
     /// Deliberately a NARRATIVE STRING rather than a boolean: the value is the

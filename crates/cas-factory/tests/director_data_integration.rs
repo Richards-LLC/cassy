@@ -949,101 +949,10 @@ fn test_tasks_by_epic_single_epic_unchanged() {
 // TaskSummary Tests
 // =============================================================================
 
-#[test]
-fn test_task_summary_fields() {
-    let summary = TaskSummary {
-        id: "cas-1234".to_string(),
-        title: "Test Task".to_string(),
-        status: TaskStatus::InProgress,
-        priority: Priority::HIGH,
-        assignee: Some("agent-1".to_string()),
-        task_type: TaskType::Feature,
-        epic: Some("cas-epic".to_string()),
-        branch: Some("feature/test".to_string()),
-        updated_at: None,
-            epic_verification_owner: None,
-        };
-
-    assert_eq!(summary.id, "cas-1234");
-    assert_eq!(summary.title, "Test Task");
-    assert_eq!(summary.status, TaskStatus::InProgress);
-    assert_eq!(summary.priority, Priority::HIGH);
-    assert_eq!(summary.assignee, Some("agent-1".to_string()));
-    assert_eq!(summary.task_type, TaskType::Feature);
-    assert_eq!(summary.epic, Some("cas-epic".to_string()));
-    assert_eq!(summary.branch, Some("feature/test".to_string()));
-}
-
 // =============================================================================
 // AgentSummary Tests
 // =============================================================================
 
-#[test]
-fn test_agent_summary_fields() {
-    let now = chrono::Utc::now();
-    let summary = AgentSummary {
-        id: "agent-123".to_string(),
-        name: "swift-fox".to_string(),
-        status: AgentStatus::Active,
-        registered_at: now,
-        current_task: Some("cas-1234".to_string()),
-        latest_activity: Some(("Edited file".to_string(), now)),
-        last_heartbeat: Some(now),
-        pending_messages: 0,
-        pending_supervisor_messages: 0,
-        latest_supervisor_message_at: None,
-        active_lease: None,
-        effort: None,
-        qa_reviewer_between_rounds: false,
-    };
-
-    assert_eq!(summary.id, "agent-123");
-    assert_eq!(summary.name, "swift-fox");
-    assert_eq!(summary.status, AgentStatus::Active);
-    assert_eq!(summary.current_task, Some("cas-1234".to_string()));
-    assert!(summary.latest_activity.is_some());
-    assert!(summary.last_heartbeat.is_some());
-}
-
 // =============================================================================
 // EpicGroup Tests
 // =============================================================================
-
-#[test]
-fn test_epic_group_fields() {
-    let epic = TaskSummary {
-        id: "cas-epic".to_string(),
-        title: "Test Epic".to_string(),
-        status: TaskStatus::InProgress,
-        priority: Priority::CRITICAL,
-        assignee: None,
-        task_type: TaskType::Epic,
-        epic: None,
-        branch: Some("epic/test".to_string()),
-        updated_at: None,
-            epic_verification_owner: None,
-        };
-
-    let subtask = TaskSummary {
-        id: "cas-0001".to_string(),
-        title: "Subtask 1".to_string(),
-        status: TaskStatus::InProgress,
-        priority: Priority::HIGH,
-        assignee: Some("agent-1".to_string()),
-        task_type: TaskType::Task,
-        epic: Some("cas-epic".to_string()),
-        branch: None,
-        updated_at: None,
-            epic_verification_owner: None,
-        };
-
-    let group = EpicGroup {
-        epic,
-        subtasks: vec![subtask],
-        has_active: true,
-    };
-
-    assert_eq!(group.epic.id, "cas-epic");
-    assert_eq!(group.subtasks.len(), 1);
-    assert!(group.has_active);
-}

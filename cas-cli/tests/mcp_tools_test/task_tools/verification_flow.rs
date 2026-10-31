@@ -137,7 +137,6 @@ async fn legacy_repository_proof_rejects_drift(test_env: &mut TestEnvGuard, isol
         id: task_id.clone(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -354,7 +353,6 @@ fn close_request(task_id: &str, reason: &str) -> TaskCloseRequest {
         id: task_id.to_string(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }
@@ -3060,7 +3058,6 @@ async fn test_task_close_blocked_without_verification() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3169,7 +3166,6 @@ require_merge_on_epic_close = true
         id: task.id.clone(),
         reason: Some("Done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3347,7 +3343,6 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
                 id: id.clone(),
                 reason: Some("implementation complete".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3463,7 +3458,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     id: task_id.to_string(),
                     reason: Some("worker tries to discard its own delivery".to_string()),
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -3495,7 +3489,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                 id: task_id.to_string(),
                 reason: Some("measurement complete".to_string()),
                 supervisor_override: Some(true),
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3519,7 +3512,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     id: task_id.to_string(),
                     reason: None,
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -3561,7 +3553,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     id: task_id.to_string(),
                     reason: Some("experiment regressed the dominant path; do not ship".to_string()),
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -3711,7 +3702,6 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3826,7 +3816,6 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3969,7 +3958,6 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4142,7 +4130,6 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4284,7 +4271,6 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
         id: id_a.clone(),
         reason: Some("ready for merge".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4549,7 +4535,6 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
                 id: task_id.clone(),
                 reason: Some("work was merged before first close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4696,7 +4681,6 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4768,7 +4752,6 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4954,7 +4937,6 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
                 id: id_a.clone(),
                 reason: Some("merged and pushed to origin".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5101,7 +5083,6 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5140,7 +5121,6 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 id: id_a.clone(),
                 reason: Some("merged, closing".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5205,7 +5185,6 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 id: id_a.clone(),
                 reason: Some("reworked, claiming done".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5321,7 +5300,6 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
         id: id.clone(),
         reason: Some("done, merged onto main".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5432,7 +5410,6 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5545,7 +5522,6 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5629,7 +5605,6 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
         id: id.clone(),
         reason: Some("resolved via notes, no code needed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5769,7 +5744,6 @@ enabled = false
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5804,7 +5778,6 @@ enabled = false
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5832,7 +5805,6 @@ enabled = false
         id: id.clone(),
         reason: Some("Committed and ready".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5967,7 +5939,6 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         id: id.clone(),
         reason: Some("done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6003,7 +5974,6 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         id: id.clone(),
         reason: Some("actually done now".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6117,7 +6087,6 @@ async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() 
                 id: id.clone(),
                 reason: Some("staging work is committed".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6287,7 +6256,6 @@ enabled = false
                 id: id_a.clone(),
                 reason: Some("committed and additive".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6335,7 +6303,6 @@ enabled = false
                 id: id_b.clone(),
                 reason: Some("claims to be additive".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6394,7 +6361,6 @@ enabled = false
                 id: id_c.clone(),
                 reason: Some("localized existing value".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6544,7 +6510,6 @@ enabled = false
         id: id.clone(),
         reason: Some("non-isolated direct CLI flow".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6619,7 +6584,6 @@ enabled = false
         id: additive_id.clone(),
         reason: Some("additive-only non-isolated".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6705,7 +6669,6 @@ enabled = false
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6814,7 +6777,6 @@ enabled = false
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6904,7 +6866,6 @@ async fn test_a699_halted_approved_delivery_recloses() {
                 id: id.clone(),
                 reason: Some("approved review re-close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -7057,7 +7018,6 @@ async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart(
                 id: task_id.clone(),
                 reason: Some("finished and merged".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: Some(receipt),
             }))
@@ -7116,7 +7076,6 @@ enabled = false
         id: id.clone(),
         reason: Some("trying to close someone else's task".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7186,7 +7145,6 @@ async fn test_epic_close_requires_epic_verification_type() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7217,7 +7175,6 @@ async fn test_epic_close_requires_epic_verification_type() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7250,7 +7207,6 @@ async fn test_epic_close_requires_epic_verification_type() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7291,7 +7247,6 @@ async fn test_branchless_no_code_epic_closes_without_checkout_snapshot_cas_04c6(
         reason: Some("Planning complete".into()),
         stranded_branch_override: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7386,7 +7341,6 @@ async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
                 id: epic.id.clone(),
                 reason: Some("merged epic branch is ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -7498,7 +7452,6 @@ async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
                 id: epic.id.clone(),
                 reason: Some("target merge receipt proves the epic delivery".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: Some(merge_tip.clone()),
             }))
@@ -7583,7 +7536,6 @@ async fn test_task_lifecycle_with_verification() {
         id: id.to_string(),
         reason: Some("Completed successfully".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7678,7 +7630,6 @@ async fn test_task_close_reopens_after_rejected_verification() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7767,7 +7718,6 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
         id: id.clone(),
         reason: Some("Completed all acceptance criteria. Deployed to prod.".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7865,7 +7815,6 @@ async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
             id,
             reason: Some("historical record".into()),
             supervisor_override: Some(true),
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -7910,7 +7859,6 @@ async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() 
                     id: id.clone(),
                     reason: Some("all child tasks complete".into()),
                     supervisor_override: explicit_override.then_some(true),
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }))
@@ -8007,7 +7955,6 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8125,7 +8072,6 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8170,7 +8116,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
 ///
 /// Post-fix, the close path resolves liveness from the task's active lease
 /// (`TaskLease.agent_id` is the real session id), which survives the name/id
-/// mismatch. A supervisor closing such a task without `bypass_code_review=true`
+/// mismatch. A supervisor closing such a task without `supervisor_override=true`
 /// must now drop into the normal verification path; with the flag set, the
 /// close proceeds but the audit message cites "supervisor bypass", never
 /// "assignee inactive".
@@ -8253,7 +8199,6 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         id: id.clone(),
         reason: Some("worker finished, asking supervisor to close".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8289,7 +8234,6 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         id: id.clone(),
         reason: Some("supervisor forced close after alignment".to_string()),
         supervisor_override: Some(true),
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8388,7 +8332,6 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         // with this phrase, an alive assignee must keep the jail engaged.
         reason: Some("verification skipped — assignee inactive".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -9884,7 +9827,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             id: id.clone(),
             reason: Some("Completed".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -9941,7 +9883,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             id: id.clone(),
             reason: Some("Completed".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -10700,7 +10641,6 @@ async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() 
                 id: id.clone(),
                 reason: Some("Ready for supervisor verification".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11048,7 +10988,6 @@ async fn supervisor_self_assignee_close_guidance(
                 id: id.clone(),
                 reason: Some("Self-implemented; ready to self-verify".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11150,7 +11089,6 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
             id: id.clone(),
             reason: Some("Completed".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -11179,7 +11117,6 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
                 id: id.clone(),
                 reason: Some("Completed".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11274,7 +11211,6 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
                 id: id.clone(),
                 reason: Some("062d close proof".to_string()),
                 supervisor_override: Some(true),
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11428,7 +11364,6 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11484,7 +11419,6 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11629,7 +11563,6 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11661,7 +11594,6 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 id: id_a.clone(),
                 reason: Some("retry before merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11770,7 +11702,6 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
             id: id_b.clone(),
             reason: Some("done".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

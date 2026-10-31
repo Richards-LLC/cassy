@@ -154,7 +154,6 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
             id: id.clone(),
             reason: Some("Feel-driven pass complete.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -263,7 +262,6 @@ async fn rapid_response_window_samples_close_verification() {
                     id,
                     reason: Some("Fixed.".to_string()),
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }))
@@ -343,7 +341,6 @@ async fn task_close_quarantines_linked_reminders_unless_explicitly_kept() {
         id: id.clone(),
         reason: Some("The task is complete.".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }))
@@ -387,7 +384,6 @@ async fn test_deep_depth_solo_close_still_arms_verification_jail() {
             id: id.clone(),
             reason: Some("Done.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -448,7 +444,6 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
             id: id.clone(),
             reason: Some("Done.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -659,7 +654,6 @@ async fn create_started_and_closed_light_task(core: &CasCore, title: &str) -> St
             id: id.clone(),
             reason: Some("Feel-driven pass complete.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -990,6 +984,15 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
     let id =
         create_started_and_closed_light_task(&core, "start-on-closed supervisor message").await;
 
+    let agents = cas::store::open_agent_store(&temp.path().join(".cas")).unwrap();
+    let agent_id = format!("test-session-{}", std::process::id());
+    let mut agent = agents.get(&agent_id).unwrap();
+    agent.metadata.insert("halt_task_work".into(), "1".into());
+    agent
+        .metadata
+        .insert("halt_task_work_gen".into(), "42".into());
+    agents.update(&agent).unwrap();
+
     let result = {
         test_env.set("CAS_AGENT_ROLE", "supervisor");
         let r = core
@@ -998,6 +1001,19 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
         test_env.remove("CAS_AGENT_ROLE");
         r
     };
+
+    let persisted = agents.get(&agent_id).unwrap();
+    assert_eq!(
+        persisted.metadata.get("halt_task_work").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        persisted
+            .metadata
+            .get("halt_task_work_gen")
+            .map(String::as_str),
+        Some("42")
+    );
 
     let _ = temp; // keep tempdir alive for the duration of the call above
     match result {

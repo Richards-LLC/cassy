@@ -634,6 +634,7 @@ impl StatusBar {
     /// Return the account profile represented by Claude's two account
     /// selectors. Non-conventional paths remain visibly custom instead of
     /// being mistaken for the main account.
+    #[cfg(test)]
     fn claude_profile_from_config_dir(config_dir: Option<&str>) -> String {
         Self::claude_profile_from_selectors(config_dir, None)
     }

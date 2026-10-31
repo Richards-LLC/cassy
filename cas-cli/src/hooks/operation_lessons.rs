@@ -40,13 +40,15 @@ pub(crate) fn operation(
                         .all(|(offset, arg)| words.get(index + 1 + offset) == Some(arg))
             })
         };
-        if starts("release-train.sh", &[]) && words.contains(&"--cut") {
+        if starts("release.sh", &[])
+            && !words.iter().any(|word| matches!(*word, "--next-version" | "--help" | "-h"))
+        {
             return Some("release-cut");
         }
         return starts("cas", &["release", "report"]).then_some("report");
     }
     let action = field("action");
-    if (tool == format!("{tool_prefix}factory") || tool == format!("{tool_prefix}coordination"))
+    if tool == format!("{tool_prefix}factory")
         && matches!(action, Some("spawn_workers" | "spawn_worker"))
     {
         return Some("spawn");
@@ -170,7 +172,7 @@ mod tests {
 
         let cut = input(
             "Bash",
-            serde_json::json!({ "command": "cd /wt && scripts/release-train.sh 9.99.3 /wt --cut > cut.log 2>&1 &" }),
+            serde_json::json!({ "command": "cd /wt && scripts/release.sh > cut.log 2>&1 &" }),
         );
         let context = surfaced(temp.path(), &cut);
         let scratch_at = context.find(&scratch).expect("scratch-base lesson surfaced");
@@ -181,7 +183,7 @@ mod tests {
         assert!(surfaced(temp.path(), &skill).contains(&scratch));
         let status = input(
             "Bash",
-            serde_json::json!({ "command": "scripts/release-train.sh 9.99.3 /wt --status" }),
+            serde_json::json!({ "command": "scripts/release.sh --next-version" }),
         );
         assert!(!surfaced(temp.path(), &status).contains("[operation lessons"));
     }

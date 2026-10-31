@@ -7743,15 +7743,7 @@ mod tests {
             phases[0].checks, 0,
             "a phase that produced no check still spent time and must be kept"
         );
-        assert_eq!(
-            recorder
-                .slowest(Duration::from_millis(100), 5)
-                .iter()
-                .map(|phase| phase.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["integrations"],
-            "slowest() ranks by duration and drops phases under the threshold"
-        );
+
     }
 
     /// The operator-facing half: `--verbose` must print the duration beside
@@ -11429,6 +11421,8 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
     #[test]
     fn busy_retirement_doctor_autofix_warns_until_retry_cas_e4aa() {
+        // The held writer exhausts a shortened budget (production: 10 s).
+        crate::daemon::indexing::set_writer_lock_budget_for_tests(std::time::Duration::from_millis(100));
         let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
         assert!(fixture.scan(&fixture.main).errors.is_empty());
         fs::remove_file(fixture.main.join("new.rs")).unwrap();

@@ -1972,6 +1972,7 @@ pub(crate) enum WorkerRetirement {
 
 /// Settle the task bindings of a worker whose process has just been retired.
 /// Returns how many bindings were released.
+#[cfg(test)]
 pub(crate) fn settle_retired_worker_bindings(
     cas_dir: &std::path::Path,
     agent_store: &dyn cas_store::AgentStore,
@@ -3668,6 +3669,7 @@ impl FactoryApp {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn worker_worktree_cleanups_pending(&self) -> bool {
         !self.worktree_cleanup_jobs.is_empty()
     }
@@ -8573,7 +8575,7 @@ mod tests {
         );
         env.set_current_dir(&project);
         let merged = supervisor
-            .coordination(Parameters(
+            .factory(Parameters(
                 serde_json::from_value(serde_json::json!({
                     "action": "worktree_merge", "id": branch, "task_id": task.id, "cleanup": false,
                 }))

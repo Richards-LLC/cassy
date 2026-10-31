@@ -5,7 +5,7 @@
 //! - cas_task: All task and dependency operations
 //! - cas_rule: All rule operations
 //! - cas_skill: All skill operations
-//! - cas_coordination: Agent, factory, and worktree operations (merged)
+//! - cas_coordination: Agent identity, messaging and reminders
 //! - cas_search: Search, context, and entity operations
 //! - cas_system: Diagnostics, stats, and maintenance
 //! - cas_verification: Task quality gates
@@ -576,19 +576,18 @@ impl CasService {
     }
 
     // ========================================================================
-    // cas_coordination - Agent, factory, and worktree operations (merged)
+    // cas_coordination - Agent identity, messaging and reminders
     // ========================================================================
 
     #[tool(
-        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory; legacy control calls forward here for one release with a deprecation note. Per-action rules are on parameters."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let action = canonical_coordination_action(&req.action).to_string();
-        // cas-8563b (D2): agent actions only. The factory actions moved to the
-        // `factory` tool and stay accepted here for one release.
+        // Only agent actions dispatch here; retired factory routes fail before mutation.
         let result = match action.as_str() {
             // cas-269ab: one action registry (`cas_mcp::actions`) drives the
             // published enum, this routing and the invalid-action message.
@@ -596,18 +595,14 @@ impl CasService {
             agent if cas_mcp::actions::COORDINATION_ACTIONS.contains(&agent) => {
                 self.coordination_dispatch(req).await
             }
-            external if cas_mcp::actions::EXTERNAL_WORK_ACTIONS.contains(&external) => {
+            moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
                 Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Slack-thread authority action `{external}` is available only through the supervisor factory tool: `{}factory action={external}`",
+                        "Factory action `{moved}` is available only through the factory tool: `{}factory action={moved}`",
                         self.inner.guidance_prefix()
                     ),
                 ))
-            }
-            moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
-                let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
-                Self::append_notice(self.coordination_dispatch(req).await, &notice)
             }
             _ => Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -628,6 +623,8 @@ impl CasService {
         &self,
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let mut req = req;
+        normalize_factory_aliases(&req.action, &mut req.target, &mut req.worker_names);
         let action = req.action.clone();
         let result = match action.as_str() {
             // cas-269ab: routed from the same registry as the published enum.
@@ -1156,39 +1153,21 @@ fn canonical_task_action(action: &str) -> &str {
     cas_mcp::actions::canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)
 }
 
-/// Deprecation note for a factory action called through `coordination`
-/// (cas-8563b, D2). The alias works for one release.
-fn moved_to_factory_notice(action: &str, prefix: &str) -> String {
-    format!(
-        "Deprecated: `coordination action={action}` moved to the supervisor factory tool. \
-         Call `{prefix}factory action={action}`; this coordination alias is accepted for one \
-         release only."
-    )
-}
-
 fn canonical_coordination_action(action: &str) -> &str {
     cas_mcp::actions::canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)
 }
 
-fn normalize_coordination_aliases(req: &mut CoordinationRequest, action: &str) {
+fn normalize_factory_aliases(
+    action: &str,
+    target: &mut Option<String>,
+    worker_names: &mut Option<String>,
+) {
     match action {
-        "shutdown_workers" if req.worker_names.is_none() => {
-            req.worker_names = req.target.take();
+        "shutdown_workers" if worker_names.is_none() => {
+            *worker_names = target.take();
         }
-        "hold_worker" | "release_worker" if req.target.is_none() => {
-            req.target = req.worker_names.take();
-        }
-        _ => {}
-    }
-}
-
-fn normalize_factory_aliases(req: &mut FactoryRequest) {
-    match req.action.as_str() {
-        "shutdown_workers" if req.worker_names.is_none() => {
-            req.worker_names = req.target.take();
-        }
-        "hold_worker" | "release_worker" if req.target.is_none() => {
-            req.target = req.worker_names.take();
+        "hold_worker" | "release_worker" if target.is_none() => {
+            *target = worker_names.take();
         }
         _ => {}
     }
@@ -1214,7 +1193,7 @@ fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Ve
 
 // ============================================================================
 // Backwards-compatible wrapper methods for tests
-// These are not exposed as MCP tools; use `coordination` tool instead.
+// These are not exposed as MCP tools; use the matching public tool instead.
 // ============================================================================
 
 impl CasService {
@@ -1235,7 +1214,6 @@ impl CasService {
             let mut req = req;
             let action = canonical_coordination_action(&req.action).to_string();
             req.action.clone_from(&action);
-            normalize_coordination_aliases(&mut req, &action);
             if action == "spawn_workers"
                 && req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty())
             {
@@ -1672,7 +1650,7 @@ impl CasService {
         Parameters(req): Parameters<FactoryRequest>,
     ) -> Result<CallToolResult, McpError> {
         let mut req = req;
-        normalize_factory_aliases(&mut req);
+        normalize_factory_aliases(&req.action, &mut req.target, &mut req.worker_names);
         let action = req.action.clone();
         let result = match action.as_str() {
             "spawn_workers" => self.factory_spawn_workers(req).await,

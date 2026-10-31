@@ -541,74 +541,6 @@ impl Config {
                 "notifications.enabled".to_string(),
                 notifications.enabled.to_string(),
             ),
-            (
-                "notifications.sound_enabled".to_string(),
-                notifications.sound_enabled.to_string(),
-            ),
-            (
-                "notifications.display_duration_secs".to_string(),
-                notifications.display_duration_secs.to_string(),
-            ),
-            (
-                "notifications.max_visible".to_string(),
-                notifications.max_visible.to_string(),
-            ),
-            // Notifications.tasks section
-            (
-                "notifications.tasks.on_created".to_string(),
-                notifications.tasks.on_created.to_string(),
-            ),
-            (
-                "notifications.tasks.on_started".to_string(),
-                notifications.tasks.on_started.to_string(),
-            ),
-            (
-                "notifications.tasks.on_closed".to_string(),
-                notifications.tasks.on_closed.to_string(),
-            ),
-            (
-                "notifications.tasks.on_updated".to_string(),
-                notifications.tasks.on_updated.to_string(),
-            ),
-            // Notifications.entries section
-            (
-                "notifications.entries.on_added".to_string(),
-                notifications.entries.on_added.to_string(),
-            ),
-            (
-                "notifications.entries.on_updated".to_string(),
-                notifications.entries.on_updated.to_string(),
-            ),
-            (
-                "notifications.entries.on_deleted".to_string(),
-                notifications.entries.on_deleted.to_string(),
-            ),
-            // Notifications.rules section
-            (
-                "notifications.rules.on_created".to_string(),
-                notifications.rules.on_created.to_string(),
-            ),
-            (
-                "notifications.rules.on_promoted".to_string(),
-                notifications.rules.on_promoted.to_string(),
-            ),
-            (
-                "notifications.rules.on_demoted".to_string(),
-                notifications.rules.on_demoted.to_string(),
-            ),
-            // Notifications.skills section
-            (
-                "notifications.skills.on_created".to_string(),
-                notifications.skills.on_created.to_string(),
-            ),
-            (
-                "notifications.skills.on_enabled".to_string(),
-                notifications.skills.on_enabled.to_string(),
-            ),
-            (
-                "notifications.skills.on_disabled".to_string(),
-                notifications.skills.on_disabled.to_string(),
-            ),
             // Agent section
             (
                 "agent.name".to_string(),
@@ -893,22 +825,9 @@ impl Config {
         ]
     }
 
-    /// Get notification config with defaults
-    pub fn notifications(&self) -> NotificationConfig {
-        self.notifications.clone().unwrap_or_default()
-    }
-
     /// Get skill validation sandbox policy with defaults.
     pub fn skill_validation(&self) -> SkillValidationConfig {
         self.skill_validation.clone().unwrap_or_default()
-    }
-
-    /// Check if notifications are enabled
-    pub fn notifications_enabled(&self) -> bool {
-        self.notifications
-            .as_ref()
-            .map(|n| n.enabled)
-            .unwrap_or(true)
     }
 
     /// Get agent config with defaults

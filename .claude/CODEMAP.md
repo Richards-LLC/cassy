@@ -13,6 +13,7 @@
 - `.cargo/`, `.config/` - Cargo settings and nextest profiles.
 - `.claude/`, `.codex/` - instructions, harness projections and working context.
 - `.githooks/`, `.github/` - Git policy hooks, CI workflows and issue templates.
+- `.github/actions/run-script-suite-tests/` - path-scoped script and visual QA dependencies/execution shared by PR, slim-lane and assembly jobs.
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, tooling and toolchain roots.
 - `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policy.
 - `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` - design, standards and release/system references.
@@ -22,6 +23,7 @@
 - `cas-cli/` - Rust binary `cas` and composed application library.
 - `crates/cas-types/` - task, agent, delivery, provenance, event and wire types.
 - `crates/cas-store/` - SQLite stores, task/QA queues, verification, knowledge and vectors.
+- `crates/cas-store/src/hash_id.rs` - shared counter-mixed ID generation and format policies for task, skill, spec and code stores.
 - `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
 - `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
 - `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.
@@ -56,7 +58,7 @@
 - `cas-cli/src/claude_credentials.rs` - shared Keychain service identity; native capacity does not read its secrets.
 - `cas-cli/src/cli/hook.rs`, `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/` - hooks, native dispatch, generation and policy.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/hooks/handlers/handlers_events/codemap.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
-- `cas-cli/src/cloud/`, `cas-cli/src/coordination/`, `cas-cli/src/notifications/` - sync/presence, binding intake, ownership and notification queues.
+- `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync/presence, binding intake and ownership.
 - `cas-cli/src/worktree/`, `cas-cli/src/store/`, `cas-cli/src/migration/migrations/` - Git lifecycle, store decorators and numbered migrations.
 - `cas-cli/src/artifacts/`, `cas-cli/src/artifacts/qa.rs` - portable proofs and task-bound QA file export/recovery.
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/`, `cas-cli/src/hybrid_search/` - distillation, background indexing and composed retrieval.
@@ -84,7 +86,7 @@
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.
 - `cas-cli/src/mcp/tools/core/` - task, memory, knowledge, artifact, search, rule and workflow handlers.
 - `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - service dispatch, bounded futures and request schemas.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates and merged-delivery closure.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates and merged-delivery closure; `recall_terms.rs` filters content terms for task-create context and epic scope comparison.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - delivery anchors, close audit tracking and guarded note-preserving park.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - worktree-keyed receipts and introducing-merge boundaries.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep modules.
@@ -96,6 +98,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry/sidecar validation and diff-scoped journey selection.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
+- `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/quality_ledger.rs`, `cas-cli/src/cli/ledger.rs`, `cas-cli/src/cloud/syncer/quality_events.rs` - friction ledger: append-only events and scope-A rules, emitters, `cas ledger`, batched team sync.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs` - independent reviews, cross-host sync, batch receipts and the operator-only QA author override.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
 - `cas-cli/src/rapid_response.rs`, `cas-cli/src/cli/qa_rapid_response.rs` - operator-only, time-boxed per-epic rapid-response windows, scaled-down gates and the back-fill ledger.
@@ -137,7 +140,7 @@
 - **Real-machine QA:** `scripts/qa-rig/commander-two-machine/` and `docs/qa/` journeys, sidecar cases and batch evaluations; `docs/qa/bug-families/supervisor-command-usage-screen.yaml` selects the native Claude Usage journey.
 - **Contributor contracts:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`; design/terminal briefs and captures under `docs/design/`.
 - **Release records:** `CHANGELOG.md`, `docs/release-notes/`, `docs/release-reports/` for titled entries, Slack drafts and Markdown/HTML/PDF proof.
-- **Release tools:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`.
+- **Release tools:** `scripts/release.sh` prepares the queued release; `scripts/release-gate.sh` and `scripts/release-integration-gates.py` retain the fast-row gate/catalog after removal of the local release train. Supporting tools: `scripts/release-train-announce.py`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`.
 - **Host release installation:** `scripts/install-on-publish.sh` installs a Linux systemd user timer or macOS LaunchAgent; `scripts/test-install-on-publish.sh` proves the scheduler lifecycle and release timer.
 - **Hosted publication:** `.github/workflows/release.yml`, `scripts/deploy-hub-release.py`, `scripts/verify-hub-dist.sh`.
 - **Queue flake recovery:** `scripts/ci-queue-flakes.py` owns queue-only native result classification, routed GitHub issue publication and open-issue quarantine; `scripts/test-ci-queue-flakes.py` covers the native runner and HTTP boundaries. `.github/workflows/ci.yml` wires read-only shards and the required publication fan-in.

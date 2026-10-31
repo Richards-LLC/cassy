@@ -2798,7 +2798,7 @@ mod tests {
         // GH #239: the director-message/team-spawn shape launches the
         // supervisor with this alt-profile `--settings` file. It must retain
         // the same SessionStart hook that a directly launched session gets,
-        // or `handle_session_start` (and thus ambient recall/context) has no
+        // or `handle_session_start` (and thus session context) has no
         // chance to run at all.
         let supervisor_settings = std::fs::read_to_string(
             alt_team_dir.join("supervisor-settings.json"),

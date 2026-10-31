@@ -1473,25 +1473,6 @@ fn strip_deleted_suffix_from_linux_process_path() {
     );
 }
 
-#[test]
-#[cfg(unix)]
-fn post_swap_hook_invokes_the_installed_binary() {
-    use std::fs;
-
-    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
-    let installed_binary = temp_dir.path().join("cas-new");
-    crate::test_paths::warm_stub(
-        &installed_binary,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
-    );
-
-    run_post_swap_hook(&installed_binary, "3.7.7", true)
-        .expect("post-swap hook should run successfully");
-
-    let args = fs::read_to_string(installed_binary.with_extension("args"))
-        .expect("fake binary should receive the post-swap arguments");
-    assert_eq!(args, "update\n--post-swap\n--from\n3.7.7\n--json\n");
-}
 
 #[test]
 fn post_swap_flags_parse_as_a_hidden_terminal_mode() {

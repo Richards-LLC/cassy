@@ -226,6 +226,7 @@ pub(crate) fn cleanup_agent_leases_for_end(
         );
         return Some(Vec::new());
     }
+    crate::quality_ledger::session_ended(cas_root, session_id, Some(&agent.name));
     // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its identity too. Its
     // MCP server outlives the conversation and still caches this row's id;
     // tearing the row down made that server resurrect it as
@@ -894,6 +895,47 @@ mod cas_85d9_lease_renewal_tests {
 #[cfg(test)]
 mod supervisor_handoff_tests {
     use super::*;
+
+    /// A session's injected context is measured when it ends, /clear included.
+    /// A family that injects nothing, like explicit search, reports nothing.
+    #[test]
+    fn session_end_reports_measured_feature_evidence() {
+        use cas_store::{FeedbackVerdict, QualityPayload, RetrievalHitIdentity, RetrievalStore};
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let mut ending = Agent::new("session-1".into(), "ending".into());
+        ending.role = AgentRole::Supervisor;
+        open_agent_store(&root).unwrap().register(&ending).unwrap();
+        let retrieval = cas_store::SqliteRetrievalStore::open(&root).unwrap();
+        retrieval.init().unwrap();
+        let hits: Vec<_> = (0..25)
+            .map(|rank| RetrievalHitIdentity {
+                result_id: format!("mem-{rank}"),
+                document_type: "entry".into(),
+                rank,
+            })
+            .collect();
+        for (id, family) in [("q1", "ambient_transition"), ("q2", "search")] {
+            retrieval
+                .record_query(id, "query", family, "current-default-v1", Some("session-1"), &hits)
+                .unwrap();
+        }
+
+        cleanup_agent_leases_for_end(&root, "session-1", Some("clear")).unwrap();
+
+        let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let QualityPayload::FeatureFeedback { feature, verdict, injected, used, .. } = &events[0].payload
+        else {
+            panic!("{:?}", events[0].payload);
+        };
+        assert_eq!(
+            (feature.as_str(), *verdict, *injected, *used),
+            ("ambient_recall", FeedbackVerdict::Noise, Some(25), Some(0))
+        );
+    }
 
     #[test]
     fn ct2_p3_session_end_hands_off_epics() {

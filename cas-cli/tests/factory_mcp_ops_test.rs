@@ -1,6 +1,6 @@
 //! Factory MCP Tool Integration Tests
 //!
-//! Tests the factory MCP tool handlers (`mcp__cas__coordination`) by constructing
+//! Tests the factory and agent MCP tool handlers (`mcp__cas__factory`, `mcp__cas__coordination`) by constructing
 //! a `CasService` with a temp CAS directory and calling `factory()` directly.
 //! Verifies input validation, queue side effects, and response formatting.
 //!
@@ -1503,7 +1503,7 @@ async fn test_focus_epic_clear_removes_pin_and_preserves_session_default() {
 }
 
 #[tokio::test]
-async fn test_coordination_focus_epic_routes_clear_field() {
+async fn test_factory_focus_epic_routes_clear_field() {
     let home = TempDir::new().expect("home tempdir");
     let home_path = home.path().to_str().unwrap();
     let _guard = EnvGuard::set(&[
@@ -1517,9 +1517,9 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     let mut pin = coord_req("focus_epic");
     pin.id = Some(epic_id.clone());
     env.service
-        .coordination(Parameters(pin))
+        .factory(Parameters(pin))
         .await
-        .expect("coordination focus_epic should pin");
+        .expect("factory focus_epic should pin");
     assert_eq!(
         read_session_metadata("session-focus-coordination").pinned_epic_id,
         Some(epic_id)
@@ -1528,9 +1528,9 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     let mut clear = coord_req("focus_epic");
     clear.clear = Some(true);
     env.service
-        .coordination(Parameters(clear))
+        .factory(Parameters(clear))
         .await
-        .expect("coordination focus_epic should forward clear=true");
+        .expect("factory focus_epic should forward clear=true");
     let metadata = read_session_metadata("session-focus-coordination");
     assert_eq!(metadata.epic_id, Some("cas-session".to_string()));
     assert_eq!(metadata.pinned_epic_id, None);
@@ -1580,7 +1580,7 @@ async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
     req.task_id = Some("cas-example".into());
     req.prompt = Some("Send a plan and wait before coding.".into());
 
-    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    let err = env.service.factory(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
     assert!(err.message.contains("loop_start"), "{err:?}");
     // pin: the refusal names spawn_brief, the path that reaches the worker before task start (cas-ee68).
@@ -1594,7 +1594,7 @@ async fn spawn_workers_rejects_unscoped_prompt_without_queueing() {
     let mut req = coord_req("spawn_workers");
     req.prompt = Some("A brief must not be lost.".into());
 
-    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    let err = env.service.factory(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("no spawn was queued"), "{err:?}");
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
@@ -2567,7 +2567,7 @@ async fn test_shutdown_workers_rejects_unsupported_known_param_without_queueing(
     // destructive action. It must not disappear during domain conversion.
     req.task_id = Some("cas-wrong-field".to_string());
 
-    let result = env.service.coordination(Parameters(req)).await;
+    let result = env.service.factory(Parameters(req)).await;
     let err = result.expect_err("unsupported shutdown field must hard-error");
     assert!(err.message.contains("task_id"), "unexpected error: {err:?}");
     assert!(
@@ -2590,7 +2590,7 @@ async fn test_shutdown_workers_id_targets_exact_worker() {
 
     let result = env
         .service
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("id target should be accepted");
     let text = get_text(&result);
@@ -4367,7 +4367,7 @@ async fn test_worker_status_and_agent_list_agree_on_live_workers() {
     .expect("CoordinationRequest");
     let list_text = get_text(
         &env.service
-            .coordination(Parameters(list_req))
+            .factory(Parameters(list_req))
             .await
             .expect("agent_list"),
     );
@@ -4892,7 +4892,7 @@ async fn test_2e81_agent_cleanup_parks_orphan_and_emits_worker_died() {
     req.stale_threshold_secs = Some(30);
     let result = env
         .service
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("agent_cleanup");
     let text = get_text(&result);
@@ -5022,11 +5022,12 @@ async fn test_20ac_lifecycle_ack_actions_terminate_both_queue_lanes_without_repl
 
         let mut request = coord_req(action);
         request.notification_id = Some(durable_id);
-        let result = env
-            .service
-            .coordination(Parameters(request))
-            .await
-            .expect("public lifecycle acknowledgement");
+        let result = if action == "queue_ack" {
+            env.service.factory(Parameters(request)).await
+        } else {
+            env.service.coordination(Parameters(request)).await
+        }
+        .expect("public lifecycle acknowledgement");
         let text = get_text(&result);
         assert!(
             text.contains("across durable and prompt queues"),
@@ -5137,7 +5138,7 @@ async fn test_20ac_queue_ack_repairs_processed_durable_row_with_replay_pending()
     request.notification_id = Some(durable_id);
     let result = env
         .service
-        .coordination(Parameters(request))
+        .factory(Parameters(request))
         .await
         .expect("repeated queue_ack bridges processed durable row");
     assert!(
@@ -6051,27 +6052,19 @@ async fn test_my_context_shows_agent_info() {
 // gc_report tests
 // =============================================================================
 
-/// cas-8563b (D2): fleet actions moved to the `factory` tool. For one release
-/// `coordination` still runs them, with a deprecation note naming the new
-/// call; `factory` rejects the messaging actions that stay on `coordination`.
+/// Retired factory aliases fail before dispatch and name the live route.
 #[tokio::test]
-async fn coordination_runs_moved_factory_actions_as_deprecated_aliases() {
+async fn coordination_rejects_retired_factory_actions() {
     let env = FactoryTestEnv::new();
     let gc_report: CoordinationRequest =
         serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
 
-    let via_alias = env
+    let refused = env
         .service
         .coordination(Parameters(gc_report.clone()))
         .await
-        .expect("the alias still runs the action");
-    let alias_text = get_text(&via_alias);
-    assert!(alias_text.contains("Stale agents: 0"), "{alias_text}");
-    assert!(
-        alias_text.contains("Deprecated: `coordination action=gc_report` moved")
-            && alias_text.contains("factory action=gc_report`"),
-        "{alias_text}"
-    );
+        .expect_err("retired alias must not run the action");
+    assert!(refused.message.contains("factory action=gc_report"), "{}", refused.message);
 
     let direct = env
         .service
@@ -9002,11 +8995,15 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
         "URGENT: stop and report your current status",
         Some(true),
     );
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let error = env
         .service
         .coordination(Parameters(urgent))
         .await
         .expect_err("the fixture has no live Claude pane to confirm");
+    tokio::time::resume();
     assert!(
         error
             .message
@@ -9105,7 +9102,6 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -9134,11 +9130,15 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
     let worker_id = env.register_worker("swift-fox");
 
     let interrupt = coord_msg("interrupt", "swift-fox", "Stop and tell me where cas-12b5 stands", None);
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let error = env
         .service
         .coordination(Parameters(interrupt))
         .await
         .expect_err("the fixture has no live Claude pane to confirm");
+    tokio::time::resume();
     assert!(
         error.message.contains("Could not confirm Claude interrupt delivery"),
         "unexpected interrupt error: {}",
@@ -9171,7 +9171,6 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
         id: task_id.clone(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -9232,10 +9231,14 @@ async fn cas_4a8e1_reply_before_the_interrupt_reached_the_worker_keeps_the_halt(
     ]);
     let env = FactoryTestEnv::with_server_supervisor();
     let worker_id = env.register_worker("swift-fox");
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let _ = env
         .service
         .coordination(Parameters(coord_msg("interrupt", "swift-fox", "Stop now", None)))
         .await;
+    tokio::time::resume();
     assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
 
     let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
@@ -10545,7 +10548,6 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
             supervisor_override: Some(true),
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -14749,7 +14751,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
         shutdown.worker_names = Some(foreign.to_string());
         let refused = env
             .service
-            .coordination(Parameters(shutdown))
+            .factory(Parameters(shutdown))
             .await
             .expect_err("another session's worker must not be shut down");
         assert!(
@@ -14823,7 +14825,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
         // The own worker holds an in-progress task, so shutdown needs force.
         own_shutdown.force = Some(true);
         env.service
-            .coordination(Parameters(own_shutdown))
+            .factory(Parameters(own_shutdown))
             .await
             .expect("own worker shutdown is queued");
         let mut own_spawn = factory_req("spawn_workers");
@@ -14834,6 +14836,20 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
             .factory_request(Parameters(own_spawn))
             .await
             .expect("own spawn is queued");
+        // A forced stop and the replacement that follows are one pair, per caller.
+        let forced = cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::ForceShutdown,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        let respawns = cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::Respawn,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        assert!(!forced.is_empty() && respawns.len() == forced.len(), "{forced:?} {respawns:?}");
         let own_merge = core
             .worktree_merge(
                 &format!("factory/{own}"),

@@ -358,7 +358,6 @@ impl CasCore {
             id: task_id.to_string(),
             reason: Some(reason),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: task.deliverables.factory_branch_anchor.clone(),
         };

@@ -9,7 +9,7 @@
 //! Merged -> CloseReady -> Delivered even though the merge's first parent was
 //! not the reviewed `target_sha`.
 //!
-//! These regressions drive the real production path (`coordination
+//! These regressions drive the real production path (`factory
 //! action=worktree_merge`) and inject drift deterministically:
 //!
 //!  * before merge  — a plain commit on the target after receipt approval;
@@ -741,7 +741,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             // background, recording its result on the task.
             let answer = get_text(
                 &supervisor
-                    .coordination_with_budget_for_testing(
+                    .factory_with_budget_for_testing(
                         merge,
                         std::time::Duration::from_secs(50),
                         std::time::Duration::ZERO,
@@ -955,7 +955,7 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     merge.cleanup = Some(false);
     let answer = get_text(
         &supervisor
-            .coordination_with_budget_for_testing(
+            .factory_with_budget_for_testing(
                 merge,
                 std::time::Duration::from_secs(50),
                 std::time::Duration::ZERO,

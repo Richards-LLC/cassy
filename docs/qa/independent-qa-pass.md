@@ -93,7 +93,7 @@ non-empty reason. The waiver is:
 
 - appended as a `✅ DECISION` task note;
 - recorded on the pass as `state=waived` with the supervisor as issuer;
-- listed with its reason in `coordination action=epic_status`.
+- listed with its reason in `factory action=epic_status`.
 
 ### Historical obsolete QA work items
 

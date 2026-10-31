@@ -2446,7 +2446,6 @@ exec "$CAS_TEST_REAL_GIT" "$@"
                 id: task.id.clone(),
                 reason: None,
                 supervisor_override: Some(true),
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             };

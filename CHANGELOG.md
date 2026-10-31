@@ -11,6 +11,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Rapid creates use one collision-resistant generator** — Tasks, skills, specs and indexed code now share the counter mixed into generated IDs. Creates during the same clock tick no longer reuse identical candidates, and occupied fallback IDs are retried. Existing ID prefixes and lengths stay unchanged.
 
+### Changed — MCP
+
+- **Retired factory and close aliases** — Was: Factory actions still ran through
+  `coordination`, and task close still accepted a hidden review-bypass alias. →
+  Now: Factory actions require `factory`; retired calls fail with the replacement
+  route, and task close accepts `supervisor_override`. Tests and live guidance use
+  the current routes.
+
 ### Changed — Test-hygiene rules in the shipped test guidance
 
 - **Builtin test guidance names six measured bad-test patterns** — Was: The

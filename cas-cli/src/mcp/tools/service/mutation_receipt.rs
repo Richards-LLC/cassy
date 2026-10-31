@@ -135,8 +135,6 @@ pub(crate) fn task_terminal_committed(id: &str) {
 /// target. That is the request's terminal mutation; the task close and
 /// verification dispatch after it are post-commit work.
 pub(crate) fn merge_committed(commit: &str, target: &str, push_state: &str) {
-    // The action alone: legacy `coordination action=worktree_merge` calls
-    // forward to the same handler.
     if let Some(receipt) = current()
         && receipt.action == "worktree_merge"
     {

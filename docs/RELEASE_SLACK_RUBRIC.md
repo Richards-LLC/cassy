@@ -170,7 +170,7 @@ replace an existing release. There is no local publisher.
    version instead of making existing verification evidence change underneath
    users.
 
-If `coordination action=worktree_merge ... allow_trunk=true` encounters the
+If `factory action=worktree_merge ... allow_trunk=true` encounters the
 ruleset first, it returns `PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` with the
 source/target-specific form of these commands. Follow that handoff and retry
 the merge action after fetching the PR landing so Cassy can reconcile delivery.

@@ -1,4 +1,4 @@
-//! Public coordination-surface tests for the director worker-hold gate.
+//! Public factory-surface tests for the director worker-hold gate.
 //!
 //! Session metadata is rooted under HOME. Use the grouped harness's canonical
 //! environment guard so these fixtures cannot race messaging/status fixtures.
@@ -113,7 +113,7 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     // cas-c5ab: before the session metadata exists the hold cannot be
     // persisted, and the failed hold changes no reminder.
     env.service
-        .coordination(Parameters(request("hold_worker", worker)))
+        .factory(Parameters(request("hold_worker", worker)))
         .await
         .expect_err("an unpersisted hold fails");
     assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
@@ -128,7 +128,7 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     )
     .unwrap();
     env.service
-        .coordination(Parameters(request("hold_worker", worker)))
+        .factory(Parameters(request("hold_worker", worker)))
         .await
         .expect_err("a failed suspend fails the hold");
     let rolled_back: cas::ui::factory::SessionMetadata =
@@ -139,7 +139,7 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
 
     let result = env
         .service
-        .coordination(Parameters(request("hold_worker", worker)))
+        .factory(Parameters(request("hold_worker", worker)))
         .await
         .expect("public hold action");
     let hold_result = result_text(&result);
@@ -166,7 +166,7 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     assert!(status.contains(worker) && status.contains("[HELD]"), "{status}");
 
     env.service
-        .coordination(Parameters(request("release_worker", worker)))
+        .factory(Parameters(request("release_worker", worker)))
         .await
         .expect("public release action");
     let released: cas::ui::factory::SessionMetadata =
@@ -190,7 +190,7 @@ async fn worker_cannot_change_hold_state_cas_60dd() {
 
     let error = env
         .service
-        .coordination(Parameters(request("hold_worker", worker)))
+        .factory(Parameters(request("hold_worker", worker)))
         .await
         .expect_err("worker role must be rejected");
     assert!(error.to_string().contains("only supervisors"), "{error}");
@@ -212,7 +212,7 @@ async fn supervisor_cannot_hold_foreign_session_worker_cas_60dd() {
 
     let error = env
         .service
-        .coordination(Parameters(request("hold_worker", worker)))
+        .factory(Parameters(request("hold_worker", worker)))
         .await
         .expect_err("foreign-session worker must be rejected");
     assert!(error.to_string().contains("not a live member"), "{error}");

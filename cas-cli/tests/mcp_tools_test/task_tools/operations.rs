@@ -789,7 +789,6 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
             id: epic_id.clone(),
             reason: Some("override incident-shaped epic close".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -3741,7 +3740,6 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             id: blocker_id,
             reason: Some("done".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -3903,7 +3901,6 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
             id: blocker_id,
             reason: Some("peer board shipped".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -4619,7 +4616,7 @@ async fn test_standard_agent_can_start_task_assigned_to_other_worker() {
 //
 // Reproduces the factory-session friction described in
 // docs/requests/BUG-factory-session-observations-2026-04-22.md §1: after
-// `coordination spawn_workers` + `task update assignee=<worker-name>`, a
+// `factory spawn_workers` + `task update assignee=<worker-name>`, a
 // freshly-spawned worker's first `action=mine` call was returning "no open
 // tasks" even when `task show` on the supervisor side immediately confirmed
 // the assignment.
@@ -6637,7 +6634,6 @@ async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
                     id: task_id.clone(),
                     reason: Some("delivery ready".to_string()),
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     stranded_branch_override: None,
                     commit_receipt: Some(delivery.clone()),

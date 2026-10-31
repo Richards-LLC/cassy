@@ -72,7 +72,6 @@ fn req() -> TaskCloseRequest {
         id: "cas-epic".into(),
         reason: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }

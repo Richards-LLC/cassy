@@ -593,7 +593,6 @@ async fn close_releases_and_other_repositories_never_collide() {
             id: "cas-p003".into(),
             reason: Some("spike answered".into()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -804,7 +803,6 @@ async fn close_does_not_wait_on_slow_cloud_releases_cas_c55f_978d() {
             id: "cas-f003".into(),
             reason: Some("spike answered".into()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

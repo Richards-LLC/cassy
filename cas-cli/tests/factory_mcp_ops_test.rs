@@ -1,6 +1,6 @@
 //! Factory MCP Tool Integration Tests
 //!
-//! Tests the factory MCP tool handlers (`mcp__cas__coordination`) by constructing
+//! Tests the factory and agent MCP tool handlers (`mcp__cas__factory`, `mcp__cas__coordination`) by constructing
 //! a `CasService` with a temp CAS directory and calling `factory()` directly.
 //! Verifies input validation, queue side effects, and response formatting.
 //!
@@ -1503,7 +1503,7 @@ async fn test_focus_epic_clear_removes_pin_and_preserves_session_default() {
 }
 
 #[tokio::test]
-async fn test_coordination_focus_epic_routes_clear_field() {
+async fn test_factory_focus_epic_routes_clear_field() {
     let home = TempDir::new().expect("home tempdir");
     let home_path = home.path().to_str().unwrap();
     let _guard = EnvGuard::set(&[
@@ -1519,7 +1519,7 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     env.service
         .factory(Parameters(pin))
         .await
-        .expect("coordination focus_epic should pin");
+        .expect("factory focus_epic should pin");
     assert_eq!(
         read_session_metadata("session-focus-coordination").pinned_epic_id,
         Some(epic_id)
@@ -1530,7 +1530,7 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     env.service
         .factory(Parameters(clear))
         .await
-        .expect("coordination focus_epic should forward clear=true");
+        .expect("factory focus_epic should forward clear=true");
     let metadata = read_session_metadata("session-focus-coordination");
     assert_eq!(metadata.epic_id, Some("cas-session".to_string()));
     assert_eq!(metadata.pinned_epic_id, None);
@@ -6052,27 +6052,19 @@ async fn test_my_context_shows_agent_info() {
 // gc_report tests
 // =============================================================================
 
-/// cas-8563b (D2): fleet actions moved to the `factory` tool. For one release
-/// `coordination` still runs them, with a deprecation note naming the new
-/// call; `factory` rejects the messaging actions that stay on `coordination`.
+/// Retired factory aliases fail before dispatch and name the live route.
 #[tokio::test]
-async fn coordination_runs_moved_factory_actions_as_deprecated_aliases() {
+async fn coordination_rejects_retired_factory_actions() {
     let env = FactoryTestEnv::new();
     let gc_report: CoordinationRequest =
         serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
 
-    let via_alias = env
+    let refused = env
         .service
         .coordination(Parameters(gc_report.clone()))
         .await
-        .expect("the alias still runs the action");
-    let alias_text = get_text(&via_alias);
-    assert!(alias_text.contains("Stale agents: 0"), "{alias_text}");
-    assert!(
-        alias_text.contains("Deprecated: `coordination action=gc_report` moved")
-            && alias_text.contains("factory action=gc_report`"),
-        "{alias_text}"
-    );
+        .expect_err("retired alias must not run the action");
+    assert!(refused.message.contains("factory action=gc_report"), "{}", refused.message);
 
     let direct = env
         .service
@@ -9110,7 +9102,6 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -9180,7 +9171,6 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
         id: task_id.clone(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -10558,7 +10548,6 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
             supervisor_override: Some(true),
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

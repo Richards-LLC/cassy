@@ -8575,7 +8575,7 @@ mod tests {
         );
         env.set_current_dir(&project);
         let merged = supervisor
-            .coordination(Parameters(
+            .factory(Parameters(
                 serde_json::from_value(serde_json::json!({
                     "action": "worktree_merge", "id": branch, "task_id": task.id, "cleanup": false,
                 }))

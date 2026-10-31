@@ -2383,7 +2383,6 @@ mod squash_close_tests {
             commit_receipt: Some(squash),
             supervisor_override: None,
             stranded_branch_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
         };
         let result = core.cas_task_close(Parameters(request)).await.unwrap();

@@ -68,7 +68,6 @@ fn req(id: &str) -> TaskCloseRequest {
         id: id.to_string(),
         reason: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }

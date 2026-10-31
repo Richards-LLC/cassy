@@ -1,6 +1,6 @@
 //! End-to-end coverage of the server registry MCP surface (cas-7c93, GH #87).
 //!
-//! Drives real `coordination action=server_*` calls against real processes:
+//! Drives real `factory action=server_*` calls against real processes:
 //! register, query, stop. The point of the issue is a *lifecycle*, so nothing
 //! here mocks the process side.
 
@@ -45,7 +45,7 @@ impl TestEnv {
 
     async fn call(&self, req: serde_json::Value) -> String {
         let req: CoordinationRequest = serde_json::from_value(req).expect("CoordinationRequest");
-        match self.service.coordination(Parameters(req)).await {
+        match self.service.factory(Parameters(req)).await {
             Ok(result) => result
                 .content
                 .iter()
@@ -528,7 +528,7 @@ async fn cas_7694_immediate_exit_reports_failure_and_log_tail() {
     );
 }
 
-/// Registered identity controls both factory and legacy coordination routes.
+/// Registered identity controls the public factory route.
 #[tokio::test]
 async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
     use cas::types::{Agent, AgentRole, Task, TaskStatus};

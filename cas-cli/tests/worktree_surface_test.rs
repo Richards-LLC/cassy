@@ -666,7 +666,7 @@ async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -706,7 +706,7 @@ async fn test_worktree_list_no_disabled_message_when_no_factory_worktrees() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -764,7 +764,7 @@ async fn test_worktree_list_honors_configured_base_path() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     // Reclaim external worktree before asserts so a failure still cleans up.
@@ -803,7 +803,7 @@ async fn test_worktree_list_surfaces_unregistered_epic_worktree_outside_cas_dir(
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -835,7 +835,7 @@ async fn test_worktree_list_ignores_unrelated_git_worktrees() {
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -867,7 +867,7 @@ async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store
     let result = svc
         .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -992,7 +992,7 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     let result = svc
         .factory(Parameters(req))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -1896,7 +1896,6 @@ async fn normal_close_uses_task_anchor_not_newer_same_worker_or_unrelated_worktr
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -2028,7 +2027,6 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
         id: task.id.clone(),
         reason: Some("reference history integrated".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -2285,7 +2283,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
         let result = svc
             .factory(Parameters(req))
             .await
-            .expect("coordination call should succeed");
+            .expect("factory call should succeed");
         let text = get_text(&result);
 
         assert!(
@@ -3603,7 +3601,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     // not committed anything a supervisor may leave alone: it must not answer
     // COMMITTED, and keeps its NOT PUSHED next step.
     let rejected = runtime
-        .block_on(service.coordination_with_budget_for_testing(
+        .block_on(service.factory_with_budget_for_testing(
             req.clone(),
             std::time::Duration::from_secs(50),
             std::time::Duration::ZERO,
@@ -5071,7 +5069,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     let result = svc
         .factory(Parameters(req))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(

@@ -608,7 +608,6 @@ impl Fx {
             commit_receipt: task.deliverables.factory_branch_anchor,
             stranded_branch_override: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
         };
         match self.core.cas_task_close(Parameters(req)).await {
@@ -1201,7 +1200,6 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         commit_receipt: Some(merged),
         stranded_branch_override: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     };
     let closed = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());
@@ -1228,7 +1226,6 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         commit_receipt: sibling,
         stranded_branch_override: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     };
     let refused = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());

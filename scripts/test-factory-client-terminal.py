@@ -156,6 +156,12 @@ def main():
                   "the existing full-lane build runs all five PTY cases")
             return 0
         parser.error(f"binary not found: {args.cas}")
+    # The client keeps an inherited SIG_IGN, as nohup and `cmd &` expect. Model
+    # an interactive terminal: a proof launched from a background shell would
+    # otherwise hand the client an ignored SIGINT and time out that case.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
     args.out.mkdir(parents=True, exist_ok=True)
     results = [check_exit(str(Path(binary).resolve()), case, args.out) for case in args.cases or CASES]
     (args.out / "report.json").write_text(json.dumps({"binary": binary, "results": results}, indent=2) + "\n")

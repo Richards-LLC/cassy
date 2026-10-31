@@ -48,16 +48,7 @@ git diff --name-status "$BASE" HEAD
 
 If the branch is already merged (`$BASE` equals `HEAD`), inspect the recorded commit instead: `git show --name-status <commit_hash>`. Prefer `deliverables.files_changed` when it is present, and confirm it matches the diff.
 
-Before running a candidate `serve` or any stateful command, create a disposable
-project with an empty `.cas` directory and a disposable HOME outside the source
-checkout. Set `CAS_ROOT` to that fixture `.cas`, `HOME` to the disposable home,
-and `XDG_CONFIG_HOME` beneath it for every candidate subprocess, including the
-fixture's `cas init`. Initialize the fixture store before serving it and record
-the resolved store path with the command receipt. A scratch Git worktree still
-discovers the main checkout's live `.cas`; unsetting `CAS_ROOT` does not isolate
-it. Keep these overrides scoped to candidate subprocesses so your authenticated
-reviewer MCP session retains its factory binding.
-
+Before running a candidate `serve` or any stateful command, isolate it in a disposable fixture project and HOME, as `verifier-evidence-gate.md` requires under Candidate fixture isolation.
 
 ### Step 4: Read every changed file in full
 

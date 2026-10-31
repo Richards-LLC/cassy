@@ -23,14 +23,17 @@ FAKE_CAS = textwrap.dedent('''\
         message = json.loads(line)
         if message.get("method") == "initialize":
             print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {}}), flush=True)
-            # A server-to-client request must be answered, not mistaken for a reply.
-            print(json.dumps({"jsonrpc": "2.0", "id": "srv-1", "method": "roots/list"}), flush=True)
         elif message.get("method") == "tools/call":
             with open(os.environ["FAKE_CAS_LOG"], "a") as log:
                 log.write(json.dumps(message["params"]) + "\\n")
             text = "Created task: cas-f00d - " + message["params"]["arguments"]["title"] + " (P0)"
-            print(json.dumps({"jsonrpc": "2.0", "id": message["id"],
-                              "result": {"content": [{"type": "text", "text": text}]}}), flush=True)
+            # A server-to-client request must be answered, not mistaken for a
+            # reply, and the reply that shares its write must still be read.
+            request = json.dumps({"jsonrpc": "2.0", "id": "srv-1", "method": "roots/list"})
+            reply = json.dumps({"jsonrpc": "2.0", "id": message["id"],
+                                "result": {"content": [{"type": "text", "text": text}]}})
+            sys.stdout.write(request + "\\n" + reply + "\\n")
+            sys.stdout.flush()
 ''')
 
 # The 2026-10-14 cut: gate 3029 s and publish 1526 s.

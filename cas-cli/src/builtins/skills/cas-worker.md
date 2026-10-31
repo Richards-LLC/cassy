@@ -67,7 +67,7 @@ context clears. Load only the current phase.
 
 | Phase or trigger | Read before acting |
 | --- | --- |
-| Test design/review | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) |
+| Test design/review | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) and [Test hygiene](../cas-tdd/SKILL.md#test-hygiene) |
 | Before checks/tests | [discipline.md](references/discipline.md) |
 | Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
 | Delivery | [close-gate.md](references/close-gate.md); look up `qa.mode`, then [Batch QA](references/details.md#batch-qa) for a batch park |

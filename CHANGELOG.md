@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Test-hygiene rules in the shipped test guidance
+
+- **Builtin test guidance names six measured bad-test patterns** — Was: The
+  TDD skill warned against sleeps but not against CSS or source-text assertions,
+  in-test dynamic imports, per-test expensive setup, assertion-free screenshot
+  tests or deleting a "duplicate" that other tests import. → Now: The TDD skill
+  states each rule with its measured cost, the worker's test-design pointer links
+  to it, and the task verifier reviews each pattern.
+- **Proof claims name what ran** — Was: A subset could be reported as the full
+  suite. → Now: Worker test discipline reports a subset by its counts, and the
+  verifier treats an overstated "full suite" claim as an incomplete close reason.
+
 ### Fixed — Factory recovery
 
 - **Replacement workers can deliver inherited tasks** — After a stale worker is released and its task is assigned to a replacement, a supervisor can approve the replacement's clean delivery branch with `rebind_branch`. The prior owner and branch remain in the audit, and the new recorded source can be parked, merged and closed through the normal gates.

@@ -16,12 +16,23 @@ Elegant tests, not copious: a test exists to catch a real regression, and each e
 - `test-first` is met by an added or changed case in any test file plus a recorded failing-first run; it never needs a new file.
 - Extend an existing test or table before adding a file; delete tests the change makes redundant or that cover dead code.
 - Assert observable behaviour. A test restating the implementation (mirroring its branches or constants) is bloat; mark a durable exact-text contract `// pin: <reason>`.
-- No exhaustive matrices, near-duplicates, copied fixtures, sleeps, timing assumptions or host state.
+- No exhaustive matrices, near-duplicates, copied fixtures, timing assumptions or host state; apply [Test hygiene](#test-hygiene) to every added or changed test.
 - Claim, identity and state-machine changes are the exception: cover the combination table, every identity kind × every entry kind, as rows of one table-driven test. One happy-path fixture hides the pairs that break.
 - Every bug fix adds a regression case that runs red before the fix, so the suite keeps the bug out; where the project keeps a user-flow case catalog, add the case there too.
 - Stress loops and live probes are proof artifacts for the task note, not suite members.
 - A flaky test is a bug in the test: fix or delete it, never retry-wrap it.
 - Each test has one command and lane, selected from the dependency graph, and a failure that names whose fault it is.
+
+## Test hygiene
+
+Each rule removes a pattern measured in a downstream audit of 2,488 test files.
+
+- **Assert behaviour, not source.** Never assert CSS or source text (selectors, hex, px, class names, token names, literal code): such tests break on correct token refactors, and `// pin:` never covers style. Delete a style-pinning test that breaks; do not update it.
+- **Fake time.** Use fake timers or an injected clock instead of sleeps, settle loops or real back-offs: fake timers took one checkout suite from 24 s to 3 s with every case kept.
+- **Hoist dynamic `import()`** out of the test body: inside the first test its cold transform spends that test's timeout, which caused both audited "flaky" load timeouts.
+- **Build expensive shared setup once** (`beforeAll`, a module-level fixture or cache), not per test: one parse re-run per module cost 22 s that a single pass did in 2 s.
+- **Every end-to-end test asserts.** A screenshot-only spec passes whatever renders; the audit found 47 that asserted nothing.
+- **Check importers before deleting a "duplicate".** Search the test tree for imports of the file first: 4 audited duplicates were helper sources other specs import.
 
 Imported and adapted from mattpocock/skills `tdd`, MIT © 2026 Matt Pocock.
 See [LICENSE](LICENSE) for the upstream permission notice.

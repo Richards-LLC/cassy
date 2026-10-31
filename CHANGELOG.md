@@ -19,6 +19,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   suite. → Now: Worker test discipline reports a subset by its counts, and the
   verifier treats an overstated "full suite" claim as an incomplete close reason.
 
+### Removed — Ambient memory recall
+
+- **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

@@ -3297,7 +3297,7 @@ Current workers: {worker_list}",
         ),
         // OpenCode's generated primary agent owns the durable role contract;
         // this queued intro carries the launch-specific skill names and
-        // ambient-recall delivery that arrive before the agent config is
+        // context delivery that arrive before the agent config is
         // inspected.
         cas_mux::SupervisorCli::OpenCode => format!(
             "OpenCode supervisor startup:\n\
@@ -3336,42 +3336,26 @@ Current workers: {worker_list}",
     }
 
     // Grok discards SessionStart stdout; OpenCode also needs queued context.
-    // Codex now requires trusted native hooks at launch, so its queued intro
-    // must not duplicate hook context or ambient recall in the visible pane.
-    // Reuse one bundle so these harnesses receive the normal context and
-    // independently bounded ambient-recall packet, with explicit child
-    // identity because the parent env is not the supervisor's env yet.
     if matches!(
         supervisor_cli,
         cas_mux::SupervisorCli::Grok | cas_mux::SupervisorCli::OpenCode
     ) {
-        if let Some(bundle) = queued_supervisor_session_start_bundle(
+        if let Some(context) = queued_supervisor_session_start_context(
             cas_dir,
-            supervisor_name,
             session_id.unwrap_or(supervisor_name),
-            factory_session.unwrap_or(supervisor_name),
         ) {
-            // Reuse the established supervisor-guidance ceiling for queued
-            // delivery. Ambient recall stays protected because it is the
-            // purpose of this fallback; ordinary SessionStart context can
-            // compact to its retrieval command rather than being truncated.
             use crate::hooks::handlers::session_budget::SessionContextAssembler;
 
             let mut assembler =
                 SessionContextAssembler::new(format!("{prompt}\n\n<cas-queued-session-start>"))
                     .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
-            if let Some(context) = bundle.context {
-                let tool_prefix = supervisor_cli.backend().capabilities().tool_prefix;
-                assembler.append_degradable(
-                    context,
-                    format!(
-                        "[session-start context omitted to fit the queued launch payload — run `{tool_prefix}search action=context`]"
-                    ),
-                );
-            }
-            if let Some(packet) = bundle.ambient_recall {
-                assembler.append_protected(packet.full);
-            }
+            let tool_prefix = supervisor_cli.backend().capabilities().tool_prefix;
+            assembler.append_degradable(
+                context,
+                format!(
+                    "[session-start context omitted to fit the queued launch payload — run `{tool_prefix}search action=context`]"
+                ),
+            );
             assembler.append_protected("</cas-queued-session-start>".to_string());
             prompt = assembler.render();
         }
@@ -3438,17 +3422,10 @@ fn claude_custom_config_context_fallback(
         .filter(|context| !context.trim().is_empty())
 }
 
-struct QueuedSupervisorSessionStartBundle {
-    context: Option<String>,
-    ambient_recall: Option<crate::ambient_recall::RecallPacket>,
-}
-
-fn queued_supervisor_session_start_bundle(
+fn queued_supervisor_session_start_context(
     cas_dir: &std::path::Path,
-    supervisor_name: &str,
     session_id: &str,
-    factory_session: &str,
-) -> Option<QueuedSupervisorSessionStartBundle> {
+) -> Option<String> {
     let input = cas_core::hooks::HookInput {
         session_id: session_id.to_string(),
         cwd: cas_dir.parent()?.to_string_lossy().into_owned(),
@@ -3460,20 +3437,9 @@ fn queued_supervisor_session_start_bundle(
     let limit = crate::config::Config::load(cas_dir)
         .unwrap_or_default()
         .context_limit();
-    let context = crate::hooks::build_context(&input, limit, cas_dir)
+    crate::hooks::build_context(&input, limit, cas_dir)
         .ok()
-        .filter(|context| !context.trim().is_empty());
-    let ambient_recall = crate::ambient_recall::build_ambient_recall_context_for_factory_launch(
-        &input,
-        cas_dir,
-        None,
-        supervisor_name,
-        factory_session,
-    );
-    (context.is_some() || ambient_recall.is_some()).then_some(QueuedSupervisorSessionStartBundle {
-        context,
-        ambient_recall,
-    })
+        .filter(|context| !context.trim().is_empty())
 }
 
 pub(crate) fn queue_codex_worker_intro_prompt(
@@ -4274,7 +4240,7 @@ mod tests {
         );
         entry.title = Some("Current Codex release recovery guidance".to_string());
         // Exercise launch delivery with evidence the supervisor policy admits.
-        entry.entry_type = crate::types::EntryType::Preference;
+        entry.entry_type = crate::types::EntryType::Handoff;
         entry.tags = vec!["release".to_string(), "recovery".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
@@ -4296,7 +4262,7 @@ mod tests {
         let prompt = &rows[0].prompt;
         assert!(
             // pin: the old fallback marker must never enter the native launch prompt.
-            !prompt.contains("[ambient recall") && !prompt.contains("<cas-queued-session-start>"),
+            !prompt.contains("<cas-queued-session-start>"),
             "Native Codex startup must not echo hook context into the pane: {prompt}"
         );
         assert!(
@@ -4331,9 +4297,9 @@ mod tests {
 
     /// Grok discards SessionStart hook stdout. Its queued startup intro is the
     /// harness-specific delivery path, so it must carry both the explicit
-    /// supervisor skills and a real ambient-recall packet.
+    /// supervisor skills and the saved session handoff.
     #[test]
-    fn grok_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
+    fn grok_supervisor_intro_carries_handoff_and_supervisor_skills() {
         use crate::store::{
             detect::open_prompt_queue_store, init_cas_dir, open_store, open_task_store_local,
         };
@@ -4349,11 +4315,11 @@ mod tests {
         task.status = TaskStatus::InProgress;
         open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
-            "grok-supervisor-ambient".to_string(),
+            "grok-supervisor-handoff".to_string(),
             "Operator prefers Grok release recovery audit receipts that preserve intent".to_string(),
         );
         entry.title = Some("Current Grok release recovery guidance".to_string());
-        entry.entry_type = crate::types::EntryType::Preference;
+        entry.entry_type = crate::types::EntryType::Handoff;
         entry.tags = vec!["release".to_string(), "recovery".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
@@ -4374,12 +4340,8 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let prompt = &rows[0].prompt;
         assert!(
-            prompt.contains("[ambient recall v1 role=supervisor"),
-            "Grok's actual SessionStart delivery payload must carry a non-empty ambient packet: {prompt}"
-        );
-        assert!(
-            prompt.contains("grok-supervisor-ambient"),
-            "ambient packet must surface the matched high-importance Grok supervisor memory: {prompt}"
+            prompt.contains("grok-supervisor-handoff"),
+            "Grok startup must retain the saved handoff: {prompt}"
         );
         for skill in ["cas-supervisor", "cas-supervisor-checklist"] {
             assert!(

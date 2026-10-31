@@ -338,7 +338,7 @@ pub(crate) fn surface_factory_inbox_after_tool_result(
 /// Code keeps hook context whole only up to about 10,000 characters and shows
 /// a short preview past that. Mail is bounded by
 /// [`cas_store::HOOK_SURFACE_BUDGET_CHARS`] plus its frames and notes; the
-/// rest (supervisor reminder, ambient recall) must fit what is left.
+/// rest (supervisor reminder) must fit what is left.
 pub(crate) const HOOK_CONTEXT_CAP_CHARS: usize = 9_500;
 
 /// cas-1f0c: what a hook's mail block may spend beyond its bodies: the
@@ -353,31 +353,6 @@ pub(crate) fn hook_body_budget(reserved: usize) -> usize {
     cas_store::HOOK_SURFACE_BUDGET_CHARS.min(
         HOOK_CONTEXT_CAP_CHARS.saturating_sub(reserved + HOOK_MAIL_NOTES_RESERVE_CHARS),
     )
-}
-
-/// cas-1f0c: append `addition` to a hook's context only if the whole, plus
-/// `reserved` characters of other context in the same output, stays within
-/// [`HOOK_CONTEXT_CAP_CHARS`]. Returns whether it was appended.
-pub(crate) fn push_within_hook_cap(context: &mut String, addition: &str, reserved: usize) -> bool {
-    let separator = if context.is_empty() { 0 } else { 2 };
-    if reserved + context.chars().count() + separator + addition.chars().count()
-        > HOOK_CONTEXT_CAP_CHARS
-    {
-        return false;
-    }
-    if separator > 0 {
-        context.push_str("\n\n");
-    }
-    context.push_str(addition);
-    true
-}
-
-/// cas-1f0c: build optional context after mail was already receipted. A
-/// panic here must not take the rendered mail down with the hook process.
-pub(crate) fn after_mail<T>(build: impl FnOnce() -> Option<T>) -> Option<T> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(build))
-        .ok()
-        .flatten()
 }
 
 /// cas-1f0c: what one hook surfacing did.
@@ -1162,7 +1137,7 @@ mod tests {
     /// cas-1f0c round 3: PostToolUse lessons and guardrail warnings share
     /// the hook output with the mail, so they are reserved inside the cap.
     #[test]
-    fn reserved_context_shrinks_the_body_budget_and_the_recall_room() {
+    fn reserved_context_shrinks_the_body_budget() {
         assert_eq!(hook_body_budget(0), cas_store::HOOK_SURFACE_BUDGET_CHARS);
         let lessons = 4_000;
         let budget = hook_body_budget(lessons);
@@ -1170,11 +1145,6 @@ mod tests {
         assert!(lessons + budget + HOOK_MAIL_NOTES_RESERVE_CHARS <= HOOK_CONTEXT_CAP_CHARS);
         assert_eq!(hook_body_budget(HOOK_CONTEXT_CAP_CHARS), 0);
 
-        let recall = "r".repeat(3_000);
-        let mut context = "m".repeat(5_000);
-        assert!(push_within_hook_cap(&mut context.clone(), &recall, 0));
-        assert!(!push_within_hook_cap(&mut context, &recall, 1_600), "lessons leave no room");
-        assert_eq!(context.len(), 5_000, "a refused addition leaves the context unchanged");
     }
 
     #[test]

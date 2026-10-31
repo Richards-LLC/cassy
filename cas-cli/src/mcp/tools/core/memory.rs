@@ -792,8 +792,7 @@ impl CasCore {
             harmful_count: 0,
             last_accessed: None,
             archived: false,
-            // Preserve author session provenance so ambient recall can avoid
-            // immediately echoing a memory back into the same conversation.
+            // Preserve author session provenance for the entry audit trail.
             session_id: self.get_agent_id().ok(),
             source_tool: Some("mcp".to_string()),
             pending_extraction: false,

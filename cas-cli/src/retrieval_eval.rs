@@ -24,17 +24,6 @@
 //!   up as the two rows converging, rather than as one unexplained move.
 //!   Ranking is captured through the production `on_surfaced` callback, in
 //!   render order, at the production limit.
-//! * **`ambient_packet`** — the evidence cards that
-//!   [`crate::ambient_recall::render_packet`] actually injects, in injection
-//!   order, after the real candidate retrieval, fusion, scope gate and
-//!   injection budget.
-//! * **`ambient_candidates`** — a diagnostic third view: the ranked candidate
-//!   list *before* `render_packet`'s injection budget. It exists because the
-//!   packet caps lexical-only injections at
-//!   `ambient_recall::LEXICAL_INJECTION_CAP` (3), so `ambient_packet` recall@5
-//!   is structurally capped on an install with no embedding cache. Separating
-//!   the two keeps a retrieval regression distinguishable from a budget change.
-//!
 //! # Tier modes
 //!
 //! The Helpful-Memories selector only considers entries whose
@@ -51,9 +40,6 @@
 //!   function alone, with the tier filter neutralised, so a ranking change
 //!   (P6b boosts) has a metric that can move.
 //!
-//! The ambient selectors filter on `archived = 0` only, so their two modes are
-//! expected to agree; a divergence there is itself a signal.
-//!
 //! # Determinism
 //!
 //! `BasicContextScorer` decays by wall-clock age and boosts by `last_accessed`,
@@ -63,10 +49,9 @@
 //! preserved exactly, every timestamp is unique (the store's
 //! `ORDER BY created DESC` has no tiebreaker), and `num_days()` still yields
 //! `age_days`. `updated_at` is rewritten to equal `created` after seeding so
-//! the ambient retriever's `ORDER BY coalesce(updated_at, created) DESC` sees
-//! the real recency order rather than insertion order.
-//! A full run snapshots one clock for both tier modes and their ambient
-//! retrievers, so crossing UTC midnight cannot change a same-day bonus
+//! retrieval sees the real recency order rather than insertion order.
+//! A full run snapshots one clock for both tier modes,
+//! so crossing UTC midnight cannot change a same-day bonus
 //! between rows that are supposed to be compared exactly.
 //!
 //! # Metrics
@@ -75,9 +60,7 @@
 //! ranked list `S` (truncated to 5):
 //!
 //! * `precision@5 = |R ∩ S| / min(5, |S|)` — the denominator is the number of
-//!   slots the selector actually used, not a flat 5. A selector that is
-//!   structurally capped below 5 slots (the ambient packet) would otherwise be
-//!   penalised for a budget decision rather than for a ranking decision.
+//!   slots the selector actually used, not a flat 5.
 //!   `mean_returned` is reported alongside so the cap stays visible.
 //! * `recall@5 = |R ∩ S| / |R|`.
 //! * Cases where the selector returned nothing contribute `0.0` precision —
@@ -120,11 +103,6 @@ use serde::{Deserialize, Serialize};
 
 use cas_store::{SqliteStore, Store};
 use cas_types::{Entry, EntryType, MemoryTier, Scope};
-
-use crate::ambient_recall::{
-    RecallIdentity, RecallLedger, RecallRequest, RecallRole, RecallRetriever, SqliteRecallRetriever,
-    render_packet, retrieve_candidates,
-};
 
 /// The production SessionStart limit (`hooks/handlers/handlers_session.rs`).
 pub const SESSION_START_LIMIT: usize = 5;
@@ -604,8 +582,6 @@ fn build_entry(
 
 /// Identifiers of the selectors this harness scores.
 pub const SELECTOR_HELPFUL_MEMORIES: &str = "helpful_memories";
-pub const SELECTOR_AMBIENT_PACKET: &str = "ambient_packet";
-pub const SELECTOR_AMBIENT_CANDIDATES: &str = "ambient_candidates";
 /// The real SessionStart path: `context.rs` + `HybridContextScorer` (cas-b06c).
 pub const SELECTOR_HELPFUL_MEMORIES_PRODUCTION: &str = "helpful_memories_production";
 
@@ -1376,71 +1352,6 @@ pub fn probe_production_scorer_state(
     }
 }
 
-fn recall_identity(case: &EvalCase) -> RecallIdentity {
-    RecallIdentity {
-        session_id: format!("retrieval-eval-{}", case.case_id),
-        agent_name: "retrieval-eval-worker".to_string(),
-        factory_session: "retrieval-eval-session".to_string(),
-        role: RecallRole::Worker,
-        project_id: EVAL_PROJECT_ID.to_string(),
-        team_id: None,
-        internal_llm: false,
-    }
-}
-
-fn recall_request(case: &EvalCase) -> RecallRequest {
-    RecallRequest {
-        prompt: case.user_prompt.clone(),
-        task_id: Some(case.task_id.clone()),
-        task_title: Some(case.task_title.clone()),
-        task_labels: case.task_labels.clone(),
-        files: case.files.clone(),
-        ..Default::default()
-    }
-}
-
-/// Rank the evidence the ambient packet would actually inject, in packet order.
-pub fn ambient_packet_ranking(corpus: &EvalCorpus, case: &EvalCase) -> Vec<String> {
-    let identity = recall_identity(case);
-    let request = recall_request(case);
-    let Some(retriever) = SqliteRecallRetriever::existing_at(corpus.cas_dir(), corpus.as_of) else {
-        return Vec::new();
-    };
-    let retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
-    let Some(candidates) = retrieve_candidates(&identity, &request, &retrievers) else {
-        return Vec::new();
-    };
-    let Some(query) = crate::ambient_recall::RecallQuery::build(&identity, &request) else {
-        return Vec::new();
-    };
-    let mut ledger = RecallLedger::default();
-    match render_packet(&identity, &query, &candidates, &mut ledger) {
-        Some((_packet, injected)) => injected
-            .into_iter()
-            .map(|candidate| candidate.evidence_id)
-            .collect(),
-        None => Vec::new(),
-    }
-}
-
-/// Rank the ambient candidates *before* the packet's injection budget.
-pub fn ambient_candidate_ranking(corpus: &EvalCorpus, case: &EvalCase) -> Vec<String> {
-    let identity = recall_identity(case);
-    let request = recall_request(case);
-    let Some(retriever) = SqliteRecallRetriever::existing_at(corpus.cas_dir(), corpus.as_of) else {
-        return Vec::new();
-    };
-    let retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
-    match retrieve_candidates(&identity, &request, &retrievers) {
-        Some(candidates) => candidates
-            .candidates
-            .into_iter()
-            .map(|candidate| candidate.evidence_id)
-            .collect(),
-        None => Vec::new(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
@@ -1463,8 +1374,7 @@ pub struct SelectorMetrics {
     pub selector: String,
     pub tier_mode: String,
     /// SessionStart shape this row was measured under, or `n/a` for selectors
-    /// that do not read the SessionStart `ContextQuery` (the Basic control and
-    /// both ambient selectors, which build their own query).
+    /// that do not read the SessionStart `ContextQuery` (the Basic control).
     #[serde(default = "not_applicable")]
     pub query_mode: String,
     pub cases: usize,
@@ -1660,54 +1570,9 @@ pub fn run_all(
         });
         details.push((m.key(), d));
         metrics.push(m);
-
-        let (m, d) = score(SELECTOR_AMBIENT_PACKET, mode, &fixture.cases, |case| {
-            ambient_packet_ranking(&corpus, case)
-        });
-        details.push((m.key(), d));
-        metrics.push(m);
-
-        let (m, d) = score(SELECTOR_AMBIENT_CANDIDATES, mode, &fixture.cases, |case| {
-            ambient_candidate_ranking(&corpus, case)
-        });
-        details.push((m.key(), d));
-        metrics.push(m);
     }
 
     Ok((metrics, details))
-}
-
-#[cfg(test)]
-mod clock_tests {
-    use super::*;
-
-    #[test]
-    fn ambient_tier_modes_share_a_clock_at_utc_midnight() {
-        let fixture = EvalFixture::load(&EvalFixture::committed_path()).expect("fixture");
-        let as_of = "2026-09-23T23:59:59Z".parse().expect("UTC instant");
-        let live_dir = tempfile::tempdir().expect("live tempdir");
-        let working_dir = tempfile::tempdir().expect("working tempdir");
-        let live = EvalCorpus::materialize_at(&fixture, live_dir.path(), TierMode::Live, as_of)
-            .expect("live corpus");
-        let working =
-            EvalCorpus::materialize_at(&fixture, working_dir.path(), TierMode::AllWorking, as_of)
-                .expect("working corpus");
-
-        for case in &fixture.cases {
-            assert_eq!(
-                ambient_packet_ranking(&live, case),
-                ambient_packet_ranking(&working, case),
-                "{}: ambient packet ranking changed with tier mode",
-                case.case_id
-            );
-            assert_eq!(
-                ambient_candidate_ranking(&live, case),
-                ambient_candidate_ranking(&working, case),
-                "{}: ambient candidate ranking changed with tier mode",
-                case.case_id
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

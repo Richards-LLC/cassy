@@ -378,20 +378,6 @@ pub fn handle_session_start(
         );
     }
 
-    // cas-cd54: ambient recall is a degradable, independently hard-bounded
-    // evidence segment. It stays below immutable role guidance and never
-    // competes with safety banners for protected SessionStart bytes.
-    if let Some(packet) =
-        crate::ambient_recall::build_ambient_recall_context(input, cas_root, None, true)
-    {
-        assembler.append_degradable_with_priority(
-            "Ambient recall",
-            packet.full,
-            packet.compact,
-            DegradationPriority::AmbientRecall,
-        );
-    }
-
     let docs_measurement = crate::hooks::handlers::handlers_events::docs_freshness::Measurement::at(
         Path::new(&input.cwd),
         cas_root,

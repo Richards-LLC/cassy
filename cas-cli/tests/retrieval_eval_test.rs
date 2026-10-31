@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use cas::retrieval_eval::{
     self, Baseline, EXPECTED_CASE_COUNT, EvalCorpus, EvalFixture, HARNESS_RUNTIME_BUDGET,
     ProductionScorerState, QueryMode, REBASELINE_ENV, REGRESSION_TOLERANCE,
-    SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET, SELECTOR_HELPFUL_MEMORIES,
+    SELECTOR_HELPFUL_MEMORIES,
     SELECTOR_HELPFUL_MEMORIES_PRODUCTION, ScorerConfig, TierMode,
 };
 use sha2::{Digest, Sha256};
@@ -904,8 +904,6 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why(
     // Both tier rows in the committed baseline are currently identical, and a
     // reader is right to suspect a copy-paste. They are not:
     //
-    // * The ambient selectors filter on `archived = 0` only — no tier
-    //   predicate exists on that path, so the modes agree by construction.
     // * The live fixture re-tiers every curated row (importance >= 0.9 or
     //   helpful_count > 0) to working, so the remaining archive-only rows are
     //   uncurated and score below the same five candidates as all_working.
@@ -915,11 +913,7 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why(
     // filter. This check asserts the *reason*, so if the coincidence ever ends
     // the baseline diff is explained rather than mysterious.
 
-    for selector in [
-        SELECTOR_HELPFUL_MEMORIES,
-        SELECTOR_AMBIENT_PACKET,
-        SELECTOR_AMBIENT_CANDIDATES,
-    ] {
+    for selector in [SELECTOR_HELPFUL_MEMORIES] {
         let live_row = metrics
             .iter()
             .find(|m| m.selector == selector && m.tier_mode == TierMode::Live.as_str())
@@ -1093,14 +1087,6 @@ fn the_gate_fires_on_a_deliberate_corpus_regression(
             retrieval_eval::helpful_memories_ranking(&corpus, c).unwrap_or_default()
         });
         damaged.push(m);
-        let (m, _) = retrieval_eval::score(SELECTOR_AMBIENT_PACKET, mode, &fixture.cases, |c| {
-            retrieval_eval::ambient_packet_ranking(&corpus, c)
-        });
-        damaged.push(m);
-        let (m, _) = retrieval_eval::score(SELECTOR_AMBIENT_CANDIDATES, mode, &fixture.cases, |c| {
-            retrieval_eval::ambient_candidate_ranking(&corpus, c)
-        });
-        damaged.push(m);
     }
 
     let (regressions, missing) =
@@ -1112,21 +1098,6 @@ fn the_gate_fires_on_a_deliberate_corpus_regression(
          clean:\n{}\ndamaged:\n{}",
         retrieval_eval::render_table(clean),
         retrieval_eval::render_table(&damaged)
-    );
-
-    // And it must be the ambient selectors that report it: they are the ones
-    // whose ranking actually depends on the query, so a corpus loss on the
-    // relevant side has to show up there.
-    assert!(
-        regressions
-            .iter()
-            .any(|r| r.key.starts_with(SELECTOR_AMBIENT_CANDIDATES)),
-        "expected the query-dependent selector to notice:\n{}",
-        regressions
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
     );
 }
 

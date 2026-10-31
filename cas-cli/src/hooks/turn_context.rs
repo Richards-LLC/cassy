@@ -96,7 +96,7 @@ fn remember_recent(keys: &mut Vec<String>, key: &str) {
     }
 }
 
-/// Successful normal hooks suppress fallback recall for that same prompt.
+/// Successful normal hooks mark that same prompt as delivered.
 pub(crate) fn record_prompt_hook(root: &Path, input: &HookInput) {
     if crate::internal_llm::is_internal_invocation() {
         return;
@@ -318,7 +318,7 @@ fn turn_start_line(line: &[u8], session: &str) -> Option<TranscriptTurn> {
 /// that reaches a busy agent mid-turn is in its context within one tool call.
 /// The check reads only a small per-recipient stamp until something new was
 /// enqueued; inbox receipts are atomic and shared with UserPromptSubmit, so a
-/// row surfaces once. Recall still runs once per turn, and only when the
+/// row surfaces once. Turn tracking runs once per turn, and only when the
 /// normal prompt hook did not serve the turn.
 pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String> {
     fallback_context_within(root, input, 0)
@@ -450,20 +450,6 @@ pub(crate) fn fallback_context_within(
         receipt.remember(key);
         receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
         changed = true;
-        // cas-1f0c: mail above is already receipted; recall may not take it
-        // down (panic) or push the output past Claude Code's cap.
-        if let Some(packet) = super::handlers::handlers_middle::factory_inbox::after_mail(|| {
-            crate::ambient_recall::build_local_ambient_recall_context(input, root, prompt)
-        }) {
-            let mut joined = parts.join("\n\n");
-            if super::handlers::handlers_middle::factory_inbox::push_within_hook_cap(
-                &mut joined,
-                &packet.full,
-                reserved,
-            ) {
-                parts.push(packet.full);
-            }
-        }
     }
     // cas-1f0c: a failed save must not drop mail that is already receipted;
     // the turn is then simply re-examined at the next tool call.

@@ -446,12 +446,12 @@ pub fn execute_parity(jsonl: Option<PathBuf>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The harness-specific ambient-recall delivery contract for a supervisor
+    /// The harness-specific session-context delivery contract for a supervisor
     /// launch. This is deliberately separate from the skill contract because
     /// Claude and Codex receive their packet through native SessionStart;
     /// Grok and OpenCode receive it through their queued launch intros.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum AmbientRecallDelivery {
+    enum SessionContextDelivery {
         /// Claude and Codex read their native SessionStart hook context.
         SessionStart,
         /// Grok ignores SessionStart stdout, so the factory's queued launch
@@ -462,13 +462,13 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     struct SupervisorHarnessRequirement {
         supervisor_skills: [&'static str; 3],
-        ambient_recall: AmbientRecallDelivery,
+        context_delivery: SessionContextDelivery,
     }
 
     /// The load-bearing exhaustive declaration for supervisor harnesses.
     ///
     /// Do not add a catch-all arm: a new `SupervisorCli` variant must fail to
-    /// compile here until its real skill and ambient-recall delivery contract
+    /// compile here until its real skill and session-context delivery contract
     /// are registered and tested below.
     fn supervisor_harness_requirement(harness: SupervisorCli) -> SupervisorHarnessRequirement {
         match harness {
@@ -478,7 +478,7 @@ mod tests {
                     "cas-supervisor-checklist",
                     "cas-codebase-design",
                 ],
-                ambient_recall: AmbientRecallDelivery::SessionStart,
+                context_delivery: SessionContextDelivery::SessionStart,
             },
             SupervisorCli::Codex => SupervisorHarnessRequirement {
                 // Codex retains its harness-specific checklist, while trusted
@@ -488,7 +488,7 @@ mod tests {
                     "cas-codex-supervisor-checklist",
                     "cas-codebase-design",
                 ],
-                ambient_recall: AmbientRecallDelivery::SessionStart,
+                context_delivery: SessionContextDelivery::SessionStart,
             },
             SupervisorCli::Grok => SupervisorHarnessRequirement {
                 supervisor_skills: [
@@ -496,24 +496,24 @@ mod tests {
                     "cas-supervisor-checklist",
                     "cas-codebase-design",
                 ],
-                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
+                context_delivery: SessionContextDelivery::QueuedSupervisorIntro,
             },
             // OpenCode receives the same generated supervisor skill projection
-            // and queued ambient-recall delivery as Grok.
+            // and queued session-context delivery as Grok.
             SupervisorCli::OpenCode => SupervisorHarnessRequirement {
                 supervisor_skills: [
                     "cas-supervisor",
                     "cas-supervisor-checklist",
                     "cas-codebase-design",
                 ],
-                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
+                context_delivery: SessionContextDelivery::QueuedSupervisorIntro,
             },
         }
     }
 
     /// Capture the concrete queued supervisor launch payload. The queued intro
-    /// is the ambient-recall delivery seam for Codex and Grok; Claude's own
-    /// ambient packet is delivered by SessionStart below.
+    /// is the session-context delivery seam for Codex and Grok; Claude's own
+    /// session context is delivered by SessionStart below.
     /// This is a second exhaustive match so a new backend cannot be quietly
     /// covered by a generic fallback.
     fn supervisor_skill_payload(cas_dir: &std::path::Path, harness: SupervisorCli) -> String {
@@ -551,7 +551,7 @@ mod tests {
     }
 
     /// Capture the shared native SessionStart handler used by Claude and Codex,
-    /// whose context is the declared ambient-recall delivery seam. The fixture is hermetic because
+    /// whose context is the declared session-context delivery seam. The fixture is hermetic because
     /// session start otherwise consults host-scoped context under `HOME`.
     fn native_session_start_payload(cas_dir: &std::path::Path) -> String {
         use crate::hooks::{HookInput, handle_session_start};
@@ -575,7 +575,7 @@ mod tests {
     /// cas-9faa: prove every declared supervisor launch contract against the
     /// real delivery seam. A new `SupervisorCli` variant fails compilation in
     /// `supervisor_harness_requirement` and `supervisor_skill_payload` until
-    /// its skill and ambient-recall policy are explicitly declared.
+    /// its skill and session-context policy are explicitly declared.
     #[test]
     fn supervisor_launch_context_parity_is_exhaustive_and_declared() {
         use crate::store::{init_cas_dir, open_agent_store, open_store, open_task_store_local};
@@ -616,12 +616,12 @@ mod tests {
             )
             .unwrap();
         let mut sentinel = Entry::new(
-            "grok-supervisor-ambient".to_string(),
+            "supervisor-handoff".to_string(),
             "Operator prefers release recovery audit receipts that preserve intent".to_string(),
         );
         sentinel.title = Some("Current supervisor release recovery guidance".to_string());
-        // Supervisor recall admits operator context, not generic project history.
-        sentinel.entry_type = crate::types::EntryType::Preference;
+        // The saved handoff must survive each harness's delivery channel.
+        sentinel.entry_type = crate::types::EntryType::Handoff;
         sentinel.tags = vec!["release".to_string(), "recovery".to_string()];
         sentinel.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&sentinel).unwrap();
@@ -644,8 +644,8 @@ mod tests {
                 );
             }
 
-            match requirement.ambient_recall {
-                AmbientRecallDelivery::SessionStart => {
+            match requirement.context_delivery {
+                SessionContextDelivery::SessionStart => {
                     env.set("CAS_HOOK_HARNESS", harness.backend().name());
                     env.set("CAS_FACTORY_SUPERVISOR_CLI", harness.backend().name());
                     let payload = native_session_start_payload(&cas_dir);
@@ -655,26 +655,18 @@ mod tests {
                         "{harness:?} SessionStart exceeds {budget}B"
                     );
                     eprintln!(
-                        "{harness:?} SessionStart with full ambient recall: {}B / {budget}B",
+                        "{harness:?} SessionStart with full session handoff: {}B / {budget}B",
                         payload.len()
                     );
                     assert!(
-                        payload.contains("[ambient recall v1 role=supervisor"),
-                        "{harness:?} SessionStart payload is missing ambient recall: {payload}"
-                    );
-                    assert!(
-                        payload.contains("grok-supervisor-ambient"),
-                        "{harness:?} SessionStart payload omitted the ambient recall sentinel: {payload}"
+                        payload.contains("supervisor-handoff"),
+                        "{harness:?} SessionStart payload omitted the session handoff sentinel: {payload}"
                     );
                 }
-                AmbientRecallDelivery::QueuedSupervisorIntro => {
+                SessionContextDelivery::QueuedSupervisorIntro => {
                     assert!(
-                        skill_payload.contains("[ambient recall v1 role=supervisor"),
-                        "{harness:?} queued supervisor intro is missing ambient recall: {skill_payload}"
-                    );
-                    assert!(
-                        skill_payload.contains("grok-supervisor-ambient"),
-                        "{harness:?} queued supervisor intro omitted the ambient recall sentinel: {skill_payload}"
+                        skill_payload.contains("supervisor-handoff"),
+                        "{harness:?} queued supervisor intro omitted the session handoff sentinel: {skill_payload}"
                     );
                 }
             }

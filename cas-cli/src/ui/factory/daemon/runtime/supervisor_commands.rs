@@ -703,6 +703,43 @@ mod tests {
         assert!(codex_model_selection("• Model changed to gpt-6.1-sol high", "• Model changed to gpt-6.1-sol high\n›").is_none());
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn captured_claude_usage_can_be_observed_and_closed_even_after_timeout() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::captured_claude_usage_can_be_observed_and_closed_even_after_timeout") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "usage-capture".into(), owner.clone()).await.unwrap();
+        // The original 90-second outcome expired before the Usage view arrived.
+        daemon.supervisor_commands.records.get_mut(&("device-a".into(), "usage-capture".into())).unwrap().started -= Duration::from_secs(91);
+        let expired = daemon.dispatch_supervisor_command(Request::Status, "usage-capture".into(), owner.clone()).await.unwrap();
+        assert!(matches!(expired, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed));
+        // Real Claude 2.1.312, 24x80, 2026-10-31. No "Current session".
+        let captured = include_str!("fixtures/claude-2.1.312-usage.txt");
+        let view = format!("\x1bc{}", captured.replace('\n', "\r\n"));
+        daemon.app.mux.get_mut(&name).unwrap().feed(view.as_bytes()).unwrap();
+        let observed = daemon.dispatch_supervisor_command(Request::Status, "usage-capture".into(), owner.clone()).await.unwrap();
+        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive), "{observed:?}");
+        // Commander stops polling at Unconfirmed: its recovery Close must work
+        // without first receiving the late observation above.
+        let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "usage-capture".into())).unwrap();
+        record.receipt.phase = Phase::Unconfirmed;
+        record.receipt.interactive = false;
+        daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "usage-capture".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\x1b") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let closed = daemon.dispatch_supervisor_command(Request::Status, "usage-capture".into(), owner.clone()).await.unwrap();
+        assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && !receipt.interactive));
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/usage").count(), 1, "Close must not replay the uncertain command");
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "usage-next".into(), owner).await.unwrap();
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn native_clear_and_a_repeat_codex_status_are_observed() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_clear_and_a_repeat_codex_status_are_observed") { return; }

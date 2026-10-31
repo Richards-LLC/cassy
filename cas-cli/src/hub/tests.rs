@@ -5467,7 +5467,6 @@ async fn operations_focus_epic_inverse() {
     assert_eq!(pinned().as_deref(), Some("cas-epa1"));
 }
 
-/// End session was the one Commander mutation with no audit row (brief O8).
 /// Dismissal belongs to a session birth on the hub, surviving new pairings and restart.
 #[tokio::test]
 async fn ended_dismissal_is_shared_durable_and_generation_bound() {
@@ -5487,15 +5486,18 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     let body = serde_json::json!({"started_at": ended.started_at});
     let (status, _) = f.call("POST", "/v1/sessions/ended-a/dismiss", Some(body.clone())).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    // Reopen the store before pairing the second device: the hub's restart
+    // fence correctly refuses proofs from pre-boot credentials in that second.
+    let reopened = AuthStore::open(&f.hub_root, "machine-test").unwrap();
     // A different signed-in device, with its own credential, reads the same tombstone.
     let signing = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-    let invite = f.auth.mint_pairing("https://controller.example", [Scope::SessionRead].into_iter().collect(), chrono::Utc::now()).unwrap();
+    let invite = reopened.mint_pairing("https://controller.example", [Scope::SessionRead].into_iter().collect(), chrono::Utc::now()).unwrap();
     let mut exchange = PairingExchange::test_fixture(invite.token, "machine-test", "https://controller.example", [Scope::SessionRead].into_iter().collect());
     exchange.public_key_jwk = public_jwk(&signing);
-    let credential = f.auth.exchange_pairing(exchange, chrono::Utc::now()).unwrap();
+    let credential = reopened.exchange_pairing(exchange, chrono::Utc::now()).unwrap();
+    f.auth = reopened.clone();
     f.signing = signing; f.credential = credential.credential;
     ended.ended.as_mut().unwrap().at = "2026-10-31T11:01:00Z".into();
-    let reopened = AuthStore::open(&f.hub_root, "machine-test").unwrap();
     f.app = app(reopened, vec![ended.clone()]);
     let (status, rows) = f.call("GET", "/v1/sessions", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -5514,6 +5516,7 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     }
 }
 
+/// End session was the one Commander mutation with no audit row (brief O8).
 #[tokio::test]
 async fn end_session_writes_audit_row() {
     let _home = crate::test_env_guard::TestEnvGuard::temp_home();

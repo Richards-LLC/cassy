@@ -1,5 +1,5 @@
 import { test, expect, journeyPart } from "./journey";
-import { journeyDay, journeyStamp } from "./clock";
+import { journeyDay, journeyNow, journeyStamp } from "./clock";
 import { HubDouble, SCOPES, type Machine } from "./hub-double";
 
 // cas-55a4: three live gabber-studio sessions on one machine, as the
@@ -383,7 +383,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(liveSupervisor).toBeVisible();
   });
 
-  await journey.stage("Dismiss and clear ended sessions without deleting their history", async () => {
+  await journey.stage("Dismiss on the phone and keep ended sessions hidden on the desktop", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
     const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
@@ -403,9 +404,10 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       await hub.announceCatalog("atlas");
       await expect(old.locator(".conversation-row")).toHaveCount(1);
     }
-    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 } });
+    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 }, timezoneId: "UTC" });
     try {
       const desktop = await context.newPage();
+      await desktop.clock.install({ time: journeyNow() });
       const otherDevice = new HubDouble(desktop, { machines: [machine, other], paired: ["atlas", "borealis"] });
       await otherDevice.install();
       await desktop.goto(page.url());

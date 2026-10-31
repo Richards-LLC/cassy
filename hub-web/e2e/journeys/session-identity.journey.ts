@@ -383,6 +383,26 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(liveSupervisor).toBeVisible();
   });
 
+  for (const mode of ["light", "dark", "forced-colors"] as const) {
+    await journey.stage(`Live idle stays distinct from offline in ${mode}`, async () => {
+      await page.emulateMedia({ colorScheme: mode === "dark" ? "dark" : "light", forcedColors: mode === "forced-colors" ? "active" : "none" });
+      const card = list.getByRole("group", { name: /^pulse-card ·/ });
+      const idle = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Idle", exact: true });
+      const offline = card.locator(".conversation-row").filter({ hasText: "watchful-heron-16" }).getByRole("img", { name: "Offline", exact: true });
+      await expect(idle).toHaveAttribute("title", "Idle");
+      await expect(offline).toHaveAttribute("title", "Offline");
+      const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
+      expect(await look(idle)).not.toEqual(await look(offline));
+      // A live idle dot uses the live green, never the old gray idle token.
+      if (mode !== "forced-colors") {
+        expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
+      } else {
+        expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
+      }
+    });
+  }
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+
   await journey.stage("Dismiss and clear ended sessions without deleting their history", async () => {
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });

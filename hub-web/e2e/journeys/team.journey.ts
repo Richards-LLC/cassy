@@ -9,7 +9,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
     test(`HUB-J26 see live staffing without opening output ${width}`, journeyPart, async ({ page, journey }) => {
       const names = ["swift-lark-3", "quiet-owl-7", "brisk-wren-9", "calm-heron-5"];
       const fleet: FleetWorld = {
-        agents: names.map((name, i) => ({ name, generation: 1, status: "active", current_task: `task-${i}`, liveness: i === 0 ? "executing" : "waiting_for_input",
+        agents: names.map((name, i) => ({ name, generation: 1, status: "active", current_task: `task-${i}`, liveness: i === 0 ? "executing" : i === 3 ? "offline" : "waiting_for_input",
           harness: "codex", model: i === 2 ? undefined : "gpt-6.1", task_started_at: new Date(journeyNow() - 42 * 60_000).toISOString(),
           recent_trail: [{ step: "started", reference: "event:1" }], latest_activity: { summary: "RAW TOOL OUTPUT MUST STAY PRIVATE" } })),
         tasks: names.map((name, i) => ({ id: `task-${i}`, title: ["Build the Team view", "Review the delivery", "Write the notes", "Check the release"][i], status: i === 1 ? "awaiting_merge" : "in_progress", epic_id: "release", assignee: name, updated_at: new Date(journeyNow()).toISOString() })),
@@ -27,7 +27,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await tab.focus(); await page.keyboard.press("ArrowRight");
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeFocused();
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
-        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 2 waiting, 1 parked. 1 needs you.");
+        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 1 waiting, 1 parked, 1 offline. 1 needs you.");
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
         // The whole team fits above the fold, and the release block has one home.
@@ -50,10 +50,14 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-model')).toHaveText("codex · Model not reported");
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
         // Working and waiting differ by color and mark, not just by the word.
-        const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => getComputedStyle(node).color + getComputedStyle(node).backgroundColor));
-        const [working, waiting] = [await look("swift-lark-3"), await look("brisk-wren-9")];
-        expect(working[0]).not.toBe(waiting[0]);
+        const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => { const s = getComputedStyle(node); return [s.color, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius].join(" "); }));
+        const [working, waiting, offline] = [await look("swift-lark-3"), await look("brisk-wren-9"), await look("calm-heron-5")];
+        expect(waiting[0]).not.toBe(offline[0]);
         expect(working[1]).not.toBe(waiting[1]);
+        expect(waiting[1]).not.toBe(offline[1]);
+        for (const [worker, label] of [["swift-lark-3", "Working"], ["brisk-wren-9", "Idle"], ["calm-heron-5", "Offline"]]) {
+          await expect(panel.locator(`.team-lane[data-worker="${worker}"]`).getByRole("img", { name: label, exact: true })).toHaveAttribute("title", label);
+        }
         // The track is an outline, so a release at zero cannot read as a full bar.
         expect(await panel.locator(".release-progress progress").evaluate(bar => { const style = getComputedStyle(bar); return [style.borderTopStyle, style.backgroundColor]; })).toEqual(["solid", "rgba(0, 0, 0, 0)"]);
         // The track's connector is a graphic that carries meaning, so it holds 3:1 against its lane.
@@ -81,6 +85,12 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
         await expect(page.locator("#team-panel")).toBeVisible();
         expect(await page.locator(".team-state").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        const waiting = page.locator('.team-lane[data-worker="brisk-wren-9"]');
+        const offline = page.locator('.team-lane[data-worker="calm-heron-5"]');
+        const treatment = (lane: typeof waiting) => lane.evaluate(node => { const pill = getComputedStyle(node.querySelector(".team-state")!); const dot = getComputedStyle(node.querySelector(".supervisor-state")!); return [pill.textDecorationLine, dot.borderRadius]; });
+        const [waitingLook, offlineLook] = [await treatment(waiting), await treatment(offline)];
+        expect(waitingLook[0]).not.toBe(offlineLook[0]);
+        expect(waitingLook[1]).not.toBe(offlineLook[1]);
         const forced = await page.evaluate(() => {
           const color = (selector: string, property: "color" | "borderBottomColor" = "color") => getComputedStyle(document.querySelector(selector)!)[property];
           return { selected: color("#team-tab", "borderBottomColor"), unselected: color("#conversation-tab", "borderBottomColor"), page: getComputedStyle(document.body).backgroundColor, row: color('.conversation-row[aria-current="true"]'), name: color('.conversation-row[aria-current="true"] .conversation-supervisor') };

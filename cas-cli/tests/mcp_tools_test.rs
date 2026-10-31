@@ -22,6 +22,7 @@ mod memory_remember_contract;
 mod memory_recent_contract;
 #[path = "mcp_tools_test/memory_autofix.rs"]
 mod memory_autofix;
+#[path = "mcp_tools_test/quality_ledger.rs"]
 mod quality_ledger;
 #[path = "mcp_tools_test/rule_tools.rs"]
 mod rule_tools;

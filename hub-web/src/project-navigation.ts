@@ -43,6 +43,8 @@ export class ProjectNavigation {
   private filter: Filter = "all";
   private collapsed = new Set<string>();
   private dismissedEnded = new Set<string>();
+  private pendingDismissals = new Set<string>();
+  private syncAttempted = new Set<string>();
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: Open; end?: End; options: Options };
 
   constructor() {
@@ -73,26 +75,29 @@ export class ProjectNavigation {
     void this.persistDismissal(row);
   }
 
-  private async persistDismissal(row: ConversationRow): Promise<void> {
+  private async persistDismissal(row: ConversationRow, keepHidden = false): Promise<void> {
     const key = endedSessionKey(row);
-    if (this.dismissedEnded.has(key)) return;
+    if (row.dismissed || this.pendingDismissals.has(key)) return;
+    this.pendingDismissals.add(key);
     this.dismissedEnded.add(key);
     this.saveDismissedEnded();
     const latest = this.latest;
-    if (!latest) return;
+    if (!latest) { this.pendingDismissals.delete(key); return; }
     this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
     try {
       await latest.options.dismissEnded?.(row);
     } catch {
-      this.dismissedEnded.delete(key);
+      if (!keepHidden) this.dismissedEnded.delete(key);
       this.saveDismissedEnded();
       const current = this.latest!;
       this.render(current.container, current.rows, current.open, current.end, current.options);
       const error = current.container.ownerDocument.createElement("p");
       error.setAttribute("role", "alert");
-      error.textContent = `Could not dismiss ${row.supervisor}. Try Dismiss again to save it on your other devices.`;
+      error.textContent = keepHidden
+        ? `Could not save the dismissal for ${row.supervisor} on your other devices. It stays hidden here; reload after reconnecting to sync it.`
+        : `Could not dismiss ${row.supervisor}. Try Dismiss again to save it on your other devices.`;
       current.container.append(error);
-    }
+    } finally { this.pendingDismissals.delete(key); }
   }
 
   private clearProjectEnded(project: string): void {
@@ -142,7 +147,15 @@ export class ProjectNavigation {
     // A different birth with the same supervisor must never inherit it.
     for (const row of options.allRows ?? rows) {
       const legacy = `${row.key}\u0000${row.ended?.at ?? ""}`;
-      if (row.ended && this.dismissedEnded.delete(legacy)) void this.persistDismissal(row);
+      const migrated = row.ended && this.dismissedEnded.delete(legacy);
+      if (migrated) this.saveDismissedEnded();
+      const key = endedSessionKey(row);
+      if (row.ended && !row.dismissed && (migrated || this.dismissedEnded.has(key)) && !this.syncAttempted.has(key)) {
+        // A tab can close between saving locally and the hub's receipt. Replay
+        // that preference on reload, once per page, without resurrecting it.
+        this.syncAttempted.add(key);
+        void this.persistDismissal(row, true);
+      }
     }
     const document = container.ownerDocument;
     const machines = options.machines ?? [...new Map(rows.map((row) => [row.machineId, { id: row.machineId, label: row.host, online: row.machine_online }])).values()];

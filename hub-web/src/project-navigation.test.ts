@@ -94,14 +94,14 @@ describe("project-first navigation", () => {
     expect(nav.querySelector(".project-card-toggle")?.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("keeps an ended generation dismissed when its end receipt changes, but shows its replacement", () => {
+  it("keeps an ended generation dismissed when its end receipt changes, but shows its replacement", async () => {
     const nav = setup(); const list = new ProjectNavigation();
     const ended = row("calm-swan-15", { startedAt: 1000, ended: { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
     const save = vi.fn(async () => {});
     list.render(nav, [ended], vi.fn(), undefined, { dismissEnded: save });
     nav.querySelector<HTMLButtonElement>('[aria-label="Dismiss ended session calm-swan-15"]')!.click();
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    expect(save).toHaveBeenCalledWith(ended);
+    expect(save).toHaveBeenCalledWith(expect.objectContaining(ended));
     const updated = { ...ended, ended: { ...ended.ended!, at: "2026-10-31T10:00:01Z" } };
     list.render(nav, [updated], vi.fn());
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
@@ -115,10 +115,16 @@ describe("project-first navigation", () => {
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
     // Pre-upgrade keys are carried to shared storage when their receipt matches.
     localStorage.setItem("commander.dismissed-ended-sessions", JSON.stringify([`${ended.key}\u0000${ended.ended!.at}`]));
-    const migrate = vi.fn(async () => {});
+    const migrate = vi.fn(async () => { throw new Error("Hub unreachable"); });
     new ProjectNavigation().render(nav, [ended], vi.fn(), undefined, { dismissEnded: migrate });
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    expect(migrate).toHaveBeenCalledWith(ended);
+    expect(migrate).toHaveBeenCalledWith(expect.objectContaining(ended));
+    await Promise.resolve();
+    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
+    // Interrupted or failed sync is retried on reload, without resurrecting the row.
+    const retry = vi.fn(async () => {});
+    new ProjectNavigation().render(nav, [ended], vi.fn(), undefined, { dismissEnded: retry });
+    expect(retry).toHaveBeenCalledWith(expect.objectContaining(ended));
   });
 
   it("pins operator decisions and intersects the Needs you and machine filters with the supplied search results", () => {

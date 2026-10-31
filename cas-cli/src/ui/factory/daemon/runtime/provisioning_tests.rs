@@ -3,6 +3,32 @@ use super::super::imports::*;
 use crate::ui::factory::app::provisioning::{ProvisioningCancellation, launch_stalled_for_test};
 use std::path::Path;
 
+/// Wait until a fixture pane has printed its `ready` bytes, then age it past
+/// the 5 s injection grace (`Pane::ready_for_injection`) without sleeping it
+/// out. Returns the pane's received byte count.
+pub(super) async fn await_ready_fixture_pane(daemon: &mut FactoryDaemon, name: &str) -> u64 {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for pane in daemon.app.mux.panes_mut() {
+                pane.drain_output();
+            }
+            if daemon.app.mux.pane_bytes_received(name).unwrap() >= b"ready".len() as u64 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture pane prints its ready bytes");
+    daemon
+        .app
+        .mux
+        .get_mut(name)
+        .unwrap()
+        .backdate_spawn_for_test(Duration::from_secs(6));
+    daemon.app.mux.pane_bytes_received(name).unwrap()
+}
+
 pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
     let app = FactoryApp::for_test_at(cas_dir.to_path_buf());
     let listener = UnixListener::bind(cas_dir.join("test.sock")).unwrap();

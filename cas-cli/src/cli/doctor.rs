@@ -11429,6 +11429,8 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
     #[test]
     fn busy_retirement_doctor_autofix_warns_until_retry_cas_e4aa() {
+        // The held writer exhausts a shortened budget (production: 10 s).
+        crate::daemon::indexing::set_writer_lock_budget_for_tests(std::time::Duration::from_millis(100));
         let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
         assert!(fixture.scan(&fixture.main).errors.is_empty());
         fs::remove_file(fixture.main.join("new.rs")).unwrap();

@@ -8377,7 +8377,7 @@ mod tests {
         use crate::mcp::{CasCore, CasService};
         use crate::store::{init_cas_dir, open_task_store};
         use crate::test_env_guard::TestEnvGuard;
-        use cas_types::{Agent, AgentStatus, FactoryBranchStart, TaskDepth, WorkTarget};
+        use cas_types::{Agent, AgentRole, AgentStatus, FactoryBranchStart, TaskDepth, WorkTarget};
         use rmcp::handler::server::wrapper::Parameters;
         use std::path::Path;
         use std::process::Command;

@@ -52,25 +52,6 @@ enum Listed {
 /// start seconds, not the coordinator's default thirty.
 pub const CLAIM_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Test-only replacement for [`CLAIM_TIMEOUT`] in milliseconds; zero means none.
-static CLAIM_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Shorten [`CLAIM_TIMEOUT`] for this process, so tests that drive a real
-/// claim timeout need not wait out the production five seconds.
-#[doc(hidden)]
-pub fn set_claim_timeout_for_tests(timeout: Duration) {
-    let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX).max(1);
-    CLAIM_TIMEOUT_OVERRIDE_MS.store(millis, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn claim_timeout() -> Duration {
-    match CLAIM_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => CLAIM_TIMEOUT,
-        millis => Duration::from_millis(millis),
-    }
-}
-
 /// The total time one MCP request may spend asking Cassy Cloud about peers.
 /// Past it, the request proceeds on the local lease and says peers were not
 /// checked.
@@ -400,8 +381,8 @@ impl PeerClaims {
         let left = self
             .budget
             .map(|budget| budget.remaining())
-            .unwrap_or_else(claim_timeout)
-            .min(claim_timeout());
+            .unwrap_or(CLAIM_TIMEOUT)
+            .min(CLAIM_TIMEOUT);
         if left.is_zero() {
             Err(CasError::Other("peer check budget exhausted".into()))
         } else {
@@ -750,7 +731,7 @@ impl PeerClaims {
         duration_secs: u32,
     ) -> Acquire {
         self.move_claim(task_id, kind, from, agent_id, agent_name, duration_secs,
-            Instant::now() + claim_timeout(), None)
+            Instant::now() + CLAIM_TIMEOUT, None)
     }
 
     fn move_claim(

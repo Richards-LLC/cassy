@@ -6105,6 +6105,60 @@ mod tests {
         }
     }
 
+    /// A target-sync merge can contain code in its first-parent diff even
+    /// though the lane delivers only documentation relative to that target.
+    #[cfg(unix)]
+    #[test]
+    fn docs_fix_after_red_target_sync_checks_current_green_tip_cas_4dd2() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, _) = delivery_ci_fixture(false, None);
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(["-c", "user.name=CI fixture", "-c", "user.email=ci@example.test"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["switch", "main"]);
+        std::fs::write(repo.path().join("base.rs"), "// target code advanced\n").unwrap();
+        git(&["add", "base.rs"]);
+        git(&["commit", "-qm", "advance merge target"]);
+        git(&["switch", "factory/ci-fixture"]);
+        git(&["merge", "--no-ff", "main", "-m", "sync target before docs fix"]);
+        let red_tip = git(&["rev-parse", "HEAD"]);
+        let fake_gh = repo.path().join("gh-fixture");
+        let red = serde_json::json!({"check_runs": [{
+            "name": "Classify CI diff", "status": "completed", "conclusion": "failure"
+        }]}).to_string();
+        crate::test_paths::warm_stub(&fake_gh, &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' '{red}'\n"
+        ));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        let before = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+        assert!(matches!(before, BranchCiState::Red { ref sha, .. } if sha == &red_tip), "{before:?}");
+        assert!(admit_branch_ci(&before, false, None).is_err());
+
+        std::fs::write(repo.path().join("README.md"), "fixed release announcement\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-qm", "fix documentation lint"]);
+        let fixed_tip = git(&["rev-parse", "HEAD"]);
+        let green = serde_json::json!({"check_runs": [
+            {"name": "Docs Lint", "status": "completed", "conclusion": "success"},
+            {"name": "Scoped Validation (factory/PR)", "status": "completed", "conclusion": "skipped"}
+        ]}).to_string();
+        crate::test_paths::warm_stub(&fake_gh, &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> fixed-requests.log\ncase \"$4\" in\n*/{fixed_tip}/check-runs) printf '%s\\n' '{green}' ;;\n*/{red_tip}/check-runs) printf '%s\\n' '{red}' ;;\n*) exit 97 ;;\nesac\n"
+        ));
+        let after = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+        assert!(matches!(&after, BranchCiState::Green { sha, .. } if sha == &fixed_tip),
+            "a superseded target-sync failure must not gate the fixed docs tip: {after:?}");
+        assert_eq!(admit_branch_ci(&after, false, None), Ok(false));
+        let requests = std::fs::read_to_string(repo.path().join("fixed-requests.log")).unwrap();
+        assert_eq!(requests.lines().count(), 1, "{requests}");
+        assert!(requests.contains(&fixed_tip), "{requests}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn docs_tip_cannot_mask_red_or_pending_delivery_code_cas_a9bd() {

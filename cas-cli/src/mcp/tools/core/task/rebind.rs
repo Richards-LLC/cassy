@@ -103,16 +103,19 @@ impl CasCore {
             .work_target
             .as_ref()
             .ok_or_else(|| refused("the task has no declared work target"))?;
-        // A supervisor may retarget this delivery to another lane in the
-        // same repository. Validate its new base below without changing owner.
-        if previous.work_target.repo_selector != target.repo_selector
-            || expected.assignee.as_deref() != Some(previous.assignee.as_str())
-        {
+        // Reassignment preserves the old start as evidence. Explicit approval
+        // binds the current assignee's lane; the prior owner stays in the audit.
+        // Retargeting still cannot move the delivery to another repository.
+        if previous.work_target.repo_selector != target.repo_selector {
             return Err(refused(
-                "assignment or repository differs from the recorded start; resolve that recovery first",
+                "repository differs from the recorded start; restore the original repository before rebinding",
             ));
         }
-        let worker = resolve_agent_identity(agents.as_ref(), &previous.assignee)
+        let assignee = expected
+            .assignee
+            .as_deref()
+            .ok_or_else(|| refused("assign the task to a live registered worker before rebinding"))?;
+        let worker = resolve_agent_identity(agents.as_ref(), assignee)
             .filter(|worker| worker.role == AgentRole::Worker && worker.is_alive())
             .ok_or_else(|| refused("the assignee must be a live registered worker"))?;
         if supervisor.factory_session != worker.factory_session {
@@ -222,7 +225,7 @@ impl CasCore {
         rebound.deliverables.parked_branch = None;
         rebound.deliverables.factory_branch_start = Some(FactoryBranchStart {
             work_target: target.clone(),
-            assignee: previous.assignee.clone(),
+            assignee: assignee.to_string(),
             branch: branch.to_string(),
             base_sha: base.clone(),
         });
@@ -243,6 +246,7 @@ impl CasCore {
             None => true,
         };
         if same_branch
+            && previous.assignee == assignee
             && previous.work_target == *target
             && previous.base_sha == base
             && anchor_still_reachable

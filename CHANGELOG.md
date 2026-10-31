@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory recovery
+
+- **Replacement workers can deliver inherited tasks** — After a stale worker is released and its task is assigned to a replacement, a supervisor can approve the replacement's clean delivery branch with `rebind_branch`. The prior owner and branch remain in the audit, and the new recorded source can be parked, merged and closed through the normal gates.
+
 ### Fixed — Commander status indicators
 
 - **Live idle supervisors stay green** — Working supervisors have solid green dots, idle supervisors have hollow green dots, and offline alone keeps the neutral dot. Each dot names its state on hover and to screen readers; forced colors also distinguish the shapes. Team's Waiting and Offline pills now have explicit live-green and offline-gray treatments.

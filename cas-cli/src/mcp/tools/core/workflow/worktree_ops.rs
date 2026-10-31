@@ -6415,6 +6415,62 @@ mod tests {
         }
     }
 
+    /// Incident shape: code commits, then changelog-only commits pushed with
+    /// them. CI runs on pushed tips only, so the latest code commit has no runs
+    /// of its own; the newest run that includes it decides. Advisory remains
+    /// only when no run covers the code anywhere.
+    #[cfg(unix)]
+    #[test]
+    fn code_without_own_runs_follows_the_newest_covering_run_cas_e0509() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, _) = delivery_ci_fixture(false, None);
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(["-c", "user.name=CI fixture", "-c", "user.email=ci@example.test"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let commit = |path: &str, message: &str| {
+            std::fs::write(repo.path().join(path), format!("{message}\n")).unwrap();
+            git(&["add", path]);
+            git(&["commit", "-qm", message]);
+            git(&["rev-parse", "HEAD"])
+        };
+        commit("store.rs", "delete the dead store");
+        let code_sha = commit("search.rs", "delete the dead search modules");
+        let mid = commit("CHANGELOG.md", "note the removal");
+        let tip = commit("CHANGELOG.md", "reword the note");
+        let pending = r#"{"check_runs":[{"name":"Classify CI diff","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/cas/actions/runs/7"}]}"#;
+        let docs_only = r#"{"check_runs":[{"name":"Classify CI diff","status":"completed","conclusion":"success"},{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
+        let none = r#"{"check_runs":[]}"#;
+        let fake_gh = repo.path().join("gh-fixture");
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        for (tip_runs, mid_runs, expected) in [
+            (pending, none, "CI PENDING"),
+            (docs_only, none, "CODE CI REQUIRED"),
+            (none, pending, "CI PENDING"),
+            (none, none, "advisory"),
+        ] {
+            crate::test_paths::warm_stub(&fake_gh, &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) printf '%s\\n' '{tip_runs}' ;;\n*/{mid}/check-runs) printf '%s\\n' '{mid_runs}' ;;\n*) printf '%s\\n' '{none}' ;;\nesac\n"
+            ));
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            match admit_branch_ci(&state, false, None) {
+                Err(refusal) => assert!(refusal.starts_with(expected), "{expected}: {refusal}"),
+                Ok(_) => {
+                    assert_eq!(expected, "advisory", "{state:?}");
+                    let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+                    assert!(
+                        receipt.contains(&format!("code validation not confirmed for {code_sha}")),
+                        "{receipt}"
+                    );
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn multi_commit_push_uses_tip_code_ci_cas_a9bd() {

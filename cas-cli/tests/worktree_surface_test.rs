@@ -1896,7 +1896,6 @@ async fn normal_close_uses_task_anchor_not_newer_same_worker_or_unrelated_worktr
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -2028,7 +2027,6 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
         id: task.id.clone(),
         reason: Some("reference history integrated".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };

@@ -46,7 +46,7 @@ pub(crate) fn operation(
         return starts("cas", &["release", "report"]).then_some("report");
     }
     let action = field("action");
-    if (tool == format!("{tool_prefix}factory") || tool == format!("{tool_prefix}coordination"))
+    if tool == format!("{tool_prefix}factory")
         && matches!(action, Some("spawn_workers" | "spawn_worker"))
     {
         return Some("spawn");

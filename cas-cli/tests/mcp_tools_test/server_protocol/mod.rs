@@ -297,7 +297,6 @@ async fn test_start_allowed_with_other_task_pending_verification() {
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -414,7 +413,6 @@ async fn test_claim_allowed_with_other_task_pending_verification() {
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -646,7 +644,6 @@ async fn test_start_same_task_allowed_when_pending() {
         id: task_id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };

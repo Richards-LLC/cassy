@@ -665,7 +665,7 @@ fn handle_pre_tool_use_inner(
     // ========================================================================
     // SUPERVISOR DISCIPLINE: Block Agent(isolation="worktree") for supervisors
     //
-    // Supervisors must spawn workers via `mcp__cas__coordination spawn_workers`
+    // Supervisors must spawn workers via `mcp__cas__factory spawn_workers`
     // so worktrees are factory-tracked and garbage-collected. Raw `Agent` calls
     // with `isolation: "worktree"` create worktrees Claude Code cleans up only
     // on process exit — which leaks across Petrastella repos when the session
@@ -11339,12 +11339,9 @@ EOF
 /// CALLING process's own harness actually named the tool).
 fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix: &str) -> bool {
     let task_tool = format!("{tool_prefix}task");
-    let coordination_tool = format!("{tool_prefix}coordination");
-    // cas-8563b: spawn_workers lives on `factory`; the coordination alias
-    // still runs it for one release, so both names are gated.
     let factory_tool = format!("{tool_prefix}factory");
     (tool_name == task_tool && action == Some("create"))
-        || ((tool_name == coordination_tool || tool_name == factory_tool)
+        || (tool_name == factory_tool
             && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
 }
 
@@ -12987,11 +12984,6 @@ mod worker_commit_guard_tests {
         assert!(is_codemap_gated_tool_call(
             "cas__task",
             Some("create"),
-            "cas__"
-        ));
-        assert!(is_codemap_gated_tool_call(
-            "cas__coordination",
-            Some("spawn_workers"),
             "cas__"
         ));
         assert!(is_codemap_gated_tool_call(

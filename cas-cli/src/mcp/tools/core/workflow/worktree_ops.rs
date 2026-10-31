@@ -5472,7 +5472,6 @@ impl CasCore {
                         id: task_id.to_string(),
                         reason: Some(receipt.scope_summary.clone()),
                         supervisor_override: None,
-                        legacy_bypass_code_review: None,
                         search_manifest: None,
                         commit_receipt: Some(receipt.commit_sha.clone()),
                     }))

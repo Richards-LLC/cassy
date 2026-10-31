@@ -4940,8 +4940,6 @@ pub(crate) fn validate_supervisor_override(
     Ok(())
 }
 
-const DEPRECATED_BYPASS_WARNING: &str = "⚠️ DEPRECATED: bypass_code_review is accepted as a one-release alias; use supervisor_override=true instead.";
-
 #[cfg(test)]
 mod delivery_audit_text_tests {
     use super::{
@@ -5247,7 +5245,6 @@ mod delivery_audit_text_tests {
             id: "cas-negative".to_string(),
             reason: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         };
@@ -7610,7 +7607,6 @@ impl CasCore {
             id: task.id.clone(),
             reason: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         };
@@ -7746,20 +7742,13 @@ impl CasCore {
             return Ok(Self::tool_error(error.message.to_string()));
         }
 
-        let supervisor_override = req
-            .supervisor_override
-            .or(req.legacy_bypass_code_review)
-            .unwrap_or(false);
-        let used_deprecated_override_alias = req.legacy_bypass_code_review.is_some();
+        let supervisor_override = req.supervisor_override.unwrap_or(false);
         if let Err(message) = validate_supervisor_override(
             supervisor_override,
             req.reason.as_deref(),
             !supervisor_override || self.resolve_live_supervisor_authority().is_ok(),
         ) {
             return Ok(Self::tool_error(message));
-        }
-        if used_deprecated_override_alias {
-            tracing::warn!(task_id = %req.id, "{DEPRECATED_BYPASS_WARNING}");
         }
 
         // This is a declaration for one attempt, never a sticky methodology
@@ -9527,10 +9516,7 @@ impl CasCore {
                 // Ownership admits this caller; the assembled epic still needs
                 // its own dispatch/verdict. Epics normally have no assignee,
                 // which is not orphan recovery and cannot imply verification.
-                if req.supervisor_override
-                    .or(req.legacy_bypass_code_review)
-                    .unwrap_or(false)
-                {
+                if req.supervisor_override.unwrap_or(false) {
                     VerificationSkipReason::SupervisorBypass
                 } else {
                     VerificationSkipReason::None
@@ -12269,17 +12255,12 @@ impl CasCore {
             receipt.push_str(&format!("\n\n{summary}"));
         }
         receipt.push_str(&epic_issue_warning);
-        if used_deprecated_override_alias {
-            receipt.push_str("\n\n");
-            receipt.push_str(DEPRECATED_BYPASS_WARNING);
-        }
         let routine_close = task.task_type != TaskType::Epic
             && auto_unblocked_tasks.is_empty()
             && held_blocked_tasks.is_empty()
             && registry_upkeep_notices.is_empty()
             && epic_close_msg.is_empty()
-            && epic_issue_warning.is_empty()
-            && !used_deprecated_override_alias;
+            && epic_issue_warning.is_empty();
         if routine_close {
             let delivery = task
                 .deliverables
@@ -12506,10 +12487,7 @@ impl CasCore {
             return VerificationSkipReason::None;
         };
 
-        let bypass_requested = req
-            .supervisor_override
-            .or(req.legacy_bypass_code_review)
-            .unwrap_or(false);
+        let bypass_requested = req.supervisor_override.unwrap_or(false);
         let alive_result = |agent: &cas_types::Agent| {
             agent.is_alive() && !agent.is_heartbeat_expired(ASSIGNEE_STALE_SECS)
         };
@@ -27239,7 +27217,6 @@ mod search_manifest_gate_tests {
             id: id.to_string(),
             reason: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: manifest_json.map(str::to_string),
             commit_receipt: None,
         }
@@ -28408,7 +28385,6 @@ mod merge_state_gate_tests {
             id: id.to_string(),
             reason: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }
@@ -38631,7 +38607,6 @@ mod epic_status_gate_tests {
             id: id.to_string(),
             reason: None,
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }

@@ -369,7 +369,6 @@ async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
                 id: dependent_id.clone(),
                 reason: Some("delivered despite blocker".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 stranded_branch_override: None,
                 search_manifest: None,
                 commit_receipt: None,

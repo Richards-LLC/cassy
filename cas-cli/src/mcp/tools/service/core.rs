@@ -230,7 +230,7 @@ impl CasService {
         let target_project = req.project.clone();
         let blocks_origin_task_id = req.blocks_origin_task_id.clone();
         let proposal_attempt_id = req.proposal_attempt_id.clone();
-        let supervisor_override = req.effective_supervisor_override();
+        let supervisor_override = req.supervisor_override;
         let task_type = req
             .task_type
             .as_deref()
@@ -547,7 +547,6 @@ impl CasService {
         // made the documented no-code escape discoverable only after exact
         // verification had locked the ordinary update path.
         let inline_execution_note = req.execution_note.clone();
-        let effective_supervisor_override = req.effective_supervisor_override();
         let evidence_only = req.evidence_only.unwrap_or(false).then(|| {
             crate::mcp::tools::EvidenceOnlyCloseRequest {
                 artifact_path: req.evidence_only_artifact_path,
@@ -567,8 +566,7 @@ impl CasService {
             stranded_branch_override: req.stranded_branch_override,
             id: req.id.ok_or_else(|| self.missing_id("task", "close"))?,
             reason: req.reason.or(req.notes),
-            supervisor_override: effective_supervisor_override,
-            legacy_bypass_code_review: req.legacy_bypass_code_review,
+            supervisor_override: req.supervisor_override,
             search_manifest: req.search_manifest,
             commit_receipt: req.commit_receipt,
         };
@@ -701,7 +699,7 @@ impl CasService {
 
     pub(super) async fn task_notes(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::{TaskNotesReadRequest, TaskNotesRequest, TaskReadOptions};
-        let supervisor_override = req.effective_supervisor_override();
+        let supervisor_override = req.supervisor_override;
         let id = req.id.ok_or_else(|| self.missing_id("task", "notes"))?;
 
         match req.notes {
@@ -803,7 +801,6 @@ impl CasService {
 
     pub(super) async fn task_transfer(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskTransferRequest;
-        let effective_supervisor_override = req.effective_supervisor_override();
         let inner_req = TaskTransferRequest {
             task_id: req.id.ok_or_else(|| self.missing_id("task", "transfer"))?,
             to_agent: req.to_agent.ok_or_else(|| {
@@ -821,9 +818,7 @@ impl CasService {
             })?,
             adopt_branch: req.adopt_branch,
             note: req.notes,
-            // Keep the one-release close-gate alias usable for transfer while
-            // exposing the surviving name consistently at the unified boundary.
-            supervisor_override: effective_supervisor_override,
+            supervisor_override: req.supervisor_override,
         };
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }

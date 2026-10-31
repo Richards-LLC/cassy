@@ -1248,7 +1248,7 @@ already pre-seeded by `codex_trust.rs`).
 
 ### Factory worker account selection
 
-`coordination action=spawn_workers` accepts an optional `config_dir` for all
+`factory action=spawn_workers` accepts an optional `config_dir` for all
 workers in the request. Claude workers use the tilde-expanded directory as
 `CLAUDE_CONFIG_DIR`; an explicit parameter wins over the requesting
 supervisor's own `CLAUDE_CONFIG_DIR`, which is captured when the request is

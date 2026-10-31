@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — MCP
+
+- **Retired factory and close aliases** — Was: Factory actions still ran through
+  `coordination`, and task close still accepted a hidden review-bypass alias. →
+  Now: Factory actions require `factory`; retired calls fail with the replacement
+  route, and task close accepts `supervisor_override`. Tests and live guidance use
+  the current routes.
+
 ### Changed — Test-hygiene rules in the shipped test guidance
 
 - **Builtin test guidance names six measured bad-test patterns** — Was: The

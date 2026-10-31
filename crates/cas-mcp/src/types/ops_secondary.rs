@@ -1045,7 +1045,7 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// Slack permalink for coordination action=claim.
+    /// Slack permalink for factory action=claim.
     #[schemars(description = "claim only: Slack thread permalink; Violet resolves and verifies the canonical thread. managed=false (next_action reply_via_violet_v1) means the channel has no managed binding for this project: no claim is needed; reply through Violet v1")]
     #[serde(default)]
     pub external_ref: Option<String>,

@@ -9102,7 +9102,6 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -9172,7 +9171,6 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
         id: task_id.clone(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -10550,7 +10548,6 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
             supervisor_override: Some(true),
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

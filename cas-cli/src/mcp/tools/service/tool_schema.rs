@@ -41,9 +41,8 @@ const STANDARD_FORMATS: &[&str] = &[
 const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "$defs", "definitions"];
 
 /// Parameters the agent-facing `coordination` tool publishes (D2 split,
-/// cas-8563b). The tool shares `CoordinationRequest` with `factory`, so it
-/// still deserializes the rest during the one-release alias window; it just
-/// stops loading the supervisor parameters into every worker's context.
+/// cas-8563b). The shared request union is projected to the fields this tool
+/// accepts so supervisor parameters do not load into every worker's context.
 pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "action",
     "id",

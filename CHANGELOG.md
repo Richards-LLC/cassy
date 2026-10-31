@@ -93,6 +93,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   subcommand. → Now: Every affected remedy names `cas login`, which opens the
   existing Cloud authentication flow.
 
+### Fixed — Release gate cancellation
+
+- **Aborted rows finish child cleanup** — Was: The gate could report cancellation while Cargo descendants kept running. → Now: It freezes the row tree, waits for descendants to terminate, and kills children that outlast the graceful shutdown window before releasing row resources.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

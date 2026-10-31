@@ -143,3 +143,5 @@
 - **Runtime/config:** `ops/systemd/`, `docs/ci/`, `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`.
 - **CLI/library:** `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`; **TUI/daemon:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`.
 - **Services:** `cas-cli/src/mcp/daemon.rs` (`cas serve`), `cas-cli/src/bridge/server/` (`cas bridge serve`), `hub-web/src/main.ts` (`cas hub` client).
+
+- `cas-cli/src/hub/dismissed_sessions.rs` - authenticated ended-session dismissal route and durable generation-scoped navigation markers shared across paired devices.

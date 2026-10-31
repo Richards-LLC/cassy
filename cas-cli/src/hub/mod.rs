@@ -551,6 +551,9 @@ pub struct HubSession {
     pub dormant: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<crate::ui::factory::SessionEndOutcome>,
+    /// Hub-owned navigation preference; the session and its history remain readable.
+    #[serde(default)]
+    pub dismissed: bool,
     /// When the session last did anything (cas-55a4): its newest queue row,
     /// Commander-facing or not. Lets Commander tell apart several live
     /// sessions of one project and show activity for a session that has not
@@ -815,6 +818,7 @@ impl LocalSessionReadModel {
                 cloud_project_id: None,
                 daemon_identity: None,
                 ended: Some(receipt.ended),
+                dismissed: false,
             });
         }
         rows
@@ -968,6 +972,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
         },
         dormant: !has_live_supervisor(session),
         ended: None,
+        dismissed: false,
         last_activity_at: None,
         last_activity: None,
         started_at: Some(session.metadata.created_at.clone()).filter(|at| !at.trim().is_empty()),
@@ -1225,6 +1230,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         liveness: DaemonLiveness::Live,
         dormant: false,
         ended: None,
+        dismissed: false,
         last_activity_at: None,
         last_activity: None,
         started_at: None,

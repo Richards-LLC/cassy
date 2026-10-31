@@ -41,6 +41,8 @@ export interface SessionEndOutcome {
 
 export interface HubSession {
   ended?: SessionEndOutcome;
+  /** Hub-persisted dismissal for this session generation, shared by paired devices. */
+  dismissed?: boolean;
   name: string;
   project_dir?: string;
   supervisor: string;

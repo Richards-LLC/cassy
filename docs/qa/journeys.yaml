@@ -672,6 +672,7 @@ journeys:
   - commander_dependencies
   owners:
   - hub-web/src/conversation-list.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/palette-commands.ts
   - hub-web/src/worker-visibility.ts
   - hub-web/src/dormant-visibility.ts
@@ -1466,6 +1467,7 @@ journeys:
   - commander_dependencies
   owners:
   - hub-web/src/accounts-panel.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/accounts-panel.css
   - hub-web/src/accounts-model.ts
   - cas-cli/src/hub/accounts.rs
@@ -1575,9 +1577,9 @@ journeys:
   - hub-web/src/conversation-history.ts
   - hub-web/src/conversation-view.ts
   - hub-web/src/conversation-list.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/connection.ts
   - hub-web/e2e/journeys/session-identity.journey.ts
-  - hub-web/src/provider-mark.ts
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/artifact-open.ts

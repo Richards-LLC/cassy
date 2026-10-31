@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  live-idle-status-dot:
+    title: Live idle supervisors and waiting workers never share the offline treatment
+    tasks: [cas-7389]
+    invariants: [HUB-J14-IDLE-OFFLINE-DOT, HUB-J26-WAITING-OFFLINE]
+    journeys: [HUB-J14, HUB-J26]
   fleet-undo-shell-focus:
     title: Focused Undo survives structural catalog changes after Raw output closes
     tasks: [cas-9826]
@@ -322,6 +327,10 @@ invariants:
     statement: A project card reads the project's display name, else its folder name, and never its canonical id; the canonical id still groups the project's sessions across machines and remains available as the name's title.
     check: Run the cross-machine project fixture in HUB-J14 with a canonical id and a display name; verify the card name shows the display name, its title is the canonical id, and both machines' sessions share the card.
     bug: {task: cas-6f79}
+  HUB-J14-IDLE-OFFLINE-DOT:
+    statement: A live idle supervisor has a hollow green dot; offline alone has the neutral dot. Working is solid green. State dots have accessible state names and remain distinguishable in light, dark and forced colors, with ended receipts retaining their neutral circle.
+    check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses the online green and verify accessible state names. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
+    bug: {task: cas-7389}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
       away once resolved, and nothing claims I replied when I didn't
@@ -411,6 +420,10 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+  HUB-J26-WAITING-OFFLINE:
+    statement: Waiting workers use live-green pills and hollow green dots; Offline workers have gray pills and neutral dots. Their pill treatments and dot shapes remain distinct in forced colors, with accessible state names.
+    check: Run HUB-J26 at desktop/light and phone/dark, then its lifecycle transition and forced-colors stages; compare Waiting and Offline computed pill and dot treatments.
+    bug: {task: cas-7389}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -659,6 +672,7 @@ journeys:
   - commander_dependencies
   owners:
   - hub-web/src/conversation-list.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/palette-commands.ts
   - hub-web/src/worker-visibility.ts
   - hub-web/src/dormant-visibility.ts
@@ -1453,6 +1467,7 @@ journeys:
   - commander_dependencies
   owners:
   - hub-web/src/accounts-panel.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/accounts-panel.css
   - hub-web/src/accounts-model.ts
   - cas-cli/src/hub/accounts.rs
@@ -1562,6 +1577,7 @@ journeys:
   - hub-web/src/conversation-history.ts
   - hub-web/src/conversation-view.ts
   - hub-web/src/conversation-list.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/connection.ts
   - hub-web/e2e/journeys/session-identity.journey.ts
   - hub-web/src/abort-signals.ts
@@ -1606,6 +1622,7 @@ journeys:
   - HUB-J14-GOAL
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
   - HUB-J14-PROJECT-DISPLAY-NAME
+  - HUB-J14-IDLE-OFFLINE-DOT
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -2295,6 +2312,7 @@ journeys:
   owner_groups: [commander_runtime]
   owners:
   - hub-web/src/team-view.ts
+  - hub-web/src/provider-mark.ts
   - hub-web/src/progress-model.ts
   - hub-web/src/progress-view.ts
   - hub-web/src/conversation-shell.ts
@@ -2305,7 +2323,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET]
+  invariants: [HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

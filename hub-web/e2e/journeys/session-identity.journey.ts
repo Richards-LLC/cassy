@@ -383,8 +383,31 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(liveSupervisor).toBeVisible();
   });
 
+  for (const mode of ["light", "dark", "forced-colors"] as const) {
+    await journey.stage(`Live idle stays distinct from offline in ${mode}`, async () => {
+      await page.emulateMedia({ colorScheme: mode === "dark" ? "dark" : "light", forcedColors: mode === "forced-colors" ? "active" : "none" });
+      const card = list.getByRole("group", { name: /^pulse-card ·/ });
+      const idle = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Idle", exact: true });
+      const offline = card.locator(".conversation-row").filter({ hasText: "watchful-heron-16" }).getByRole("img", { name: "Offline", exact: true });
+      await card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
+      await expect(idle).toHaveAttribute("title", "Idle");
+      await expect(offline).toHaveAttribute("title", "Offline");
+      const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
+      expect(await look(idle)).not.toEqual(await look(offline));
+      // A live idle dot uses the live green, never the old gray idle token.
+      if (mode !== "forced-colors") {
+        expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
+      } else {
+        expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
+      }
+    });
+  }
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+
   await journey.stage("Dismiss on the phone and keep ended sessions hidden on the desktop", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
+    await back();
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
     const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
@@ -437,6 +460,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     for (const width of widths) for (const scheme of schemes) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none", reducedMotion: "reduce" });
+      await back();
       expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
       await expect(studio().locator(".project-card-toggle")).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

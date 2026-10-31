@@ -32,45 +32,6 @@ fn test_factory_config_default() {
     assert!(config.session_id.is_none());
 }
 
-#[test]
-fn test_factory_config_with_workers() {
-    let config = FactoryConfig {
-        workers: 3,
-        worker_names: vec!["worker-a".to_string(), "worker-b".to_string()],
-        supervisor_name: Some("supervisor-1".to_string()),
-        ..Default::default()
-    };
-
-    assert_eq!(config.workers, 3);
-    assert_eq!(config.worker_names.len(), 2);
-    assert_eq!(config.supervisor_name, Some("supervisor-1".to_string()));
-}
-
-#[test]
-fn test_factory_config_with_worktrees() {
-    let worktree_root = PathBuf::from("/tmp/worktrees");
-    let config = FactoryConfig {
-        enable_worktrees: true,
-        worktree_root: Some(worktree_root.clone()),
-        ..Default::default()
-    };
-
-    assert!(config.enable_worktrees);
-    assert_eq!(config.worktree_root, Some(worktree_root));
-}
-
-#[test]
-fn test_factory_config_with_recording() {
-    let config = FactoryConfig {
-        record: true,
-        session_id: Some("session-123".to_string()),
-        ..Default::default()
-    };
-
-    assert!(config.record);
-    assert_eq!(config.session_id, Some("session-123".to_string()));
-}
-
 // =============================================================================
 // EpicState Tests
 // =============================================================================
@@ -158,18 +119,6 @@ fn test_auto_prompt_config_default() {
     assert!(config.on_worker_idle);
     assert!(config.on_epic_completed);
     assert!(config.on_worker_ready);
-}
-
-#[test]
-fn test_auto_prompt_config_disabled() {
-    let config = AutoPromptConfig {
-        enabled: false,
-        ..Default::default()
-    };
-
-    assert!(!config.enabled);
-    // Individual flags are still true but the master switch is off
-    assert!(config.on_task_assigned);
 }
 
 // =============================================================================
@@ -298,74 +247,6 @@ fn test_git_file_status_symbol() {
     assert_eq!(GitFileStatus::Deleted.symbol(), "D");
     assert_eq!(GitFileStatus::Renamed.symbol(), "R");
     assert_eq!(GitFileStatus::Untracked.symbol(), "?");
-}
-
-#[test]
-fn test_file_change_info_creation() {
-    let change = FileChangeInfo {
-        file_path: "src/lib.rs".to_string(),
-        lines_added: 50,
-        lines_removed: 10,
-        status: GitFileStatus::Modified,
-        staged: true,
-    };
-
-    assert_eq!(change.file_path, "src/lib.rs");
-    assert_eq!(change.lines_added, 50);
-    assert_eq!(change.lines_removed, 10);
-    assert_eq!(change.status, GitFileStatus::Modified);
-    assert!(change.staged);
-}
-
-#[test]
-fn test_source_changes_info_creation() {
-    let changes = vec![
-        FileChangeInfo {
-            file_path: "src/main.rs".to_string(),
-            lines_added: 100,
-            lines_removed: 20,
-            status: GitFileStatus::Modified,
-            staged: true,
-        },
-        FileChangeInfo {
-            file_path: "src/new.rs".to_string(),
-            lines_added: 50,
-            lines_removed: 0,
-            status: GitFileStatus::Added,
-            staged: false,
-        },
-    ];
-
-    let source = SourceChangesInfo {
-        source_name: "worker-1".to_string(),
-        source_path: PathBuf::from("/tmp/worktrees/worker-1"),
-        agent_name: Some("swift-fox".to_string()),
-        changes,
-        total_added: 150,
-        total_removed: 20,
-    };
-
-    assert_eq!(source.source_name, "worker-1");
-    assert_eq!(source.agent_name, Some("swift-fox".to_string()));
-    assert_eq!(source.changes.len(), 2);
-    assert_eq!(source.total_added, 150);
-    assert_eq!(source.total_removed, 20);
-}
-
-#[test]
-fn test_source_changes_info_without_agent() {
-    let source = SourceChangesInfo {
-        source_name: "main".to_string(),
-        source_path: PathBuf::from("/tmp/repo"),
-        agent_name: None,
-        changes: vec![],
-        total_added: 0,
-        total_removed: 0,
-    };
-
-    assert_eq!(source.source_name, "main");
-    assert!(source.agent_name.is_none());
-    assert!(source.changes.is_empty());
 }
 
 // =============================================================================

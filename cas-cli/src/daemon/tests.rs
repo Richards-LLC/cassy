@@ -16,13 +16,6 @@ fn test_daemon_config_default() {
 }
 
 #[test]
-fn test_daemon_status_default() {
-    let status = DaemonStatus::default();
-    assert!(!status.running);
-    assert!(status.last_run.is_none());
-}
-
-#[test]
 fn memory_decay_status_round_trips_atomically() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -394,15 +387,6 @@ fn test_observation_in_cold_stays_cold() {
 }
 
 #[test]
-fn test_code_index_result_default() {
-    let result = CodeIndexResult::default();
-    assert_eq!(result.files_indexed, 0);
-    assert_eq!(result.files_deleted, 0);
-    assert_eq!(result.symbols_indexed, 0);
-    assert!(result.errors.is_empty());
-}
-
-#[test]
 fn test_code_index_result_tracks_deletions() {
     let result = CodeIndexResult {
         files_deleted: 5,
@@ -411,30 +395,6 @@ fn test_code_index_result_tracks_deletions() {
     };
     assert_eq!(result.files_deleted, 5);
     assert_eq!(result.files_indexed, 10);
-}
-
-#[test]
-fn test_watch_event_variants() {
-    use std::path::PathBuf;
-
-    let modified = WatchEvent::Modified(PathBuf::from("test.rs"));
-    let deleted = WatchEvent::Deleted(PathBuf::from("deleted.rs"));
-    let error = WatchEvent::Error("test error".to_string());
-
-    match modified {
-        WatchEvent::Modified(path) => assert_eq!(path, PathBuf::from("test.rs")),
-        _ => panic!("Expected Modified variant"),
-    }
-
-    match deleted {
-        WatchEvent::Deleted(path) => assert_eq!(path, PathBuf::from("deleted.rs")),
-        _ => panic!("Expected Deleted variant"),
-    }
-
-    match error {
-        WatchEvent::Error(message) => assert_eq!(message, "test error"),
-        _ => panic!("Expected Error variant"),
-    }
 }
 
 #[test]

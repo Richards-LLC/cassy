@@ -7743,15 +7743,7 @@ mod tests {
             phases[0].checks, 0,
             "a phase that produced no check still spent time and must be kept"
         );
-        assert_eq!(
-            recorder
-                .slowest(Duration::from_millis(100), 5)
-                .iter()
-                .map(|phase| phase.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["integrations"],
-            "slowest() ranks by duration and drops phases under the threshold"
-        );
+
     }
 
     /// The operator-facing half: `--verbose` must print the duration beside

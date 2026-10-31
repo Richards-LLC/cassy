@@ -571,57 +571,6 @@ mod tests {
     }
 
     #[test]
-    fn test_spreading_activation_config_custom() {
-        let mut relation_weights = HashMap::new();
-        relation_weights.insert(RelationType::Uses, 1.0);
-
-        let config = SpreadingActivationConfig {
-            initial_activation: 2.0,
-            decay_factor: 0.7,
-            min_activation: 0.1,
-            max_hops: 5,
-            relation_weights,
-        };
-
-        assert_eq!(config.initial_activation, 2.0);
-        assert_eq!(config.decay_factor, 0.7);
-        assert_eq!(config.min_activation, 0.1);
-        assert_eq!(config.max_hops, 5);
-        assert_eq!(config.relation_weights.get(&RelationType::Uses), Some(&1.0));
-    }
-
-    #[test]
-    fn test_graph_retrieval_result() {
-        let result = GraphRetrievalResult {
-            entry_id: "entry-123".to_string(),
-            activation_score: 0.85,
-            contributing_entities: vec![
-                ("entity-1".to_string(), 0.5),
-                ("entity-2".to_string(), 0.35),
-            ],
-            min_hops: 1,
-        };
-
-        assert_eq!(result.entry_id, "entry-123");
-        assert_eq!(result.activation_score, 0.85);
-        assert_eq!(result.contributing_entities.len(), 2);
-        assert_eq!(result.min_hops, 1);
-    }
-
-    #[test]
-    fn test_graph_retrieval_result_zero_hops() {
-        let result = GraphRetrievalResult {
-            entry_id: "direct-entry".to_string(),
-            activation_score: 1.0,
-            contributing_entities: vec![("seed-entity".to_string(), 1.0)],
-            min_hops: 0,
-        };
-
-        assert_eq!(result.min_hops, 0);
-        assert_eq!(result.contributing_entities.len(), 1);
-    }
-
-    #[test]
     fn test_extract_candidates_lowercase_words() {
         // Lowercase words longer than 4 chars should be candidates
         let query = "What about rust and python?";

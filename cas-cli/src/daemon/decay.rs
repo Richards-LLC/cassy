@@ -19,6 +19,7 @@ fn consolidated_source_ids(source_ids: &[String], entries: &[crate::types::Entry
 }
 
 /// Apply memory decay to entries based on time and access patterns.
+#[cfg(test)]
 pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasError> {
     let result = apply_memory_decay_with_policy(store, 0.9, true)?;
     Ok(result.updated)

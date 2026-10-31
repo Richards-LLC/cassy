@@ -3383,6 +3383,7 @@ impl SyncSummary {
         self.team_configured = true;
     }
 
+    #[cfg(test)]
     fn merge_team_pull(&mut self, result: &crate::cloud::SyncResult) {
         let team = Self::pull(result, true);
         self.merge_team_summary(&team);
@@ -6641,6 +6642,7 @@ safety limit — review project attribution before deleting anything"
 /// Safety limits that are intrinsic to the classifier and cannot be bypassed
 /// by `--force`. `proven_rule_count` is computed from the same attribution
 /// predicate as the delete set, so a proven local rule never trips this guard.
+#[cfg(test)]
 fn evaluate_purge_hard_guards(
     delete_set: &PurgeDeleteSet,
     total_tasks: usize,

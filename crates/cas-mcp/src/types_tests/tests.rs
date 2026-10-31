@@ -196,13 +196,15 @@ fn test_task_request_with_options() {
         r#"{
             "action": "create",
             "title": "Test task",
-            "priority": 1
+            "priority": 1,
+            "task_type": "bug"
         }"#,
     )
     .unwrap();
     assert_eq!(req.action, "create");
     assert_eq!(req.title, Some("Test task".to_string()));
     assert_eq!(req.priority, Some(1));
+    assert_eq!(req.task_type.as_deref(), Some("bug"));
 }
 
 #[test]
@@ -229,13 +231,15 @@ fn test_system_request_reindex() {
         r#"{
             "action": "reindex",
             "bm25": true,
-            "embeddings": false
+            "embeddings": false,
+            "missing_only": true
         }"#,
     )
     .unwrap();
     assert_eq!(req.action, "reindex");
     assert_eq!(req.bm25, Some(true));
     assert_eq!(req.embeddings, Some(false));
+    assert_eq!(req.missing_only, Some(true));
 }
 
 #[test]

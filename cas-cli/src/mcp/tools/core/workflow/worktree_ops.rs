@@ -568,6 +568,7 @@ fn gh_api_get(endpoint: &str, cwd: &Path, binary: &Path) -> GhApiOutput {
 
 /// Isolate response classification from process execution so its output
 /// shapes can be tested with a mocked lookup rather than requiring GitHub.
+#[cfg(test)]
 fn lookup_branch_ci_with<F>(branch: &str, sha: &str, fetch: F) -> BranchCiState
 where
     F: FnOnce(&str, &str) -> GhApiOutput,

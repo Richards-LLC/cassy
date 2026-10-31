@@ -37,6 +37,7 @@ enum ValidationMode {
 /// fail closed instead. This keeps relative writes out of the project and
 /// avoids leaking CAS credentials. Validation scripts must be local,
 /// deterministic availability checks that do not require network access.
+#[cfg(test)]
 pub(crate) fn validate_skill(skill: &Skill) -> Result<ValidationReport, String> {
     validate_skill_with_policy(skill, false)
 }

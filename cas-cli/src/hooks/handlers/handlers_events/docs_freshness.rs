@@ -101,6 +101,7 @@ impl Measurement {
 
     /// Preserve explicit fixture/project roots while letting shared-store
     /// consumers follow a cwd in another linked checkout of that repository.
+    #[cfg(test)]
     pub fn for_store(cas_root: &Path) -> Self {
         Self::resolve_store(cas_root, false)
     }

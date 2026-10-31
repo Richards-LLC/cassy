@@ -317,6 +317,7 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
     )
 }
 
+#[cfg(test)]
 fn authorize_with_relay(
     args: &HubAuthorizeArgs,
     cli: &Cli,

@@ -112,6 +112,7 @@ impl CasCore {
         Ok(local)
     }
 
+    #[cfg(test)]
     pub(crate) async fn cas_task_proposal_create(
         &self,
         req: TaskCreateRequest,

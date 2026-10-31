@@ -359,11 +359,13 @@ impl CodemapStaleness {
 /// longer authoritative for freshness decisions.
 ///
 /// Returns None if no action needed (codemap is up to date or fresh enough).
+#[cfg(test)]
 pub fn check_codemap_freshness(cas_root: &Path) -> Option<CodemapStaleness> {
     evaluate_codemap_freshness(cas_root)?.staleness
 }
 
 /// Evaluate the caller's worktree against its task/project integration ref.
+#[cfg(test)]
 pub fn evaluate_codemap_freshness(cas_root: &Path) -> Option<CodemapFreshnessEvaluation> {
     if cas_root.parent().is_none() { return None; }
     evaluate_codemap_at(&super::docs_freshness::Measurement::for_store(cas_root))

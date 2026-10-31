@@ -664,7 +664,7 @@ async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
         .expect("coordination call should succeed");
 
@@ -704,7 +704,7 @@ async fn test_worktree_list_no_disabled_message_when_no_factory_worktrees() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
         .expect("coordination call should succeed");
 
@@ -762,7 +762,7 @@ async fn test_worktree_list_honors_configured_base_path() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
         .expect("coordination call should succeed");
     let text = get_text(&result);
@@ -801,7 +801,7 @@ async fn test_worktree_list_surfaces_unregistered_epic_worktree_outside_cas_dir(
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
         .expect("coordination call should succeed");
     let text = get_text(&result);
@@ -833,7 +833,7 @@ async fn test_worktree_list_ignores_unrelated_git_worktrees() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
         .expect("coordination call should succeed");
     let text = get_text(&result);
@@ -865,7 +865,7 @@ async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
         .expect("coordination call should succeed");
     let text = get_text(&result);
@@ -990,7 +990,7 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     req.allow_trunk = Some(true);
     req.cleanup = Some(true);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("coordination call should succeed");
 
@@ -1115,7 +1115,7 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("task-bound cross-repo merge call");
     let text = get_text(&result);
@@ -1370,7 +1370,7 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("task-bound duplicate-selector merge call");
     let text = get_text(&result);
@@ -1495,7 +1495,7 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
     req.force = Some(true);
     req.cleanup = Some(true);
     let error = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect_err("same-selector wrong-clone worktree must fail closed")
         .to_string();
@@ -2099,7 +2099,7 @@ async fn test_worktree_merge_reports_not_found_not_disabled_when_nothing_matches
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/bob".to_string());
     req.task_id = Some("missing-worker".into());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     let (not_disabled, contains_not_found) = match &result {
         Ok(r) => {
@@ -2283,7 +2283,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
         req.id = Some("factory/alice".to_string());
         req.task_id = Some(worker_task_id);
         let result = svc
-            .coordination(Parameters(req))
+            .factory(Parameters(req))
             .await
             .expect("coordination call should succeed");
         let text = get_text(&result);
@@ -2470,7 +2470,7 @@ async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
     request.id = Some(fixture.branch.clone());
     request.task_id = Some(task.id);
     request.cleanup = Some(false);
-    let response = fixture.service.coordination(Parameters(request)).await.unwrap();
+    let response = fixture.service.factory(Parameters(request)).await.unwrap();
     let text = get_text(&response);
     assert!(text.contains("UNPARKED TASK") && text.contains("cas-e429"),
         "an explicit merge must disclose the worker's unfinished lifecycle state: {text}");
@@ -2487,7 +2487,7 @@ async fn test_worktree_merge_honors_rebound_task_branch_gh1397() {
     request.cleanup = Some(false);
     let response = fixture
         .service
-        .coordination(Parameters(request))
+        .factory(Parameters(request))
         .await
         .unwrap();
     let text = get_text(&response);
@@ -2565,7 +2565,7 @@ async fn test_worktree_merge_refuses_stale_or_conflicting_rebound_ref_gh1397() {
         request.cleanup = Some(false);
         let error = fixture
             .service
-            .coordination(Parameters(request))
+            .factory(Parameters(request))
             .await
             .expect_err(case);
         assert!(
@@ -2726,7 +2726,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             assert_ne!(rebased_tip, anchor);
             run_git(&["push", "--force-with-lease", "origin", branch], &peer);
             env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
-            let merged = svc.coordination(Parameters(request)).await
+            let merged = svc.factory(Parameters(request)).await
                 .expect("a reviewed same-patch rebase must merge from the pushed tip");
             assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
             assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(rebased_tip.as_str()));
@@ -2738,7 +2738,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             continue;
         }
         if branch == "delivery/reviewed-correction" {
-            let refused = svc.coordination(Parameters(request)).await
+            let refused = svc.factory(Parameters(request)).await
                 .expect_err("an unsupported recorded name needs an actionable supervisor remedy");
             let message = refused.message.as_ref();
             if !message.contains(branch) || !message.contains("request_changes")
@@ -2753,7 +2753,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         if discover_with_bare {
             env.set(cas::github_issue_attach::GH_BIN_ENV,
                 ci_check_run::ci_concluded(remote.path(), "failure"));
-            let refused = svc.coordination(Parameters(request.clone())).await
+            let refused = svc.factory(Parameters(request.clone())).await
                 .expect_err("per-task discovery must still reach the normal CI gate");
             if !refused.message.contains("CI RED") {
                 failures.push(format!("per-task source must outrank bare worker branch: {refused}"));
@@ -2770,7 +2770,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 ci_check_run::ci_concluded(remote.path(), "failure"));
             let mut stale_request = request.clone();
             stale_request.id = Some(stale.into());
-            let refused = svc.coordination(Parameters(stale_request)).await
+            let refused = svc.factory(Parameters(stale_request)).await
                 .expect_err("stale remote-only source must refuse before merging another parked round");
             let message = refused.message.as_ref();
             if !message.contains("PARKED DELIVERY SOURCE CHANGED")
@@ -2784,7 +2784,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         if branch == "factory/peer-worker-cas-c28b" || branch.ends_with("-r2") {
             run_git(&["push", "origin", &format!("HEAD:refs/heads/{sibling}")], &peer);
             if task.deliverables.parked_branch.is_none() {
-                let refused = svc.coordination(Parameters(request.clone())).await
+                let refused = svc.factory(Parameters(request.clone())).await
                     .expect_err("two fallback branches are ambiguous even at the same SHA");
                 let message = refused.message.as_ref();
                 assert!(message.contains("AMBIGUOUS DELIVERY SOURCE"), "{message}");
@@ -2800,7 +2800,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             task.assignee = Some("other-worker".into());
             tasks.update(&task).unwrap();
             let refused = svc
-                .coordination(Parameters(request.clone()))
+                .factory(Parameters(request.clone()))
                 .await
                 .expect_err("task ownership must bind the pushed branch");
             assert!(
@@ -2812,7 +2812,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             task.deliverables.factory_branch_anchor = Some(before.clone());
             tasks.update(&task).unwrap();
             let refused = svc
-                .coordination(Parameters(request.clone()))
+                .factory(Parameters(request.clone()))
                 .await
                 .expect_err("origin must match the recorded anchor");
             assert!(
@@ -2837,7 +2837,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             )
             .unwrap();
             let refused = svc
-                .coordination(Parameters(request.clone()))
+                .factory(Parameters(request.clone()))
                 .await
                 .expect_err("ordinary independent QA still gates remote delivery");
             assert!(
@@ -2863,13 +2863,13 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             ci_check_run::ci_concluded(remote.path(), "failure"),
         );
         let refused = svc
-            .coordination(Parameters(request.clone()))
+            .factory(Parameters(request.clone()))
             .await
             .expect_err("normal CI must refuse remote-only code");
         assert!(refused.message.contains("CI RED"), "{branch}: {}", refused.message);
         let mut worker_request = request.clone();
         worker_request.id = Some("peer-worker".into());
-        let refused = svc.coordination(Parameters(worker_request)).await
+        let refused = svc.factory(Parameters(worker_request)).await
             .expect_err("worker alias must reach the same delivery's CI gate");
         assert!(refused.message.contains("CI RED"), "{branch}: {}", refused.message);
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
@@ -2878,7 +2878,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             ci_check_run::green_ci(remote.path()),
         );
         let merged = svc
-            .coordination(Parameters(request))
+            .factory(Parameters(request))
             .await
             .expect("merge remote delivery through normal handler");
         let text = get_text(&merged);
@@ -3123,7 +3123,7 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
         merge.task_id = Some(task_id.into());
         merge.cleanup = Some(false);
         let result = delivery_service(&cas_root, "repark-supervisor")
-            .coordination(Parameters(merge))
+            .factory(Parameters(merge))
             .await
             .expect("the re-parked branch must merge without another close");
         assert!(
@@ -3343,7 +3343,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     request.supervisor_override = Some(ci_override);
     request.reason = ci_override.then(|| "Fixture supervisor reviewed failing CI".into());
     let first = service
-        .coordination(Parameters(request.clone()))
+        .factory(Parameters(request.clone()))
         .await
         .expect_err("first request must surface the failed observation write");
     assert!(
@@ -3363,7 +3363,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     conn.execute_batch("DROP TRIGGER fail_fixture_observation;")
         .unwrap();
     let retry = service
-        .coordination(Parameters(request.clone()))
+        .factory(Parameters(request.clone()))
         .await
         .expect("retry should reconcile the already-published merge");
     let text = get_text(&retry);
@@ -3415,7 +3415,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     );
     run_git(&["push", "origin", "epic/observation"], &repo.root);
     let target = git_stdout(&repo.root, &["rev-parse", "epic/observation"]);
-    let third = service.coordination(Parameters(request)).await.unwrap();
+    let third = service.factory(Parameters(request)).await.unwrap();
     let text = get_text(&third);
     assert!(text.contains("Already contained"), "{conclusion}: {text}");
     assert_eq!(
@@ -3495,7 +3495,7 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
     req.id = Some("factory/alice".into());
     req.task_id = Some(task_id);
     req.cleanup = Some(false);
-    let result = svc.coordination(Parameters(req)).await.expect("merge parked pushed delivery");
+    let result = svc.factory(Parameters(req)).await.expect("merge parked pushed delivery");
     let text = get_text(&result);
     assert!(text.contains("Merged worktree"), "{text}");
     // pin: operator receipt identifies immutable origin authority and preservation, per cas-cfd1 AC3.
@@ -3578,7 +3578,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 let service = make_service(root.clone());
                 start.wait();
-                runtime.block_on(service.coordination(Parameters(req)))
+                runtime.block_on(service.factory(Parameters(req)))
                     .map(|result| get_text(&result)).map_err(|error| error.to_string())
             })
         }).collect();
@@ -3611,7 +3611,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
         .unwrap();
     assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
     assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
-    let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
     // cas-d8ab: count origin fetches. The containment re-check after the
@@ -3621,7 +3621,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
     std::fs::set_permissions(&counter, std::fs::Permissions::from_mode(0o755)).unwrap();
     run_git(&["config", "remote.origin.uploadpack", counter.to_str().unwrap()], &repo.root);
-    let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
+    let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
     assert_eq!(fetches, 2, "one fetch to check containment, one to sync the target: {}", get_text(&landed));
@@ -3635,7 +3635,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let local_before = git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]);
     let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
     run_git(&["remote", "set-url", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
-    let offline = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
+    let offline = runtime.block_on(service.factory(Parameters(request("charlie")))).unwrap();
     let offline = get_text(&offline);
     // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
     assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
@@ -3649,7 +3649,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     run_git(&["remote", "set-url", "origin", remote.path().to_str().unwrap()], &repo.root);
     run_git(&["branch", "-D", "epic/race"], remote.path());
     let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
-    let local_only = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
+    let local_only = runtime.block_on(service.factory(Parameters(request("charlie")))).unwrap();
     let local_only = get_text(&local_only);
     assert!(!local_only.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{local_only}");
     // pin: the existing contained receipt names the local authority.
@@ -3713,7 +3713,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         if local_behind {
             run_git(&["reset", "--hard", &format!("{before}^")], &repo.root);
         }
-        let result = service.coordination(Parameters(request.clone())).await.unwrap();
+        let result = service.factory(Parameters(request.clone())).await.unwrap();
         let text = get_text(&result);
         assert!(text.contains(&format!("Target: origin/main @ {before}")), "{text}");
         if local_behind {
@@ -3742,7 +3742,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         if parked_count == 0 { tasks.add(&sibling).unwrap(); } else { tasks.update(&sibling).unwrap(); }
         for id in ["alice", "factory/alice"] {
             implicit.id = Some(id.into());
-            match service.coordination(Parameters(implicit.clone())).await {
+            match service.factory(Parameters(implicit.clone())).await {
                 Err(error) if error.message.to_ascii_lowercase().contains("ambiguous") => {}
                 outcome => failures.push(format!("{id} with {parked_count} parked tasks must refuse as ambiguous: {outcome:?}")),
             }
@@ -3765,7 +3765,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     task.deliverables.factory_branch_anchor = Some(tip.clone());
     task.deliverables.parked_branch = Some(rework.into());
     tasks.update(&task).unwrap();
-    match service.coordination(Parameters(request)).await {
+    match service.factory(Parameters(request)).await {
         Ok(result) => {
             if !get_text(&result).contains(rework)
                 || !Command::new("git").args(["merge-base", "--is-ancestor", &tip, "main"])
@@ -3785,7 +3785,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     tasks.update(&task).unwrap();
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
     implicit.id = Some("alice".into());
-    match service.coordination(Parameters(implicit)).await {
+    match service.factory(Parameters(implicit)).await {
         Ok(result) => {
             let text = get_text(&result);
             if text.contains("Already contained")
@@ -3861,7 +3861,7 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     request.cleanup = Some(false);
     let target_status = git_stdout(&repo.root, &["status", "--porcelain"]);
     for _ in 0..2 {
-        let error = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+        let error = supervisor.factory(Parameters(request.clone())).await.unwrap_err();
         assert!(error.message.contains("CONTENT CONFLICT"), "{error}");
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "HEAD"]), target_tip);
         assert_eq!(git_stdout(&repo.root, &["status", "--porcelain"]), target_status);
@@ -3970,7 +3970,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     request.id = Some(branch.into());
     request.task_id = Some(task.id.clone());
     request.cleanup = Some(false);
-    let merged = supervisor.coordination(Parameters(request.clone())).await.unwrap();
+    let merged = supervisor.factory(Parameters(request.clone())).await.unwrap();
     let gate = get_text(&merged);
     assert!(gate.contains("UNOWNED USER-FACING FILE") && gate.contains("src/pages/email.ts"), "{gate}");
     run_git(&["merge-base", "--is-ancestor", &anchor, "epic/upkeep"], &repo.root);
@@ -4007,7 +4007,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(repaired.as_str()));
     assert_ne!(repaired, anchor);
     env.set_current_dir(&repo.root);
-    let qa_required = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+    let qa_required = supervisor.factory(Parameters(request.clone())).await.unwrap_err();
     assert!(qa_required.message.contains("INDEPENDENT QA REQUIRED"), "{qa_required}");
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge,
         "a QA wait must keep its existing ownership, rather than return a source fix");
@@ -4017,7 +4017,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
         &root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &repaired,
         "fixture: isolate post-merge source correction from independent QA", chrono::Utc::now(),
     ).unwrap();
-    let accepted = supervisor.coordination(Parameters(request)).await.unwrap();
+    let accepted = supervisor.factory(Parameters(request)).await.unwrap();
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{}", get_text(&accepted));
 }
 
@@ -4106,7 +4106,7 @@ async fn post_merge_generated_tip_preserves_changed_bug_case_cas_3712() {
         request.id = Some(branch.into());
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
-        let merged = supervisor.coordination(Parameters(request)).await.unwrap();
+        let merged = supervisor.factory(Parameters(request)).await.unwrap();
         let text = get_text(&merged);
         assert_eq!(git_stdout(&repo.root, &["log", "-1", "--format=%s", "epic/upkeep"]),
             "build: regenerate dist from merged sources", "automatic regeneration must still run");
@@ -4186,7 +4186,7 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
         req.id = Some("factory/alice".into());
         req.task_id = Some(task_id);
         req.cleanup = Some(case == "cleanup");
-        let error = svc.coordination(Parameters(req)).await.expect_err(case);
+        let error = svc.factory(Parameters(req)).await.expect_err(case);
         if case == "conflict" {
             assert!(error.message.to_lowercase().contains("conflict"), "{case}: {error:?}");
         } else if case == "anchor_mismatch" {
@@ -4232,7 +4232,7 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/closed-worker".to_string());
     req.task_id = Some(worker_task_id);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(result.is_err(), "closed parent epic must reject the merge");
     let message = format!("{:?}", result.unwrap_err());
@@ -4296,7 +4296,7 @@ async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df(
     req.task_id = Some(standalone_task.id);
     req.cleanup = Some(false);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("a declared non-trunk WorkTarget must not require allow_trunk");
     let text = get_text(&result);
@@ -4343,7 +4343,7 @@ async fn missing_work_target_refusal_names_resolved_trunk_cas_84df() {
     req.id = Some("factory/bob".to_string());
     req.task_id = Some(standalone_task.id);
     let refused = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect_err("missing WorkTarget must require explicit trunk authorization");
     assert!(
@@ -4401,7 +4401,7 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
     trunk_ok.task_id = Some(standalone_task.id);
     trunk_ok.allow_trunk = Some(true);
     let result = svc
-        .coordination(Parameters(trunk_ok))
+        .factory(Parameters(trunk_ok))
         .await
         .expect("allow_trunk=true must authorize a genuine trunk fallback");
     let text = get_text(&result);
@@ -4434,7 +4434,7 @@ async fn test_worktree_merge_refuses_when_task_id_does_not_exist() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/carol".to_string());
     req.task_id = Some("cas-does-not-exist".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     // A caller-asserted task_id we can't verify must refuse — never guess a
     // merge target (that's exactly how the original wrong-target-to-trunk
@@ -4472,7 +4472,7 @@ async fn test_worktree_merge_refuses_silent_trunk_when_no_task_id_and_no_epic_co
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/dave".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "no task_id / no epic / no focus must refuse silent trunk (cas-0b32)"
@@ -4535,7 +4535,7 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("hv-director".to_string());
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("assignee epic merge should succeed without task_id");
     let text = get_text(&result);
@@ -4649,7 +4649,7 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/reassigned-worker".to_string());
     req.allow_trunk = Some(true);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     let text = get_text(&result.expect("allow_trunk merge should succeed"));
     assert!(
@@ -4736,7 +4736,7 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/erin".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     let error = result.expect_err("focused epic alone must not authorize a merge");
     let text = format!("{error:?}");
@@ -4792,7 +4792,7 @@ async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/erin".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "cross-project focused epic must not authorize merge to that epic/trunk silently"
@@ -4851,7 +4851,7 @@ async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/stranger".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "non-member worker must not inherit focused epic merge target"
@@ -4905,7 +4905,7 @@ async fn test_worktree_merge_rejects_mixed_branchful_and_branchless_parent_epics
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/mixed".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "mixed branchful+branchless parent epics must reject, not pick branchful"
@@ -4949,7 +4949,7 @@ async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/nb".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(result.is_err(), "branchless parent epic must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(
@@ -5007,7 +5007,7 @@ async fn test_worktree_merge_rejects_ambiguous_assignee_epics_cas_0b32() {
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/multi".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(result.is_err(), "ambiguous assignee epics must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(
@@ -5069,7 +5069,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     // Path-resolution fixture has no epic context — allow_trunk (not force).
     req.allow_trunk = Some(true);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("coordination call should succeed");
     let text = get_text(&result);
@@ -5119,7 +5119,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(task_id);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("matching worker/task must merge");
     let text = get_text(&result);
@@ -5160,7 +5160,7 @@ async fn test_worktree_merge_rejects_foreign_task_assignee_cas_bd5f() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(foreign_task_id.clone());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(
         result.is_err(),
@@ -5209,7 +5209,7 @@ async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/carol".to_string());
     req.task_id = Some(orphan_task_id);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(
         result.is_err(),
@@ -5260,7 +5260,7 @@ async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(task_id);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(
         result.is_err(),
@@ -5312,7 +5312,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(task_id);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("matching lease must authorize task_id");
     let text = get_text(&result);
@@ -6235,7 +6235,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(true);
     let result = supervisor_service
-        .coordination(Parameters(merge))
+        .factory(Parameters(merge))
         .await
         .expect("public cleanup-before-close-gate merge");
     let gate_text = get_text(&result);
@@ -6335,7 +6335,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     retry.allow_trunk = Some(true);
     retry.cleanup = Some(true);
     let retry_result = supervisor_service
-        .coordination(Parameters(retry))
+        .factory(Parameters(retry))
         .await
         .expect("source-less idempotent close-ready retry");
     assert!(
@@ -6546,7 +6546,7 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
     let result = supervisor_service
-        .coordination(Parameters(merge))
+        .factory(Parameters(merge))
         .await
         .expect("public stale-tip merge response");
     assert!(get_text(&result).contains("tip_changed"));
@@ -7492,7 +7492,7 @@ async fn test_worktree_cleanup_removes_retired_system_b_worktree() {
     let svc = make_service(cas_root.clone());
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("retired-fox".to_string());
-    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+    let text = get_text(&svc.factory(Parameters(req)).await.expect("cleanup"));
 
     assert!(
         !text.contains("experimental and disabled"),
@@ -7526,7 +7526,7 @@ async fn test_worktree_cleanup_unknown_target_reports_not_found_not_disabled() {
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("no-such-worker".to_string());
     let err = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect_err("unknown target must be an error, not a success message");
 
@@ -7572,7 +7572,7 @@ async fn test_worktree_cleanup_refuses_unmerged_branch_without_force() {
     let svc = make_service(cas_root.clone());
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("unmerged-owl".to_string());
-    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+    let text = get_text(&svc.factory(Parameters(req)).await.expect("cleanup"));
 
     assert!(
         text.contains("Refused") && text.contains("exist on no other branch"),
@@ -7609,7 +7609,7 @@ async fn test_worktree_cleanup_refuses_live_assignee_even_with_force() {
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("busy-lynx".to_string());
     req.force = Some(true);
-    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+    let text = get_text(&svc.factory(Parameters(req)).await.expect("cleanup"));
 
     assert!(
         text.contains("Refused") && text.contains("still a live agent"),
@@ -7646,7 +7646,7 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
         let mut req = coord_req(action);
         req.id = Some("anything".to_string());
         req.task_id = Some("anything".to_string());
-        let text = get_text(&svc.coordination(Parameters(req)).await.expect(action));
+        let text = get_text(&svc.factory(Parameters(req)).await.expect(action));
         assert!(
             text.contains("System A worktrees are disabled by `[worktrees].enabled`")
                 && text.contains(
@@ -7829,7 +7829,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
         req.task_id = task_id.clone();
         req.cleanup = Some(false);
         let text = get_text(
-            &svc.coordination(Parameters(req))
+            &svc.factory(Parameters(req))
                 .await
                 .unwrap_or_else(|e| panic!("merge (task_id={task_id:?}): {}", e.message)),
         );
@@ -7902,7 +7902,7 @@ async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
         req.task_id = task_id.clone();
         req.cleanup = Some(false);
         let refused = svc
-            .coordination(Parameters(req))
+            .factory(Parameters(req))
             .await
             .expect_err("trunk must not replace the epic lane silently");
         assert!(
@@ -7925,7 +7925,7 @@ async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let text = get_text(
-        &svc.coordination(Parameters(req))
+        &svc.factory(Parameters(req))
             .await
             .unwrap_or_else(|e| panic!("authorized trunk merge: {}", e.message)),
     );

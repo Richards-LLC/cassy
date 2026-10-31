@@ -157,6 +157,7 @@ fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool 
 
 /// Run the gate. `Ok(notes)` carries decision-note lines to record on close;
 /// `Err(message)` is the complete rejection text.
+#[cfg(test)]
 pub(crate) fn qa_evidence_close_gate(
     cas_root: &Path,
     task: &Task,

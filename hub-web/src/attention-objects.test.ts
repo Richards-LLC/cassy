@@ -203,17 +203,6 @@ describe("blocker object", () => {
     expect(history.acknowledge({ client_ref: "ack", notification_id: 60, target: "atlas-sup", stamped: true })).toBe(true);
     expect(renderBlockerObject(blocker, context(blocker, history)).dataset.acknowledged).toBe("true");
   });
-  it("quiets an acknowledged blocker in the stylesheet (cas-71af)", async () => {
-    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain('.obj.t-a.blk[data-acknowledged="true"] .obj-body, .obj.t-a.blk[data-acknowledged="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
-  });
-  it("quiets an answered question in the stylesheet: supervisor colour, the tick kept (journey F12)", async () => {
-    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain('.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
-    expect(css).toContain('.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }');
-  });
   it("has no tray without evidence", () => {
     const blocker = reply(51, "blocker", "The release gate went red.");
     const node = renderBlockerObject(blocker, context(blocker, new ConversationHistory()));

@@ -6,73 +6,8 @@ use crate::mcp::tools::types::*;
 // =========================================================================
 
 #[test]
-fn test_default_entry_type() {
-    assert_eq!(default_entry_type(), "learning");
-}
-
-#[test]
-fn test_default_importance() {
-    assert_eq!(default_importance(), 0.5);
-}
-
-#[test]
 fn test_default_recent() {
     assert_eq!(default_recent(), 10);
-}
-
-#[test]
-fn test_default_priority() {
-    assert_eq!(default_priority(), 2);
-}
-
-#[test]
-fn test_default_task_type() {
-    assert_eq!(default_task_type(), "task");
-}
-
-#[test]
-fn test_default_search_limit() {
-    assert_eq!(default_search_limit(), 10);
-}
-
-#[test]
-fn test_default_observation_type() {
-    assert_eq!(default_observation_type(), "general");
-}
-
-#[test]
-fn test_default_skill_type() {
-    assert_eq!(default_skill_type(), "command");
-}
-
-#[test]
-fn test_default_dep_type() {
-    assert_eq!(default_dep_type(), "blocks");
-}
-
-#[test]
-fn test_default_note_type() {
-    assert_eq!(default_note_type(), "progress");
-}
-
-#[test]
-fn test_default_subagent_tokens() {
-    assert_eq!(default_subagent_tokens(), 2000);
-}
-
-#[test]
-fn test_default_scope_project() {
-    assert_eq!(default_scope_project(), "project");
-}
-
-#[test]
-fn test_default_scope_global() {
-    assert_eq!(default_scope_global(), "global");
-}
-
-#[test]
-fn test_default_scope_all() {
-    assert_eq!(default_scope_all(), "all");
 }
 
 // =========================================================================

@@ -585,6 +585,7 @@ fn change_prefix(c: &ProjectOverviewChange) -> &'static str {
 /// `agent_role` is accepted for API symmetry with downstream hook wiring; the
 /// returned staleness is role-agnostic. Callers can tailor rendering through
 /// `format_injection`.
+#[cfg(test)]
 pub fn check_freshness(
     repo_root: &Path,
     agent_role: Option<&str>,

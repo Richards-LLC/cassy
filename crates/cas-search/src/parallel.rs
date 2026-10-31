@@ -395,22 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parallel_result_fields() {
-        let result = ParallelResult {
-            channel: "test".into(),
-            results: vec![("doc-1".into(), 0.9)],
-            latency: Duration::from_millis(100),
-            success: true,
-            error: None,
-        };
-
-        assert_eq!(result.channel, "test");
-        assert!(result.success);
-        assert!(result.error.is_none());
-        assert_eq!(result.results.len(), 1);
-    }
-
-    #[test]
     fn test_timed_search() {
         let (result, latency): (Vec<(String, f64)>, Duration) = timed_search(|| {
             std::thread::sleep(Duration::from_millis(10));

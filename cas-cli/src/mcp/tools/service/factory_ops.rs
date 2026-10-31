@@ -9444,6 +9444,7 @@ fn sync_skip_reason_for_clone_resolve(
     }
 }
 
+#[cfg(test)]
 fn collect_worker_worktree_status(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
@@ -9552,6 +9553,7 @@ fn worker_worktree_status_fallback(
 
 /// The worker checkout can still point at an older lane after the task was
 /// delivered on `factory/<worker>-<task>`. Measure the bound delivery instead.
+#[cfg(test)]
 fn apply_task_delivery_git_status(
     repo: &std::path::Path,
     task: &cas_types::Task,
@@ -11963,6 +11965,7 @@ pub(crate) fn transcript_path_from_resolution(
 
 /// Resolve a live worker's real transcript/rollout path using the same
 /// harness-aware resolver as `cas factory is-wedged`.
+#[cfg(test)]
 pub(crate) fn resolve_worker_transcript_path(
     clone_path: Option<&str>,
     session_id: &str,
@@ -12001,6 +12004,7 @@ pub(crate) fn resolve_worker_transcript_path_for_account(
 /// `cas factory is-wedged`, otherwise this function stats a synthesized Claude
 /// path and returns `None` while the wedged classifier finds `updates.jsonl`.
 /// Claude alone retains the historical single-stat fast path.
+#[cfg(test)]
 fn worker_status_transcript_path(
     clone_path: Option<&str>,
     session_id: &str,

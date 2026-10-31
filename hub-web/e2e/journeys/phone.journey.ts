@@ -303,10 +303,9 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(dialog.locator(".paired-machine").first()).toHaveAttribute("data-machine-id", "shed");
     await expect(dialog).toContainText("Can't reach · retrying");
     await expect(dialog).not.toContainText("Connecting");
-    // One clock, the thread's 24-hour one, and plain words for a version the
-    // machine has not reported yet (3.30.0 journey F10).
+    // One clock, the thread's 12-hour one (cas-73dd9), and plain words for a
+    // version the machine has not reported yet (3.30.0 journey F10).
     await expect(dialog.locator(".paired-machine-seen").filter({ hasText: "Last seen" }).first()).toHaveText(/ · \d{1,2}:\d{2}\s[AP]M$/);
-    await expect(dialog).not.toContainText(/\b(AM|PM)\b/);
     await expect(dialog).not.toContainText("Runtime not yet received");
     await expect(dialog.locator('[data-machine-id="shed"] .paired-machine-runtime')).toHaveText("Version unknown until it connects");
   });

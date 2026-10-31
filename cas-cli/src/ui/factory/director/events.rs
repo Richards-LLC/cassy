@@ -633,6 +633,7 @@ pub(crate) fn task_delivery_ref(
 ///
 /// Branch tips are resolved by the caller so tests stay pure and production
 /// can consult the live repository immediately before constructing the wake.
+#[cfg(test)]
 pub(crate) fn supervisor_actionable_state(
     data: &DirectorData,
     focused_epic_id: Option<&str>,
@@ -3184,6 +3185,7 @@ fn transcript_confirms_stall_for_path_with_background(
 /// `fresh_window` must come from
 /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window)
 /// (or the same constants) so director and is-wedged agree.
+#[cfg(test)]
 fn transcript_confirms_stall_for_age(
     age: Option<Duration>,
     fresh_window: Duration,

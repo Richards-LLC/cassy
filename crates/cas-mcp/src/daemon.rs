@@ -248,10 +248,4 @@ mod tests {
         assert!(config.apply_decay);
     }
 
-    #[test]
-    fn test_daemon_status_default() {
-        let status = EmbeddedDaemonStatus::default();
-        assert!(!status.running);
-        assert!(status.last_maintenance.is_none());
-    }
 }

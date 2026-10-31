@@ -645,6 +645,7 @@ fn publish_target_seed(staging: &Path, target: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn hardlink_seed_tree(
     source: &Path,
     destination: &Path,

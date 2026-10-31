@@ -367,6 +367,7 @@ fn route_kind(route: Route) -> &'static str {
 
 /// Post text and files, choosing the inline or external route by the files'
 /// aggregate size. Returns the hub's final receipt.
+#[cfg(test)]
 pub fn post_files(
     hub: &mut dyn Hub,
     channel: &str,

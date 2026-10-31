@@ -71,6 +71,7 @@ pub(crate) const SESSION_START_BUDGET_BYTES: usize = 9 * 1024;
 /// (~0.8KB). 2 400 B is that need with a deliberate alarm margin, so the pin
 /// fires while there is still room to act rather than after a section has
 /// already collapsed.
+#[cfg(test)]
 pub(crate) const SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES: usize = 2_400;
 
 /// Minimum un-compacted payload headroom required by the self-test/doctor
@@ -342,6 +343,7 @@ impl SessionContextAssembler {
     }
 
     /// Prepend a segment that degrades to `compact` when over budget.
+    #[cfg(test)]
     pub(crate) fn prepend_degradable(&mut self, full: String, compact: String) {
         self.prepend_degradable_with_priority(
             section_label(&full),

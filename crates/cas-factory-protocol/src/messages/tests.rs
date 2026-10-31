@@ -12,9 +12,18 @@ mod cases {
             session_id: Some("test-session".to_string()),
             capabilities: ClientCapabilities::default(),
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "type": "connect",
+          "client_type": "tui",
+          "protocol_version": "1.0.0",
+          "session_id": "test-session"
+        });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), fixture);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(fixture).unwrap(),
+            msg
+        );
     }
 
     #[test]
@@ -39,9 +48,18 @@ mod cases {
             client_id: 1,
             mode: SessionMode::Live,
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "type": "connected",
+          "session_id": "test-session",
+          "client_id": 1,
+          "mode": "live"
+        });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), fixture);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(fixture).unwrap(),
+            msg
+        );
     }
 
     #[test]
@@ -72,9 +90,75 @@ mod cases {
             cursor: Some(CursorPosition { x: 2, y: 1 }),
             seq: 42,
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "type": "pane_rows_update",
+          "pane_id": "supervisor",
+          "rows": [
+            {
+              "row": 0,
+              "runs": [
+                {
+                  "text": "Hello ",
+                  "fg": [
+                    204,
+                    204,
+                    204
+                  ],
+                  "bg": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "flags": 0
+                },
+                {
+                  "text": "world",
+                  "fg": [
+                    0,
+                    255,
+                    0
+                  ],
+                  "bg": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "flags": 1
+                }
+              ]
+            },
+            {
+              "row": 1,
+              "runs": [
+                {
+                  "text": "$ ",
+                  "fg": [
+                    204,
+                    204,
+                    204
+                  ],
+                  "bg": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "flags": 0
+                }
+              ]
+            }
+          ],
+          "cursor": {
+            "x": 2,
+            "y": 1
+          },
+          "seq": 42
+        });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), fixture);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(fixture).unwrap(),
+            msg
+        );
     }
 
     #[test]
@@ -102,9 +186,42 @@ mod cases {
                 StyleRun::with_style("error", (255, 0, 0), (0, 0, 0), 0),
             ],
         };
-        let json = serde_json::to_string(&row).unwrap();
-        let decoded: RowData = serde_json::from_str(&json).unwrap();
-        assert_eq!(row, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "row": 5,
+          "runs": [
+            {
+              "text": "prefix: ",
+              "fg": [
+                204,
+                204,
+                204
+              ],
+              "bg": [
+                0,
+                0,
+                0
+              ],
+              "flags": 0
+            },
+            {
+              "text": "error",
+              "fg": [
+                255,
+                0,
+                0
+              ],
+              "bg": [
+                0,
+                0,
+                0
+              ],
+              "flags": 0
+            }
+          ]
+        });
+        assert_eq!(serde_json::to_value(&row).unwrap(), fixture);
+        assert_eq!(serde_json::from_value::<RowData>(fixture).unwrap(), row);
     }
 
     #[test]
@@ -118,9 +235,60 @@ mod cases {
                 StyleRun::new("!"),
             ],
         };
-        let json = serde_json::to_string(&cache_row).unwrap();
-        let decoded: CacheRow = serde_json::from_str(&json).unwrap();
-        assert_eq!(cache_row, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "screen_row": 100,
+          "text": "Hello, scrollback!",
+          "style_runs": [
+            {
+              "text": "Hello, ",
+              "fg": [
+                204,
+                204,
+                204
+              ],
+              "bg": [
+                0,
+                0,
+                0
+              ],
+              "flags": 0
+            },
+            {
+              "text": "scrollback",
+              "fg": [
+                0,
+                255,
+                0
+              ],
+              "bg": [
+                0,
+                0,
+                0
+              ],
+              "flags": 1
+            },
+            {
+              "text": "!",
+              "fg": [
+                204,
+                204,
+                204
+              ],
+              "bg": [
+                0,
+                0,
+                0
+              ],
+              "flags": 0
+            }
+          ]
+        });
+        assert_eq!(serde_json::to_value(&cache_row).unwrap(), fixture);
+        assert_eq!(
+            serde_json::from_value::<CacheRow>(fixture).unwrap(),
+            cache_row
+        );
     }
 
     #[test]
@@ -129,7 +297,7 @@ mod cases {
             pane_id: "worker-1".to_string(),
             scroll_offset: 50,
             scrollback_lines: 1000,
-            snapshot: TerminalSnapshot::empty(80, 24),
+            snapshot: TerminalSnapshot::empty(1, 1),
             snapshot_rows: vec![],
             cache_rows: vec![
                 CacheRow {
@@ -146,9 +314,86 @@ mod cases {
             cache_start_row: Some(26),
             request_id: None,
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "type": "pane_snapshot",
+          "pane_id": "worker-1",
+          "scroll_offset": 50,
+          "scrollback_lines": 1000,
+          "snapshot": {
+            "cells": [
+              {
+                "codepoint": 0,
+                "fg": [
+                  204,
+                  204,
+                  204
+                ],
+                "bg": [
+                  0,
+                  0,
+                  0
+                ],
+                "flags": 0,
+                "width": 1
+              }
+            ],
+            "cursor": {
+              "x": 0,
+              "y": 0
+            },
+            "cols": 1,
+            "rows": 1
+          },
+          "cache_rows": [
+            {
+              "screen_row": 26,
+              "text": "cached line 1",
+              "style_runs": [
+                {
+                  "text": "cached line 1",
+                  "fg": [
+                    204,
+                    204,
+                    204
+                  ],
+                  "bg": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "flags": 0
+                }
+              ]
+            },
+            {
+              "screen_row": 27,
+              "text": "cached line 2",
+              "style_runs": [
+                {
+                  "text": "cached line 2",
+                  "fg": [
+                    204,
+                    204,
+                    204
+                  ],
+                  "bg": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "flags": 0
+                }
+              ]
+            }
+          ],
+          "cache_start_row": 26
+        });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), fixture);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(fixture).unwrap(),
+            msg
+        );
     }
 
     #[test]
@@ -315,9 +560,16 @@ mod cases {
     #[test]
     fn test_batch_empty() {
         let msg = ServerMessage::Batch { messages: vec![] };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, decoded);
+        // pin: independent protocol fixture catches renamed tags/fields and decode drift.
+        let fixture = serde_json::json!({
+          "type": "batch",
+          "messages": []
+        });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), fixture);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(fixture).unwrap(),
+            msg
+        );
     }
 
     #[test]

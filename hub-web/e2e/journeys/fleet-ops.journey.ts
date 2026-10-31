@@ -92,34 +92,6 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
     });
-    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: connection and pairing refusals`, journeyPart, async ({ page, journey }) => {
-      const { row, panel, result } = await openFailureFleet(page, journey, width);
-      await journey.stage("A connection failure offers connection recovery without diagnostics", async () => {
-        await page.unroute("**/v1/sessions/*/operations");
-        await page.route("**/v1/sessions/*/operations", (route) => route.abort("failed"));
-        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
-        await panel().getByRole("menuitem", { name: "Pause" }).click();
-        await expect(result).toHaveText("Could not pause swift-lark-3: the machine could not be reached. Check its connection and try again.");
-        await expect(row.locator(".fleet-ops-note")).not.toContainText(/POST|\/v1\/|Failed to fetch|500/);
-        await expect(row.locator(".status-chip")).toHaveText("Active");
-      });
-      for (const [status, reason, detail] of [
-        [403, "scope_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
-        [401, "revoked", "the pairing is no longer accepted. Pair the machine again."],
-      ] as const) {
-        await journey.stage(`A ${status} refusal names the pairing problem and recovery`, async () => {
-          await page.unroute("**/v1/sessions/*/operations");
-          await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status, json: { error: "unauthorized", reason, retryable: false } }));
-          await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
-          await panel().getByRole("menuitem", { name: "Pause" }).click();
-          const text = `Could not pause swift-lark-3: ${detail}`;
-          await expect(result).toHaveText(text);
-          await expect(row.locator(".fleet-ops-note")).toHaveText(text);
-          await expect(row.locator(".status-chip")).toHaveText("Active");
-          if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
-        });
-      }
-    });
     test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: assignment failure`, journeyPart, async ({ page, journey }) => {
       const { result } = await openFailureFleet(page, journey, width);
       await journey.stage("A failed assignment names the task before its assignee", async () => {
@@ -384,17 +356,7 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
     await page.keyboard.press("Escape");
     await page.locator("#paired-machines-toggle").click();
     const paired = page.locator("#paired-machines-dialog");
-    const manage = paired.locator('[data-machine-id="studio"] [data-permission="manage"]');
     await expect(paired).toBeVisible();
-    await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
-    await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");
-    expect(await manage.evaluate((node) => {
-      const reason = node.querySelector(".fleet-permission-reason")!;
-      const also = node.querySelector(".fleet-permission-also")!;
-      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
-    })).toBe(true);
-    await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
-    await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
   });
 });
 

@@ -412,7 +412,7 @@ async fn run_merge(fixture: &DeliveryFixture) -> String {
     merge.task_id = Some(fixture.task_id.clone());
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
-    match supervisor_service.coordination(Parameters(merge)).await {
+    match supervisor_service.factory(Parameters(merge)).await {
         Ok(result) => get_text(&result),
         Err(error) => format!("MCP_ERROR: {error}"),
     }
@@ -502,7 +502,7 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     merge.id = Some("factory/cas8d38-worker".to_string());
     merge.task_id = Some(task.id.clone());
     merge.cleanup = Some(false);
-    let merged = service.coordination(Parameters(merge)).await.expect("merge call");
+    let merged = service.factory(Parameters(merge)).await.expect("merge call");
     assert!(get_text(&merged).contains("Merged"), "{}", get_text(&merged));
     assert!(cas_store::get_latest_worker_delivery(&cas_root, &task.id)
         .unwrap()
@@ -767,7 +767,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             );
             answer
         } else {
-            get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"))
+            get_text(&supervisor.factory(Parameters(merge)).await.expect("merge"))
         };
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
@@ -1051,7 +1051,7 @@ async fn delivery_merge_rejects_unrelated_union_parameter_before_target_resoluti
     merge.target = Some("not-a-worktree-merge-parameter".to_string());
 
     let error = supervisor_service
-        .coordination(Parameters(merge))
+        .factory(Parameters(merge))
         .await
         .expect_err("unrelated worktree_merge parameter must fail closed");
     assert!(
@@ -1104,7 +1104,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
         Err(error) => format!("MCP_ERROR: {error}"),
     };
 
-    let refused = outcome(supervisor_service.coordination(Parameters(merge_with(None, None))).await);
+    let refused = outcome(supervisor_service.factory(Parameters(merge_with(None, None))).await);
     assert!(refused.contains("CI RED"), "{refused}");
     assert!(refused.contains(&format!("repos/Richards-LLC/cassy/commits/{}/check-runs", fixture.receipt.commit_sha)), "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
@@ -1125,14 +1125,14 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     unmerged("red CI without override");
 
     let no_reason =
-        outcome(supervisor_service.coordination(Parameters(merge_with(Some(true), None))).await);
+        outcome(supervisor_service.factory(Parameters(merge_with(Some(true), None))).await);
     assert!(!no_reason.contains("Unsupported parameter(s)"), "{no_reason}");
     assert!(no_reason.contains("non-empty reason"), "{no_reason}");
     unmerged("override without reason");
 
     let merged = outcome(
         supervisor_service
-            .coordination(Parameters(merge_with(
+            .factory(Parameters(merge_with(
                 Some(true),
                 Some("red run is the known flaky runner; delivery reviewed"),
             )))
@@ -1300,7 +1300,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
 
     let refused = outcome(
         supervisor_service
-            .coordination(Parameters(merge_with(None, None)))
+            .factory(Parameters(merge_with(None, None)))
             .await,
     );
     assert!(refused.contains("CODE CI REQUIRED"), "{refused}");
@@ -1323,7 +1323,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
 
     let no_reason = outcome(
         supervisor_service
-            .coordination(Parameters(merge_with(Some(true), None)))
+            .factory(Parameters(merge_with(Some(true), None)))
             .await,
     );
     assert!(
@@ -1335,7 +1335,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
 
     let merged = outcome(
         supervisor_service
-            .coordination(Parameters(merge_with(
+            .factory(Parameters(merge_with(
                 Some(true),
                 Some("docs-only run skipped validation; supervisor reviewed delivery"),
             )))

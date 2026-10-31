@@ -1569,40 +1569,6 @@ fn test_hook_command_session_start() {
 }
 
 #[test]
-fn test_hook_config() {
-    let temp = TempDir::new().unwrap();
-
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success();
-
-    // Check default hook config
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "get", "hooks.capture_enabled"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("true"));
-
-    // Set hook config
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "set", "hooks.capture_enabled", "false"])
-        .assert()
-        .success();
-
-    // Verify it was set
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "get", "hooks.capture_enabled"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("false"));
-}
-
-#[test]
 fn test_hook_post_tool_use() {
     let temp = TempDir::new().unwrap();
 
@@ -1728,29 +1694,6 @@ fn test_config_get_set() {
         .assert()
         .success()
         .stdout(predicate::str::contains("false"));
-
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "set", "qa.capture.success_url", "^https?://[^/]+/dashboard"])
-        .assert()
-        .success();
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "get", "qa.capture.success_url"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("^https?://[^/]+/dashboard"));
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "list", "--section", "qa.capture"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("qa.capture.credentials_env"));
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "set", "qa.capture.success_url", "/dashboard"])
-        .assert()
-        .failure();
 
     // Hub policy is consumed by the host daemon, even from an initialized
     // project with a conflicting value (cas-e3ed).

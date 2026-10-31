@@ -983,6 +983,7 @@ fn build_prompt_body(
 /// Task mutation must already have succeeded. Callers must surface errors with
 /// [`lifecycle_push_failure_message`] — never claim the original task op retry is safe.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn emit_task_lifecycle_transition(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: Option<&dyn PromptQueueStore>,
@@ -1016,6 +1017,7 @@ pub fn emit_task_lifecycle_transition(
 /// transitions need this extra identity because `AwaitingMerge` is reusable
 /// after a supervisor requests changes.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn emit_task_lifecycle_transition_with_branch_tip(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: Option<&dyn PromptQueueStore>,
@@ -1439,6 +1441,7 @@ fn parse_required_status(
 ///
 /// Fail-closed on corrupt/incomplete payloads (cas-3a47): leaves
 /// `prompt_delivered_at` unmarked so a later fix can re-drain.
+#[cfg(test)]
 pub fn deliver_lifecycle_outbox_row(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: &dyn PromptQueueStore,
@@ -1591,6 +1594,7 @@ fn deliver_lifecycle_outbox_row_with_agents(
 /// Drain all pending lifecycle outbox rows (callable repair + daemon auto-drain).
 ///
 /// Does **not** re-run task mutations. Safe after process restart.
+#[cfg(test)]
 pub fn drain_lifecycle_outbox(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: &dyn PromptQueueStore,

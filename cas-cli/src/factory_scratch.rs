@@ -87,6 +87,7 @@ pub(crate) struct RelocatedCache {
 
 /// Every relocated cache under this project's scratch directory; empty when
 /// the root is unset (cas-baa8).
+#[cfg(test)]
 pub(crate) fn relocated_caches(cas_dir: &Path) -> Vec<RelocatedCache> {
     relocated_caches_with_targets(cas_dir, None, None)
 }
@@ -167,10 +168,12 @@ fn tree_bytes(path: &Path, deadline: std::time::Instant) -> (u64, bool) {
 }
 
 /// The `gc_report` section naming the relocated caches. Read-only.
+#[cfg(test)]
 pub(crate) fn render_relocated(cas_dir: &Path) -> String {
     render_relocated_with_targets(cas_dir, None)
 }
 
+#[cfg(test)]
 pub(crate) fn render_relocated_with_targets(
     cas_dir: &Path,
     targets: Option<&crate::factory_target_cache::TargetCacheReport>,

@@ -114,6 +114,7 @@ pub(crate) fn record_prompt_hook(root: &Path, input: &HookInput) {
 
 /// Read only real external user messages, never tool results, sidechains or
 /// meta reminders. `promptId` aligns with the normal hook's `prompt_id`.
+#[cfg(test)]
 fn latest_turn(path: &Path, session: &str) -> Option<(String, String)> {
     latest_turn_with_start(path, session).map(|(key, prompt, _)| (key, prompt))
 }

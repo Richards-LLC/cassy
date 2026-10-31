@@ -1517,7 +1517,7 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     let mut pin = coord_req("focus_epic");
     pin.id = Some(epic_id.clone());
     env.service
-        .coordination(Parameters(pin))
+        .factory(Parameters(pin))
         .await
         .expect("coordination focus_epic should pin");
     assert_eq!(
@@ -1528,7 +1528,7 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     let mut clear = coord_req("focus_epic");
     clear.clear = Some(true);
     env.service
-        .coordination(Parameters(clear))
+        .factory(Parameters(clear))
         .await
         .expect("coordination focus_epic should forward clear=true");
     let metadata = read_session_metadata("session-focus-coordination");
@@ -1580,7 +1580,7 @@ async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
     req.task_id = Some("cas-example".into());
     req.prompt = Some("Send a plan and wait before coding.".into());
 
-    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    let err = env.service.factory(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
     assert!(err.message.contains("loop_start"), "{err:?}");
     // pin: the refusal names spawn_brief, the path that reaches the worker before task start (cas-ee68).
@@ -1594,7 +1594,7 @@ async fn spawn_workers_rejects_unscoped_prompt_without_queueing() {
     let mut req = coord_req("spawn_workers");
     req.prompt = Some("A brief must not be lost.".into());
 
-    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    let err = env.service.factory(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("no spawn was queued"), "{err:?}");
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
@@ -2567,7 +2567,7 @@ async fn test_shutdown_workers_rejects_unsupported_known_param_without_queueing(
     // destructive action. It must not disappear during domain conversion.
     req.task_id = Some("cas-wrong-field".to_string());
 
-    let result = env.service.coordination(Parameters(req)).await;
+    let result = env.service.factory(Parameters(req)).await;
     let err = result.expect_err("unsupported shutdown field must hard-error");
     assert!(err.message.contains("task_id"), "unexpected error: {err:?}");
     assert!(
@@ -2590,7 +2590,7 @@ async fn test_shutdown_workers_id_targets_exact_worker() {
 
     let result = env
         .service
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("id target should be accepted");
     let text = get_text(&result);
@@ -4367,7 +4367,7 @@ async fn test_worker_status_and_agent_list_agree_on_live_workers() {
     .expect("CoordinationRequest");
     let list_text = get_text(
         &env.service
-            .coordination(Parameters(list_req))
+            .factory(Parameters(list_req))
             .await
             .expect("agent_list"),
     );
@@ -4892,7 +4892,7 @@ async fn test_2e81_agent_cleanup_parks_orphan_and_emits_worker_died() {
     req.stale_threshold_secs = Some(30);
     let result = env
         .service
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("agent_cleanup");
     let text = get_text(&result);
@@ -5022,11 +5022,12 @@ async fn test_20ac_lifecycle_ack_actions_terminate_both_queue_lanes_without_repl
 
         let mut request = coord_req(action);
         request.notification_id = Some(durable_id);
-        let result = env
-            .service
-            .coordination(Parameters(request))
-            .await
-            .expect("public lifecycle acknowledgement");
+        let result = if action == "queue_ack" {
+            env.service.factory(Parameters(request)).await
+        } else {
+            env.service.coordination(Parameters(request)).await
+        }
+        .expect("public lifecycle acknowledgement");
         let text = get_text(&result);
         assert!(
             text.contains("across durable and prompt queues"),
@@ -5137,7 +5138,7 @@ async fn test_20ac_queue_ack_repairs_processed_durable_row_with_replay_pending()
     request.notification_id = Some(durable_id);
     let result = env
         .service
-        .coordination(Parameters(request))
+        .factory(Parameters(request))
         .await
         .expect("repeated queue_ack bridges processed durable row");
     assert!(
@@ -14761,7 +14762,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
         shutdown.worker_names = Some(foreign.to_string());
         let refused = env
             .service
-            .coordination(Parameters(shutdown))
+            .factory(Parameters(shutdown))
             .await
             .expect_err("another session's worker must not be shut down");
         assert!(
@@ -14835,7 +14836,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
         // The own worker holds an in-progress task, so shutdown needs force.
         own_shutdown.force = Some(true);
         env.service
-            .coordination(Parameters(own_shutdown))
+            .factory(Parameters(own_shutdown))
             .await
             .expect("own worker shutdown is queued");
         let mut own_spawn = factory_req("spawn_workers");

@@ -241,3 +241,25 @@ fn get_codemap_git_timestamp(codemap_path: &Path) -> Option<String> {
     let ts = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if ts.is_empty() { None } else { Some(ts) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_readers_count_changes_and_skip_malformed_jsonl() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join(CODEMAP_PENDING_FILE);
+        assert_eq!(count_pending_changes(&pending), 0);
+        std::fs::write(&pending, concat!(
+            "{\"changes\":[{\"type\":\"A\",\"path\":\"src/new.rs\"}],\"commit\":\"abc1234\",\"recorded_at\":\"2026-04-03T18:00:00Z\"}\n",
+            "not json\n\n",
+            "{\"changes\":[{\"type\":\"D\",\"path\":\"src/old.rs\"}],\"commit\":\"def5678\",\"recorded_at\":\"2026-04-03T19:00:00Z\"}\n",
+        )).unwrap();
+        assert_eq!(count_pending_changes(&pending), 2);
+        assert_eq!(
+            crate::hooks::handlers::handlers_events::codemap::codemap_stop_reminder(root.path()).as_deref(),
+            Some("Note: CODEMAP.md has 2 pending structural change(s) that should be updated.")
+        );
+    }
+}

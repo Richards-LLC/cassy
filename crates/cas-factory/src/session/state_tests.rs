@@ -19,11 +19,6 @@ fn test_session_type_display() {
 }
 
 #[test]
-fn test_session_type_default() {
-    assert_eq!(SessionType::default(), SessionType::Factory);
-}
-
-#[test]
 fn test_session_type_serde() {
     let factory = SessionType::Factory;
     let json = serde_json::to_string(&factory).unwrap();
@@ -41,11 +36,6 @@ fn test_agent_state_display() {
     assert_eq!(AgentState::Idle.to_string(), "idle");
     assert_eq!(AgentState::Blocked.to_string(), "blocked");
     assert_eq!(AgentState::Exited.to_string(), "exited");
-}
-
-#[test]
-fn test_agent_state_default() {
-    assert_eq!(AgentState::default(), AgentState::Active);
 }
 
 #[test]

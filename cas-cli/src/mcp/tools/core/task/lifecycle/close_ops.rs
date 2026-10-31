@@ -6975,6 +6975,7 @@ impl CasCore {
     /// after a sibling's lease), same container and already-integrated guards.
     /// Returns the task to park; status is untouched so the park's lifecycle
     /// push still reports the real transition.
+    #[cfg(test)]
     pub(crate) fn advance_commit_time_anchor_before_park(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -15502,6 +15503,7 @@ pub(crate) fn validate_current_factory_branch_tip_ancestry_with_delivery_mode(
 /// evidence (whole-branch semantics). Used by callers that have no close
 /// request in hand (e.g. the `AwaitingMerge` delivery precheck) and by the
 /// pre-cas-e74c unit tests.
+#[cfg(test)]
 pub(crate) fn run_factory_branch_merge_gate(
     task: &Task,
     req: &TaskCloseRequest,
@@ -17945,8 +17947,6 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
          execution_note or ask the supervisor to audit and close it."
     ))
 }
-
-
 
 
 /// Resolve the immutable baseline a scoped proof must use for a declared

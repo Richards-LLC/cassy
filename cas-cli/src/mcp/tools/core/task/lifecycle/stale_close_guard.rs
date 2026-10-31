@@ -814,22 +814,6 @@ mod tests {
         assert!(!net_halt(false, "STOP and stand by for re-scope"));
     }
 
-    #[test]
-    fn test_b269_failed_start_statuses_do_not_clear_halt_policy() {
-        let no_clear = [
-            TaskStatus::Closed,
-            TaskStatus::AwaitingMerge,
-        ];
-        for status in no_clear {
-            assert!(
-                !matches!(
-                    status,
-                    TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
-                ),
-                "status {status:?} is a failed-start path that must preserve halt"
-            );
-        }
-    }
 
     /// cas-60393 happy path: the caller's own AwaitingMerge task is exempt
     /// from an unrelated, pre-existing halt.

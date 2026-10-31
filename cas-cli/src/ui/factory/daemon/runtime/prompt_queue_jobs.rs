@@ -1821,6 +1821,7 @@ impl QueueJobs {
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).
+    #[cfg(test)]
     pub(crate) fn take_external_completions(&mut self) -> Vec<JobResult<ExternalOutcome>> {
         std::mem::take(&mut self.external)
     }

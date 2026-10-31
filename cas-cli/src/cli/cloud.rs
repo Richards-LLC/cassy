@@ -69,7 +69,7 @@ pub enum CloudTeamCommands {
     ///
     /// Use `--personal` to revert to personal scope (clears the default).
     ///
-    /// Requires cached team memberships — run `cas cloud login` first if you see
+    /// Requires cached team memberships — run `cas login` first if you see
     /// "team not found" errors.
     Default(CloudTeamDefaultArgs),
     /// Set the per-project team override by slug or UUID
@@ -970,7 +970,7 @@ fn resolve_team_set_target(
         }
 
         anyhow::bail!(
-            "Team slug {:?} not found in cached memberships.\n{}\nRun `cas cloud login` to refresh team membership.",
+            "Team slug {:?} not found in cached memberships.\n{}\nRun `cas login` to refresh team membership.",
             input,
             cached_team_options(user_config)
         );
@@ -982,10 +982,10 @@ fn resolve_team_set_target(
             team: team.clone(),
         }),
         [] => anyhow::bail!(
-            "No cached team memberships found.\nRun `cas cloud login` to refresh team membership."
+            "No cached team memberships found.\nRun `cas login` to refresh team membership."
         ),
         _ => anyhow::bail!(
-            "Multiple cached teams found; pass one explicitly.\n{}\nRun `cas cloud login` to refresh team membership.",
+            "Multiple cached teams found; pass one explicitly.\n{}\nRun `cas login` to refresh team membership.",
             cached_team_options(user_config)
         ),
     }
@@ -1066,7 +1066,7 @@ pub(crate) fn print_login_team_selection(cli: &Cli, outcome: &LoginTeamSelection
 fn load_user_cloud_config_for_team_resolution() -> anyhow::Result<CloudConfig> {
     let path = user_level_cloud_json_path().ok_or_else(|| {
         anyhow::anyhow!(
-            "Cannot determine home directory. Run `cas cloud login` to refresh team membership."
+            "Cannot determine home directory. Run `cas login` to refresh team membership."
         )
     })?;
     Ok(CloudConfig::load_from(&path)?)
@@ -1619,7 +1619,7 @@ fn execute_team_auto(
             fmt.write_colored("  \u{26A0} ", warning_color)?;
             if matches!(cmd, CloudTeamAutoCommands::On) {
                 fmt.write_raw(
-                    "No effective team resolved. Set a user default with `cas cloud team default <slug>` or refresh memberships with `cas cloud login`.",
+                    "No effective team resolved. Set a user default with `cas cloud team default <slug>` or refresh memberships with `cas login`.",
                 )?;
             } else {
                 fmt.write_raw("Effective scope: personal")?;
@@ -1930,7 +1930,7 @@ fn execute_team_show(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     // that the team is unknown — say so instead of leaving a
                     // bare sentinel the user cannot act on.
                     (None, _) => fmt.write_raw(
-                        "<not resolved — run `cas cloud login` to refresh team memberships>",
+                        "<not resolved — run `cas login` to refresh team memberships>",
                     )?,
                 }
                 fmt.newline()?;
@@ -4421,7 +4421,7 @@ fn execute_sync_with_output(
                         FetchTeamsOutcome::AuthFailed if emit_output => {
                             eprintln!(
                                 "warning: could not refresh team membership (/api/me 401). \
-                                 Token may be expired — run `cas cloud login` to re-authenticate."
+                                 Token may be expired — run `cas login` to re-authenticate."
                             );
                         }
                         FetchTeamsOutcome::AuthFailed => {}
@@ -9148,7 +9148,7 @@ mod team_cmd_tests {
             .to_string();
         assert!(err.contains("missing-team"));
         assert!(err.contains("petra-stella"));
-        assert!(err.contains("cas cloud login"));
+        assert!(err.contains("cas login"));
         assert!(!err.contains("Slug resolution is not yet supported"));
     }
 
@@ -9193,7 +9193,7 @@ mod team_cmd_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("No cached team memberships"));
-        assert!(err.contains("cas cloud login"));
+        assert!(err.contains("cas login"));
     }
 
     #[test]

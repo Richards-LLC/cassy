@@ -275,7 +275,7 @@ verified.
 | `artifact_id_missing` / `artifact_channel_missing` | `id` or `channel` was not given |
 | `artifact_not_found` | no published artifact by that ID in this project or Cloud account |
 | `artifact_not_in_cloud` | the record is not committed to Cloud; publish it again while logged in |
-| `cloud_auth_missing` | not logged in to Cassy Cloud; run `cas cloud login` |
+| `cloud_auth_missing` | not logged in to Cassy Cloud; run `cas login` |
 | `cloud_resolve_failed` / `artifact_store_failed` | Cloud or the local artifact store could not be read |
 | `artifact_size_invalid` | the record's size is outside the publishable range |
 | `artifact_size_mismatch` / `artifact_checksum_mismatch` | the downloaded bytes differ from the record; nothing was posted |

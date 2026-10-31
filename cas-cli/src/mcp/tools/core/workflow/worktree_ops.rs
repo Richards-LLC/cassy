@@ -6178,6 +6178,92 @@ mod tests {
         );
     }
 
+    /// Incident shape: lane-owned embedded skill edits, a target sync whose
+    /// classifier fails before validation, then a successful docs-only repair.
+    #[cfg(unix)]
+    #[test]
+    fn lane_code_classifier_failure_is_unconfirmed_after_docs_fix_cas_4dd2() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, _) = delivery_ci_fixture(false, None);
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(["-c", "user.name=CI fixture", "-c", "user.email=ci@example.test"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let skill = repo.path().join("cas-cli/src/builtins/skills/worker/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        for content in ["worker rules\n", "worker rules with test hygiene\n"] {
+            std::fs::write(&skill, content).unwrap();
+            git(&["add", "cas-cli/src/builtins"]);
+            git(&["commit", "-qm", "lane-owned embedded skill change"]);
+        }
+        git(&["switch", "main"]);
+        std::fs::write(repo.path().join("base.rs"), "// target code advanced\n").unwrap();
+        git(&["add", "base.rs"]);
+        git(&["commit", "-qm", "advance target"]);
+        git(&["switch", "factory/ci-fixture"]);
+        git(&["merge", "--no-ff", "main", "-m", "sync target"]);
+        let sync_tip = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("README.md"), "repair announcement lint\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-qm", "docs repair"]);
+        let docs_tip = git(&["rev-parse", "HEAD"]);
+        let classifier_url = "https://github.com/acme/cas/actions/runs/100/job/1";
+        let fake_gh = repo.path().join("gh-fixture");
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        for (classifier, validation, expected) in [
+            ("failure", "skipped", "unconfirmed"),
+            ("skipped", "skipped", "unconfirmed"),
+            ("failure", "failure", "red"),
+            ("failure", "in_progress", "pending"),
+            ("failure", "success", "red"),
+        ] {
+            let code_response = serde_json::json!({"check_runs": [
+                {"name": "Classify CI diff", "status": "completed", "conclusion": classifier,
+                 "html_url": classifier_url},
+                {"name": "Scoped Validation (factory/PR)",
+                 "status": if validation == "in_progress" { "in_progress" } else { "completed" },
+                 "conclusion": if validation == "in_progress" { None } else { Some(validation) }},
+                {"name": "Scoped Validation (fast)", "status": "completed", "conclusion": "skipped"},
+                {"name": "Full lane", "status": "completed", "conclusion": "skipped"},
+                {"name": "Docs Lint", "status": "completed", "conclusion": "skipped"}
+            ]}).to_string();
+            let docs_response = serde_json::json!({"check_runs": [
+                {"name": "Classify CI diff", "status": "completed", "conclusion": "success"},
+                {"name": "Docs Lint", "status": "completed", "conclusion": "success"},
+                {"name": "Scoped Validation (factory/PR)", "status": "completed", "conclusion": "skipped"}
+            ]}).to_string();
+            crate::test_paths::warm_stub(&fake_gh, &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{docs_tip}/check-runs) printf '%s\\n' '{docs_response}' ;;\n*/{sync_tip}/check-runs) printf '%s\\n' '{code_response}' ;;\n*) exit 97 ;;\nesac\n"
+            ));
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            match expected {
+                "unconfirmed" => {
+                    assert!(matches!(&state, BranchCiState::UnvalidatedCode { sha, .. } if sha == &sync_tip), "{state:?}");
+                    let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+                    let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+                    let note = ci_override_note("supervisor", "factory/ci-fixture", &state, "local code validation reviewed");
+                    for text in [&receipt, &refusal, &note] {
+                        assert!(text.contains("lane code never ran code CI"), "{text}");
+                        assert!(text.contains(classifier_url), "{text}");
+                        assert!(!text.contains("CI RED") && !text.contains("red lane CI"), "{text}");
+                    }
+                    assert!(receipt.contains("unconfirmed"), "{receipt}");
+                    assert!(refusal.starts_with("CODE CI REQUIRED"), "{refusal}");
+                    assert_eq!(admit_branch_ci(&state, true, Some("local code validation reviewed")), Ok(true));
+                }
+                "pending" => {
+                    let refusal = admit_branch_ci(&state, true, Some("ship it")).unwrap_err();
+                    assert!(refusal.starts_with("CI PENDING"), "{refusal}");
+                }
+                _ => assert!(matches!(state, BranchCiState::Red { .. }), "{state:?}"),
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn docs_tip_cannot_mask_red_or_pending_delivery_code_cas_a9bd() {

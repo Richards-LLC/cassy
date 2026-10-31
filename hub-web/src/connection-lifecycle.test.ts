@@ -874,16 +874,21 @@ describe("Commander live connection lifecycle", () => {
   it("aborts the old live transport and stops its heartbeats when replacing it", async () => {
     const hub = transport();
     const prior = await storedMachine("old");
-    const old = supervisor(prior);
+    const oldCatalog = vi.fn();
+    const old = supervisor(prior, () => {}, () => {}, oldCatalog);
     const connections = new Map([[prior.id, old]]);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     old.start();
     await waitFor(() => expect(old.snapshot().phase).toBe("live"));
-    const installed = replaceMachineConnection(await storedMachine("replacement"), connections, new Map(), (machine) => supervisor(machine));
+    await waitFor(() => expect(oldCatalog).toHaveBeenCalledOnce());
+    const replacementCatalog = vi.fn();
+    const installed = replaceMachineConnection(await storedMachine("replacement"), connections, new Map(), (machine) => supervisor(machine, () => {}, () => {}, replacementCatalog));
     await waitFor(() => expect(installed.snapshot().phase).toBe("live"));
     expect(hub.streams[0]!.signal.aborted).toBe(true);
     expect(hub.streams[1]!.signal.aborted).toBe(false);
-    await waitFor(() => expect(hub.requests.filter(request => request.path === "/v1/sessions").length).toBeGreaterThan(0));
+    // Live precedes the signed startup catalog read. Await this supervisor's
+    // catalog delivery so neither startup read is counted as heartbeat traffic.
+    await waitFor(() => expect(replacementCatalog).toHaveBeenCalledOnce());
     const boundary = hub.requests.length;
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await waitFor(() => expect(installed.snapshot().latencyMs).toBe(24));

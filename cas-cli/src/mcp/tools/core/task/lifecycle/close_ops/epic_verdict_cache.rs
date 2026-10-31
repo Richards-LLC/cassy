@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Bump when the verdict semantics or the key inputs change.
-const CACHE_VERSION: u32 = 9; // GH #1401: accepted reviewed-drop decisions affect content verdicts
+const CACHE_VERSION: u32 = 10; // cas-68d2: net anchor content proves edited in-delivery renames
 /// Bound on stored verdicts; the oldest are evicted first.
 const MAX_ENTRIES: usize = 8192;
 const CACHE_DIR: &str = "cas";

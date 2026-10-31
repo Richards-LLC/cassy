@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander
+
+- **Dismissed sessions stay dismissed** — Dismiss and Clear ended now save the session's identity on its hub, so it stays hidden through live updates, reloads and the operator's other paired browsers. A later session with the same supervisor name still appears.
+
 ## [3.92.0] - 2026-10-31
 
 ### Changed — Team leads with what your team is doing

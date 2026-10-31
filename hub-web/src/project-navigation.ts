@@ -6,14 +6,14 @@ export interface NavigationMachine { id: string; label: string; online?: boolean
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
-interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[] }
+interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[]; dismissEnded?: (row: ConversationRow) => Promise<void> }
 interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
 const projectName = (row: ConversationRow) => rowProjectName(row) || row.supervisor;
 const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.key;
-const endedSessionKey = (row: ConversationRow) => `${row.key}\u0000${row.ended?.at ?? ""}`;
+const endedSessionKey = (row: ConversationRow) => `${row.machineId}\u0000${row.session}\u0000${row.startedAt ?? ""}`;
 
 /**
  * cas-ade2: the register's order is alphabetical and never follows activity,
@@ -65,25 +65,42 @@ export class ProjectNavigation {
   }
 
   private isDismissedEnded(row: ConversationRow): boolean {
-    return row.ended !== undefined && this.dismissedEnded.has(endedSessionKey(row));
+    return row.ended !== undefined && (row.dismissed === true || this.dismissedEnded.has(endedSessionKey(row)));
   }
 
   private dismissEnded(row: ConversationRow): void {
     if (!row.ended) return;
-    this.dismissedEnded.add(endedSessionKey(row));
+    void this.persistDismissal(row);
+  }
+
+  private async persistDismissal(row: ConversationRow): Promise<void> {
+    const key = endedSessionKey(row);
+    if (this.dismissedEnded.has(key)) return;
+    this.dismissedEnded.add(key);
     this.saveDismissedEnded();
     const latest = this.latest;
-    if (latest) this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    if (!latest) return;
+    this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    try {
+      await latest.options.dismissEnded?.(row);
+    } catch {
+      this.dismissedEnded.delete(key);
+      this.saveDismissedEnded();
+      const current = this.latest!;
+      this.render(current.container, current.rows, current.open, current.end, current.options);
+      const error = current.container.ownerDocument.createElement("p");
+      error.setAttribute("role", "alert");
+      error.textContent = `Could not dismiss ${row.supervisor}. Try Dismiss again to save it on your other devices.`;
+      current.container.append(error);
+    }
   }
 
   private clearProjectEnded(project: string): void {
     const latest = this.latest;
     if (!latest) return;
     for (const row of latest.options.allRows ?? latest.rows) {
-      if (row.ended && projectKey(row) === project) this.dismissedEnded.add(endedSessionKey(row));
+      if (row.ended && projectKey(row) === project) void this.persistDismissal(row);
     }
-    this.saveDismissedEnded();
-    this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
     const target = this.cards.get(project)?.toggle ?? latest.container;
     if (!(target instanceof HTMLButtonElement) && !target.hasAttribute("tabindex")) target.tabIndex = -1;
     target.focus({ preventScroll: true });

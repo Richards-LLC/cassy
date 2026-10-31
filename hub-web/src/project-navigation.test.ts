@@ -94,6 +94,21 @@ describe("project-first navigation", () => {
     expect(nav.querySelector(".project-card-toggle")?.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("keeps an ended generation dismissed when its end receipt changes, but shows its replacement", () => {
+    const nav = setup(); const list = new ProjectNavigation();
+    const ended = row("calm-swan-15", { startedAt: 1000, ended: { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
+    list.render(nav, [ended], vi.fn());
+    nav.querySelector<HTMLButtonElement>('[aria-label="Dismiss ended session calm-swan-15"]')!.click();
+    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
+    const updated = { ...ended, ended: { ...ended.ended!, at: "2026-10-31T10:00:01Z" } };
+    list.render(nav, [updated], vi.fn());
+    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
+    new ProjectNavigation().render(nav, [updated], vi.fn());
+    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
+    new ProjectNavigation().render(nav, [{ ...updated, startedAt: 2000 }], vi.fn());
+    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(1);
+  });
+
   it("pins operator decisions and intersects the Needs you and machine filters with the supplied search results", () => {
     const nav = setup(); const list = new ProjectNavigation(); const open = vi.fn();
     const rows = [row("answer-me", { attention: 1 }), row("merge-me", { machineId: "prowl", host: "prowl", needsYou: true }), row("only-unread", { unread: 2 })];

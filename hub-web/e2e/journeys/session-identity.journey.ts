@@ -1,6 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
 import { journeyDay, journeyStamp } from "./clock";
-import { SCOPES, type Machine } from "./hub-double";
+import { HubDouble, SCOPES, type Machine } from "./hub-double";
 
 // cas-55a4: three live gabber-studio sessions on one machine, as the
 // operator's Pixel saw them on 2026-09-30. noble-cheetah-84 wrote to Commander
@@ -324,13 +324,13 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
 
 test("HUB-J14 project navigation spans machines, decisions and device collapse (cas-6024)", journeyPart, async ({ page, journey }) => {
   const machine = atlas();
-  const ended = (name: string, offset: number) => {
+  const endedSession = (name: string, offset: number) => {
     const at = journeyStamp(offset);
-    return { name, supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
+    return { name, started_at: journeyStamp(offset - 60_000), supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
   };
   machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
     name: "golden-jaguar-44", supervisor: "golden-jaguar-44", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
-  }, ended("watchful-heron-16", -3_600_000), ended("solid-parrot-40", -2 * 3_600_000), ended("patient-heron-27", -3 * 3_600_000)];
+  }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000)];
   const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "github.com/acme/studio", project_name: "Studio", harness: "claude", machine_online: true }] };
   const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
     [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
@@ -396,6 +396,35 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(old.locator(".conversation-topline .conversation-action")).toBeHidden();
     await expect(liveSupervisor).toBeVisible();
     expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    // The hub keeps the preference; a fresh browser has no local dismissal keys.
+    await expect.poll(() => hub.machine("atlas").sessions.filter(row => row.dismissed).length).toBe(3);
+    for (let tick = 0; tick < 3; tick++) {
+      for (const row of hub.machine("atlas").sessions) if (row.ended) row.ended.at = journeyStamp(tick * 1000);
+      await hub.announceCatalog("atlas");
+      await expect(old.locator(".conversation-row")).toHaveCount(1);
+    }
+    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 } });
+    try {
+      const desktop = await context.newPage();
+      const otherDevice = new HubDouble(desktop, { machines: [machine, other], paired: ["atlas", "borealis"] });
+      await otherDevice.install();
+      await desktop.goto(page.url());
+      await otherDevice.seedPaired();
+      await desktop.reload();
+      const desktopRows = desktop.locator("#conversation-list .project-card").filter({ hasText: "pulse-card" }).locator(".conversation-row");
+      await expect(desktopRows).toHaveCount(1);
+      await desktop.reload();
+      await expect(desktopRows).toHaveCount(1);
+      // Reusing a supervisor name with a new birth must appear when it ends.
+      const replacement = { ...endedSession("watchful-heron-16", 60_000), started_at: journeyStamp(30_000) };
+      machine.sessions = machine.sessions.map(row => row.name === replacement.name ? replacement : row);
+      await hub.announceCatalog("atlas");
+      await expect(old.locator(".conversation-row")).toHaveCount(2);
+      await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
+      await expect.poll(() => machine.sessions.find(row => row.name === replacement.name)?.dismissed).toBe(true);
+      await desktop.reload();
+      await expect(desktopRows).toHaveCount(1);
+    } finally { await context.close(); }
     await page.reload();
     await expect(old.locator(".conversation-row")).toHaveCount(1);
     await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(0);

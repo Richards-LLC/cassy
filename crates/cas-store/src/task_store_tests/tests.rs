@@ -294,6 +294,7 @@ fn task_note_append_reports_bounded_contention_exhaustion() {
         .unwrap()
         .busy_timeout(Duration::from_millis(20))
         .unwrap();
+    crate::shared_db::set_pooled_write_budget_for_tests(Duration::from_millis(200));
 
     let holder = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
     holder

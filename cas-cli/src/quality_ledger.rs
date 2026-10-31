@@ -539,6 +539,16 @@ mod tests {
         assert_eq!(hand_merges(root), 1);
     }
 
+    /// Real verdicts from one day: 42 errors against 5 rejections. Counting errors
+    /// as failed deliveries would credit the verifier with catches it never made.
+    #[test]
+    fn a_verifier_error_is_not_a_failed_delivery() {
+        use cas_types::VerificationStatus as Status;
+        assert_eq!(verifier_outcome(Status::Rejected), Some(CheckOutcome::Fail));
+        assert_eq!(verifier_outcome(Status::Error), Some(CheckOutcome::Error));
+        assert_eq!(verifier_outcome(Status::Skipped), None);
+    }
+
     /// The 10/31 numbers: 283 injected and none used is noise, not a win.
     #[test]
     fn measured_verdict_needs_a_sample_and_real_use() {

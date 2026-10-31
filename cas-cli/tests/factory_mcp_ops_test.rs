@@ -9002,11 +9002,15 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
         "URGENT: stop and report your current status",
         Some(true),
     );
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let error = env
         .service
         .coordination(Parameters(urgent))
         .await
         .expect_err("the fixture has no live Claude pane to confirm");
+    tokio::time::resume();
     assert!(
         error
             .message
@@ -9134,11 +9138,15 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
     let worker_id = env.register_worker("swift-fox");
 
     let interrupt = coord_msg("interrupt", "swift-fox", "Stop and tell me where cas-12b5 stands", None);
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let error = env
         .service
         .coordination(Parameters(interrupt))
         .await
         .expect_err("the fixture has no live Claude pane to confirm");
+    tokio::time::resume();
     assert!(
         error.message.contains("Could not confirm Claude interrupt delivery"),
         "unexpected interrupt error: {}",
@@ -9232,10 +9240,14 @@ async fn cas_4a8e1_reply_before_the_interrupt_reached_the_worker_keeps_the_halt(
     ]);
     let env = FactoryTestEnv::with_server_supervisor();
     let worker_id = env.register_worker("swift-fox");
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let _ = env
         .service
         .coordination(Parameters(coord_msg("interrupt", "swift-fox", "Stop now", None)))
         .await;
+    tokio::time::resume();
     assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
 
     let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);

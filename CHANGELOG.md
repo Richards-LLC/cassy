@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.92.0] - 2026-10-31
+
 ### Changed — Team leads with what your team is doing
 
 - **The heading states a finding** — Team now opens with a sentence computed from the session, such as "3 working, 1 waiting. 1 needs you.", and says when it is showing the last reported state.

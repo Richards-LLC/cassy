@@ -428,6 +428,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     for (const width of widths) for (const scheme of schemes) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none", reducedMotion: "reduce" });
+      await back();
       expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
       await expect(studio().locator(".project-card-toggle")).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

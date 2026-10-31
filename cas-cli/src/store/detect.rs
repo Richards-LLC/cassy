@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use super::{
     AgentStore, CodeStore, CommitLinkStore, EntityStore, EventStore, FileChangeStore, LoopStore,
-    MarkdownRuleStore, MarkdownStore, PromptQueueStore, PromptStore, RecordingStore, ReminderStore, RuleStore,
+    MarkdownRuleStore, MarkdownStore, PromptQueueStore, PromptStore, ReminderStore, RuleStore,
     SkillStore, SpawnQueueStore, SpecStore, SqliteAgentStore, SqliteCodeStore,
     SqliteCommitLinkStore, SqliteEntityStore, SqliteEventStore, SqliteFileChangeStore,
-    SqliteLoopStore, SqlitePromptQueueStore, SqlitePromptStore, SqliteRecordingStore,
-    SqliteReminderStore, SqliteRuleStore, SqliteSkillStore, SqliteSpawnQueueStore, SqliteSpecStore,
-    SqliteStore, SqliteSupervisorQueueStore, SqliteTaskStore, SqliteVerificationStore,
-    SqliteWorktreeStore, Store, SupervisorQueueStore, TaskStore, VerificationStore, WorktreeStore,
+    SqliteLoopStore, SqlitePromptQueueStore, SqlitePromptStore, SqliteReminderStore,
+    SqliteRuleStore, SqliteSkillStore, SqliteSpawnQueueStore, SqliteSpecStore, SqliteStore,
+    SqliteSupervisorQueueStore, SqliteTaskStore, SqliteVerificationStore, SqliteWorktreeStore,
+    Store, SupervisorQueueStore, TaskStore, VerificationStore, WorktreeStore,
 };
 use crate::cloud::{CloudConfig, SyncQueue};
 use crate::config::Config;
@@ -671,13 +671,6 @@ pub fn open_verification_store(cas_dir: &Path) -> Result<Arc<dyn VerificationSto
 /// Open the worktree store for tracking git worktrees
 pub fn open_worktree_store(cas_dir: &Path) -> Result<Arc<dyn WorktreeStore>> {
     let store = SqliteWorktreeStore::open(cas_dir)?;
-    store.init()?;
-    Ok(Arc::new(store))
-}
-
-/// Open the recording store for terminal recording metadata
-pub fn open_recording_store(cas_dir: &Path) -> Result<Arc<dyn RecordingStore>> {
-    let store = SqliteRecordingStore::open(cas_dir)?;
     store.init()?;
     Ok(Arc::new(store))
 }

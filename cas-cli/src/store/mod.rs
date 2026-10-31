@@ -75,8 +75,6 @@ pub use cas_store::{
     PromptStore,
     // Prompt queue types
     QueuedPrompt,
-    // Recording store for terminal recordings
-    RecordingStore,
     // Reminder store for supervisor reminders
     Reminder,
     ReminderStatus,
@@ -100,7 +98,6 @@ pub use cas_store::{
     SqliteLoopStore,
     SqlitePromptQueueStore,
     SqlitePromptStore,
-    SqliteRecordingStore,
     SqliteReminderStore,
     SqliteRuleStore,
     SqliteSkillStore,
@@ -163,7 +160,7 @@ pub use detect::{
     has_project_cas, init_cas_dir,
     open_agent_store, open_code_store, open_commit_link_store, open_entity_store, open_event_store,
     open_file_change_store, open_loop_store, open_prompt_queue_store, open_prompt_store,
-    open_recording_store, open_reminder_store, open_rule_store, open_rule_store_local,
+open_reminder_store, open_rule_store, open_rule_store_local,
     open_skill_store, open_skill_store_local, open_spawn_queue_store, open_spec_store, open_store,
     open_store_local, open_supervisor_queue_store, open_task_store, open_task_store_local,
     open_verification_store, open_worktree_store,

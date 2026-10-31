@@ -9,11 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
-use crate::recording_store::capture_task_event;
 use crate::{Result, TaskStore};
 use cas_types::{
-    Dependency, DependencyType, Event, EventEntityType, EventType, Priority, RecordingEventType,
-    Scope, Task, TaskDeliverables, TaskRisk, TaskStatus, TaskTerminalOutcome, TaskType,
+    Dependency, DependencyType, Event, EventEntityType, EventType, Priority, Scope, Task, TaskDeliverables, TaskRisk, TaskStatus, TaskTerminalOutcome, TaskType,
 };
 
 /// SQLite DDL for the `tasks` and `dependencies` tables.
@@ -429,43 +427,34 @@ impl SqliteTaskStore {
             if let Some(prev) = prev_status {
                 let prev_status: TaskStatus = prev.parse().unwrap_or(TaskStatus::Open);
                 if prev_status != task.status {
-                    let (event_type, summary, recording_event_type) = match task.status {
+                    let (event_type, summary) = match task.status {
                         TaskStatus::InProgress => (
                             EventType::TaskStarted,
                             format!("Task started: {}", task.title),
-                            RecordingEventType::TaskStarted,
                         ),
                         TaskStatus::Closed => (
                             EventType::TaskCompleted,
                             format!("Task completed: {}", task.title),
-                            RecordingEventType::TaskCompleted,
                         ),
                         TaskStatus::Cancelled => (
                             EventType::TaskBlocked,
                             format!("Task cancelled without delivery: {}", task.title),
-                            RecordingEventType::TaskBlocked,
                         ),
                         TaskStatus::Blocked => (
                             EventType::TaskBlocked,
                             format!("Task blocked: {}", task.title),
-                            RecordingEventType::TaskBlocked,
                         ),
                         TaskStatus::Open => (
                             EventType::TaskCreated,
                             format!("Task reopened: {}", task.title),
-                            RecordingEventType::TaskCreated,
                         ),
                         TaskStatus::AwaitingMerge => (
                             EventType::TaskBlocked,
                             format!("Task awaiting merge: {}", task.title),
-                            RecordingEventType::TaskBlocked,
                         ),
                     };
                     let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
                     let _ = record_event_with_conn(&tx, &event);
-
-                    // Capture event for recording playback
-                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
                 }
             }
 
@@ -964,9 +953,6 @@ impl SqliteTaskStore {
         };
         let _ = record_event_with_conn(conn, &event);
 
-        // Capture event for recording playback
-        let _ = capture_task_event(conn, RecordingEventType::TaskCreated, &task.id, None);
-
         Ok(())
     }
 
@@ -1377,9 +1363,6 @@ impl TaskStore for SqliteTaskStore {
                 );
                 let _ = record_event_with_conn(&tx, &event);
             }
-
-            // Capture event for recording playback
-            let _ = capture_task_event(&tx, RecordingEventType::TaskDeleted, id, None);
 
             tx.commit()?;
             Ok(())

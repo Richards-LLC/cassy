@@ -17,7 +17,7 @@ pub const MIGRATION: Migration = Migration {
             metadata TEXT,
             FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
         )"],
-    detect: Some(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='recording_events'",
-    ),
+    // Retired by m289, which drops the recording tables: always detected, so an
+    // upgraded store never recreates it and a fresh store never builds it.
+    detect: Some(super::m289_drop_recording_index::RETIRED_DETECT),
 };

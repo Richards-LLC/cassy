@@ -190,8 +190,6 @@ pub struct DaemonRunResult {
     pub events_pruned: usize,
     /// Lease history entries pruned
     pub lease_history_pruned: usize,
-    /// Recordings pruned (older than retention period)
-    pub recordings_pruned: usize,
     /// Immutable trace archive files evicted to enforce the size cap.
     pub trace_archives_evicted: usize,
     /// Stale agents cleaned (marked dead and leases reclaimed)

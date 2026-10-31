@@ -321,7 +321,9 @@ for (const width of [1280, 390]) {
       let stamp = -3_600_000;
       let last = "";
       await journey.stage("Every tap opens the conversation it pressed, while the list is changing", async () => {
-        for (let tap = 0; tap < 50; tap++) {
+        // Four cycles over the four targets. The cycle fixes which toggle each
+        // target sees, so more cycles only repeat the same press/update pairs.
+        for (let tap = 0; tap < 16; tap++) {
           // soundwave, prowl, soundwave, prowl: 0, 2, 1, 3, …
           const target = tapped[[0, 2, 1, 3][tap % 4]!]!;
           const owner = soundwave.sessions.includes(target) ? soundwave : prowl;

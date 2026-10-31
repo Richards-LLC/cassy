@@ -162,73 +162,78 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         }
         await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/unavailable-${width}-${colorScheme}.png` });
       });
-      await journey.stage("A slow 10 MiB photo shows byte progress, then Saving, then Delivered", async () => {
-        // A real loopback HTTP upload supplies browser byte events. Only storage
-        // and message delivery use the hub double; no progress events are injected.
-        let releaseSaving!: () => void;
-        const saving = new Promise<void>(resolve => { releaseSaving = resolve; });
-        let receivedBytes = 0;
-        const tls = mkdtempSync(join(tmpdir(), "commander-upload-"));
-        execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1", "-keyout", join(tls, "key.pem"), "-out", join(tls, "cert.pem")], { stdio: "ignore" });
-        const server = createServer({ key: readFileSync(join(tls, "key.pem")), cert: readFileSync(join(tls, "cert.pem")) }, async (request, response) => {
-          response.setHeader("access-control-allow-origin", "*");
-          response.setHeader("access-control-allow-headers", "*");
-          if (request.method === "OPTIONS") { response.end(); return; }
-          const chunks: Buffer[] = [];
-          for await (const chunk of request) chunks.push(Buffer.from(chunk));
-          const body = JSON.parse(Buffer.concat(chunks).toString()) as { name: string; data: string };
-          const bytes = Buffer.from(body.data, "base64"); receivedBytes = bytes.length;
-          hub.storeComposerUpload("atlas", PELICAN, "art-slow-photo", "image/png", bytes);
-          await saving;
-          response.setHeader("content-type", "application/json");
-          response.end(JSON.stringify({ artifact_id: "art-slow-photo", path: "/fixture/project/artifacts/art-slow-photo/slow-photo.png", mime: "image/png" }));
+      // The slow 10 MiB walk runs once at each width; the dark-scheme progress
+      // and Saving states are captured by the conversation-upload-progress
+      // Visual QA fixture.
+      if (colorScheme === "light") {
+        await journey.stage("A slow 10 MiB photo shows byte progress, then Saving, then Delivered", async () => {
+          // A real loopback HTTP upload supplies browser byte events. Only storage
+          // and message delivery use the hub double; no progress events are injected.
+          let releaseSaving!: () => void;
+          const saving = new Promise<void>(resolve => { releaseSaving = resolve; });
+          let receivedBytes = 0;
+          const tls = mkdtempSync(join(tmpdir(), "commander-upload-"));
+          execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1", "-keyout", join(tls, "key.pem"), "-out", join(tls, "cert.pem")], { stdio: "ignore" });
+          const server = createServer({ key: readFileSync(join(tls, "key.pem")), cert: readFileSync(join(tls, "cert.pem")) }, async (request, response) => {
+            response.setHeader("access-control-allow-origin", "*");
+            response.setHeader("access-control-allow-headers", "*");
+            if (request.method === "OPTIONS") { response.end(); return; }
+            const chunks: Buffer[] = [];
+            for await (const chunk of request) chunks.push(Buffer.from(chunk));
+            const body = JSON.parse(Buffer.concat(chunks).toString()) as { name: string; data: string };
+            const bytes = Buffer.from(body.data, "base64"); receivedBytes = bytes.length;
+            hub.storeComposerUpload("atlas", PELICAN, "art-slow-photo", "image/png", bytes);
+            await saving;
+            response.setHeader("content-type", "application/json");
+            response.end(JSON.stringify({ artifact_id: "art-slow-photo", path: "/fixture/project/artifacts/art-slow-photo/slow-photo.png", mime: "image/png" }));
+          });
+          server.listen(0, "127.0.0.1"); await once(server, "listening");
+          const port = (server.address() as { port: number }).port;
+          const pattern = "https://*.test/v1/sessions/*/uploads/*";
+          const forward = async (route: import("@playwright/test").Route) => {
+            if (route.request().postDataJSON()?.name !== "slow-photo.png") return route.fallback();
+            return route.continue({ url: `https://127.0.0.1:${port}/upload` });
+          };
+          const cdp = await page.context().newCDPSession(page);
+          try {
+            await page.route(pattern, forward);
+            await cdp.send("Network.enable");
+            // 1 MiB/s keeps the browser walk bounded; the 512 kbit/s + 25%
+            // deadline boundary is covered by the deterministic transport test.
+            await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: 1024 * 1024 });
+            await field.evaluate((element, png) => {
+              const bytes = new Uint8Array(10 * 1024 * 1024);
+              bytes.set(Uint8Array.from(atob(png), c => c.charCodeAt(0)));
+              const image = new DataTransfer();
+              image.items.add(new File([bytes], "slow-photo.png", { type: "image/png" }));
+              element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: image, bubbles: true, cancelable: true }));
+            }, PNG);
+            await expect(page.getByRole("button", { name: "Remove slow-photo.png", exact: true })).toBeVisible();
+            const next = hub.nextSend();
+            await send.click();
+            const progress = page.getByRole("progressbar", { name: "Upload slow-photo.png" });
+            await expect(progress).toBeVisible();
+            await expect.poll(async () => Number(await progress.getAttribute("aria-valuenow"))).toBeGreaterThan(0);
+            expect(Number(await progress.getAttribute("aria-valuenow"))).toBeLessThan(100);
+            await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-progress-${width}-${colorScheme}.png` });
+            await expect(page.locator(".composer-uploads")).toContainText("Saving slow-photo.png", { timeout: 30_000 });
+            expect(receivedBytes).toBe(10 * 1024 * 1024);
+            await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-saving-${width}-${colorScheme}.png` });
+            releaseSaving();
+            expect((await next).text).toContain("art-slow-photo/slow-photo.png");
+            hub.deliverLatest(PELICAN);
+            await expect(page.locator(".composer-uploads")).toBeHidden();
+            await expect(page.getByRole("log").locator(".conversation-turn").filter({ hasText: "slow-photo.png" }).locator(".conversation-delivered")).toHaveText("Delivered");
+            expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+          } finally {
+            releaseSaving();
+            await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(() => {});
+            await cdp.detach().catch(() => {}); await page.unroute(pattern, forward);
+            server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+            rmSync(tls, { recursive: true, force: true });
+          }
         });
-        server.listen(0, "127.0.0.1"); await once(server, "listening");
-        const port = (server.address() as { port: number }).port;
-        const pattern = "https://*.test/v1/sessions/*/uploads/*";
-        const forward = async (route: import("@playwright/test").Route) => {
-          if (route.request().postDataJSON()?.name !== "slow-photo.png") return route.fallback();
-          return route.continue({ url: `https://127.0.0.1:${port}/upload` });
-        };
-        const cdp = await page.context().newCDPSession(page);
-        try {
-          await page.route(pattern, forward);
-          await cdp.send("Network.enable");
-          // 1 MiB/s keeps the browser walk bounded; the 512 kbit/s + 25%
-          // deadline boundary is covered by the deterministic transport test.
-          await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: 1024 * 1024 });
-          await field.evaluate((element, png) => {
-            const bytes = new Uint8Array(10 * 1024 * 1024);
-            bytes.set(Uint8Array.from(atob(png), c => c.charCodeAt(0)));
-            const image = new DataTransfer();
-            image.items.add(new File([bytes], "slow-photo.png", { type: "image/png" }));
-            element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: image, bubbles: true, cancelable: true }));
-          }, PNG);
-          await expect(page.getByRole("button", { name: "Remove slow-photo.png", exact: true })).toBeVisible();
-          const next = hub.nextSend();
-          await send.click();
-          const progress = page.getByRole("progressbar", { name: "Upload slow-photo.png" });
-          await expect(progress).toBeVisible();
-          await expect.poll(async () => Number(await progress.getAttribute("aria-valuenow"))).toBeGreaterThan(0);
-          expect(Number(await progress.getAttribute("aria-valuenow"))).toBeLessThan(100);
-          await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-progress-${width}-${colorScheme}.png` });
-          await expect(page.locator(".composer-uploads")).toContainText("Saving slow-photo.png", { timeout: 30_000 });
-          expect(receivedBytes).toBe(10 * 1024 * 1024);
-          await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-saving-${width}-${colorScheme}.png` });
-          releaseSaving();
-          expect((await next).text).toContain("art-slow-photo/slow-photo.png");
-          hub.deliverLatest(PELICAN);
-          await expect(page.locator(".composer-uploads")).toBeHidden();
-          await expect(page.getByRole("log").locator(".conversation-turn").filter({ hasText: "slow-photo.png" }).locator(".conversation-delivered")).toHaveText("Delivered");
-          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-        } finally {
-          releaseSaving();
-          await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(() => {});
-          await cdp.detach().catch(() => {}); await page.unroute(pattern, forward);
-          server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
-          rmSync(tls, { recursive: true, force: true });
-        }
-      });
+      }
       await journey.stage("A refusal names its file and keeps the hub's reason", async () => {
         const pick = async (files: { name: string; mimeType: string; buffer: Buffer }[]) => {
           const chooser = page.waitForEvent("filechooser");

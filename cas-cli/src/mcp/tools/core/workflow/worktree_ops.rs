@@ -202,21 +202,25 @@ fn delivery_ci_commit(
     let base = ci_git(cwd, &["merge-base", target, &tip], deadline)?;
     let base = String::from_utf8_lossy(&base);
     let range = format!("{}..{tip}", base.trim());
-    let commits = ci_git(cwd, &["rev-list", "--topo-order", &range], deadline)?;
-    for commit in String::from_utf8_lossy(&commits).lines() {
-        let paths = ci_git(
-            cwd,
-            &[
-                "show",
-                "--format=",
-                "--name-only",
-                "--diff-merges=first-parent",
-                "--no-renames",
-                "-z",
-                commit,
-            ],
-            deadline,
-        )?;
+    let commits = ci_git(cwd, &["rev-list", "--topo-order", "--parents", &range], deadline)?;
+    for line in String::from_utf8_lossy(&commits).lines() {
+        let mut fields = line.split_whitespace();
+        let Some(commit) = fields.next() else { continue };
+        let paths = if fields.nth(1).is_some() {
+            // A target-sync merge's first-parent diff includes code already
+            // on the target. Compare with its common target ancestor instead,
+            // keeping actual merge resolutions (including discarded target
+            // edits) in the delivery's code-validation requirement.
+            let base = ci_git(cwd, &["merge-base", target, commit], deadline)?;
+            let base = String::from_utf8_lossy(&base);
+            ci_git(cwd, &["diff", "--name-only", "--no-renames", "-z", base.trim(), commit], deadline)?
+        } else {
+            ci_git(
+                cwd,
+                &["show", "--format=", "--name-only", "--no-renames", "-z", commit],
+                deadline,
+            )?
+        };
         if paths
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
@@ -6157,6 +6161,21 @@ mod tests {
         let requests = std::fs::read_to_string(repo.path().join("fixed-requests.log")).unwrap();
         assert_eq!(requests.lines().count(), 1, "{requests}");
         assert!(requests.contains(&fixed_tip), "{requests}");
+
+        // An ours-strategy merge discards a target code edit. It must still
+        // require code CI even though its first-parent tree is unchanged.
+        git(&["switch", "main"]);
+        std::fs::write(repo.path().join("base.rs"), "// required target fix\n").unwrap();
+        git(&["add", "base.rs"]);
+        git(&["commit", "-qm", "target code fix"]);
+        git(&["switch", "factory/ci-fixture"]);
+        git(&["merge", "--no-ff", "-s", "ours", "main", "-m", "discard target fix"]);
+        let resolution_tip = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            super::delivery_ci_commit("factory/ci-fixture", "main", repo.path()).unwrap(),
+            (resolution_tip.clone(), Some(resolution_tip)),
+            "discarding target code must not be classified as documentation"
+        );
     }
 
     #[cfg(unix)]

@@ -27,6 +27,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Per-turn memory cards retired** — Session starts, prompts and tool responses no longer inject ambient recall cards. Saved session handoffs, explicit memory/search tools and task-create related context remain available.
 
+### Fixed — Factory merge admission
+
+- **Documentation repairs use current CI** — Was: syncing a worker lane with its target could make a later documentation fix inherit the sync commit's old red CI. Now: target code already integrated by that sync is excluded from delivery classification, so the fixed documentation tip's green checks admit the merge while actual code changes still require code CI.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

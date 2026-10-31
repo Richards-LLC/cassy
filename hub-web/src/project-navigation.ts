@@ -138,6 +138,12 @@ export class ProjectNavigation {
 
   render(container: HTMLElement, rows: readonly ConversationRow[], open: Open, end?: End, options: Options = {}): void {
     this.latest = { container, rows, open, end, options };
+    // Carry forward a pre-upgrade dismissal only when its exact receipt matches.
+    // A different birth with the same supervisor must never inherit it.
+    for (const row of options.allRows ?? rows) {
+      const legacy = `${row.key}\u0000${row.ended?.at ?? ""}`;
+      if (row.ended && this.dismissedEnded.delete(legacy)) void this.persistDismissal(row);
+    }
     const document = container.ownerDocument;
     const machines = options.machines ?? [...new Map(rows.map((row) => [row.machineId, { id: row.machineId, label: row.host, online: row.machine_online }])).values()];
     const filters = document.getElementById("conversation-filters");

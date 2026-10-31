@@ -965,7 +965,7 @@ export class HubConnectionSupervisor {
    */
   async dismissEndedSession(session: string, startedAt: string): Promise<void> {
     await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
-    await this.refreshSessions();
+    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
   }
 
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {

@@ -445,8 +445,9 @@ pub(crate) fn epic_tip_ci_proof(sha: &str, cwd: &Path) -> Result<String, String>
 }
 
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
-/// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
-/// the tip for a pure docs delivery. Both lookups are bounded and never poll.
+/// Otherwise query the latest code commit in merge-base..tip, falling back to
+/// the newest run that includes it when it has none of its own, or Docs Lint
+/// at the tip for a pure docs delivery. All lookups are bounded and never poll.
 fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
     cas_store::lane_guard::note_blocking_call(
         cas_store::lane_guard::BlockingKind::Command,
@@ -503,7 +504,14 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                         })
                     })
                     .flatten();
-                settled.unwrap_or_else(|| classify_code_ci_response(branch, &code_sha, output))
+                let own = settled
+                    .unwrap_or_else(|| classify_code_ci_response(branch, &code_sha, output));
+                if matches!(own, BranchCiState::NoChecks { .. }) {
+                    covering_code_ci(branch, &code_sha, &tip, tip_state, cwd, &repo, &binary)
+                        .unwrap_or(own)
+                } else {
+                    own
+                }
             };
             require_code_validation(state)
         }
@@ -513,6 +521,49 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
         repo: Some(repo),
         repository_lookup_attempted: true,
     }
+}
+
+/// Bound on the descendant commits searched for a run covering the code commit.
+const COVERING_CI_MAX_DESCENDANTS: usize = 8;
+
+/// cas-e0509: CI runs on pushed tips only, so a code commit pushed together
+/// with later commits has no runs of its own. The newest run that includes it
+/// decides: the tip's, else the newest earlier-pushed descendant's. `None`
+/// when no run covers the code, which stays advisory.
+fn covering_code_ci(
+    branch: &str,
+    code_sha: &str,
+    tip: &str,
+    tip_state: BranchCiState,
+    cwd: &Path,
+    repo: &str,
+    binary: &Path,
+) -> Option<BranchCiState> {
+    let covers = |state: &BranchCiState| {
+        !matches!(
+            state,
+            BranchCiState::NoChecks { .. }
+                | BranchCiState::GhFailure { .. }
+                | BranchCiState::Unknown { .. }
+                | BranchCiState::MissingCommit { .. }
+        )
+    };
+    if covers(&tip_state) {
+        return Some(tip_state);
+    }
+    let deadline = crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT);
+    let range = format!("{code_sha}..{tip}");
+    let descendants =
+        ci_git(cwd, &["rev-list", "--topo-order", "--ancestry-path", &range], deadline).ok()?;
+    String::from_utf8_lossy(&descendants)
+        .lines()
+        .filter(|commit| *commit != tip)
+        .take(COVERING_CI_MAX_DESCENDANTS)
+        .map(|commit| {
+            let output = fetch_branch_ci(commit, cwd, repo, binary);
+            classify_code_ci_response(branch, commit, output)
+        })
+        .find(|state| covers(state))
 }
 
 /// cas-c59e: the lane's concurrency group cancels a commit's run when a newer push

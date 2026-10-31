@@ -3770,8 +3770,8 @@ fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
         "a current config must not create locks or backups"
     );
     for raw in [
-        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\nnotifications.tasks.endpoint = 'fixture#secret'\n",
-        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\nnotifications = { tasks = { endpoint = 'fixture#secret' } } # keep retired comment\n",
+        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\nnotifications.enabled = false\nnotifications.tasks.endpoint = 'fixture#secret'\n",
+        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\nnotifications = { enabled = false, tasks = { endpoint = 'fixture#secret' } } # keep retired comment\n",
     ] {
         std::fs::write(&path, raw).unwrap();
         let before: crate::config::Config = toml::from_str(raw).unwrap();

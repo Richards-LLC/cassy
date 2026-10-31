@@ -549,6 +549,35 @@ mod tests {
         assert_eq!(verifier_outcome(Status::Skipped), None);
     }
 
+    #[test]
+    fn backfill_does_not_count_dispatch_markers_as_failed_checks() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("ledger-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        let task = cas_types::Task::new("cas-marker".into(), "Pending review".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        // The old producer persisted an Error before any verifier was run.
+        let mut marker = cas_types::Verification::new("ver-marker".into(), task.id.clone());
+        marker.provenance = cas_types::VerificationProvenance::System;
+        marker.status = cas_types::VerificationStatus::Error;
+        marker.summary = "Dispatch requested (vdispatch-marker) — waiting for review".into();
+        cas_store::add_system_verification(&root, &marker).unwrap();
+        let mut error = cas_types::Verification::new("ver-real-error".into(), task.id);
+        error.status = cas_types::VerificationStatus::Error;
+        error.summary = "Verifier tool failed to open the evidence".into();
+        crate::store::open_verification_store(&root).unwrap().add(&error).unwrap();
+
+        backfill(&root, Utc::now() - Duration::minutes(1)).unwrap();
+        let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        let checks: Vec<_> = events.iter().filter_map(|event| match &event.payload {
+            QualityPayload::CheckRun { check_id, outcome, .. } => Some((check_id.as_str(), *outcome)),
+            _ => None,
+        }).collect();
+        assert_eq!(checks, [("task_verifier", CheckOutcome::Error)], "only the real failed check counts");
+    }
+
     /// The 10/31 numbers: 283 injected and none used is noise, not a win.
     #[test]
     fn measured_verdict_needs_a_sample_and_real_use() {

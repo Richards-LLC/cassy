@@ -40,6 +40,16 @@ impl Fixture {
         Self { root, service }
     }
 
+    fn as_agent(&self, agent_id: &str) -> Self {
+        let core = CasCore::with_daemon(self.root.clone(), None, None);
+        core.set_agent_id_for_testing(agent_id.to_string());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        Self { root: self.root.clone(), service }
+    }
+
     async fn verification(&self, value: Value) -> Result<CallToolResult, rmcp::ErrorData> {
         self.service
             .verification(Parameters(serde_json::from_value(value).unwrap()))
@@ -299,9 +309,9 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             }
             child_id
         };
-        fixture.service.inner.set_agent_id_for_testing(caller);
+        let question_caller = fixture.as_agent(&caller);
         let question = "Does the recorded scope split cover the unexercised Accounts row?";
-        text(fixture.verification(json!({
+        text(question_caller.verification(json!({
             "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
             "status":"supervisor_call", "summary":question, "verifier_capability":capability,
         })).await.expect("a scope question is accepted"));
@@ -317,25 +327,25 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
         // A worker cannot turn the question into an approval.
         let worker_id = format!("question-worker-{index}");
         agents.register(&Agent::new(worker_id.clone(), worker_id.clone())).unwrap();
-        fixture.service.inner.set_agent_id_for_testing(worker_id);
-        assert!(fixture.verification(json!({
+        let worker = fixture.as_agent(&worker_id);
+        assert!(worker.verification(json!({
             "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
             "status":"approved", "summary":"unauthorized answer",
         })).await.is_err());
 
-        fixture.service.inner.set_agent_id_for_testing(supervisor_id.into());
+        let supervisor = fixture.as_agent(supervisor_id);
         let answer = json!({
             "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
             "status":"approved", "summary":"Yes. The recorded scope split is accepted; review passes.",
         });
-        text(fixture.verification(answer.clone()).await.expect("supervisor answers the existing dispatch"));
-        text(fixture.verification(answer).await.expect("lost-response retry is idempotent"));
+        text(supervisor.verification(answer.clone()).await.expect("supervisor answers the existing dispatch"));
+        text(supervisor.verification(answer).await.expect("lost-response retry is idempotent"));
         assert_eq!(history.get(&call.id).unwrap().summary, question, "retain the original question");
         let verdict = cas_store::get_verification_for_dispatch(&fixture.root, &dispatch.id).unwrap().unwrap();
         assert_eq!(verdict.status, VerificationStatus::Approved);
         assert!(!open_task_store_local(&fixture.root).unwrap().get(&task_id).unwrap().pending_verification);
         assert_eq!(cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap().state, cas::types::VerificationDispatchState::Resolved);
-        assert!(fixture.verification(json!({
+        assert!(supervisor.verification(json!({
             "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
             "status":"rejected", "summary":"conflicting replay",
         })).await.is_err(), "terminal verdict remains single use");

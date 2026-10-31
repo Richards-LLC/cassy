@@ -670,6 +670,12 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
         .await
         .expect("one supervisor receipt must cover the staging walk");
     assert!(extract_text(recorded).contains("Batch QA receipt"));
+    let ledger = cas_store::quality_events_for_task(&fx.repo.join(".cas"), "cas-bq01").unwrap();
+    assert!(
+        ledger.iter().any(|event| matches!(&event.payload,
+            cas_store::QualityPayload::CheckRun { check_id, .. } if check_id == "qa_batch")),
+        "{ledger:?}"
+    );
     let receipt = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(
         (receipt[0].ledger_author_id.as_deref(), receipt[0].ledger_author_role.as_deref()),

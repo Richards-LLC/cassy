@@ -263,6 +263,7 @@ mod m286_epic_split_releases;
 mod m287_usage_limit_episodes;
 mod m288_worker_task_queues;
 mod m289_drop_recording_index;
+mod m290_quality_events;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -563,6 +564,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m287_usage_limit_episodes::MIGRATION,
     m288_worker_task_queues::MIGRATION,
     m289_drop_recording_index::MIGRATION,
+    m290_quality_events::MIGRATION,
 ];
 
 #[cfg(test)]

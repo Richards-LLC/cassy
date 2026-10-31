@@ -933,7 +933,7 @@ pub struct CloudConfig {
     /// Team memberships for the authenticated user, fetched from `/api/me`
     /// and cached here so the resolution chain (T3) can work offline.
     ///
-    /// Empty by default; populated by T2 (`cas cloud login` + lazy refresh).
+    /// Empty by default; populated by T2 (`cas login` + lazy refresh).
     /// Absent in existing `cloud.json` files → deserialises to empty `Vec`
     /// via `#[serde(default)]`.  Not written to disk when empty via
     /// `skip_serializing_if` so pre-T2 files stay clean.

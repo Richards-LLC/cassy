@@ -774,6 +774,7 @@ impl CasCore {
                 .and_then(|cfg| cfg.active_team_id())
         };
 
+        let handoff_content = handoff_role.as_ref().map(|_| req.content.clone());
         let entry = Entry {
             origin_project: None,
             source_ids: Vec::new(),
@@ -850,6 +851,15 @@ impl CasCore {
         let mut msg = format!("Created entry: {id}");
         if let Some(role) = handoff_role.as_deref() {
             msg.push_str(&format!("\nCurrent {role} handoff for this project."));
+            let verdicts = crate::quality_ledger::handoff_saved(
+                &self.cas_root,
+                &id,
+                handoff_content.as_deref().unwrap_or_default(),
+                self.get_agent_id().ok().as_deref(),
+            );
+            if verdicts > 0 {
+                msg.push_str(&format!("\nRecorded {verdicts} feature_feedback verdict(s)."));
+            }
             if !superseded_ids.is_empty() {
                 msg.push_str(&format!(
                     "\nSuperseded (kept as history): {}",

@@ -1613,4 +1613,14 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     assert_eq!(closed.status, TaskStatus::Closed, "{reviewed}");
     assert!(closed.notes.contains(&replacement) && closed.notes.contains("reviewed delivery content supersession accepted"), "{}", closed.notes);
 
+    // The override is an intervention and the independent verdict is a check.
+    let ledger = cas_store::quality_events_for_task(&cas_dir, TASK).unwrap();
+    let interventions: Vec<_> = ledger.iter().filter_map(|event| match event.payload {
+        cas_store::QualityPayload::Intervention { intervention, .. } => Some(intervention),
+        _ => None,
+    }).collect();
+    assert!(interventions.contains(&cas_store::InterventionKind::OverrideClose), "{ledger:?}");
+    assert!(ledger.iter().any(|event| matches!(&event.payload,
+        cas_store::QualityPayload::CheckRun { check_id, outcome: cas_store::CheckOutcome::Pass, .. } if check_id == "task_verifier")),
+        "{ledger:?}");
 }

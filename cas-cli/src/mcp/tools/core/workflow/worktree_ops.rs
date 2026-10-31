@@ -129,6 +129,24 @@ fn admit_branch_ci(
     Ok(false)
 }
 
+impl BranchCiState {
+    /// The commit this state describes.
+    fn sha(&self) -> &str {
+        match self {
+            Self::Green { sha, .. }
+            | Self::Red { sha, .. }
+            | Self::Pending { sha, .. }
+            | Self::CodePending { sha, .. }
+            | Self::NoChecks { sha, .. }
+            | Self::GhFailure { sha, .. }
+            | Self::Unknown { sha, .. }
+            | Self::UnvalidatedCode { sha, .. }
+            | Self::CodeValidationUnconfirmed { sha, .. }
+            | Self::MissingCommit { sha, .. } => sha,
+        }
+    }
+}
+
 fn ci_override_note(
     supervisor_id: &str,
     branch: &str,
@@ -4930,6 +4948,21 @@ impl CasCore {
             Ok(accepted) => accepted,
             Err(message) => {
                 let refusal_kind = "ci_refused";
+                crate::quality_ledger::check_run(&cas_root, crate::quality_ledger::Check {
+                    natural_key: format!(
+                        "merge_gate|{}|{}|refused",
+                        worktree.branch,
+                        branch_ci_state.sha()
+                    ),
+                    check_id: crate::quality_ledger::MERGE_GATE_CHECK,
+                    stage: cas_store::CheckStage::Lane,
+                    outcome: cas_store::CheckOutcome::Fail,
+                    task_id,
+                    sha: Some(branch_ci_state.sha()),
+                    minutes: None,
+                    link: None,
+                    actor: None,
+                });
                 // cas-d1eb: CI refuses before Git runs. Withdraw the durable
                 // intent, including one stranded by an earlier attempt, while
                 // retaining the approved receipt for a supervisor retry.
@@ -5766,6 +5799,32 @@ impl CasCore {
                     ("cleanup", if do_cleanup { "true" } else { "false" }),
                 ],
             );
+        }
+
+        // Before the close below, which reads this row to tell a tool merge from
+        // a hand merge.
+        if let Some(merge_sha) = merge_commit.as_deref() {
+            crate::quality_ledger::check_run(&self.cas_root, crate::quality_ledger::Check {
+                natural_key: format!("merge_gate|{}|{merge_sha}|merged", worktree.branch),
+                check_id: crate::quality_ledger::MERGE_GATE_CHECK,
+                stage: cas_store::CheckStage::Lane,
+                outcome: cas_store::CheckOutcome::Pass,
+                task_id,
+                sha: Some(merge_sha),
+                minutes: None,
+                link: None,
+                actor: None,
+            });
+            if ci_override {
+                crate::quality_ledger::intervention(
+                    &self.cas_root,
+                    cas_store::InterventionKind::OverrideMerge,
+                    format!("override_merge|{}|{merge_sha}", worktree.branch),
+                    task_id,
+                    None,
+                    reason,
+                );
+            }
         }
 
         // A parked delivery merged and published without a CI override is

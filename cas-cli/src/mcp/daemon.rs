@@ -2415,7 +2415,7 @@ impl EmbeddedDaemon {
             // Get sessions to sync (sessions are stored directly, not queued)
             let sessions = get_sessions_for_sync(&cas_root, syncer.queue());
 
-            syncer.sync_with_sessions(
+            let result = syncer.sync_with_sessions(
                 store.as_ref(),
                 task_store.as_ref(),
                 rule_store.as_ref(),
@@ -2426,7 +2426,13 @@ impl EmbeddedDaemon {
                 file_change_store.as_ref(),
                 commit_link_store.as_ref(),
                 &sessions,
-            )
+            );
+            // Paced inside: at most one bounded round per interval. The ledger
+            // is an enhancement, so its failure never fails entity sync.
+            if let Err(error) = syncer.sync_quality_events(false) {
+                tracing::warn!(target: "cas::sync", %error, "quality events sync failed (non-fatal)");
+            }
+            result
         })
         .await
         .map_err(|e| CasError::Other(format!("Task join error: {e}")))?

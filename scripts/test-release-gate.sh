@@ -222,6 +222,14 @@ class ScriptTier(unittest.TestCase):
         for key in ("CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
                     "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"):
             self.assertNotIn(key, os.environ)
+        if pid_log := os.environ.get("GATE_FIXTURE_ABORT_PIDS"):
+            from pathlib import Path
+            import time
+            ready = Path(pid_log + ".ready")
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "abort fixture Cargo child never became ready")
         self.assertNotEqual(os.environ.get("GATE_FIXTURE_CI_SCRIPT_FAIL"), "1",
                             "seeded script failure before queue admission")
 
@@ -316,7 +324,6 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
-[[ -z "${GATE_FIXTURE_ABORT_PIDS:-}" ]] || printf '%s\n' "$BASHPID" >>"$GATE_FIXTURE_ABORT_PIDS"
 # cas-dcb4: concurrency fixtures time the slow suite boundaries as spans.
 if [[ -n "${GATE_FIXTURE_SPAN_LOG:-}" ]]; then
   span_name=''
@@ -336,7 +343,18 @@ if [[ -n "${GATE_FIXTURE_SPAN_LOG:-}" ]]; then
       # must not see each other's file.
       [[ -z "${GATE_FIXTURE_TMP_PROBE:-}" ]] || printf '%s\n' "$span_name" >"${TMPDIR:-/tmp}/gate-fixture-probe"
       sleep_variable="GATE_FIXTURE_SLEEP_${span_name//-/_}"
-      sleep "${!sleep_variable:-${GATE_FIXTURE_ROW_SLEEP:-0}}"
+      if [[ -n "${GATE_FIXTURE_ABORT_PIDS:-}" ]]; then
+        # Cargo/test children can defer TERM. The gate must await termination
+        # and escalate, rather than only wait for their owning row shell.
+        trap '' TERM
+        sleep "${!sleep_variable:-${GATE_FIXTURE_ROW_SLEEP:-0}}" &
+        sleeper=$!
+        printf '%s\n%s\n' "$BASHPID" "$sleeper" >>"$GATE_FIXTURE_ABORT_PIDS"
+        [[ "$span_name" != release-binary-isa ]] || : >"$GATE_FIXTURE_ABORT_PIDS.ready"
+        wait "$sleeper"
+      else
+        sleep "${!sleep_variable:-${GATE_FIXTURE_ROW_SLEEP:-0}}"
+      fi
       if [[ -n "${GATE_FIXTURE_TMP_PROBE:-}" && "$(cat "${TMPDIR:-/tmp}/gate-fixture-probe")" != "$span_name" ]]; then
         printf 'temp collision: %s found %s\n' "$span_name" "$(cat "${TMPDIR:-/tmp}/gate-fixture-probe")" >&2
         exit 1
@@ -737,6 +755,36 @@ PY_WRITERS
         bad "memory admission overcommitted or stalled: $(cat "$spans"); $output"
     fi
 
+    # A failed ISA row aborts the gate; the smoke that needs its archive
+    # never starts and reports nothing.
+    : >"$spans"
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
+        run_gate "$repo" GATE_FIXTURE_ISA_BUILD_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qE '^RELEASE GATE FAILED: .*release-binary-isa.* \(release binary ISA audit refused before pr-body/pipeline\)$' <<<"$output" \
+        && ! grep -qE '^(PASS|FAIL) operator-launch-smoke' <<<"$output" \
+        && ! grep -q 'operator-launch-smoke' "$spans"; then
+        ok 'a failed release-binary-isa leaves operator-launch-smoke unstarted'
+    else
+        bad "operator-launch-smoke ran without a passing ISA row: $output"
+    fi
+
+    # A failing ordinary row still fails the gate without cancelling others.
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" run_gate "$repo" GATE_FIXTURE_CHECK_FAIL \
+        "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qE '^RELEASE GATE FAILED: workspace-tests$' <<<"$output" \
+        && [[ "$(receipt_rows "$output")" == "$gate_canonical_rows" ]]; then
+        ok 'an ordinary failing row fails the gate after every row reports'
+    else
+        bad "ordinary row failure handling drifted: $output"
+    fi
+}
+# The same abort fixture is selectable alone for repeated lifecycle proof.
+section_cancellation() {
+    local repo logs spans output
+    unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+    repo="$(new_fixture cancellation)"
+    logs="$tmp/cancellation-rows"
+    spans="$tmp/cancellation-spans.log"
     # A failing abort row stops the gate: rows after it are cancelled and
     # report nothing; rows before it still finish; the failure is named.
     : >"$spans"
@@ -779,6 +827,8 @@ while True:
     if not live:
         break
     if time.monotonic() >= deadline:
+        # A red run must clean up only the exact children this fixture owns.
+        subprocess.run(["kill", "-KILL", *live], check=False)
         raise SystemExit(f"cancelled Cargo PIDs still executing after 5s: {live}")
     time.sleep(0.05)
 PY_ABORT_PIDS
@@ -788,29 +838,8 @@ PY_ABORT_PIDS
         bad "cancelled Cargo children survived (recorded PIDs: $(cat "$aborted_pids" 2>/dev/null))"
     fi
 
-    # A failed ISA row aborts the gate; the smoke that needs its archive
-    # never starts and reports nothing.
-    : >"$spans"
-    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
-        run_gate "$repo" GATE_FIXTURE_ISA_BUILD_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
-    if grep -qE '^RELEASE GATE FAILED: .*release-binary-isa.* \(release binary ISA audit refused before pr-body/pipeline\)$' <<<"$output" \
-        && ! grep -qE '^(PASS|FAIL) operator-launch-smoke' <<<"$output" \
-        && ! grep -q 'operator-launch-smoke' "$spans"; then
-        ok 'a failed release-binary-isa leaves operator-launch-smoke unstarted'
-    else
-        bad "operator-launch-smoke ran without a passing ISA row: $output"
-    fi
-
-    # A failing ordinary row still fails the gate without cancelling others.
-    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" run_gate "$repo" GATE_FIXTURE_CHECK_FAIL \
-        "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
-    if grep -qE '^RELEASE GATE FAILED: workspace-tests$' <<<"$output" \
-        && [[ "$(receipt_rows "$output")" == "$gate_canonical_rows" ]]; then
-        ok 'an ordinary failing row fails the gate after every row reports'
-    else
-        bad "ordinary row failure handling drifted: $output"
-    fi
 }
+
 # Replays a real gate's row durations (timing.tsv) through the fixture at
 # 1/<scale> speed and reports the scheduled wall against the longest row:
 #   scripts/test-release-gate.sh --replay-timing <timing.tsv> [scale]
@@ -2556,7 +2585,9 @@ if [[ "${1:-}" == --changelog-only ]]; then
 elif [[ "${1:-}" == --release-binary-isa-only ]]; then
     run_sections section_release_binary_isa
 elif [[ "${1:-}" == --concurrency-only ]]; then
-    run_sections section_concurrency
+    run_sections section_concurrency section_cancellation
+elif [[ "${1:-}" == --cancellation-only ]]; then
+    run_sections section_cancellation
 elif [[ "${1:-}" == --failure-scenarios-only ]]; then
     run_sections section_failure_scenarios
 else
@@ -2569,7 +2600,7 @@ else
         section_row_cache \
         section_assembly_proof \
         section_admission_barriers \
-        section_concurrency
+        section_concurrency section_cancellation
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

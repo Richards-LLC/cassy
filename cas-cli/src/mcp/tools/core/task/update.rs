@@ -2541,6 +2541,17 @@ impl CasCore {
             data: None,
         })?;
 
+        if changes.contains(&"labels") {
+            crate::quality_ledger::bug_labelled(
+                &self.cas_root,
+                &task.id,
+                &task.title,
+                task.task_type,
+                &task.labels,
+                None,
+            );
+        }
+
         if epic_update_supplied {
             match crate::cloud::epic_split::release_obsolete_claims_for_task(
                 &self.cas_root,

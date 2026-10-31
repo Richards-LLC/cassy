@@ -32,6 +32,7 @@ mod known_repos;
 mod peers;
 mod project_overview_cmd;
 pub(crate) mod qa;
+pub(crate) mod ledger;
 pub(crate) mod qa_ledger;
 mod qa_impact;
 mod qa_polish;
@@ -363,6 +364,9 @@ pub enum Commands {
     #[command(name = "release-report", hide = true)]
     ReleaseReport(ReleaseReportArgs),
 
+    /// Friction ledger: interventions, speed, escapes and feature verdicts per release
+    Ledger(ledger::LedgerArgs),
+
     /// Branded deliverables: resolve a project's brand from its DESIGN.md
     #[command(subcommand)]
     Deliverable(deliverable::DeliverableCommands),
@@ -489,6 +493,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Changelog(_)
         | Commands::Release(_)
         | Commands::ReleaseReport(_)
+        | Commands::Ledger(_)
         | Commands::Deliverable(_)
         | Commands::Hook(_)
         | Commands::Factory(_)
@@ -856,6 +861,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Changelog(_) => "changelog".to_string(),
         Commands::Release(_) => "release".to_string(),
         Commands::ReleaseReport(_) => "release-report".to_string(),
+        Commands::Ledger(_) => "ledger".to_string(),
         Commands::Deliverable(_) => "deliverable".to_string(),
         Commands::Mcp(_) => "mcp".to_string(),
         Commands::Queue(_) => "queue".to_string(),
@@ -1004,6 +1010,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
+        Commands::Ledger(args) => ledger::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Deliverable(cmd) => deliverable::execute(cmd, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Queue(cmd) => queue::execute(cmd, cli),

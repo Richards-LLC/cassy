@@ -11,6 +11,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Retired local release train** — Removed the unused release train, its lane checkers and train-only tests. Release lessons now follow `scripts/release.sh`; CI and the factory pre-push gate keep their shared fast-row catalog.
 
+### Added — Friction ledger, phase 1
+
+- **Every check and supervisor rescue is measured** — Was: Interventions, escapes
+  and what each Cassy feature contributed were reconstructed by hand after a
+  session. → Now: Merge gates, queue results, verifier and QA verdicts, journeys,
+  overrides, rebinds, respawns, stall alerts, tagged escapes (`found-in:vX.Y.Z` on
+  a bug), releases and per-feature verdicts land automatically in an append-only
+  `quality_events` table.
+- **`cas ledger report --release vX`** — Was: No release-level view of friction. →
+  Now: One command prints interventions by kind, commit-to-main and
+  main-to-published minutes, escapes, checks and feature verdicts across every
+  synced project. `cas ledger backfill` turns existing history into events.
+- **Supervisors can rate a feature in one line** — Was: "What helped, what was
+  noise" lived in prose. → Now: A handoff line
+  `feature_feedback: <feature> <helped|noise|harmful|unused> [note]` records a
+  verdict next to the measured injected, opened and used counts.
+- **Fleet-wide over Cloud, metrics only** — Was: Each project's numbers stayed on
+  one machine. → Now: Events sync in batches to the team's Cloud route once it is
+  live, limited to metrics, timings, titles and links. Reasons and notes never
+  leave the machine, and until the route is live the client holds its place.
+
 ### Fixed — Store IDs
 
 - **Rapid creates use one collision-resistant generator** — Tasks, skills, specs and indexed code now share the counter mixed into generated IDs. Creates during the same clock tick no longer reuse identical candidates, and occupied fallback IDs are retried. Existing ID prefixes and lengths stay unchanged.
@@ -68,6 +89,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Unused internal code removed** — Was: A second factory session manager, a
   second search scorer and two search metrics stores were compiled into every
   build without being called. → Now: They are removed, with no change in behavior.
+
+### Fixed — Cloud
+
+- **Cloud login instructions** — Was: Missing or expired authentication and team
+  membership errors, plus the Violet contract, suggested an unavailable login
+  subcommand. → Now: Every affected remedy names `cas login`, which opens the
+  existing Cloud authentication flow.
+
+### Fixed — Release gate cancellation
+
+- **Aborted rows finish child cleanup** — Was: The gate could report cancellation while Cargo descendants kept running. → Now: It freezes the row tree, waits for descendants to terminate, and kills children that outlast the graceful shutdown window before releasing row resources.
 
 ## [3.93.0] - 2026-10-31
 

@@ -57,11 +57,27 @@ describe("supervisor slash commands", () => {
     expect(run).toHaveBeenCalledWith("clear", true);
   });
 
-  it("keeps submission separate from execution and escapes native output", () => {
+  it("keeps submission separate from execution and allows only Close for uncertain Usage", async () => {
     const row = commandReceiptNode({ client_ref: "cmd-1", command: "compact", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "<unsafe>", interactive: false });
     expect(row.textContent).toContain("not confirmed");
     expect(row.querySelector("unsafe")).toBeNull();
     expect(row.querySelector("pre")?.textContent).toBe("<unsafe>");
+    const send = vi.fn().mockReturnValue(true);
+    const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+    await session.run("usage", false);
+    const ref = [...session.receipts.keys()][0];
+    const uncertain: CommandReceipt = { client_ref: ref, command: "usage", phase: "unconfirmed", detail: "Outcome unknown", output: "", interactive: false };
+    session.receive(uncertain);
+    const pending: Promise<void>[] = [];
+    const recovery = commandReceiptNode(uncertain, key => { pending.push(session.step(ref, key)); });
+    const close = recovery.querySelector("button");
+    expect(close?.textContent).toBe("Close chooser");
+    expect(recovery.querySelectorAll("button")).toHaveLength(1);
+    close!.click();
+    await Promise.all(pending);
+    expect(send).toHaveBeenLastCalledWith({ SupervisorCommandStep: { client_ref: ref, key: "cancel" } });
+    session.receive({ ...uncertain, phase: "observed" });
+    expect(commandReceiptNode({ ...uncertain, command: "compact" }, () => {}).querySelector("button")).toBeNull();
   });
 });
 

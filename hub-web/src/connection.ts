@@ -963,6 +963,11 @@ export class HubConnectionSupervisor {
    * End a session (cas-55a4): the hub stops its daemon the way `cas kill`
    * does. Needs factory-manage; a refusal throws like any other request.
    */
+  async dismissEndedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
+    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
+  }
+
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
   }

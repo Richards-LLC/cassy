@@ -471,6 +471,7 @@ mod tests {
             liveness: DaemonLiveness::Live,
             dormant: false,
             ended: None,
+            dismissed: false,
             last_activity_at: None,
             last_activity: None,
             started_at: None,

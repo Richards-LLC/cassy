@@ -129,6 +129,12 @@ export class SlashCommands {
   }
 }
 
+/** A timed-out Usage may still cover the native prompt. The daemon rechecks
+ * the view before sending Escape; recovery never resends the command. */
+function canCloseUnconfirmedUsage(receipt: CommandReceipt): boolean {
+  return receipt.command === "usage" && receipt.phase === "unconfirmed";
+}
+
 export function commandReceiptNode(receipt: CommandReceipt, step?: (key: CommandKey) => void): HTMLElement {
   const row = document.createElement("article"); row.className = "supervisor-command-receipt"; row.dataset.phase = receipt.phase;
   const title = document.createElement("strong"); title.textContent = `/${receipt.command}`;
@@ -139,7 +145,7 @@ export function commandReceiptNode(receipt: CommandReceipt, step?: (key: Command
     const output = document.createElement("pre"); output.textContent = receipt.output;
     details.append(summary, output); row.append(details);
   }
-  if (receipt.interactive && step) {
+  if ((receipt.interactive || canCloseUnconfirmedUsage(receipt)) && step) {
     const actions = receipt.command === "model" ? ["previous", "next", "select", "cancel"] as const : ["cancel"] as const;
     for (const key of actions) {
       const button = document.createElement("button"); button.type = "button";
@@ -272,7 +278,8 @@ export class SupervisorCommandSession {
     }
   }
   async step(ref: string, key: CommandKey): Promise<void> {
-    const receipt = this.receipts.get(ref); if (!receipt?.interactive) return;
+    const receipt = this.receipts.get(ref);
+    if (!receipt || (!receipt.interactive && !(canCloseUnconfirmedUsage(receipt) && key === "cancel"))) return;
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
     await this.options.control();
     const changed = this.options.unavailable(); if (changed) throw new Error(changed);

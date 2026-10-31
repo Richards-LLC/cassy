@@ -911,6 +911,8 @@ main {
 .status-chip--stalled,
 .status-chip--budget-stopped,
 .status-chip--parked-for-merge { color: var(--state-warn); background: var(--tint-warn); }
+.status-chip--waiting { color: var(--state-ok); }
+.status-chip--offline { color: var(--state-idle); }
 .status-chip--idle,
 .status-chip--open { color: var(--text-mid); }
 
@@ -3447,6 +3449,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .conversation-avatar.harness-mark { background: var(--bg-panel); color: var(--ink); font-family: var(--font-mono); }
 .supervisor-state { position: absolute; right: 0; bottom: 0; width: var(--space-3); height: var(--space-3); border: var(--state-rule-width) solid var(--bg-raised); border-radius: var(--radius-pill); background: var(--state-idle); }
 .supervisor-state.working { background: var(--state-ok); }
+.supervisor-state.idle { background: var(--bg-raised); outline: var(--state-rule-width) solid var(--state-ok); outline-offset: calc(-2 * var(--state-rule-width)); }
 .supervisor-state.needs-you { background: var(--state-warn); }
 .supervisor-state.offline { background: var(--bg-raised); outline: var(--line-width) solid var(--ink-mid); outline-offset: calc(-1 * var(--line-width)); }
 .conversation-filters { display: flex; flex: none; gap: var(--space-1); padding: 0 var(--space-4) var(--space-2); overflow-x: auto; min-width: 0; }
@@ -3478,8 +3481,16 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media (forced-colors: active) {
   .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }
   .conversation-filter[aria-pressed="true"] { border-color: Highlight; background: Canvas; color: Highlight; }
-  .supervisor-state { border-color: Canvas; background: CanvasText; }
-  .supervisor-state.offline { background: Canvas; outline: var(--line-width) solid CanvasText; }
+  .supervisor-state,
+  .supervisor-state.working,
+  .supervisor-state.needs-you,
+  .conversation-row[aria-current="true"] .supervisor-state { forced-color-adjust: none; border-color: Canvas; background: CanvasText; }
+  .supervisor-state.idle,
+  .conversation-row[aria-current="true"] .supervisor-state.idle { background: Canvas; outline-color: CanvasText; border-radius: 0; }
+  .supervisor-state.offline,
+  .conversation-row[aria-current="true"] .supervisor-state.offline { background: Canvas; outline: var(--line-width) solid CanvasText; }
+  .status-chip--waiting { color: CanvasText; text-decoration: underline; }
+  .status-chip--offline { color: GrayText; }
   .machine-online-dot.online { background: CanvasText; border-color: CanvasText; }
 }
 

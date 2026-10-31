@@ -60,13 +60,14 @@ export function avatarLetters(name: string): string {
  */
 export function providerAvatarMarkup(options: { harness?: string | null; fallback: string; state?: AvatarState; size?: "row" | "lane"; className?: string }): string {
   const harness = isHarness(options.harness) ? options.harness : undefined;
+  const label = options.state ? { working: "Working", idle: "Idle", "needs-you": "Needs you", offline: "Offline" }[options.state] : undefined;
+  const dot = options.state ? `<span class="supervisor-state ${options.state}" role="img" aria-label="${label}" title="${label}"></span>` : "";
   // No harness on a surface with its own avatar class: that avatar, unchanged.
-  if (!harness && options.className) return `<span class="${options.className}" aria-hidden="true">${escapeHtml(options.fallback)}${options.state ? `<span class="supervisor-state ${options.state}" title="${options.state === "needs-you" ? "Needs you" : options.state}" aria-hidden="true"></span>` : ""}</span>`;
+  if (!harness && options.className) return `<span class="${options.className}"><span aria-hidden="true">${escapeHtml(options.fallback)}</span>${dot}</span>`;
   const mark = harness ? MARKS[harness] : undefined;
   const face = mark
     ? `<svg class="provider-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${mark}</svg>`
-    : `<span class="provider-letters">${escapeHtml(harness ? avatarLetters(HARNESS_PROVIDER[harness]) : options.fallback)}</span>`;
-  const dot = options.state ? `<span class="supervisor-state ${options.state}" title="${options.state === "needs-you" ? "Needs you" : options.state}" aria-hidden="true"></span>` : "";
+    : `<span class="provider-letters" aria-hidden="true">${escapeHtml(harness ? avatarLetters(HARNESS_PROVIDER[harness]) : options.fallback)}</span>`;
   const classes = ["provider-avatar", options.size === "lane" ? "provider-avatar--lane" : "", harness ? "harness-mark" : "", options.className ?? ""].filter(Boolean).join(" ");
-  return `<span class="${classes}"${harness ? ` data-harness="${harness}" title="${HARNESS_PROVIDER[harness]}"` : ""} aria-hidden="true">${face}${dot}</span>`;
+  return `<span class="${classes}"${harness ? ` data-harness="${harness}" title="${HARNESS_PROVIDER[harness]}"` : ""}>${face}${dot}</span>`;
 }

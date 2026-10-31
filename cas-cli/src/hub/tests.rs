@@ -5467,6 +5467,55 @@ async fn operations_focus_epic_inverse() {
     assert_eq!(pinned().as_deref(), Some("cas-epa1"));
 }
 
+/// Dismissal belongs to a session birth on the hub, surviving new pairings and restart.
+#[tokio::test]
+async fn ended_dismissal_is_shared_durable_and_generation_bound() {
+    let mut f = ops_fixture([Scope::SessionRead].into_iter().collect());
+    let mut ended = fixture_session("ended-a");
+    ended.started_at = Some("2026-10-31T10:00:00Z".into());
+    ended.ended = Some(crate::ui::factory::SessionEndOutcome {
+        at: "2026-10-31T11:00:00Z".into(), reason: "prompt_input_exit".into(),
+        workers_stopped: vec![], orphans: vec![], unverified: vec![],
+    });
+    let app = |auth: AuthStore, rows: Vec<HubSession>| router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(rows)), Arc::new(PreAuthAuthorizer),
+        MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), f.events.clone()), f.events.clone(),
+    ).with_auth(auth).with_effective_origin("https://controller.example"));
+    f.app = app(f.auth.clone(), vec![ended.clone()]);
+    let body = serde_json::json!({"started_at": ended.started_at});
+    let (status, _) = f.call("POST", "/v1/sessions/ended-a/dismiss", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Reopen the store before pairing the second device: the hub's restart
+    // fence correctly refuses proofs from pre-boot credentials in that second.
+    let reopened = AuthStore::open(&f.hub_root, "machine-test").unwrap();
+    // A different signed-in device, with its own credential, reads the same tombstone.
+    let signing = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let invite = reopened.mint_pairing("https://controller.example", [Scope::SessionRead].into_iter().collect(), chrono::Utc::now()).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invite.token, "machine-test", "https://controller.example", [Scope::SessionRead].into_iter().collect());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = reopened.exchange_pairing(exchange, chrono::Utc::now()).unwrap();
+    f.auth = reopened.clone();
+    f.signing = signing; f.credential = credential.credential;
+    ended.ended.as_mut().unwrap().at = "2026-10-31T11:01:00Z".into();
+    f.app = app(reopened, vec![ended.clone()]);
+    let (status, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows["sessions"][0]["dismissed"], true);
+    assert!(rows["sessions"][0]["ended"].is_object(), "history remains available");
+    // The same codename ending again is a new generation; stale dismissal cannot hide it.
+    ended.started_at = Some("2026-10-31T12:00:00Z".into());
+    f.app = app(f.auth.clone(), vec![ended.clone(), fixture_session("live-a")]);
+    let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(rows["sessions"][0]["dismissed"], false);
+    for (path, body) in [
+        ("/v1/sessions/ended-a/dismiss", body),
+        ("/v1/sessions/live-a/dismiss", serde_json::json!({"started_at": "anything"})),
+    ] {
+        assert_eq!(f.call("POST", path, Some(body)).await.0, StatusCode::CONFLICT);
+    }
+}
+
 /// End session was the one Commander mutation with no audit row (brief O8).
 #[tokio::test]
 async fn end_session_writes_audit_row() {

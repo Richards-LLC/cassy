@@ -6496,16 +6496,24 @@ mod tests {
         let pending = r#"{"check_runs":[{"name":"Classify CI diff","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/cas/actions/runs/7"}]}"#;
         let docs_only = r#"{"check_runs":[{"name":"Classify CI diff","status":"completed","conclusion":"success"},{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
         let none = r#"{"check_runs":[]}"#;
+        // A failed tip lookup must not hide an earlier covering run either.
+        let outage = "outage";
         let fake_gh = repo.path().join("gh-fixture");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
         for (tip_runs, mid_runs, expected) in [
             (pending, none, "CI PENDING"),
             (docs_only, none, "CODE CI REQUIRED"),
             (none, pending, "CI PENDING"),
+            (outage, pending, "CI PENDING"),
             (none, none, "advisory"),
         ] {
+            let tip_arm = if tip_runs == outage {
+                "echo 'HTTP 502: Bad Gateway' >&2; exit 1".to_string()
+            } else {
+                format!("printf '%s\\n' '{tip_runs}'")
+            };
             crate::test_paths::warm_stub(&fake_gh, &format!(
-                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) printf '%s\\n' '{tip_runs}' ;;\n*/{mid}/check-runs) printf '%s\\n' '{mid_runs}' ;;\n*) printf '%s\\n' '{none}' ;;\nesac\n"
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) {tip_arm} ;;\n*/{mid}/check-runs) printf '%s\\n' '{mid_runs}' ;;\n*) printf '%s\\n' '{none}' ;;\nesac\n"
             ));
             let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
             match admit_branch_ci(&state, false, None) {

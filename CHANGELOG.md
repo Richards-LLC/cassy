@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.93.0] - 2026-10-31
+
 ### Fixed — Factory recovery
 
 - **Replacement workers can deliver inherited tasks** — After a stale worker is released and its task is assigned to a replacement, a supervisor can approve the replacement's clean delivery branch with `rebind_branch`. The prior owner and branch remain in the audit, and the new recorded source can be parked, merged and closed through the normal gates.

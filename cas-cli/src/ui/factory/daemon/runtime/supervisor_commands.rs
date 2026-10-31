@@ -732,6 +732,14 @@ mod tests {
         quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "usage-capture".into(), owner.clone()).await.unwrap();
+        // A real view can only open after the paced command submit reaches
+        // the harness. Do not race that submit with this fixture's Escape.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while daemon.app.mux.pane_inject_busy(&name)
+                || !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
         // The original 90-second outcome expired before the Usage view arrived.
         daemon.supervisor_commands.records.get_mut(&("device-a".into(), "usage-capture".into())).unwrap().started -= Duration::from_secs(91);
         let expired = daemon.dispatch_supervisor_command(Request::Status, "usage-capture".into(), owner.clone()).await.unwrap();

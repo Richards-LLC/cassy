@@ -3601,7 +3601,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     // not committed anything a supervisor may leave alone: it must not answer
     // COMMITTED, and keeps its NOT PUSHED next step.
     let rejected = runtime
-        .block_on(service.coordination_with_budget_for_testing(
+        .block_on(service.factory_with_budget_for_testing(
             req.clone(),
             std::time::Duration::from_secs(50),
             std::time::Duration::ZERO,

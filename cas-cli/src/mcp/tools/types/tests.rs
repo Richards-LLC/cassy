@@ -7,7 +7,8 @@ use crate::mcp::tools::types::*;
 
 #[test]
 fn test_default_recent() {
-    assert_eq!(default_recent(), 10);
+    let request: RecentRequest = serde_json::from_str("{}").unwrap();
+    assert_eq!(request.n, 10);
 }
 
 // =========================================================================

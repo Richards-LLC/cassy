@@ -815,12 +815,135 @@ mod tests {
             assert!(TERMINAL_RUN_STATES.contains(&state));
         }
         assert!(!TERMINAL_RUN_STATES.contains(&"running"));
-        assert_eq!(VIKTOR_WATCH_MAX_CALLS_PER_TICK, 32);
-        assert_eq!(VIKTOR_WATCH_TICK_BUDGET_SECS, 20);
-        assert_eq!(VIKTOR_INBOUND_DISCOVERY_SCAN_THREADS, 32);
-        assert_eq!(VIKTOR_INBOUND_DISCOVERY_MAX_THREADS, 4);
-        assert_eq!(VIKTOR_INBOUND_DISCOVERY_MAX_CALLS, 5);
-        assert_eq!(VIKTOR_INBOUND_DISCOVERY_BUDGET_SECS, 4);
+    }
+
+    #[derive(Default)]
+    struct BudgetProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        blocked: std::sync::atomic::AtomicBool,
+    }
+
+    impl cmcp_core::ProxyCallInterceptor for BudgetProvider {
+        fn prepare<'a>(
+            &'a self,
+            _caller: &'a cmcp_core::ProxyCaller,
+            _server: &'a str,
+            tool: &'a str,
+            arguments: Option<Map<String, Value>>,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<cmcp_core::PreparedProxyCall>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.blocked.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::future::pending::<()>().await;
+                }
+                let payload = match tool {
+                    "get_run" => serde_json::json!({"status": "completed"}),
+                    "get_run_result" => serde_json::json!({"markdown": "completed"}),
+                    "list_threads" => Value::Array(
+                        (0..64)
+                            .map(|i| serde_json::json!({"id": format!("thread-{i}")}))
+                            .collect(),
+                    ),
+                    "list_messages" => serde_json::json!([]),
+                    other => panic!("unexpected budget-test call: {other}"),
+                };
+                Ok(cmcp_core::PreparedProxyCall {
+                    arguments,
+                    response: Some(rmcp::model::CallToolResult::success(vec![
+                        rmcp::model::Content::text(payload.to_string()),
+                    ])),
+                    warning: None,
+                    failure_context: None,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn polling_caps_calls_and_cancels_a_stalled_provider_after_twenty_seconds() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tempfile::tempdir().unwrap();
+        let agents = crate::store::open_agent_store(root.path()).unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "supervisor-session".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let store = SqliteViktorWatchStore::open(root.path()).unwrap();
+        for i in 0..17 {
+            store
+                .record(
+                    &format!("thread-{i}"),
+                    &format!("run-{i}"),
+                    "supervisor-session",
+                    "supervisor",
+                    "supervisor",
+                    None,
+                    None,
+                    None,
+                    cas_store::DEFAULT_VIKTOR_WATCH_TTL_SECS,
+                )
+                .unwrap();
+        }
+        let engine = cmcp_core::ProxyEngine::from_configs(HashMap::new())
+            .await
+            .unwrap();
+        let provider = std::sync::Arc::new(BudgetProvider::default());
+        engine.set_call_interceptor(provider.clone()).await;
+        assert_eq!(poll_due_watches(root.path(), &engine).await.unwrap(), 16);
+        assert_eq!(provider.calls.load(SeqCst), 32);
+        assert_eq!(store.list_live().unwrap().len(), 1);
+
+        provider.blocked.store(true, SeqCst);
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        assert_eq!(poll_due_watches(root.path(), &engine).await.unwrap(), 0);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(20));
+        assert_eq!(
+            provider.calls.load(SeqCst),
+            33,
+            "the blocked call is cancelled without starting another"
+        );
+        assert_eq!(store.list_live().unwrap().len(), 1);
+        tokio::time::resume();
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn discovery_caps_thread_reads_and_cancels_after_four_seconds() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tempfile::tempdir().unwrap();
+        let engine = inbound_fixture_engine(root.path()).await;
+        let provider = std::sync::Arc::new(BudgetProvider::default());
+        engine.set_call_interceptor(provider.clone()).await;
+        assert_eq!(
+            discover_originated_messages(root.path(), &engine)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            provider.calls.load(SeqCst),
+            5,
+            "one list plus four thread reads out of 64 offered"
+        );
+
+        provider.blocked.store(true, SeqCst);
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let error = discover_originated_messages(root.path(), &engine)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("exhausted its 4s wall-clock budget"),
+            "{error}"
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(4));
+        assert_eq!(provider.calls.load(SeqCst), 6);
+        tokio::time::resume();
+        engine.shutdown().await;
     }
 
     #[tokio::test]

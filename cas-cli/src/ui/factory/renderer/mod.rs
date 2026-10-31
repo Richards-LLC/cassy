@@ -81,17 +81,11 @@ mod tests {
 
     #[test]
     fn test_factory_view_mode_toggle() {
-        let mut mode = FactoryViewMode::Panes;
-        mode = match mode {
-            FactoryViewMode::Panes => FactoryViewMode::MissionControl,
-            FactoryViewMode::MissionControl => FactoryViewMode::Panes,
-        };
-        assert_eq!(mode, FactoryViewMode::MissionControl);
-
-        mode = match mode {
-            FactoryViewMode::Panes => FactoryViewMode::MissionControl,
-            FactoryViewMode::MissionControl => FactoryViewMode::Panes,
-        };
-        assert_eq!(mode, FactoryViewMode::Panes);
+        let mut app = crate::ui::factory::app::FactoryApp::for_test();
+        assert_eq!(app.factory_view_mode, FactoryViewMode::Panes);
+        app.toggle_factory_view_mode();
+        assert_eq!(app.factory_view_mode, FactoryViewMode::MissionControl);
+        app.toggle_factory_view_mode();
+        assert_eq!(app.factory_view_mode, FactoryViewMode::Panes);
     }
 }

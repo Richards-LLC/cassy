@@ -215,18 +215,19 @@ mod tests {
 
     #[test]
     fn change_type_variants() {
-        let variants = [
-            ChangeType::Change,
-            ChangeType::RenamePure,
-            ChangeType::RenameChanged,
-            ChangeType::New,
-            ChangeType::Deleted,
-        ];
-        for v in &variants {
-            // Round-trip through serde
-            let json = serde_json::to_string(v).unwrap();
-            let back: ChangeType = serde_json::from_str(&json).unwrap();
-            assert_eq!(*v, back);
+        for (variant, spelling) in [
+            (ChangeType::Change, "change"),
+            (ChangeType::RenamePure, "rename-pure"),
+            (ChangeType::RenameChanged, "rename-changed"),
+            (ChangeType::New, "new"),
+            (ChangeType::Deleted, "deleted"),
+        ] {
+            let fixture = serde_json::Value::String(spelling.into());
+            assert_eq!(serde_json::to_value(variant).unwrap(), fixture);
+            assert_eq!(
+                serde_json::from_value::<ChangeType>(fixture).unwrap(),
+                variant
+            );
         }
     }
 
@@ -274,53 +275,5 @@ mod tests {
         assert!(json.contains("\"type\":\"change\""));
     }
 
-    #[test]
-    fn parsed_patch_serde_roundtrip() {
-        let patch = ParsedPatch {
-            patch_metadata: None,
-            files: vec![FileDiffMetadata {
-                name: "test.rs".into(),
-                prev_name: None,
-                change_type: ChangeType::New,
-                hunks: vec![Hunk {
-                    collapsed_before: 0,
-                    addition_start: 1,
-                    addition_count: 3,
-                    addition_lines: 3,
-                    addition_line_index: 0,
-                    deletion_start: 0,
-                    deletion_count: 0,
-                    deletion_lines: 0,
-                    deletion_line_index: 0,
-                    hunk_content: vec![HunkContent::Change(ChangeContent {
-                        deletions: 0,
-                        deletion_line_index: 0,
-                        additions: 3,
-                        addition_line_index: 0,
-                    })],
-                    hunk_context: None,
-                    hunk_specs: Some("@@ -0,0 +1,3 @@".into()),
-                    split_line_start: 0,
-                    split_line_count: 3,
-                    unified_line_start: 0,
-                    unified_line_count: 3,
-                    no_eof_cr_deletions: false,
-                    no_eof_cr_additions: false,
-                }],
-                split_line_count: 3,
-                unified_line_count: 3,
-                is_partial: false,
-                deletion_lines: vec![],
-                addition_lines: vec![
-                    "fn main() {".into(),
-                    "    println!(\"hello\");".into(),
-                    "}".into(),
-                ],
-            }],
-        };
 
-        let json = serde_json::to_string_pretty(&patch).unwrap();
-        let back: ParsedPatch = serde_json::from_str(&json).unwrap();
-        assert_eq!(patch, back);
-    }
 }

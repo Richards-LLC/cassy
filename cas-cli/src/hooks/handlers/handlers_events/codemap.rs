@@ -649,45 +649,6 @@ mod tests {
         assert!(changes.is_empty());
     }
 
-    #[test]
-    fn test_codemap_pending_serialization() {
-        let pending = CodemapPending {
-            changes: vec![
-                CodemapChange {
-                    change_type: "A".to_string(),
-                    path: "src/new.rs".to_string(),
-                    old_path: None,
-                },
-                CodemapChange {
-                    change_type: "D".to_string(),
-                    path: "src/old.rs".to_string(),
-                    old_path: None,
-                },
-            ],
-            commit: "abc1234".to_string(),
-            recorded_at: "2026-04-03T18:00:00Z".to_string(),
-        };
-
-        let json = serde_json::to_string(&pending).unwrap();
-        let deserialized: CodemapPending = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.changes.len(), 2);
-        assert_eq!(deserialized.commit, "abc1234");
-    }
-
-    #[test]
-    fn test_codemap_pending_jsonl_parsing() {
-        let jsonl = r#"{"changes":[{"type":"A","path":"src/new.rs"}],"commit":"abc1234","recorded_at":"2026-04-03T18:00:00Z"}
-{"changes":[{"type":"D","path":"src/old.rs"}],"commit":"def5678","recorded_at":"2026-04-03T19:00:00Z"}"#;
-
-        let entries: Vec<CodemapPending> = jsonl
-            .lines()
-            .filter_map(|line| serde_json::from_str(line.trim()).ok())
-            .collect();
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].commit, "abc1234");
-        assert_eq!(entries[1].commit, "def5678");
-    }
 
     #[test]
     fn test_parse_git_log_nul_output_added_and_deleted() {

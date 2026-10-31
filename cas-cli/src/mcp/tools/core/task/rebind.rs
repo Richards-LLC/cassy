@@ -292,6 +292,14 @@ impl CasCore {
         tasks
             .update_if_current(&rebound, &expected)
             .map_err(|error| refused(error.to_string()))?;
+        crate::quality_ledger::intervention(
+            &self.cas_root,
+            cas_store::InterventionKind::Rebind,
+            format!("rebind|{id}|{branch}|{tip}"),
+            Some(id),
+            Some(&supervisor.id),
+            Some(reason),
+        );
         Ok(Self::success(format!(
             "Task {id} delivery branch rebound to {branch} at {tip}.\nPrevious branch {} at {} is retained in the audit.\nAssignment, target, leases and normal close gates are unchanged.",
             previous.branch,

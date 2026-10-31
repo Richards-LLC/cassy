@@ -226,6 +226,7 @@ pub(crate) fn cleanup_agent_leases_for_end(
         );
         return Some(Vec::new());
     }
+    crate::quality_ledger::session_ended(cas_root, session_id, Some(&agent.name));
     // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its identity too. Its
     // MCP server outlives the conversation and still caches this row's id;
     // tearing the row down made that server resurrect it as

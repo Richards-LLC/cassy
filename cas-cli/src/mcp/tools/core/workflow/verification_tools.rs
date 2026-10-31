@@ -1060,6 +1060,18 @@ impl CasCore {
             String::new()
         };
 
+        crate::quality_ledger::check_run(&self.cas_root, crate::quality_ledger::Check {
+            natural_key: format!("verifier|{id}"),
+            check_id: "task_verifier",
+            stage: cas_store::CheckStage::Verifier,
+            outcome: crate::quality_ledger::verifier_outcome(verification.status),
+            task_id: Some(&req.task_id),
+            sha: None,
+            minutes: req.duration_ms.map(|ms| ms as f64 / 60_000.0),
+            link: None,
+            actor: Some(&caller_id),
+        });
+
         Ok(Self::success(format!(
             "{} Verification {} for task {} - {}: {}{}",
             status_emoji,

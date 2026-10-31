@@ -11910,6 +11910,14 @@ impl CasCore {
                 ));
             }
 
+            crate::quality_ledger::task_closed(
+                &self.cas_root,
+                &req.id,
+                Some(&actor),
+                req.supervisor_override.unwrap_or(false),
+                req.reason.as_deref(),
+            );
+
             let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
                 &self.cas_root,
                 "task_closed",

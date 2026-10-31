@@ -69,6 +69,7 @@ mod prompt_queue_store;
 mod prompt_store;
 mod qa_batch_store;
 mod qa_pass_store;
+mod quality_event_store;
 mod recording_store;
 mod recording_text_store;
 mod reminder_store;
@@ -179,6 +180,14 @@ pub use qa_pass_store::{
     resolve_qa_pass, satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task, waive_qa_pass,
     withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task, waive_qa_pass_reporting_superseded,
     obsolete_qa_task_passes, qa_task_has_current_round,
+};
+pub use quality_event_store::{
+    CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
+    QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
+    QualityPayload, ensure_quality_event_schema, import_quality_events,
+    normalize_release_version, quality_events_after, quality_events_between,
+    quality_events_for_task, quality_interventions_since, quality_release_events,
+    record_quality_event, sanitize_quality_link, sanitize_quality_title,
 };
 pub use rule_candidate_store::{
     RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,

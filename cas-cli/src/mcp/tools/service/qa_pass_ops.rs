@@ -33,6 +33,19 @@ impl CasService {
         // cas-6048: the peer machine's close gate learns it through task sync.
         crate::qa_pass::sync::record_batch(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;
+        for (task_id, head) in &receipt.task_heads {
+            crate::quality_ledger::check_run(&self.inner.cas_root, crate::quality_ledger::Check {
+                natural_key: format!("qa_batch|{}|{task_id}", receipt.id),
+                check_id: "qa_batch",
+                stage: cas_store::CheckStage::Qa,
+                outcome: cas_store::CheckOutcome::Pass,
+                task_id: Some(task_id),
+                sha: Some(head),
+                minutes: None,
+                link: None,
+                actor: None,
+            });
+        }
         let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={} author={} ({})",
             receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
             receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
@@ -134,6 +147,7 @@ impl CasService {
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
         crate::qa_pass::sync::record(&cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("QA sync receipt failed: {error}")))?;
+        crate::quality_ledger::qa_recorded(&cas_root, &pass, verdict, &ledger_text, &reviewer_id);
         // cas-2ee2: the verdict turns the GitHub required check green or red.
         crate::qa_pass::github_gate::publish_pass_status(&cas_root, &pass);
 

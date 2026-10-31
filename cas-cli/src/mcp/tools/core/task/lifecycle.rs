@@ -2075,6 +2075,14 @@ impl CasCore {
                 receipt
             })
             .unwrap_or_default();
+        crate::quality_ledger::bug_labelled(
+            &self.cas_root,
+            &id,
+            &task.title,
+            task.task_type,
+            &task.labels,
+            None,
+        );
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}{}{}{}{}",
             id,

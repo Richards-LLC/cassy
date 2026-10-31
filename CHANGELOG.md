@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.94.0] - 2026-10-31
+
 ### Fixed — Task close
 
 - **Renumbered migrations close normally** — Was: Adding a migration and then

@@ -722,7 +722,7 @@ mod tests {
         let view = format!("\x1bc{}", captured.replace('\n', "\r\n"));
         daemon.app.mux.get_mut(&name).unwrap().feed(view.as_bytes()).unwrap();
         let observed = daemon.dispatch_supervisor_command(Request::Status, "usage-capture".into(), owner.clone()).await.unwrap();
-        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive), "{observed:?}");
+        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { ref receipt } if receipt.phase == Phase::Observed && receipt.interactive), "{observed:?}");
         // Commander stops polling at Unconfirmed: its recovery Close must work
         // without first receiving the late observation above.
         let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "usage-capture".into())).unwrap();

@@ -897,6 +897,13 @@ impl ProxyEngine {
         self.retry_unhealthy_at(now_ms()).await
     }
 
+    /// [`Self::retry_unhealthy`] with the clock reading `now_ms`, so tests can
+    /// reach a backoff deadline without sleeping until it. Internal; no stable API.
+    #[doc(hidden)]
+    pub async fn retry_unhealthy_at_for_tests(&self, now_ms: u64) -> usize {
+        self.retry_unhealthy_at(now_ms).await
+    }
+
     /// Probe configured upstreams once and return the credential-free health
     /// snapshot. This is used by synchronous diagnostics such as `cas doctor`;
     /// it deliberately does not publish a live proxy cache or retain any

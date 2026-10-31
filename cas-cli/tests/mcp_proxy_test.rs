@@ -1200,12 +1200,14 @@ exec env \
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    tokio::time::sleep(std::time::Duration::from_millis(
-        due.saturating_sub(now).saturating_add(50),
-    ))
-    .await;
+    // The first failure backs off by the production 5 s base; reach that
+    // deadline on the engine's clock instead of sleeping until it.
+    assert!(
+        (3_000..=5_000).contains(&due.saturating_sub(now)),
+        "first retry is due about 5 s out: due={due} now={now}"
+    );
 
-    assert_eq!(engine.retry_unhealthy().await, 1);
+    assert_eq!(engine.retry_unhealthy_at_for_tests(due).await, 1);
     let recovered = engine.health_snapshot().await.servers.remove(0);
     assert_eq!(recovered.state, UpstreamState::Healthy);
     assert_eq!(recovered.consecutive_failures, 0);

@@ -17,7 +17,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 fixture="$tmpdir/fixture"
 mkdir -p "$fixture/assets" "$fixture/repo/scripts"
 # Exercise the real digest and latency producers against a local tag remote.
-for helper in release-published-receipt.sh release-latency-receipt.sh release-portable.sh release-interventions.py release-metrics.py; do
+for helper in release-published-receipt.sh release-latency-receipt.sh release-portable.sh release-interventions.py release-metrics.py release-stage-budgets.json; do
     cp "$script_dir/$helper" "$fixture/repo/scripts/"
 done
 receipt="$fixture/repo/scripts/release-published-receipt.sh"
@@ -150,6 +150,7 @@ for ledger_status in 0 23; do
   assert_no_digest_placeholders "$draft"
   if [[ "$(wc -l <"$FIXTURE_LEDGER_LOG")" -ne 1 ]]; then
     echo 'FAIL published receipt did not invoke release-ledger recording exactly once' >&2
+    cat "$fixture/receipt.err" >&2
     exit 1
   fi
   grep -qFx 'ledger record-release --receipt' "$FIXTURE_LEDGER_LOG"

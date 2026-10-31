@@ -34394,7 +34394,8 @@ esac
     }
 
     /// GH #1404: the worker renames its migration while merging the target,
-    /// so the rename belongs to the delivery anchor itself.
+    /// so the rename belongs to the delivery anchor itself. cas-68d2: its
+    /// migration ID changes too; the final tree, not the old blob, is delivery.
     #[test]
     fn migration_renamed_inside_own_anchor_merge_is_delivered_gh1404() {
         let dir = init_factory_repo("worker");
@@ -34402,7 +34403,8 @@ esac
         let old = "migrations/20261027200000_watched_creators.sql";
         let new = "migrations/20261027210000_watched_creators.sql";
         std::fs::create_dir_all(p.join("migrations")).unwrap();
-        std::fs::write(p.join(old), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        let body = |id| format!("-- migration {id}\nCREATE TABLE watched_creators (\n  id INT PRIMARY KEY,\n  name TEXT NOT NULL\n);\n");
+        std::fs::write(p.join(old), body(289)).unwrap();
         git(p, &["add", "."]);
         git(p, &["commit", "-qm", "cas-test1: add watched creators migration"]);
         git(p, &["checkout", "main"]);
@@ -34412,6 +34414,8 @@ esac
         git(p, &["checkout", "factory/worker"]);
         git(p, &["merge", "--no-ff", "--no-commit", "main"]);
         git(p, &["mv", old, new]);
+        std::fs::write(p.join(new), body(290)).unwrap();
+        git(p, &["add", new]);
         git(p, &["commit", "-qm", "cas-test1: sync target and rename migration"]);
         let anchor = head_sha(p);
         git(p, &["checkout", "main"]);
@@ -34430,7 +34434,7 @@ esac
         let delivered = outcome();
         assert!(
             matches!(delivered, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
-            "the identical migration renamed inside its own anchor must be delivered: {delivered:?}"
+            "the renumbered migration inside its own anchor must be delivered: {delivered:?}"
         );
 
         // Reachability and the old path's absence cannot excuse losing the
@@ -34442,7 +34446,7 @@ esac
             if reason.contains("DELIVERY CONTENT DROPPED")), "{dropped:?}");
         // Matching bytes after lost ownership are still not delivery.
         std::fs::create_dir_all(p.join("migrations")).unwrap();
-        std::fs::write(p.join(new), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        std::fs::write(p.join(new), body(290)).unwrap();
         git(p, &["add", new]);
         git(p, &["commit", "-qm", "unrelated recreation of migration"]);
         let recreated = outcome();

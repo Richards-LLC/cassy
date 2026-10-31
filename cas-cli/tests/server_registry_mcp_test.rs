@@ -1,6 +1,6 @@
 //! End-to-end coverage of the server registry MCP surface (cas-7c93, GH #87).
 //!
-//! Drives real `coordination action=server_*` calls against real processes:
+//! Drives real `factory action=server_*` calls against real processes:
 //! register, query, stop. The point of the issue is a *lifecycle*, so nothing
 //! here mocks the process side.
 

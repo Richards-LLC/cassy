@@ -9,7 +9,7 @@
 //! Merged -> CloseReady -> Delivered even though the merge's first parent was
 //! not the reviewed `target_sha`.
 //!
-//! These regressions drive the real production path (`coordination
+//! These regressions drive the real production path (`factory
 //! action=worktree_merge`) and inject drift deterministically:
 //!
 //!  * before merge  — a plain commit on the target after receipt approval;

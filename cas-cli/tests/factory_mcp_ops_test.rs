@@ -1,6 +1,6 @@
 //! Factory MCP Tool Integration Tests
 //!
-//! Tests the factory MCP tool handlers (`mcp__cas__coordination`) by constructing
+//! Tests the factory and agent MCP tool handlers (`mcp__cas__factory`, `mcp__cas__coordination`) by constructing
 //! a `CasService` with a temp CAS directory and calling `factory()` directly.
 //! Verifies input validation, queue side effects, and response formatting.
 //!
@@ -1503,7 +1503,7 @@ async fn test_focus_epic_clear_removes_pin_and_preserves_session_default() {
 }
 
 #[tokio::test]
-async fn test_coordination_focus_epic_routes_clear_field() {
+async fn test_factory_focus_epic_routes_clear_field() {
     let home = TempDir::new().expect("home tempdir");
     let home_path = home.path().to_str().unwrap();
     let _guard = EnvGuard::set(&[
@@ -1519,7 +1519,7 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     env.service
         .factory(Parameters(pin))
         .await
-        .expect("coordination focus_epic should pin");
+        .expect("factory focus_epic should pin");
     assert_eq!(
         read_session_metadata("session-focus-coordination").pinned_epic_id,
         Some(epic_id)
@@ -1530,7 +1530,7 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     env.service
         .factory(Parameters(clear))
         .await
-        .expect("coordination focus_epic should forward clear=true");
+        .expect("factory focus_epic should forward clear=true");
     let metadata = read_session_metadata("session-focus-coordination");
     assert_eq!(metadata.epic_id, Some("cas-session".to_string()));
     assert_eq!(metadata.pinned_epic_id, None);

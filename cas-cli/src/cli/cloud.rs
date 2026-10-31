@@ -2121,6 +2121,10 @@ fn sync_project_knowledge_with_output(
             0
         }
     };
+    match syncer.sync_quality_events(true) {
+        Ok(summary) => tracing::debug!(?summary, "quality events synced"),
+        Err(e) => tracing::warn!(error = %e, "quality events sync failed (non-fatal)"),
+    }
     let pulled = match syncer.pull_knowledge_pages(&store) {
         Ok(report) => {
             for (rel_path, message) in &report.errors {

@@ -1583,6 +1583,14 @@ post_publication_gh_calls="$tmp/post-publication-gh.calls"
 printf '\nRelease PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 printf '4242\n' >"$post_publication_run/pr-number.txt"
 post_publication_stderr="$tmp/post-publication.stderr"
+post_publication_cas="$tmp/post-publication-cas.sh"
+cat >"$post_publication_cas" <<'EOF_CAS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${POST_PUBLICATION_CAS_CALLS:?}"
+[[ "$1" != ledger ]] || exit 7
+EOF_CAS
+chmod +x "$post_publication_cas"
+export POST_PUBLICATION_CAS_CALLS="$tmp/post-publication-cas.calls"
 if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
     cut_has_external_stage() { return 1; }
@@ -1598,11 +1606,14 @@ if (
     CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES=1 \
     CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD="$post_publication_published" \
     CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD="$post_publication_latency" \
+    CAS_RELEASE_TRAIN_CAS="$post_publication_cas" \
         release_train_post_publication
 ) 2>"$post_publication_stderr" && [[ -s "$post_publication_run/release-workflow.json" ]] \
     && [[ -s "$post_publication_run/release-published.receipt" ]] \
     && [[ -s "$post_publication_run/release-latency.receipt" ]] \
     && grep -q -- '--branch main --event push' "$post_publication_gh_calls" \
+    && grep -qxF "ledger record-release --receipt $post_publication_run/release-latency.receipt" "$POST_PUBLICATION_CAS_CALLS" \
+    && grep -q 'could not record v9.99.8 in the friction ledger' "$post_publication_stderr" \
     && grep -qx 'WITHIN_BUDGET=false' "$post_publication_run/release-latency.receipt" \
     && grep -q '908s; over budget (600s)' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && grep -qx 'Release PR #4242' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \

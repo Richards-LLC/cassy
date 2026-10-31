@@ -3433,6 +3433,12 @@ impl CasService {
             )
         };
 
+        crate::quality_ledger::worker_spawned(
+            &self.inner.cas_root,
+            req.task_id.as_deref(),
+            None,
+        );
+
         Ok(Self::success(msg))
     }
 
@@ -3753,6 +3759,22 @@ impl CasService {
                         .join("\n")
                 ),
             ));
+        }
+
+        // Force was needed and given: that is the intervention, whichever stop
+        // path follows. The respawn it causes is paired at the next spawn.
+        if force {
+            let forced_at = chrono::Utc::now().timestamp();
+            for snapshot in &unsafe_snapshots {
+                crate::quality_ledger::intervention(
+                    &self.inner.cas_root,
+                    cas_store::InterventionKind::ForceShutdown,
+                    format!("force_shutdown|{}|{forced_at}", snapshot.worker_id),
+                    None,
+                    None,
+                    None,
+                );
+            }
         }
 
         // Orphan PTYs cannot be attached to this daemon. Stop only durable,

@@ -14836,6 +14836,20 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
             .factory_request(Parameters(own_spawn))
             .await
             .expect("own spawn is queued");
+        // A forced stop and the replacement that follows are one pair, per caller.
+        let forced = cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::ForceShutdown,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        let respawns = cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::Respawn,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        assert!(!forced.is_empty() && respawns.len() == forced.len(), "{forced:?} {respawns:?}");
         let own_merge = core
             .worktree_merge(
                 &format!("factory/{own}"),

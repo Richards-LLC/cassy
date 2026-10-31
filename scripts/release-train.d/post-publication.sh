@@ -130,6 +130,9 @@ release_train_post_publication() {
         return 1
     fi
     mv "$tmp" "$run_dir/release-latency.receipt"
+    # Friction ledger. The release is already published, so a failure here warns.
+    "${CAS_RELEASE_TRAIN_CAS:-cas}" ledger record-release --receipt "$run_dir/release-latency.receipt" \
+        || printf 'WARN post-publication: could not record %s in the friction ledger\n' "$tag" >&2
     # cas-2bef: a stage over its versioned budget files one P0 task. The
     # release stays published; a filing failure keeps the stage resumable.
     if ! python3 "$script_dir/release-budget-breach.py" "$tag" "$run_dir" \

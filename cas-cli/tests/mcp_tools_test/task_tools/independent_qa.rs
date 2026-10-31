@@ -265,6 +265,20 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
     assert!(result.contains("APPROVAL"), "{result}");
     assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task_id(&cas_dir, &task_id)).unwrap().status,
         TaskStatus::Closed);
+    // The verdict and the journey it exercised are ledger checks; the row it
+    // could not exercise measures nothing.
+    let checks: Vec<_> = cas_store::quality_events_for_task(&cas_dir, &task_id).unwrap().into_iter()
+        .filter_map(|event| match event.payload {
+            cas_store::QualityPayload::CheckRun { check_id, stage, outcome, .. }
+                if matches!(stage, cas_store::CheckStage::Qa | cas_store::CheckStage::Journey) =>
+                Some((check_id, outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checks, [
+        ("qa_pass".to_string(), cas_store::CheckOutcome::Pass),
+        ("journey:REPLY".to_string(), cas_store::CheckOutcome::Pass),
+    ]);
 }
 
 #[tokio::test]

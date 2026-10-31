@@ -873,6 +873,8 @@ expiry received after acceptance releases the recipient's own split claims.
 
 ## Adding Features
 
+**Friction ledger event**: Emit from the code path that observed the fact, through `cas-cli/src/quality_ledger.rs`, after that path has succeeded. Emission fails open and never changes the action it measures. The natural key names the fact, so a retry collapses to one row. Payload fields are metrics, enums and slugs (scope A); free text goes in `local_note`, which has no wire field. An escape is a bug labelled `found-in:vX.Y.Z`, optionally `missed-by:<stage>`.
+
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.
 
 **New MCP tool**: Add handler in `cas-cli/src/mcp/tools/core/` (data tools) or `cas-cli/src/mcp/tools/service/` (orchestration tools). Request types go in `cas-cli/src/mcp/tools/types/`. Register in the tool list via the `CasService` impl.

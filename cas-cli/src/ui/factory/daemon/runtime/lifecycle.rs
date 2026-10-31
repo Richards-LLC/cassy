@@ -309,6 +309,17 @@ fn enqueue_worker_attention_relay_for_episode(
     let subject = task_id
         .map(|task| serde_json::json!([worker, task]).to_string())
         .unwrap_or_else(|| worker.to_string());
+    let episode_key = attention_episode_key(kind, &subject, episode_start);
+    if kind == "worker_stalled" {
+        crate::quality_ledger::intervention(
+            cas_dir,
+            cas_store::InterventionKind::StaleAlert,
+            format!("stale_alert|{episode_key}"),
+            task_id,
+            Some(worker),
+            None,
+        );
+    }
     enqueue_worker_attention_relay_detail(
         cas_dir,
         kind,
@@ -316,7 +327,7 @@ fn enqueue_worker_attention_relay_for_episode(
         task_id,
         elapsed_secs,
         &detail,
-        &attention_episode_key(kind, &subject, episode_start),
+        &episode_key,
     )
 }
 
@@ -629,6 +640,18 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
+    crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
+        natural_key: format!("merge_queue|{task_id}|{pr_number}|{occurrence}"),
+        check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
+        stage: cas_store::CheckStage::Queue,
+        outcome: cas_store::CheckOutcome::Fail,
+        task_id: Some(task_id),
+        sha: None,
+        minutes: None,
+        link: None,
+        actor: None,
+    });
+
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
@@ -818,6 +841,18 @@ fn enqueue_delivery_pr_merged_wake(
 ) -> Result<(), String> {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
     use cas_store::NotificationPriority;
+
+    crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
+        natural_key: format!("merge_queue|{task_id}|{pr_number}|{merge_commit}"),
+        check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
+        stage: cas_store::CheckStage::Queue,
+        outcome: cas_store::CheckOutcome::Pass,
+        task_id: Some(task_id),
+        sha: Some(merge_commit),
+        minutes: None,
+        link: None,
+        actor: None,
+    });
 
     let queue = crate::store::open_prompt_queue_store(cas_dir)
         .map_err(|error| format!("could not open prompt queue: {error}"))?;
@@ -1980,6 +2015,15 @@ mod worker_attention_tests {
                 && row.prompt.contains("limited-codex")
                 && row.prompt.contains("terminal unavailable state")
         }));
+        // Only the escalated stall is an intervention, and replays are one row.
+        let alerts = cas_store::quality_interventions_since(
+            &cas_dir,
+            cas_store::InterventionKind::StaleAlert,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].task_id.as_deref(), Some("cas-d4ae"));
     }
 
     /// cas-2ffe (GH #915): three simultaneous harness exits reach the
@@ -2977,6 +3021,24 @@ mod worker_attention_tests {
                 .matches("merge-queue-ejection occurrence=merge-group-run:32386300052")
                 .count(),
             1
+        );
+        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234").unwrap();
+        // A replayed ejection is one failure; the later merge is the pass.
+        let outcomes: Vec<_> = cas_store::quality_events_for_task(&cas_dir, "cas-fc35")
+            .unwrap()
+            .into_iter()
+            .map(|event| match event.payload {
+                cas_store::QualityPayload::CheckRun {
+                    stage: cas_store::CheckStage::Queue,
+                    outcome,
+                    ..
+                } => outcome,
+                other => panic!("not a queue check: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass]
         );
     }
 

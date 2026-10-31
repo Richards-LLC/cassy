@@ -8454,7 +8454,7 @@ mod tests {
         let reassigned = tasks.get(&task.id).unwrap();
         assert_eq!(reassigned.status, TaskStatus::Open);
         assert!(reassigned.notes.contains("force-released"));
-        assert!(!agents.get_lease(&task.id).unwrap().unwrap().is_valid());
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
         assert_eq!(reassigned.deliverables.factory_branch_start, task.deliverables.factory_branch_start);
         let service = |id: &str| {
             let core = CasCore::with_daemon(root.clone(), None, None);

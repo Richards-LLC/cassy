@@ -572,7 +572,7 @@ mod tests {
             occurred_at: at(2, 7),
             task_id: None,
             release_version: None,
-            actor: None,
+            actor: Some("ending-supervisor".into()),
             title: None,
             link: None,
             payload: QualityPayload::FeatureFeedback {
@@ -585,7 +585,24 @@ mod tests {
             },
             project_id: Some("acme/other".into()),
         };
-        cas_store::import_quality_events(&cas_root, &[other_project], "acme/this").unwrap();
+        // Older backfills emitted lifetime totals dated at the time of backfill.
+        // They remain immutable after sync, and a second day could repeat them.
+        let mut legacy = other_project.clone();
+        legacy.id = "qe-lifetime-day-one".into();
+        legacy.actor = None;
+        legacy.payload = QualityPayload::FeatureFeedback {
+            feature: "ambient_recall".into(),
+            verdict: FeedbackVerdict::Noise,
+            source: FeedbackSource::Measured,
+            injected: Some(39_852),
+            opened: Some(1_095),
+            used: Some(5),
+        };
+        legacy.occurred_at = at(1, 13);
+        let mut repeated = legacy.clone();
+        repeated.id = "qe-lifetime-day-two".into();
+        repeated.occurred_at = at(2, 8);
+        cas_store::import_quality_events(&cas_root, &[other_project, legacy, repeated], "acme/this").unwrap();
 
         let receipt = repo.join("release-latency.receipt");
         std::fs::write(
@@ -603,12 +620,18 @@ mod tests {
         assert_eq!(report.commit_to_main_minutes, Some(0.0));
         assert_eq!(report.projects.len(), 2, "{report:?}");
         assert_eq!(report.escapes.len(), 1, "{report:?}");
+        let feature = &report.features["ambient_recall"];
+        assert_eq!((feature.injected, feature.opened, feature.used), (283, 1, 0));
+        assert_eq!(feature.measured.get("noise"), Some(&1));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["excluded_unscoped_measurements"], 2);
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",
             "Interventions: 1",
             "main to publish 9 min",
             "ambient_recall: measured noise 1 (283 injected, 1 opened, 0 used)",
+            "Excluded 2 unscoped measurement(s); may include lifetime totals.",
         ] {
             assert!(text.contains(expected), "missing {expected}:\n{text}");
         }

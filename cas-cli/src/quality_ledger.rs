@@ -562,6 +562,7 @@ mod tests {
 
     #[test]
     fn backfill_does_not_count_dispatch_markers_as_failed_checks() {
+        use cas_store::{RetrievalHitIdentity, RetrievalStore};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = env.home().join("ledger-project");
         std::fs::create_dir_all(&project).unwrap();
@@ -580,8 +581,20 @@ mod tests {
         error.summary = "Verifier tool failed to open the evidence".into();
         crate::store::open_verification_store(&root).unwrap().add(&error).unwrap();
 
+        // Lifetime retrieval evidence is real, but its time scope cannot be
+        // recovered from the totals. Backfill must not date it as a new sample.
+        let retrieval = cas_store::SqliteRetrievalStore::open(&root).unwrap();
+        retrieval.record_query(
+            "prior-query", "query", "ambient_transition", "current-default-v1",
+            Some("prior-session"),
+            &[RetrievalHitIdentity { result_id: "mem-1".into(), document_type: "entry".into(), rank: 0 }],
+        ).unwrap();
+
         backfill(&root, Utc::now() - Duration::minutes(1)).unwrap();
+        assert_eq!(backfill(&root, Utc::now() - Duration::days(2)).unwrap(), 0);
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        assert!(events.iter().all(|event| !matches!(event.payload, QualityPayload::FeatureFeedback { .. })),
+            "backfill invented a release-window measurement from lifetime evidence: {events:?}");
         let checks: Vec<_> = events.iter().filter_map(|event| match &event.payload {
             QualityPayload::CheckRun { check_id, outcome, .. } => Some((check_id.as_str(), *outcome)),
             _ => None,

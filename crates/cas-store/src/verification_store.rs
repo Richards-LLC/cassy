@@ -3338,7 +3338,7 @@ impl VerificationStore for SqliteVerificationStore {
                     duration_ms, created_at, status_detail
              FROM verifications WHERE (CASE
                  WHEN status = 'error' AND status_detail IN ('pending', 'supervisor_call') THEN status_detail
-                 WHEN status IN ('approved', 'rejected', 'skipped') THEN status
+                 WHEN status IN ('approved', 'rejected', 'skipped', 'pending', 'supervisor_call') THEN status
                  ELSE 'error' END) = ?1
              ORDER BY created_at DESC",
         )?;

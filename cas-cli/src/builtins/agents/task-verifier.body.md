@@ -61,7 +61,7 @@ rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|ex
 
 Back every finding with a command output or an exact line reference.
 
-To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. This command creates its managed task/dispatch checkout, resolves Zig and a private target, and holds a review lease across the existing capped runner. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
+To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
 
 ### Step 6: Impact, wiring and co-changes (blocking when missing)
 
@@ -119,7 +119,7 @@ verification action=add task_id=<id> status=<approved|rejected|error> confidence
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
 - Categories describe the defect, not whether it blocks: `correctness`, `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`, `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`. Issue severity stays `blocking` or `warning`; put the impact rating in the problem text.
 
-Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
+Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, record it with `rule action=observe` as `verifier-evidence-gate.md` describes under Rule candidates. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
 
 ## Epic verification
 

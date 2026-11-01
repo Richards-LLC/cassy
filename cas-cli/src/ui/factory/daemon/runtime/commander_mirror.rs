@@ -796,6 +796,82 @@ mod tests {
     }
 
     #[test]
+    fn claude_consumed_queued_input_binds_the_replacement_answer() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (blocks, target, factory, bound) in [
+            (false, "supervisor", "factory-1", true),
+            (true, "supervisor", "factory-1", true),
+            (false, "another-supervisor", "factory-1", false),
+            (false, "supervisor", "another-factory", false),
+        ] {
+            let (temp, root, queue) = terminal_session(vec![]);
+            let account = temp.path().join("account");
+            env.set("CLAUDE_CONFIG_DIR", &account);
+            let agents = SqliteAgentStore::open(&root).unwrap();
+            let mut supervisor = agents.get("supervisor-id").unwrap();
+            supervisor.cc_session_id = Some("replacement".into());
+            supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
+            agents.update(&supervisor).unwrap();
+            let message = queue.enqueue_operator_message(
+                "commander:Alice@phone", target, "reply after replacement", Some(factory),
+                None, None, false, None,
+                &OperatorStamp {
+                    operator: "Alice".into(), device_id: "phone".into(), device_label: "phone".into(),
+                    scopes: vec!["message:send".into()], verified: true,
+                },
+            ).unwrap();
+            let prompt = format!("<pasted_content id=\"4582\">\n[cas #{} operator Alice@phone verified 2s first]\nreply after replacement\n</pasted_content id=\"4582\">", message.id);
+            let now = Utc::now() + chrono::Duration::seconds(1);
+            let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+            let directory = account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("replacement.jsonl");
+            let values = [
+                serde_json::json!({"timestamp":at(0),"type":"user","uuid":"startup","message":{"content":"[cas #0 agent-authored 0s first] startup context"}}),
+                serde_json::json!({"timestamp":at(1),"type":"queue-operation","operation":"enqueue","content":prompt}),
+                serde_json::json!({"timestamp":at(2),"type":"queue-operation","operation":"dequeue","content":prompt,"commandUuid":"queued","deliveryId":"delivery"}),
+                serde_json::json!({"timestamp":at(3),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Startup ready"}],"stop_reason":"end_turn"}}),
+            ];
+            std::fs::write(&path, values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+                &root, temp.path(), "factory-1", &queue, &agents.list(None).unwrap(), state,
+            );
+            let mut state = MirrorScanState::default();
+            scan(&mut state);
+            assert_eq!(operator_replies(&queue)[0].reply_to, None, "queue bookkeeping must not bind an answer");
+            let prompt = if blocks {
+                serde_json::json!([{"type":"image","source":{}},{"type":"text","text":prompt}])
+            } else {
+                Value::String(prompt)
+            };
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            // Claude persists consumption as an attachment, not a user row.
+            for record in [
+                serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":{"type":"queued_command","prompt":prompt,"source_uuid":"queued","delivery_id":"delivery","origin":{"kind":"human"}}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated","attachment":{"type":"file","prompt":"unrelated file content"}}),
+                serde_json::json!({"timestamp":at(5),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement answer"}],"stop_reason":"end_turn"}}),
+            ] {
+                writeln!(file, "{record}").unwrap();
+            }
+            scan(&mut state);
+            scan(&mut MirrorScanState::default());
+            let replies = operator_replies(&queue);
+            assert_eq!(replies.len(), 2, "one startup status and one replacement answer, including replay");
+            let reply = &replies[1];
+            assert_eq!(reply.message, "Replacement answer");
+            assert_eq!(reply.reply_to, bound.then_some(message.id));
+            assert_eq!(reply.device_id, if bound { "phone" } else { "*" });
+            assert_eq!(reply.kind, if bound {
+                crate::ui::factory::OperatorTurnKind::Answer
+            } else {
+                crate::ui::factory::OperatorTurnKind::Status
+            });
+            assert!(queue.conversation_history("factory-1", "phone", None, 50).unwrap().iter()
+                .all(|row| row.source != "terminal"), "Commander envelopes must not become duplicate terminal sends");
+        }
+    }
+
+    #[test]
     fn mirrored_history_is_idempotent_and_deduplicates_matching_explicit_reply() {
         let temp = tempfile::tempdir().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();

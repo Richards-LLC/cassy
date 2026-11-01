@@ -40,9 +40,8 @@ with `scripts/refresh-worker-build-cache.sh` during a quiet window.
 Step 3. The final assembled-tree gate in cas-src is the merge queue (cas-2970):
    after lane CI and the lane compile, open the epic PR and let the queue run
    the full workspace suite, doctests, archive mode and macOS Check on the exact
-   merged tree. Do not run a local full suite first. When a queue run fails and
-   needs local reproduction, the opt-in diagnostic is
-   `python3 scripts/assembly-proof.py prove <epic-worktree>`, or a direct suite
+   merged tree. Do not run a local full suite first. When a queue run fails, use
+   the queue precheck at the fix tip. When it needs local reproduction, run a direct suite
    (add `cargo test -p cas --doc` when the epic touches doctests):
 
    ```bash

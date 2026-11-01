@@ -33,6 +33,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Commander answers:** reply once in the Claude/Codex pane. Web/phone receive the mirror, including offline catch-up. [Disabled or unmirrored supervisors](references/reference.md#verified-commander-messages) use explicit routing.
 - **Unprompted operator updates:** `target=operator kind=status|receipt|ask|blocker`, optional `attachment=<artifact-id>`; no pane prose.
+- **Pane text:** only for a decision or a result. A turn with neither ends with no text. Workers message only to state a need or ready.
 - **Need a key or token:** `target=operator kind=secret summary=<NAME> message="<what it is for, how to create it>"`; never ask for one in chat. You get the saved file's path ([secret requests](references/reference.md#secret-requests)).
 
 ### Drive to the exit

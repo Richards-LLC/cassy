@@ -19,7 +19,7 @@ incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED: <reason>`.
 `qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 For batch work, capture before/after evidence during implementation. The supervisor
-builds an hourly candidate at the exact epic tip and walks one combined matrix.
+builds one candidate per release at the exact frozen tip and walks one combined matrix.
 Publish the PASS ledger, then record `verification action=batch_receipt` with
 `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author`
 (a non-implementer). Every listed
@@ -134,6 +134,8 @@ For example, cas-1073's `am-deal-to-quote-3` required preserving the chosen
 quote From address after a 409 split-conflict response; resetting it to the
 recommended sender was unmet even though base did the same. Record only
 qualifying pre-existing findings in step 5; do not count them toward the verdict.
+A finding outside the frozen release scope goes in the ledger's next-board list and
+does not fail the round, unless it loses data or hides state.
 
 ## 4. Polish
 
@@ -267,7 +269,9 @@ verification action=qa_record task_id=<delivery> status=approved|rejected \
 ```
 
 A rejection sends the delivery back to its implementer with your ledger. The
-next park opens a new round. Recording the verdict also closes your QA task,
+next park opens a new round. In a release batch round there is no next round: list
+every failing row in one ledger; the supervisor batches the fix and asks for a
+re-walk of those rows only. Recording the verdict also closes your QA task,
 and it cannot be revised. If you change your mind after recording, do not
 record again. Message the supervisor with `blocker=true`, ask for
 `request_changes` on the delivery, and name the finding.

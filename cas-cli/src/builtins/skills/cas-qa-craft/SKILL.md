@@ -51,9 +51,8 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    format](references/evidence-bundle.md#api-surfaces)). Register long-lived servers through
    `cas-servers`; never substitute fixtures.
    For a Cassy source CLI binary, including a fixture revision committed in your own checkout, call
-   `factory action=candidate_request task_id=<your-task> revision=<full-sha>`, then end the turn. The factory
-   daemon messages you the path, version, hash, receipt and log. Later,
-   `cas qa candidate path --task <task-id>` gives the newest build's own path; cite that path and its receipt.
+   `factory action=candidate_request task_id=<your-task> revision=<full-sha>` and end the turn; the daemon messages you
+   the path, version, hash, receipt and log. Cite that path; `cas qa candidate path --task <task-id>` prints the newest.
 5. Capture rendered cells with screenshots, CLI cells with terminal captures, and API cells with
    HTTP transcripts. Choose evidence labels by how the result was obtained using
    the scaffold and [evidence guidance](references/evidence-ledger.md). When

@@ -981,6 +981,7 @@ mod tests {
             crate::test_paths::warm_stub(&binary, &script);
             let error = manager.ensure(4174, 443).unwrap_err().to_string();
             assert!(error.contains("already owned"), "{error}");
+            assert!(error.contains("serve --https=443 off"), "refusal must name port-scoped recovery: {error}");
             assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
         }
     }

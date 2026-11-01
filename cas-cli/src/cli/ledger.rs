@@ -662,5 +662,14 @@ mod tests {
         let unreleased = build_report(&cas_root, repo, None).unwrap();
         assert!(!unreleased.published);
         assert_eq!(unreleased.interventions.get("rebind"), Some(&1), "{unreleased:?}");
+        let mut empty = unreleased;
+        empty.features.clear();
+        for excluded in [0, 2] {
+            empty.excluded_unscoped_measurements = excluded;
+            let text = render(&empty);
+            assert!(text.contains(if excluded == 0 {
+                "Feature feedback\n  none recorded"
+            } else { "none with known scope" }), "{text}");
+        }
     }
 }

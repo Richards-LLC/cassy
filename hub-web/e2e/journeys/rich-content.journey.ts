@@ -159,15 +159,23 @@ for (const [index, variant] of variants.entries()) {
         await source.focus(); await page.keyboard.press("Enter");
         await expect(frame.locator("pre.markdown-code")).toBeVisible();
         await expect(frame.locator(".rich-diagram")).toBeHidden();
-        await page.keyboard.press("Enter");
-        await expect(frame.locator(".rich-diagram")).toBeVisible();
+        // Only the source can overflow, so only the source view offers Expand.
         const expand = frame.getByRole("button", { name: /^(?:Expand|Collapse) mermaid$/ });
         await expand.focus(); await page.keyboard.press("Enter");
         await expect(expand).toHaveAttribute("aria-expanded", "true");
         await page.keyboard.press("Enter");
         await expect(expand).toHaveAttribute("aria-expanded", "false");
+        await frame.getByRole("button", { name: "Show preview from mermaid" }).focus(); await page.keyboard.press("Enter");
+        await expect(frame.locator(".rich-diagram")).toBeVisible();
+        await expect(expand).toBeHidden();
         await expect(log.locator('[data-rich-state="fallback"]')).toHaveText("invalid diagram source");
         expect(richRequests.some((url) => url.includes("chunk-rich-diagram"))).toBe(true);
+        // The reply guidance's own flowchart shows whole, with no action to reach its end.
+        hub.supervisorSays(PELICAN, "```mermaid\nflowchart TD\n  A[Worker parks the task] --> B[Supervisor merges to the epic]\n  B --> C[Merge queue runs the suite]\n  C -->|green| D[main]\n  C -->|red| B\n```");
+        const flow = log.locator(".code-frame").filter({ hasText: "mermaid" }).filter({ has: page.getByText("Merge queue runs the suite") });
+        await expect(flow.locator(".rich-diagram svg")).toBeVisible();
+        expect((await flow.locator(".rich-diagram svg").boundingBox())!.height).toBeGreaterThan(288);
+        expect(await flow.locator(".code-frame-content").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
       });
 
       await journey.stage("Expand a unified diff", async () => {

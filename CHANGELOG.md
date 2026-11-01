@@ -18,6 +18,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander messages
 
+- **Keep messages through Claude setup** — Commander retains the original words while Claude shows onboarding or sign-in pages, then sends them once its text prompt is ready. Setup dialogs no longer consume a send reported as Delivered.
+
 - **Operator messages reach the harness like terminal input** — Verified
   Commander messages enter idle and working supervisors' input directly; fresh
   MCP heartbeats no longer hold them. Recipient reads and acknowledgements

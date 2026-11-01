@@ -7519,6 +7519,26 @@ impl FactoryDaemon {
         }
     }
 
+    /// Claude setup pages produce output for arbitrarily long periods before
+    /// readline exists. A chooser's ❯ is not a text prompt: require the native
+    /// composer between its two horizontal rules. Use the current viewport,
+    /// never scrollback, and keep busy turns eligible when their composer is up.
+    fn commander_native_input_ready(&self, pane_id: &str) -> bool {
+        if self.app.harness_for(pane_id) != cas_mux::SupervisorCli::Claude {
+            return true;
+        }
+        let Some(pane) = self.app.mux.get(pane_id) else { return false };
+        let rows: Vec<_> = (0..pane.rows())
+            .map(|row| pane.dump_row(row).unwrap_or_default())
+            .collect();
+        let Some(input) = rows.iter().rposition(|row| row.trim_start().starts_with('❯')) else {
+            return false;
+        };
+        input > 0 && input + 1 < rows.len()
+            && rows[input - 1].contains("───")
+            && rows[input + 1].trim_start().starts_with("───")
+    }
+
     /// Combine off-loop transcript inputs with the pane's current vetoes.
     fn prepared_pane_wake_state(&self, pane: &str) -> PaneWakeState {
         PaneWakeState {
@@ -10076,6 +10096,22 @@ impl FactoryDaemon {
                 } else {
                     target.as_str()
                 };
+                // Paired human text must wait for Claude's native composer,
+                // including in Teams mode and on the urgent path. Setup must
+                // receive neither the body nor the submit CR. Keep the original
+                // durable row pending without spending transport retries.
+                if wake_sender == WakeSender::Operator
+                    && !self.commander_native_input_ready(pane_target)
+                {
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: Some("Claude is awaiting its input prompt; your message is kept".into()),
+                        },
+                    );
+                    continue;
+                }
                 let pty_delivered = self.teams.is_none()
                     || (target != "all_workers"
                         && (queued.urgent

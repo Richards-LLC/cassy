@@ -6523,7 +6523,8 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert_eq!(rows[0].machine_online, Some(false));
     manager.remove_metadata(&metadata.name).unwrap();
     assert!(manager.list_sessions_read_only().unwrap().is_empty());
-    let rows = super::server::supervisor_sessions(LocalSessionReadModel::default().list_sessions().unwrap(), false);
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert!(super::server::supervisor_sessions(rows.clone(), false).is_empty(), "ended history is readable but never listed in Commander");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].ended, Some(outcome));
     assert_eq!(rows[0].liveness, DaemonLiveness::StaleMetadata);

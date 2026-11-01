@@ -12,3 +12,8 @@ Both launchd and systemd retry a service start that exhausts the bounded
 publication attempts. The failed process record keeps the cause observable
 between restarts. Successful startup clears it. On Linux the service's stderr
 reaches the journal; startup and exit diagnostics also remain in hub.log.
+
+Pending and failed starts retain the last known Serve target when a legacy
+runtime record is the only ownership evidence. A successful publication replaces
+it; the pending record never advertises a ready public endpoint. An unrelated
+mapping still fails the exact ownership comparison and remains untouched.

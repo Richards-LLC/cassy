@@ -1035,7 +1035,7 @@ fn service_start_retries_tailscale_before_publication() {
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    let script = format!("#!/bin/sh\nif [ \"$*\" = 'status --json' ]; then\n count=0\n if [ -f \"$HOME/probes\" ]; then count=$(/bin/cat \"$HOME/probes\"); fi\n count=$((count + 1))\n printf '%s' \"$count\" > \"$HOME/probes\"\n if [ \"$count\" -lt 3 ]; then printf '%s' '{{\"BackendState\":\"Stopped\",\"Self\":{{}}}}'; exit 0; fi\nfi\n{}",
+    let script = format!("#!/bin/sh\nif [ -f \"$HOME/offline\" ]; then echo \"daemon unavailable\" >&2; exit 1; fi\nif [ \"$*\" = 'status --json' ]; then\n count=0\n if [ -f \"$HOME/probes\" ]; then count=$(/bin/cat \"$HOME/probes\"); fi\n count=$((count + 1))\n printf '%s' \"$count\" > \"$HOME/probes\"\n if [ \"$count\" -lt 3 ]; then printf '%s' '{{\"BackendState\":\"Stopped\",\"Self\":{{}}}}'; exit 0; fi\nfi\n{}",
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
     install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
     fs::write(home.path().join("mock-port"), "10047").unwrap();
@@ -1050,12 +1050,26 @@ fn service_start_retries_tailscale_before_publication() {
     })).unwrap();
     paths.write_process_record(&old_record).unwrap();
     fs::write(home.path().join("mock-route"), &old_target).unwrap();
-    let mut child = cas_process_command(home.path(), bin.as_os_str())
+    let launch = || cas_process_command(home.path(), bin.as_os_str())
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve", "--tailscale-serve-port", "10047"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let _cleanup = LegacyHubCleanup(vec![child.id()]);
-    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    // The daemon stays unavailable beyond the first process's whole retry
+    // budget. Only the old process record proves ownership (no Serve receipt).
+    fs::write(home.path().join("offline"), "").unwrap();
+    let mut failed = launch();
+    let mut cleanup = LegacyHubCleanup(vec![failed.id()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while failed.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "offline service must exhaust its retries");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!failed.wait().unwrap().success());
+    cleanup.0.clear();
+    assert_eq!(fs::read_to_string(home.path().join("mock-route")).unwrap(), old_target);
+    fs::remove_file(home.path().join("offline")).unwrap();
+    let mut child = launch();
+    cleanup.0.push(child.id());
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
@@ -1158,7 +1172,10 @@ esac
     let mut replacement = None;
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
-            if record.pid == child.id() && record.tailscale_serve_target.is_some() {
+            if record.pid == child.id() && record.tailscale_serve_target.is_some()
+                && paths.read_lock_owner().is_some_and(|owner|
+                    owner.pid == child.id() && owner.phase == "running")
+            {
                 replacement = record.tailscale_serve_target;
                 break;
             }

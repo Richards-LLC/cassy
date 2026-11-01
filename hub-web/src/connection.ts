@@ -33,7 +33,7 @@ import {
 } from "./connection-state";
 import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
-import { sessionsPath } from "./worker-visibility";
+import { sessionRunning, sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
 import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
@@ -341,6 +341,7 @@ export class HubConnectionSupervisor {
   private readonly eventRecovery = new EventRecovery();
   private readonly diagnostics = new ConnectionDiagnostics();
   private connectionGeneration = 0;
+  private awaitingRecoveryCatalog = false;
   /**
    * The connection was lost (heartbeats failed, the network went offline, a
    * reconnect failed) since it was last live. Sockets from before the loss may
@@ -513,18 +514,18 @@ export class HubConnectionSupervisor {
       this.lastHeartbeatAt = Date.now();
       const recovering = this.connectionLost;
       this.connectionLost = false;
+      this.awaitingRecoveryCatalog ||= recovering;
       this.transition("live", "live");
       // Catalog freshness is independent of authentication and transport.
       this.refreshCatalog();
       this.startHeartbeat();
       // Event-stream loss alone does not condemn terminal transports that
       // still answer. A proved machine outage already abandoned them.
-      if (recovering) this.reattachDesired("Reconnected after the network changed");
-      else this.ensureAttachesPending();
+      if (!this.awaitingRecoveryCatalog) this.ensureAttachesPending();
       // A session can become ready before this event stream. Its earlier
       // flush was fenced while the machine was attaching; wake it now, after
       // missing or stale recovery sockets have been replaced.
-      this.releaseHeldMessages();
+      if (!this.awaitingRecoveryCatalog) this.releaseHeldMessages();
       await this.consumeEvents(response, this.eventAbort!.signal);
       if (this.desired) throw new Error("hub event stream closed");
     } catch (error) {
@@ -726,7 +727,19 @@ export class HubConnectionSupervisor {
     if (!this.catalogRequest) this.catalogRequest = (async () => {
       const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal);
       signal.throwIfAborted();
+      const recovering = this.awaitingRecoveryCatalog;
+      this.awaitingRecoveryCatalog = false;
+      const running = new Set(response.sessions.filter(sessionRunning).map(session => session.name));
+      // Only a successful, authenticated catalog can retire demand. A timeout
+      // or an unreachable machine says nothing about its sessions' processes.
+      for (const name of new Set([...this.desiredSessions, ...this.endedSessions, ...response.sessions.map(session => session.name)])) {
+        this.setSessionEnded(name, !running.has(name));
+      }
       this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
+      if (recovering) {
+        this.reattachDesired("Reconnected after checking running sessions");
+        this.releaseHeldMessages();
+      }
       return response.sessions;
     })().finally(() => { this.catalogRequest = undefined; });
     const request = this.catalogRequest;
@@ -959,15 +972,7 @@ export class HubConnectionSupervisor {
     return this.acquireLease(session, force);
   }
 
-  /**
-   * End a session (cas-55a4): the hub stops its daemon the way `cas kill`
-   * does. Needs factory-manage; a refusal throws like any other request.
-   */
-  async dismissEndedSession(session: string, startedAt: string): Promise<void> {
-    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
-    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
-  }
-
+  /** Stop the daemon through the hub; requires factory-manage. */
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
   }
@@ -1335,7 +1340,7 @@ export class HubConnectionSupervisor {
     else await installationLock(this.machine.id, rotate);
   }
 
-  /** A durable end receipt stops retries; transport closure alone does not. */
+  /** A confirmed stop or catalog removal fences retries; transport closure alone does not. */
   setSessionEnded(session: string, ended: boolean): void {
     if (!ended) {
       if (this.endedSessions.delete(session) && this.endedAttachRequests.delete(session)) {
@@ -1343,6 +1348,7 @@ export class HubConnectionSupervisor {
       }
       return;
     }
+    if (this.endedSessions.has(session)) return;
     this.endedSessions.add(session);
     // A daemon replacement can be preceded by the old daemon's end receipt.
     // Keep the requested stream separate from active demand: ended sessions
@@ -1356,6 +1362,7 @@ export class HubConnectionSupervisor {
     const socket = this.sockets.get(session);
     if (socket) this.retireLegacySocket(socket);
     this.sockets.delete(session);
+    this.transitionAttach(session, "idle", "idle");
   }
 
   async attach(session: string): Promise<void> {
@@ -1380,7 +1387,7 @@ export class HubConnectionSupervisor {
    * flight) is scheduled again rather than left "Reconnecting" for good.
    */
   private ensureAttachesPending(): void {
-    if (!this.desired || this.lifecycle.phase !== "live" || this.machineSocketOpening) return;
+    if (!this.desired || this.awaitingRecoveryCatalog || this.lifecycle.phase !== "live" || this.machineSocketOpening) return;
     for (const session of this.desiredSessions) {
       if (this.servedByMachineSocket(session) || this.attachRetryTimers.has(session) || this.attachesInFlight.has(session)) continue;
       // An unsupported browser needs an upgrade, not another attempt.
@@ -1396,7 +1403,7 @@ export class HubConnectionSupervisor {
     const unsupported = unsupportedBrowserReason();
     if (unsupported) throw new UnsupportedBrowserError(unsupported);
     this.desiredSessions.add(session);
-    if (this.lifecycle.phase !== "live") return;
+    if (this.lifecycle.phase !== "live" || this.awaitingRecoveryCatalog) return;
     if (this.servedByMachineSocket(session)) return;
     const retryTimer = this.attachRetryTimers.get(session);
     if (retryTimer !== undefined) {
@@ -1846,6 +1853,7 @@ export class HubConnectionSupervisor {
    * the wire: a probe waits on a doubted socket, or the machine is unsteady.
    */
   holdsMessages(): boolean {
+    if (this.awaitingRecoveryCatalog) return true;
     return this.probePingId !== undefined || this.unsteady();
   }
 

@@ -19,29 +19,26 @@ describe("worker visibility", () => {
   });
 });
 
-import { retainPendingSessions, visibleCatalog } from './worker-visibility';
+import { visibleCatalog } from './worker-visibility';
 import type { HubSession } from './types';
 
 const liveSession: HubSession = { name: 'live', supervisor: 'supervisor', workers: ['worker'], liveness: 'live' };
 describe('staffed session catalog', () => {
   it('hides dead, worker-only and unreachable rows; keeps live supervisors, with or without workers (cas-7103, cas-645e)', () => {
     const rows = [{ ...liveSession, name: 'ended', ended: { at: '2026-11-01T00:00:00Z', reason: 'exit', workers_stopped: [], orphans: [] } }, liveSession, { ...liveSession, name: 'dead', dormant: true, liveness: 'stale_metadata' as const }, { ...liveSession, name: 'empty', workers: [] }, { ...liveSession, name: 'worker', supervisor: '' }, { ...liveSession, name: 'missing', liveness: 'missing_endpoint' as const }];
-    expect(visibleCatalog(rows, () => false).map(row => row.name)).toEqual(['live', 'empty']);
-    // Recovery lists every supervisor, whatever its state, but never a row
-    // with no supervisor: the list cannot show one (cas-645e QA F02).
-    expect(visibleCatalog(rows, () => false, true, true).map(row => row.name)).toEqual(['live', 'empty']);
+    expect(visibleCatalog(rows).map(row => row.name)).toEqual(['live', 'empty']);
+    // Recovery cannot turn stopped processes into running conversations.
+    expect(visibleCatalog(rows, true, true).map(row => row.name)).toEqual(['live', 'empty']);
   });
   it('does not retain a missing destination just because it has a pending message (cas-f8ab)', () => {
-    const rows = retainPendingSessions([liveSession], [], () => true);
+    const rows = visibleCatalog([{ ...liveSession, liveness: "stale_metadata" }]);
     expect(rows).toEqual([]);
-    expect(visibleCatalog(rows, () => true)).toHaveLength(0);
-    expect(visibleCatalog(rows, () => false)).toHaveLength(0);
-    expect(retainPendingSessions(rows, [liveSession], () => true)).toEqual([liveSession]);
+    expect(visibleCatalog(rows)).toHaveLength(0);
+    expect(visibleCatalog([liveSession])).toEqual([liveSession]);
   });
-  it('expires cached catalogs but retains pending work, and recovers on a fresh response', () => {
-    expect(visibleCatalog([liveSession], () => false, false)).toEqual([]);
-    expect(visibleCatalog([liveSession], () => true, false)).toEqual([]);
-    expect(visibleCatalog([liveSession], () => true, true)[0].unreachable).toBeUndefined();
+  it('expires cached catalogs and recovers on a fresh response', () => {
+    expect(visibleCatalog([liveSession], false)).toEqual([]);
+    expect(visibleCatalog([liveSession], true)[0].unreachable).toBeUndefined();
   });
   it('never reads an exited supervisor', () => {
     expect(readablePanes(panes.map(pane => ({ ...pane, exited: true })))).toEqual([]);

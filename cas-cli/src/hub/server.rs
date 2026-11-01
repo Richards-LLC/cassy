@@ -2789,14 +2789,16 @@ struct SessionsQuery {
 
 /// The catalog lists every fresh supervisor-led session, including sessions
 /// whose live supervisor has not spawned workers yet; `dormant=1` adds sessions
-/// whose supervisor is not live. A row with no supervisor is never listed:
+/// whose supervisor is not live but whose daemon is still running. Stopped
+/// sessions are never navigation destinations. A row with no supervisor is never listed:
 /// Commander has no one to talk to there (cas-f285 retired `workers=1`, which
 /// only the removed Terminal view's "Show workers" sent).
 pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: bool) -> Vec<HubSession> {
     sessions
         .into_iter()
         .filter(|session| {
-            session.ended.is_some() || reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
+            session.ended.is_none() && session.liveness == super::DaemonLiveness::Live
+                && (reveal_dormant || !session.dormant)
         })
         .filter(|session| !session.supervisor.trim().is_empty())
         .collect()

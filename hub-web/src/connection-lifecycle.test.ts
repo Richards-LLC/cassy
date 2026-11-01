@@ -64,7 +64,10 @@ function transport(multiplex = false) {
         init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
       });
       clock += 17;
-      return Response.json({ sessions: catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}` }] });
+      return Response.json({ sessions: [
+        ...(catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}`, supervisor: "supervisor", liveness: "live" }]),
+        ...["session-a", "session-b", "healthy", "a", "b", "c", "d"].map(name => ({ name, supervisor: "supervisor", workers: [], liveness: "live" })),
+      ] });
     }
     if (path === "/v1/events") {
       const signal = init!.signal as AbortSignal;

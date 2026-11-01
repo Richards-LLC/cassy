@@ -771,7 +771,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Copy retains literal source; clipboard refusal is visible. Wrap is per block and long lines fit 390px without page overflow; unknown languages stay readable.
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
-- Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.
+- Diffs retain literal code and line markers, and a hand-written `+`/`-` change without an `@@` line colors the same way with no line numbers. More than 24 lines start collapsed and allocate line DOM only when opened.
 - Media reserve their viewport before tickets or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes. An expired video ticket is renewed once, preserving the requested playback and native Range seeking.
 - PDF previews render only the first page as pixels. Each file's chip and supported preview share one card; image thumbnails replace their type plate and open the original preview. A failed preview leaves a compact chip with an inline note.
 

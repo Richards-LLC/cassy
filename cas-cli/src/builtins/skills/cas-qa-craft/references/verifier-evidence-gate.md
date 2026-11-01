@@ -68,10 +68,13 @@ from the close verifier or substitute the children's ledgers for the epic walk.
 Neither approve nor reject a ledger because of its `NOT EXERCISED` rows. When
 the evidence gate otherwise passes and at least one row is `NOT EXERCISED`
 (including rows you downgraded for a weak label), stop and escalate: record
-`status=error` with a summary that starts
+`status=supervisor_call` with a summary that starts
 `SUPERVISOR CALL: <n> NOT EXERCISED row(s)` and lists each row ID, cell, and
 why it was not exercised, then say the same in your final output. The
-supervisor decides whether the owed rows block the close.
+supervisor decides whether the owed rows block the close, then answers with
+`verification action=add` on the same `dispatch_id`, the final `approved` or
+`rejected` status, and the answer in `summary`. The dispatch stays open; no
+re-dispatch is needed.
 
 ## Measurable claims: same-command baseline and treatment
 
@@ -108,3 +111,11 @@ the resolved store path with the command receipt. A scratch Git worktree still
 discovers the main checkout's live `.cas`; unsetting `CAS_ROOT` does not isolate
 it. Keep these overrides scoped to candidate subprocesses so your authenticated
 reviewer MCP session retains its factory binding.
+
+## Counted verifier lane
+
+To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. This command creates its managed task/dispatch checkout, resolves Zig and a private target, and holds a review lease across the existing capped runner. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
+
+## Rule candidates
+
+On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it.

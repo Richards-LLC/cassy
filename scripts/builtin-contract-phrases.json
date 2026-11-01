@@ -4469,8 +4469,8 @@
           "reason": "Keep the installed workflow/reference route reachable; epic child demos require evidence before close reason."
         },
         {
-          "text": "status=error",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by epic child demos require evidence before close reason."
+          "text": "status=supervisor_call",
+          "reason": "Route NOT EXERCISED scope questions to the supervisor without resolving the verification dispatch as a failed check."
         }
       ],
       "absent": [],

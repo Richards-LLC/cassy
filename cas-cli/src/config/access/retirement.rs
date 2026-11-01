@@ -148,7 +148,7 @@ fn backup_config(root: &Path, before: &[u8]) -> std::io::Result<PathBuf> {
 }
 
 /// Source-proven ignored fields only: factory's existing retirement registry,
-/// Jev's removed integration, the never-wired TUI pop-up notification keys, and
+/// the never-wired TUI pop-up notification keys, and
 /// code_review.owner (dispatch removal 849a49f38).
 /// Parser spans remove tokens, retaining untouched bytes and parser-identified
 /// comments. In particular a '#' inside an old secret string is never a comment.
@@ -176,9 +176,6 @@ fn retirement_edit(raw: &str) -> Result<(String, Vec<String>), String> {
                 .into_iter()
                 .map(|key| vec!["notifications".into(), key.into()]),
         );
-    }
-    if config.retired_jev.is_some() {
-        targets.push(vec!["jev".into()]);
     }
     let mut expected: toml::Value = toml::from_str(raw).map_err(|_| "invalid config TOML")?;
     if expected

@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.95.0] - 2026-11-01
+
+### Fixed — Verification
+
+- **Incomplete verification records cannot approve work** — Was: Synced JSON
+  without a status field defaulted to approved. → Now: Missing status defaults
+  to error and cannot authorize task close; complete records keep their status.
+- **Mixed-version verification readers fail closed** — Was: Older binaries could
+  interpret new pending and supervisor-question statuses as approved. → Now:
+  Stored and synced records use a compatible error status plus separate detail;
+  current readers retain the distinction and treat future unknown statuses as
+  errors while older binaries remain able to read and close tasks safely.
+- **Supervisor questions keep their dispatch** — Was: Scope questions were
+  recorded as verifier errors and spent the dispatch. → Now: `supervisor_call`
+  retains the question so a supervisor can answer with a final verdict on that
+  same dispatch, without re-dispatching a verifier.
+- **Waiting for review is pending** — Was: Dispatch-request markers inflated
+  verifier error counts. → Now: New markers are pending, and historical backfill
+  excludes old synthetic markers while retaining real failed checks.
+
 ## [3.94.0] - 2026-10-31
 
 ### Fixed — Task close
@@ -119,6 +139,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Release quality recording
 
 - **Published receipts feed the friction ledger** — Was: Release events were recorded only by the retired train. → Now: The existing published-receipt step records actual landing and publication timings with current tag history. A recording failure warns and preserves the verified receipt and draft.
+
+### Removed — Configuration
+
+- **Retired integration config shim** — Was: An obsolete integration table still
+  triggered deprecation notices and update rewrites. → Now: Old copies load
+  silently as unknown config, and generic retirement cleanup keeps its existing
+  supported targets.
 
 ## [3.93.0] - 2026-10-31
 

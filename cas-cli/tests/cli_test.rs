@@ -1631,12 +1631,19 @@ fn test_config_list() {
         .assert()
         .success();
 
+    // Unknown legacy tables must load without emitting a retirement notice.
+    let path = temp.path().join(".cas/config.toml");
+    let mut raw = std::fs::read_to_string(&path).unwrap();
+    raw.push_str("\n[jev]\nenabled = true\n[jev.gate]\nshadow = true\n");
+    std::fs::write(&path, raw).unwrap();
+
     // Test config list
     cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list"])
         .assert()
         .success()
+        .stderr("")
         .stdout(predicate::str::contains("sync.enabled"))
         .stdout(predicate::str::contains("hooks.token_budget"));
 }

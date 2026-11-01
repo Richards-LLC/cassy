@@ -61,7 +61,7 @@ rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|ex
 
 Back every finding with a command output or an exact line reference.
 
-To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. This command creates its managed task/dispatch checkout, resolves Zig and a private target, and holds a review lease across the existing capped runner. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
+To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
 
 ### Step 6: Impact, wiring and co-changes (blocking when missing)
 
@@ -113,12 +113,13 @@ verification action=add task_id=<id> status=<approved|rejected|error> confidence
 - **Approve** only when every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and no rejection condition remains. Only low or medium findings that do not meet that threshold can be improvements with `"severity":"warning"`; set `status=approved` and start the summary with `APPROVED`.
 - **Improvements stay in this verdict.** List them under `Improvements (non-blocking)` and as `"severity":"warning"` issues, with a one-line summary. Never file or request a task for one: a follow-up needs a reproduced defect affecting someone today, and `task action=create` refuses one without `repro` and `affected`.
 - **Tier 2:** when the task notes record `VERIFICATION TIER 2`, also probe the changed enforcement adversarially: try to get past it with a realistic input, and reject a bypass you reproduce.
-- **Escalate** only when no rejection condition applies (`status=error`, summary starting `SUPERVISOR CALL:`) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
+- **Escalate** only when no rejection condition applies (`status=supervisor_call`, summary starting `SUPERVISOR CALL:` and including the question) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
+- A supervisor call preserves the exact dispatch. The supervisor answers with `verification action=add` on that `dispatch_id`, `status=approved` or `rejected`, and the answer plus final verdict in `summary`; no re-dispatch is needed.
 - For an epic, add `verification_type=epic`.
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
 - Categories describe the defect, not whether it blocks: `correctness`, `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`, `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`. Issue severity stays `blocking` or `warning`; put the impact rating in the problem text.
 
-Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
+Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, record it with `rule action=observe` as `verifier-evidence-gate.md` describes under Rule candidates. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
 
 ## Epic verification
 

@@ -146,9 +146,6 @@ pub(super) fn defer_retired_config(root: &Path, config: &Config) -> bool {
                     .map(|key| format!("notifications.{key}")),
             );
         }
-        if config.retired_jev.is_some() {
-            keys.insert("jev".into());
-        }
         if !keys.is_empty() {
             pending
                 .notices

@@ -1268,6 +1268,36 @@ describe("Commander live connection lifecycle", () => {
     expect(TransportSocket.instances).toHaveLength(1);
   });
 
+  it("stops attaching a session removed by a successful catalog and resumes its replacement (cas-f8ab)", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("catalog-removal"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    socket.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    const fetchNow = globalThis.fetch;
+    let listed = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(Response.json({ sessions: listed ? [{ name: "session-a", supervisor: "supervisor", workers: [], liveness: "live" }] : [] }))
+        : fetchNow(input, init)));
+    await connection.refreshSessions();
+    expect(connection.hasLiveAttach("session-a")).toBe(false);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Gone" } })).toBe(false);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+    await connection.attach("session-a");
+    expect(subscriptions()).toHaveLength(1);
+    listed = true;
+    await connection.refreshSessions();
+    await waitFor(() => expect(subscriptions()).toHaveLength(2));
+  });
+
   it("keeps a responsive machine live when the session catalog fails under load", async () => {
     transport(true);
     TransportSocket.instances = [];

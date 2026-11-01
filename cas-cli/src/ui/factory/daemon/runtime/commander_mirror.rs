@@ -1125,6 +1125,53 @@ mod tests {
     }
 
     #[test]
+    fn codex_boot_mirror_waits_for_its_own_rollout_in_a_reused_project() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.cc_session_id = Some("codex-supervisor-synthetic".into());
+        store.update(&agent).unwrap();
+        let stamp = OperatorStamp {
+            operator: "Alice".into(), device_id: "phone".into(),
+            device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true,
+        };
+        let enqueue = |session| queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", "Boot words", Some(session),
+            None, None, false, None, &stamp,
+        ).unwrap().id();
+        let old = enqueue("factory-previous");
+        let first = temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        let meta: Value = serde_json::from_str(std::fs::read_to_string(&first).unwrap().lines().next().unwrap()).unwrap();
+        let write = |path: &Path, id, key, answer| {
+            let mut values = vec![meta.clone()];
+            values.extend(codex_turn_at(key, &format!("[cas #{id} operator Alice@phone verified 0s first] Boot words"), answer, Utc::now()));
+            std::fs::write(path, values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        };
+        write(&first, old, "previous", "Previous session answer");
+        let mut state = MirrorScanState::default();
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state,
+        );
+        // The eager MCP registration exists before this native rollout does.
+        scan(&mut state);
+        let own = enqueue("factory-1");
+        let second = first.with_file_name("rollout-2026-10-10T12-00-01-native.jsonl");
+        write(&second, own, "boot", "Boot words preserved");
+        // Another live pane can keep the prior cwd match newest. Freshness
+        // alone must not bind either supervisor to the other pane's rollout.
+        std::fs::File::open(&first).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
+        scan(&mut state);
+        let replies = operator_replies(&queue);
+        assert!(replies.iter().any(|reply| reply.message == "Boot words preserved"),
+            "completed boot answer must be mirrored without a registration/checklist call");
+        assert_eq!(replies.len(), 1, "another session's answer must never enter this thread");
+        assert_eq!(replies[0].reply_to, Some(own));
+        let reads = state.transcript_reads;
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, reads, "owned unchanged rollout remains cached");
+    }
+
+    #[test]
     fn ct2_p3_operator_mirror_unchanged_transcript_is_not_read() {
         let (temp, root, queue) = terminal_session(codex_turn_at(
             "status",

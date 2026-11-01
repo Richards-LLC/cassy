@@ -790,6 +790,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
   let fixture: { pairUrl: string; version: string } | undefined;
   let stopped: { name: string; pid: number; signal: string }[] = [];
   let observationMs = 0;
+  let journalSends: unknown[] = [];
   const secrets: string[] = [];
   try {
     fixture = await command("reset", { messageControl: true });
@@ -853,11 +854,11 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     await expect(rows).toHaveCount(0);
     await expect(page.locator(".project-card")).toHaveCount(0);
     await expect(page.getByText("Waiting message not sent", { exact: true })).toBeVisible();
-    const saved = await page.evaluate(async () => {
+    const readSaved = async () => journalSends = await page.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open("cas-commander-delivery-v1", 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
       try { return await new Promise<unknown[]>((resolve, reject) => { const r = db.transaction("sends").objectStore("sends").getAll(); r.onsuccess = () => resolve(r.result.map(row => row.send).filter(Boolean)); r.onerror = () => reject(r.error); }); } finally { db.close(); }
     });
-    expect(saved).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Keep this stopped-session instruction", state: "error" })]));
+    await expect.poll(readSaved).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Keep this stopped-session instruction", state: "error" })]));
     await page.screenshot({ path: join(directory, "stopped-message.png") });
     await command("daemon-start");
     await expect(rows).toHaveCount(1);
@@ -867,7 +868,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     try {
       await writeFile(join(directory, "final.aria.yml"), await page.locator("body").ariaSnapshot().catch(() => "# unavailable"));
       await writeFile(join(directory, "final.aria.json"), JSON.stringify(await page.locator("body").ariaSnapshotJSON().catch(() => null)));
-      await writeFile(join(directory, "result.json"), JSON.stringify({ id: "HUB-J14", status: passed ? "PASS" : "FAIL", binary: fixture?.version, stopped, observationMs, traffic, catalogs }, null, 2));
+      await writeFile(join(directory, "result.json"), JSON.stringify({ id: "HUB-J14", status: passed ? "PASS" : "FAIL", binary: fixture?.version, stopped, observationMs, traffic, catalogs, journalSends }, null, 2));
       await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
     } finally { await context.close(); await command("cleanup"); }
   }

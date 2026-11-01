@@ -39,6 +39,7 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
     std::fs::create_dir_all(&project).unwrap();
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &project);
     env.set("CAS_FACTORY_MODE", "1");
     env.set("CAS_FACTORY_SESSION", "factory-nested-review");
     env.set("CAS_HOOK_HARNESS", "codex");
@@ -76,7 +77,8 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 clone_path: None,
             },
             DaemonEvent::SessionEnd {
-                session_id: id.clone(), cc_pid: Some(nested_pid),
+                session_id: id.clone(),
+                cc_pid: Some(nested_pid),
             },
         ] {
             assert!(matches!(
@@ -84,10 +86,15 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 DaemonResponse::Error { .. }
             ));
         }
-        assert!(matches!(
-            daemon.handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid }).await,
-            DaemonResponse::NoSession
-        ), "rejected registration must not publish the parent's identity in the socket map");
+        assert!(
+            matches!(
+                daemon
+                    .handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid })
+                    .await,
+                DaemonResponse::NoSession
+            ),
+            "rejected registration must not publish the parent's identity in the socket map"
+        );
         for event in ["SessionStart", "Stop", "SessionEnd"] {
             handle_hook(
                 event,
@@ -106,12 +113,121 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
             assert_eq!(kept.status, parent.status, "{role}: {event}");
             assert_eq!(kept.factory_session, parent.factory_session);
         }
+        // Identity isolation must preserve tool-policy enforcement even when
+        // the caller belongs to a different process (verifier cas-b815).
+        for (tool, tool_input) in [
+            (
+                "mcp__claude_ai_Slack__slack_send_message",
+                serde_json::json!({
+                    "channel": "synthetic-proof-channel", "text": "must not be sent"
+                }),
+            ),
+            (
+                "Write",
+                serde_json::json!({
+                    "file_path": env.home().join("outside-worktree.txt"), "content": "denied"
+                }),
+            ),
+            ("Bash", serde_json::json!({"command": "cargo build"})),
+        ] {
+            if tool == "Bash" && role != AgentRole::Worker {
+                continue;
+            }
+            let output = handle_hook(
+                "PreToolUse",
+                HookInput {
+                    session_id: "nested-codex-thread".into(),
+                    cwd: project.to_string_lossy().into_owned(),
+                    hook_event_name: "PreToolUse".into(),
+                    tool_name: Some(tool.into()),
+                    tool_input: Some(tool_input),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let wire = serde_json::to_value(output).unwrap();
+            assert_eq!(
+                wire.pointer("/hookSpecificOutput/permissionDecision")
+                    .and_then(serde_json::Value::as_str),
+                Some("deny"),
+                "foreign-process {role} must retain {tool} policy denial: {wire}"
+            );
+            assert_eq!(agents.get(&id).unwrap().pid, parent.pid);
+        }
         agents.heartbeat(&id).unwrap();
     }
     assert_eq!(
         agents.list(None).unwrap().len(),
         2,
         "no nested ghost identities"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_factory_owner_accepts_its_actual_unstamped_parent_cas_b815() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "legacy-parent-factory");
+    let project = env.home().join("project");
+    let root = init_cas_dir(&project).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let parent_pid = std::os::unix::process::parent_id();
+    for role in [AgentRole::Supervisor, AgentRole::Worker] {
+        let id = format!("legacy-{role}");
+        let mut owner = Agent::new(id.clone(), id.clone());
+        owner.role = role;
+        owner.factory_session = Some("legacy-parent-factory".into());
+        owner.pid = Some(std::process::id());
+        stamp_pid_fingerprint(&mut owner, std::process::id());
+        // OpenCode-style legacy rows have a real MCP parent but no parent
+        // fingerprint because its name was not recognised as a harness.
+        owner.ppid = Some(parent_pid);
+        owner.metadata.remove(PPID_STARTTIME_KEY);
+        agents.register(&owner).unwrap();
+        let (refreshed, _) = register_session_start_agent(
+            &root,
+            agents.as_ref(),
+            &id,
+            Some(&id),
+            Some(&role.to_string()),
+            parent_pid,
+            None,
+        )
+        .expect("the live fingerprinted MCP child proves its actual parent owns this identity");
+        assert_eq!(refreshed.id, id);
+        assert_eq!(agents.get(&id).unwrap().pid, Some(parent_pid));
+    }
+}
+
+#[test]
+fn expired_factory_owner_from_old_hostname_can_reregister_cas_b815() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "renamed-host-factory");
+    let project = env.home().join("project");
+    let root = init_cas_dir(&project).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let mut retired = Agent::new("renamed-host-owner".into(), "owner".into());
+    retired.role = AgentRole::Supervisor;
+    retired.status = AgentStatus::Stale;
+    retired.factory_session = Some("renamed-host-factory".into());
+    retired.machine_id = Some("older-hostname.invalid".into());
+    retired.pid = Some(i32::MAX as u32);
+    agents.register(&retired).unwrap();
+    let (current, _) = register_session_start_agent(
+        &root,
+        agents.as_ref(),
+        &retired.id,
+        Some("owner"),
+        Some("supervisor"),
+        std::process::id(),
+        None,
+    )
+    .expect("an exited owner under the previous hostname is replaceable");
+    assert_eq!(current.id, retired.id);
+    assert_eq!(current.pid, Some(std::process::id()));
+    assert_eq!(
+        current.machine_id,
+        Some(Agent::get_or_generate_machine_id())
     );
 }
 

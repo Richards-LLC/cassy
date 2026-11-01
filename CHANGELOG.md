@@ -60,7 +60,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and disable worker messages and the peer mailbox when it exited. → Now:
   Nested harnesses cannot take over a live factory identity or run lifecycle
   cleanup against it; the authenticated owner also repairs older exited-PID
-  records before heartbeats resume.
+  records before heartbeats resume. Tool policy checks keep enforcing their
+  denials for nested callers, and legacy parent records and exited rows from
+  an earlier hostname can recover normally.
 
 ## [3.95.0] - 2026-11-01
 

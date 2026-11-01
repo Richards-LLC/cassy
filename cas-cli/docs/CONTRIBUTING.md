@@ -83,6 +83,10 @@ from a different process, publish a socket mapping for it, or apply lifecycle
 hooks to its owner. Replacement MCP servers under the same fingerprinted harness
 remain valid. The authenticated cached owner repairs an exited PID left by older
 nested registrations before its next heartbeat, preserving its durable session.
+Tool permission hooks always retain their policy checks, even for a nested
+caller. A live fingerprinted MCP child can prove its current parent when an
+older registration lacks a parent fingerprint; an exited registration remains
+replaceable after the host's name changes.
 
 Worker liveness uses concrete turn and process evidence. While a recycled
 worker's transcript is unresolved, its own recent activity or outbound message

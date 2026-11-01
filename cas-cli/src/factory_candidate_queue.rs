@@ -212,7 +212,7 @@ fn refresh_builder_checkout(cas_root: &Path) -> Result<PathBuf> {
         git(&checkout, &["checkout", "--quiet", "--detach", "--force", &tip])?;
         git(&checkout, &["clean", "-fdq"])?;
     } else {
-        git(project, &["worktree", "prune"])?;
+        // --force reclaims a registration whose directory was deleted.
         let path = checkout.display().to_string();
         git(project, &["worktree", "add", "--quiet", "--detach", "--force", &path, &tip])?;
     }

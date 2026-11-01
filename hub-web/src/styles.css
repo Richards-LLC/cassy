@@ -3454,7 +3454,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-state.working { background: var(--state-ok); }
 .supervisor-state.idle { background: var(--bg-raised); outline: var(--state-rule-width) solid var(--state-ok); outline-offset: calc(-2 * var(--state-rule-width)); }
 .supervisor-state.needs-you { background: var(--state-warn); }
-.supervisor-state.offline { background: var(--bg-raised); outline: var(--line-width) solid var(--ink-mid); outline-offset: calc(-1 * var(--line-width)); }
+.supervisor-state.offline { background: var(--state-idle); }
 .conversation-filters { display: flex; flex: none; gap: var(--space-1); padding: 0 var(--space-4) var(--space-2); overflow-x: auto; min-width: 0; }
 .conversation-filter { flex: none; min-height: 32px; padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); white-space: nowrap; }
 .conversation-filter[aria-pressed="true"] { border-color: var(--color-action); background: var(--bg-active); color: var(--color-action); }

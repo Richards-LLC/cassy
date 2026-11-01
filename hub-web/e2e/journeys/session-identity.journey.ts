@@ -399,6 +399,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       // A live idle dot uses the live green, never the old gray idle token.
       if (mode !== "forced-colors") {
         expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
+        // A stopped session's dot is filled gray; a live idle dot stays an open ring.
+        expect((await look(offline))[0]).not.toBe((await look(idle))[0]);
       } else {
         expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
       }

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander boot replies
+
+- **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
+
 ### Fixed — Commander messages
 
 - **Operator messages reach the harness like terminal input** — Verified

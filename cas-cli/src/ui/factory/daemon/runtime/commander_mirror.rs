@@ -796,13 +796,18 @@ mod tests {
     fn claude_only_mirrors_completed_final_text() {
         let values = vec![
             serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"user","uuid":"prompt-1","message":{"content":"status"}}),
+            serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"user","uuid":"text-projection","message":{"content":"status"}}),
             serde_json::json!({"timestamp":"2026-09-23T12:00:01Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Working"},{"type":"tool_use","input":{"secret":"hidden"}}],"stop_reason":"tool_use"}}),
+            serde_json::json!({"timestamp":"2026-09-23T12:00:01Z","type":"attachment","uuid":"second-send","attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":"[cas #42 operator Alice@phone verified 0s first] second question"}}),
+            serde_json::json!({"timestamp":"2026-09-23T12:00:01Z","type":"attachment","uuid":"hook-batch","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["[incoming messages]\n[cas #42 operator Alice@phone verified 0s first] second question\n[cas #43 operator Alice@phone verified 0s first] third question"]}}),
             serde_json::json!({"timestamp":"2026-09-23T12:00:02Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}),
             serde_json::json!({"timestamp":"2026-09-23T12:00:03Z","type":"system","subtype":"turn_duration"}),
         ];
         let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].text, "Done");
+        assert_eq!(turns.len(), 3, "typed input, a mid-turn send and every new hook marker each retain their answer");
+        assert_eq!(turns.iter().map(|turn| turn.commander_id).collect::<Vec<_>>(), vec![None, Some(42), Some(43)]);
+        assert_eq!(turns[0].prompt.as_deref(), Some("status"));
+        assert!(turns.iter().all(|turn| turn.text == "Done"));
     }
 
     #[test]

@@ -89,6 +89,21 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
     await expect(badge).toBeVisible();
     await expect(badge).toHaveText("1");
+    // cas-a929: a visible warning must not push any header control off-screen.
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      for (const selector of ["#conversation-back", "#conversation-attention", ".conversation-identity", ".conversation-header-actions button"]) {
+        for (const element of await page.locator(selector).all()) {
+          await expect(element).toBeVisible();
+          const bounds = (await element.boundingBox())!;
+          expect(bounds.x, `${colorScheme} ${selector} left edge`).toBeGreaterThanOrEqual(0);
+          expect(bounds.x + bounds.width, `${colorScheme} ${selector} right edge`).toBeLessThanOrEqual(390);
+        }
+      }
+      await expect(page.getByRole("button", { name: "Raw output", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Show work", exact: true })).toBeVisible();
+    }
+    await page.emulateMedia({ colorScheme: "light" });
     // cas-97d58 F07: with the attention chip, Raw output and Interrupt on the
     // row, the identity takes its own line; title and machine read whole.
     const identity = page.locator(".conversation-identity");

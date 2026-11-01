@@ -1049,7 +1049,10 @@ mod tests {
             VerificationStatus::from_str("skipped").unwrap(),
             VerificationStatus::Skipped
         );
-        assert!(VerificationStatus::from_str("invalid").is_err());
+        for unknown in ["future_verdict", "", "APPROVED_BUT_UNRECOGNIZED"] {
+            assert_eq!(VerificationStatus::from_str(unknown).unwrap(), VerificationStatus::Error);
+            assert_eq!(serde_json::from_value::<VerificationStatus>(serde_json::json!(unknown)).unwrap(), VerificationStatus::Error);
+        }
     }
 
     #[test]

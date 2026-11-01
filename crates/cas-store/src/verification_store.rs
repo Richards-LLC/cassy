@@ -3693,6 +3693,42 @@ mod tests {
     }
 
     #[test]
+    fn rollout_statuses_keep_legacy_storage_and_round_trip() {
+        let (store, dir) = create_test_store();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        for status in [VerificationStatus::Pending, VerificationStatus::SupervisorCall] {
+            let mut verification = Verification::error(format!("ver-{status}"), "cas-rollout".into(), "Waiting for a decision".into());
+            verification.status = status;
+            store.add(&verification).unwrap();
+            // The persisted and synced legacy status is a safe non-approval.
+            let stored: String = conn.query_row("SELECT status FROM verifications WHERE id=?1", [&verification.id], |row| row.get(0)).unwrap();
+            assert_eq!(stored, "error", "released binaries must never see a new enum value");
+            let wire = serde_json::to_value(&verification).unwrap();
+            assert_eq!(wire["status"], "error");
+            assert_eq!(serde_json::from_value::<Verification>(wire).unwrap().status, status);
+            assert_eq!(store.get(&verification.id).unwrap().status, status);
+            assert_eq!(store.list_by_status(status).unwrap().len(), 1);
+            assert!(store.list_by_status(VerificationStatus::Error).unwrap().is_empty());
+
+            // A terminal result from an old writer must supersede stale detail.
+            conn.execute("UPDATE verifications SET status='approved' WHERE id=?1", [&verification.id]).unwrap();
+            assert_eq!(store.get(&verification.id).unwrap().status, VerificationStatus::Approved);
+            verification.status = VerificationStatus::Rejected;
+            store.update(&verification).unwrap();
+            assert_eq!(store.get(&verification.id).unwrap().status, VerificationStatus::Rejected);
+
+            // Upgrade rows already written by the pre-release implementation.
+            conn.execute("UPDATE verifications SET status=?2 WHERE id=?1", params![verification.id, status.to_string()]).unwrap();
+        }
+        let reopened = SqliteVerificationStore::open(dir.path()).unwrap();
+        for status in [VerificationStatus::Pending, VerificationStatus::SupervisorCall] {
+            let id = format!("ver-{status}");
+            assert_eq!(reopened.get(&id).unwrap().status, status);
+            assert_eq!(conn.query_row("SELECT status FROM verifications WHERE id=?1", [id], |row| row.get::<_, String>(0)).unwrap(), "error");
+        }
+    }
+
+    #[test]
     fn test_list_by_status() {
         let (store, _dir) = create_test_store();
 

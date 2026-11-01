@@ -71,6 +71,63 @@ fn text(result: CallToolResult) -> String {
 }
 
 #[tokio::test]
+async fn verification_without_status_is_error_and_cannot_close_task() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let mut supervisor = Agent::new("missing-status-supervisor".into(), "supervisor".into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    let owner = Agent::new("missing-status-owner".into(), "owner".into());
+    agents.register(&owner).unwrap();
+    let tasks = open_task_store_local(&fixture.root).unwrap();
+    let mut task = tasks.get("cas-c034").unwrap();
+    task.status = TaskStatus::InProgress;
+    task.pending_verification = true;
+    tasks.update(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &fixture.root,
+        &task.id,
+        &supervisor.id,
+        &owner.id,
+        &VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .unwrap();
+    let mut record = Verification::approved(
+        "ver-missing-status".into(),
+        task.id.clone(),
+        "Partial synced record".into(),
+    );
+    record.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    record.agent_id = Some(supervisor.id.clone());
+    record.issuer_agent_id = Some(supervisor.id);
+    record.dispatch_id = Some(dispatch.id);
+    let mut payload = serde_json::to_value(record).unwrap();
+    assert!(payload.as_object_mut().unwrap().remove("status").is_some());
+    let imported: Verification = serde_json::from_value(payload).unwrap();
+    assert_eq!(imported.status, VerificationStatus::Error);
+    open_verification_store(&fixture.root)
+        .unwrap()
+        .add(&imported)
+        .unwrap();
+
+    let result = fixture.as_agent(&owner.id).service.task(Parameters(
+        serde_json::from_value(json!({"action":"close", "id":task.id, "reason":"Partial synced record must not authorize close"})).unwrap(),
+    )).await.unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let diagnostic = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(diagnostic.contains("VERIFICATION"), "{diagnostic}");
+    assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+}
+
+#[tokio::test]
 async fn verification_add_and_reads_preserve_all_statuses_issues_and_metadata() {
     let mut env = TestEnvGuard::temp_home();
     let fixture = Fixture::new(&mut env);

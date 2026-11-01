@@ -691,7 +691,7 @@ mod verification_status_wire {
     }
 
     fn default_status() -> String {
-        "approved".into()
+        "error".into()
     }
 
     pub fn serialize<S: Serializer>(

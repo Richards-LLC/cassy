@@ -396,8 +396,8 @@ pub struct VerificationRequest {
     #[serde(default)]
     pub task_id: Option<String>,
 
-    /// Status (for add): approved, rejected, error, skipped
-    #[schemars(description = "Status: 'approved', 'rejected', 'error', 'skipped'")]
+    /// Status (for add): approved, rejected, supervisor_call, error, skipped
+    #[schemars(description = "Status: 'approved', 'rejected', 'supervisor_call' (question in summary; supervisor answers with add on the same dispatch), 'error', 'skipped'")]
     #[serde(default)]
     pub status: Option<String>,
 

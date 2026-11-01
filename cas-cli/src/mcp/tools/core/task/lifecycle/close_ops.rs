@@ -9878,7 +9878,10 @@ impl CasCore {
                         )));
                     }
                     Ok(Some(ref v))
-                        if v.status == VerificationStatus::Error
+                        if matches!(
+                            v.status,
+                            VerificationStatus::Error | VerificationStatus::Pending
+                        )
                             && v.summary.starts_with(DISPATCH_SUMMARY_PREFIX)
                             && typed_dispatch.is_none()
                             && (chrono::Utc::now() - v.created_at).num_seconds()
@@ -9910,6 +9913,7 @@ impl CasCore {
                         // the audit trail shows escalation instead of a dangling
                         // "Dispatch requested" row.
                         let mut timeout_row = v.clone();
+                        timeout_row.status = VerificationStatus::Error;
                         timeout_row.summary = format!(
                             "Verification timed out after {elapsed_mins} minutes — \
                              task-verifier subagent never recorded a verdict. \
@@ -10303,14 +10307,14 @@ impl CasCore {
                             }
                         }
 
-                        // Keep the legacy Error row for old clients and
-                        // audit views. It is descriptive only: typed dispatch
+                        // Keep a pending marker for audit views, without
+                        // claiming a check failed. Typed dispatch
                         // state and server-derived authority control new adds.
                         if !had_prior_verification {
                             if let Ok(ver_id) = verification_store.generate_id() {
                                 let mut dispatch_row = Verification::new(ver_id, req.id.clone());
                                 dispatch_row.verification_type = verification_type;
-                                dispatch_row.status = VerificationStatus::Error;
+                                dispatch_row.status = VerificationStatus::Pending;
                                 dispatch_row.agent_id = Some(owner_id.clone());
                                 dispatch_row.provenance = cas_types::VerificationProvenance::System;
                                 dispatch_row.issuer_agent_id = Some(requester_id);

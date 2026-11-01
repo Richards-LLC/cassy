@@ -8,7 +8,9 @@ pub struct VerificationAddRequest {
     pub task_id: String,
 
     /// Verification status
-    #[schemars(description = "Status: 'approved', 'rejected', 'error', 'skipped'")]
+    #[schemars(
+        description = "Status: 'approved', 'rejected', 'supervisor_call' (question in summary; supervisor answers with add on the same dispatch), 'error', 'skipped'"
+    )]
     pub status: String,
 
     /// Summary of the verification decision

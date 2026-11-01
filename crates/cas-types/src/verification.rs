@@ -599,6 +599,10 @@ pub enum VerificationStatus {
     Approved,
     /// Verification rejected - issues found
     Rejected,
+    /// Review is waiting for a supervisor decision; summary carries the question.
+    SupervisorCall,
+    /// System dispatch marker: no verifier check has run yet.
+    Pending,
     /// Verification failed with error
     Error,
     /// Verification skipped (force bypass)
@@ -610,6 +614,8 @@ impl fmt::Display for VerificationStatus {
         match self {
             VerificationStatus::Approved => write!(f, "approved"),
             VerificationStatus::Rejected => write!(f, "rejected"),
+            VerificationStatus::SupervisorCall => write!(f, "supervisor_call"),
+            VerificationStatus::Pending => write!(f, "pending"),
             VerificationStatus::Error => write!(f, "error"),
             VerificationStatus::Skipped => write!(f, "skipped"),
         }
@@ -623,6 +629,8 @@ impl FromStr for VerificationStatus {
         match s.to_lowercase().as_str() {
             "approved" => Ok(VerificationStatus::Approved),
             "rejected" => Ok(VerificationStatus::Rejected),
+            "supervisor_call" => Ok(VerificationStatus::SupervisorCall),
+            "pending" => Ok(VerificationStatus::Pending),
             "error" => Ok(VerificationStatus::Error),
             "skipped" => Ok(VerificationStatus::Skipped),
             _ => Err(TypeError::Parse(format!(

@@ -16248,6 +16248,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verified_commander_text_reaches_idle_and_busy_harness_input_cas_e999() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary(
+            "cosmic-bear-43", None, Some(now), Some(now),
+        )]);
+        let operator = FactoryDaemon::wake_sender_from_origin(
+            Some(&cas_store::QueueOrigin::PairedDevice { device_id: "paired-device".into() }),
+            None,
+        );
+        let mut senders = vec![operator, WakeSender::Daemon, WakeSender::Unstamped,
+            WakeSender::Unattributed, WakeSender::Unresolvable];
+        for role in [cas_types::AgentRole::Standard, cas_types::AgentRole::Director,
+            cas_types::AgentRole::Supervisor, cas_types::AgentRole::Worker]
+        {
+            senders.push(WakeSender::Registered { role, name: "another-agent".into() });
+        }
+        let busy = PaneWakeState {
+            silent_for: Some(std::time::Duration::ZERO),
+            tool_call: ToolCallEvidence::InFlight,
+            ..quiet_pane()
+        };
+        for sender in senders {
+            for pane in [quiet_pane(), busy] {
+                let decision = FactoryDaemon::supervisor_wake_decision(
+                    &data, "cosmic-bear-43", "cosmic-bear-43", &sender,
+                    "operator", "Please check the build.", pane, now,
+                );
+                assert_eq!(decision.allowed, sender == WakeSender::Operator,
+                    "{sender:?}, {pane:?}: {}", decision.reason);
+            }
+        }
+    }
+
     /// cas-f02b (GH #101): a worker parked in `awaiting_merge` must be able to
     /// wake an idle supervisor. For a Claude supervisor in teams mode the
     /// signal is an inbox file write, and an idle supervisor has no upcoming

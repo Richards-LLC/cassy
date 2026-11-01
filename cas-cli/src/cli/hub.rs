@@ -2130,7 +2130,8 @@ fn serve_foreground_logged(
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())
             .or_else(|| paths.read_process_record().ok().and_then(|previous| {
                 Some((previous.tailscale_serve_port?, previous.tailscale_serve_target?))
-            }));
+            }))
+            .filter(|_| tailscale_serve);
         let started_at = chrono::Utc::now().to_rfc3339();
         let mut record = HubProcessRecord {
             pid: std::process::id(),
@@ -2144,9 +2145,13 @@ fn serve_foreground_logged(
             launched_by: Some(launched_by),
             launched_at: Some(launched_at.unwrap_or(started_at)),
             public_url: None,
-            tailscale_serve_port: None,
+            // A legacy runtime record may be the only ownership evidence.
+            // Carry it through pending and failed starts until publication
+            // replaces it below. public_url=None and the starting lock phase
+            // keep this old route from being mistaken for a ready new shim.
+            tailscale_serve_port: prior_serve_target.as_ref().map(|(port, _)| *port),
             tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
-            tailscale_serve_target: None,
+            tailscale_serve_target: prior_serve_target.as_ref().map(|(_, target)| target.clone()),
             transport_warning: None,
             nofile_limit,
         };

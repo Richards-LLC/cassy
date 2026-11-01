@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander hub
 
+- **Slow boot retries keep their route ownership** — A failed service start
+  preserves its previous Serve target even when only a legacy runtime record
+  identifies it, so a later start can restore the route after Tailscale returns.
+
 - **Service startup restores the tailnet route after reboot** — Was: A Linux hub
   could settle on loopback after Tailscale was briefly unavailable, leaving Serve
   pointed at a dead shim. → Now: Both service managers retry publication and

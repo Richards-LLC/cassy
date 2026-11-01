@@ -3153,7 +3153,7 @@ impl FactoryApp {
 
         // Capture effective CLI before spec is moved into add_worker.
         // Explicit spec overrides session default so the intro prompt matches the actual harness.
-        let effective_cli = spec.as_ref().map(|s| s.cli).unwrap_or(self.worker_cli);
+        let effective_cli = effective_spec.cli;
 
         // Bind before launch so the first turn can carry the actual assignment.
         // Store reads stay here; mux/pty only receive the composed text.

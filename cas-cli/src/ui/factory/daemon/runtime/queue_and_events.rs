@@ -15144,8 +15144,19 @@ mod tests {
             "the single spawn message must include the worker startup contract");
         deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,
             &task.title, cas_mux::SupervisorCli::Claude).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-1".into(),
+            cas_types::AgentRole::Worker);
+        worker.factory_session = Some("factory-session".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        task.assignee = Some(worker.name.clone());
+        crate::store::open_task_store_cached(&cas_dir).unwrap().update(&task).unwrap();
+        crate::task_assignment::enqueue(&cas_dir, &task).unwrap();
+        // An ordered spawn starts its head at registration. It still shares
+        // the initial assignment rather than creating another model turn.
+        task.status = cas_types::TaskStatus::InProgress;
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
         assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
-            .peek_all(10).unwrap().len(), 1, "registration retries must reuse the assignment");
+            .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(

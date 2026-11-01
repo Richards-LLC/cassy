@@ -913,7 +913,7 @@ impl Mux {
         }
     }
 
-    pub fn worker_startup_prompt(&self, worker: &str) -> Option<&str> {
+    fn worker_startup_prompt(&self, worker: &str) -> Option<&str> {
         self.worker_startup_prompts.get(worker).map(String::as_str)
     }
 
@@ -1051,6 +1051,8 @@ impl Mux {
         // number is exact at the moment the env is built, with nothing to
         // thread through the caller.
         let fleet_size = self.worker_count() + 1;
+        // Consume the override: a later recycle must not reuse an old task.
+        let startup_prompt = self.worker_startup_prompts.remove(name);
         let pane = Pane::worker_resuming(
             name,
             cwd,
@@ -1069,7 +1071,7 @@ impl Mux {
             self.factory_session.as_deref(),
             Some(fleet_size),
             resume_session,
-            self.worker_startup_prompt(name),
+            startup_prompt.as_deref(),
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is

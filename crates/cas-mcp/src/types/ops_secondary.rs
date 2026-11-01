@@ -934,7 +934,7 @@ pub struct FactoryRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -948,7 +948,7 @@ pub struct FactoryRequest {
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start expected port (advisory); server_list reports actual bound ports."
+        description = "server_start expected port (advisory)."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
@@ -962,7 +962,7 @@ pub struct FactoryRequest {
 
     /// Exact revision for `candidate_request`.
     #[schemars(
-        description = "candidate_request: full commit SHA reachable from HEAD of your own checkout."
+        description = "candidate_request: full commit SHA."
     )]
     #[serde(default)]
     pub revision: Option<String>,
@@ -1539,7 +1539,7 @@ pub struct CoordinationRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -1553,7 +1553,7 @@ pub struct CoordinationRequest {
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start expected port (advisory); server_list reports actual bound ports."
+        description = "server_start expected port (advisory)."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
@@ -1567,7 +1567,7 @@ pub struct CoordinationRequest {
 
     /// Exact revision for `candidate_request`.
     #[schemars(
-        description = "candidate_request: full commit SHA reachable from HEAD of your own checkout."
+        description = "candidate_request: full commit SHA."
     )]
     #[serde(default)]
     pub revision: Option<String>,

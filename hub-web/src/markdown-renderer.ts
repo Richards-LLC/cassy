@@ -43,6 +43,11 @@ function isBlockStart(line: string): boolean {
   return isFence(line) || HEADING.test(line) || CALLOUT.test(line) || listMarker(line) !== undefined;
 }
 
+/** Whether rendering gives this message structure beyond inline text and paragraphs. */
+export function hasBlockMarkdown(source: string): boolean {
+  return source.split(/\r\n?|\n/).some(isBlockStart);
+}
+
 function leadingPlainText(source: string): string | undefined {
   const match = LEAD.exec(source);
   return match && match[0] ? match[0] : undefined;

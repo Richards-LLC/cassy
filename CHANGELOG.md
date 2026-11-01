@@ -38,6 +38,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rendered diagram shows whole at phone and desktop widths, and Expand appears
   only on its source view, where long text can still overflow.
 
+### Fixed — Commander status updates
+
+- **A short status shows its formatting** — Was: A status of 140 characters or
+  fewer folded into the quiet status box as plain text, so `> [!WARNING]` and
+  `**bold**` appeared literally, and the same callout one character longer
+  rendered properly. → Now: A short status with a callout, heading or list reads
+  as a full message at any length, and bold, code and links render in the status
+  box.
+
 ### Fixed — Commander diffs
 
 - **A hand-written diff shows its changes in color** — Was: A `diff` fence

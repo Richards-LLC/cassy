@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander messages
+
+- **Operator messages reach the harness like terminal input** — Verified
+  Commander messages enter idle and working supervisors' input directly; fresh
+  MCP heartbeats no longer hold them. Recipient reads and acknowledgements
+  update queued bubbles live on every connected device.
+
 ### Fixed — Commander hub
 
 - **Failed hub starts preserve operator routes** — A stopped local service on a

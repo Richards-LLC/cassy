@@ -385,6 +385,8 @@ pub(crate) struct MirrorScanState {
     cursors: HashMap<String, TranscriptCursor>,
     published_inputs: HashSet<i64>,
     pub(super) operator_messages: Vec<crate::ui::factory::ConversationHistoryMessage>,
+    pub(super) pending_operator_receipts: HashSet<i64>,
+    pub(super) finished_operator_receipts: Vec<i64>,
     #[cfg(test)]
     transcript_reads: usize,
 }
@@ -404,6 +406,30 @@ pub(super) fn scan_supervisor_replies(
     agents: &[cas_types::Agent],
     state: &mut MirrorScanState,
 ) {
+    // Inbox reads and explicit answers can settle a message in another
+    // process. Publish those durable changes to connected devices as well as
+    // history pages, independently of optional assistant-reply mirroring.
+    for id in std::mem::take(&mut state.pending_operator_receipts) {
+        let row = match queue.queued_prompt(id) {
+            Ok(row) => row,
+            Err(_) => {
+                state.pending_operator_receipts.insert(id);
+                continue;
+            }
+        };
+        let message = row.filter(|row| row.factory_session.as_deref() == Some(session))
+            .and_then(|row| super::queue_and_events::commander_history_send(queue, row, session));
+        match message {
+            Some(message) if message.state == "acknowledged" => {
+                state.pending_operator_receipts.insert(id);
+            }
+            Some(message) => {
+                state.operator_messages.push(message);
+                state.finished_operator_receipts.push(id);
+            }
+            None => state.finished_operator_receipts.push(id),
+        }
+    }
     let Ok(config) = crate::config::Config::load(root) else {
         return;
     };

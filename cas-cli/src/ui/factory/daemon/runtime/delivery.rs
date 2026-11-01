@@ -1042,6 +1042,9 @@ impl FactoryDaemon {
                     );
                 }
                 let receipt = outcome.receipt();
+                if receipt.stamped {
+                    self.queue_jobs.watch_operator_receipt(receipt.notification_id);
+                }
                 if let Some(live_view) = live_view {
                     match live_view {
                         Ok(Some(message)) => self.broadcast_daemon_message(

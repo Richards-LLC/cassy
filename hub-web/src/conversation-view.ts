@@ -2005,8 +2005,11 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     const row = (cells: string[], head: boolean): HTMLElement => {
       const line = document.createElement("tr"); line.className = head ? "evi-row evi-head" : "evi-row";
       for (let index = 0; index < columns; index += 1) {
-        const cell = document.createElement(head ? "th" : "td"); if (head) cell.setAttribute("scope", "col");
-        const text = cells[index] ?? ""; appendInline(document, cell, text);
+        const text = cells[index] ?? "";
+        // A blank corner (`| | time |`) labels nothing: an empty cell, not a nameless header.
+        const header = head && text.trim() !== "";
+        const cell = document.createElement(header ? "th" : "td"); if (header) cell.setAttribute("scope", "col");
+        appendInline(document, cell, text);
         if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
         const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
         line.append(cell);
@@ -2037,7 +2040,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
       });
       actions.append(copy);
     }
-    table.append(actions, scroll, status);
+    table.append(scroll, actions, status);
     nodes.push(table);
   }
   if (options.attachments === "none") return nodes;

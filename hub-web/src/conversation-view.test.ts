@@ -433,6 +433,13 @@ describe("ConversationView (Pebble thread)", () => {
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
+  it("renders a blank corner header as an empty cell, not a nameless column header, with copy attached below (cas-0e5e)", () => {
+    const [table] = renderBody(document, reply(1, "answer", "| | time |\n|---|---:|\n| bubble says delivered | 1.05 s |"));
+    const head = [...table!.querySelectorAll("thead tr > *")];
+    expect(head.map(cell => [cell.tagName, cell.textContent])).toEqual([["TD", ""], ["TH", "time"]]);
+    expect(table!.querySelectorAll("th:empty")).toHaveLength(0);
+    expect([...table!.children].map(child => child.className)).toEqual(["evi-scroll", "evi-actions", "evi-status"]);
+  });
   it.each(["answer", "status"] as const)("copies a %s table as original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async (kind) => {
     const markdown = '| item | note | result |\r\n| --- | --- | --- |\r\n| `a\\|b` | said "ready", now | **pass** |';
     const writeText = vi.fn().mockResolvedValue(undefined);

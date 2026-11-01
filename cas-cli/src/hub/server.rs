@@ -4939,7 +4939,7 @@ mod catalog_visibility_tests {
     use super::*;
 
     #[test]
-    fn normal_catalog_requires_fresh_reachable_supervisor() {
+    fn normal_catalog_keeps_running_dormant_daemons() {
         let live = super::super::fixture_session("live");
         let mut dead = live.clone();
         dead.name = "dead".into();
@@ -4963,7 +4963,7 @@ mod catalog_visibility_tests {
         let visible = supervisor_sessions(all.clone(), false);
         assert_eq!(
             visible.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            vec!["live", "empty"]
+            vec!["live", "dead", "empty"]
         );
         assert_eq!(supervisor_sessions(all, true).iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["live", "dead", "empty"]);
     }

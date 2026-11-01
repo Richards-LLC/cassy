@@ -320,10 +320,10 @@ test("HUB-J4 a short status shows its callout and bold, not their markers", jour
       await expect(log).not.toContainText("**");
       await expect(log).not.toContainText("[!WARNING]");
       // Bold joins its sentence: one reading line, not a stacked box per run.
-      const [bold, line_] = await Promise.all([line.locator("strong").boundingBox(), line.boundingBox()]);
-      expect(line_!.height).toBeLessThan(3 * 24 + 20);
-      expect(bold!.y - line_!.y).toBeLessThan(16);
-      await log.locator(".turn").filter({ has: callout }).screenshot({ path: testInfo.outputPath(`status-callout-${width}-${colorScheme}.png`) });
+      const [bold, box] = await Promise.all([line.locator("strong").boundingBox(), line.boundingBox()]);
+      expect(box!.height).toBeLessThan(3 * 24 + 20);
+      expect(bold!.y - box!.y).toBeLessThan(16);
+      await log.locator(".turn").filter({ has: page.getByRole("complementary", { name: "Warning", exact: true }) }).screenshot({ path: testInfo.outputPath(`status-callout-${width}-${colorScheme}.png`) });
       await line.screenshot({ path: testInfo.outputPath(`status-bold-${width}-${colorScheme}.png`) });
     });
   }

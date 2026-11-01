@@ -28,6 +28,7 @@ export interface ConversationSend {
   id: string;
   target: string;
   text: string;
+  sessionStartedAt?: string;
   /** `unconfirmed`: sent, but the hub's receipt never came (cas-1622). It may
    * or may not have arrived; the operator can retry it. */
   state: "sending" | "acknowledged" | "delivered" | "replied" | "error" | "unconfirmed";
@@ -303,9 +304,9 @@ export class ConversationHistory {
    * unreachable. It shows in the thread as waiting and has no receipt
    * deadline until `release` puts it on the wire.
    */
-  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
+  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string, sessionStartedAt?: string): void {
     const key = Math.max(at, this.latestAt());
-    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }), ...(sessionStartedAt === undefined ? {} : { sessionStartedAt }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
   }
 
   /**
@@ -346,6 +347,7 @@ export class ConversationHistory {
       if (!state || at === undefined || !Number.isFinite(at)) return [];
       return [{
         id: send.id, target: send.target, text: send.text, state, at,
+        ...(send.sessionStartedAt === undefined ? {} : { sessionStartedAt: send.sessionStartedAt }),
         ...(send.sentAt === undefined || send.held ? {} : { sentAt: send.sentAt }),
         ...(send.replyTo === undefined ? {} : { replyTo: send.replyTo }),
         ...(send.error === undefined ? {} : { error: send.error }),
@@ -421,7 +423,7 @@ export class ConversationHistory {
     const held: PendingSend[] = [];
     for (const stored of sends) {
       if (this.events.some((event) => event.kind === "send" && event.value.id === stored.id)) continue;
-      const value: ConversationSend = { id: stored.id, target: stored.target, text: stored.text, state: "sending", restored: true, ...(stored.replyTo === undefined ? {} : { replyTo: stored.replyTo }) };
+      const value: ConversationSend = { id: stored.id, target: stored.target, text: stored.text, state: "sending", restored: true, ...(stored.replyTo === undefined ? {} : { replyTo: stored.replyTo }), ...(stored.sessionStartedAt === undefined ? {} : { sessionStartedAt: stored.sessionStartedAt }) };
       if (stored.state === "held") {
         value.held = true;
         held.push(stored);

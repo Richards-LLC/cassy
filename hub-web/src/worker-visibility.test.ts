@@ -36,8 +36,9 @@ describe('staffed session catalog', () => {
     expect(visibleCatalog(rows)).toHaveLength(0);
     expect(visibleCatalog([liveSession])).toEqual([liveSession]);
   });
-  it('expires cached catalogs and recovers on a fresh response', () => {
-    expect(visibleCatalog([liveSession], false)).toEqual([]);
+  it('retains last-known running and dormant daemons when catalog freshness expires', () => {
+    expect(visibleCatalog([liveSession], false).map(row => row.name)).toEqual(['live']);
+    expect(visibleCatalog([{ ...liveSession, dormant: true }]).map(row => row.name)).toEqual(['live']);
     expect(visibleCatalog([liveSession], true)[0].unreachable).toBeUndefined();
   });
   it('never reads an exited supervisor', () => {

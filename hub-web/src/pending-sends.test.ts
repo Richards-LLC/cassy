@@ -72,12 +72,14 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
 
   it("restores each message honestly: a held one still waits and a sent one without a receipt is Not confirmed, never Sending… or Delivered", () => {
     const stored = unsettledThread().pendingSends();
+    stored[0]!.sessionStartedAt = "2026-11-01T00:00:00Z";
     expect(stored.map((send) => [send.id, send.state])).toEqual([["held", "held"], ["in-flight", "unconfirmed"], ["unconfirmed", "unconfirmed"], ["refused", "error"]]);
     // A reload while one was still on the wire.
     stored[1] = { ...stored[1]!, state: "sending" };
 
     const reloaded = new ConversationHistory();
     const held = reloaded.restorePending(stored, at(9, 30));
+    expect(reloaded.pendingSends()[0]!.sessionStartedAt).toBe(stored[0]!.sessionStartedAt);
     expect(held.map((send) => send.id), "only the held message is queued to go out").toEqual(["held"]);
     expect(reloaded.restorePending(stored, at(9, 31)), "restoring twice adds nothing").toEqual([]);
     expect(reloaded.events).toHaveLength(4);

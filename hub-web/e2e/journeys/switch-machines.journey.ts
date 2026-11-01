@@ -347,20 +347,20 @@ for (const width of [1280, 390]) {
             await hub.announceCatalog(prowl.id);
             await expect(list.locator('.conversation-row[data-machine-id="prowl"]').first(),
               `tap ${tap}: activity never re-sorts the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:calm-raven-72`);
-            if (soundwave.sessions.some((session) => session.name === PASSING.name)) {
-              soundwave.sessions = soundwave.sessions.filter((session) => session.name !== PASSING.name);
+            if (soundwave.sessions.some((session) => session.name === PASSING.name && session.liveness === "live")) {
+              soundwave.sessions = soundwave.sessions.map((session) => session.name === PASSING.name ? { ...session, liveness: "stale_metadata" as const } : session);
               await hub.announceCatalog(soundwave.id, { removed: [PASSING.name] });
             } else {
               // Insert before both targets: even a render that keeps its keyed
               // nodes must move the soundwave row out from under this press.
-              soundwave.sessions = [PASSING, ...soundwave.sessions];
+              soundwave.sessions = [PASSING, ...soundwave.sessions.filter((session) => session.name !== PASSING.name)];
               await hub.announceCatalog(soundwave.id, { added: [PASSING.name] });
             }
             // A fulfilled catalog request is not a rendered catalog. Observe
             // each toggle before the next tap can toggle it back, otherwise
             // coalesced reads can skip the intervening start/end altogether.
             await expect(list.locator(`.conversation-row[data-thread-key="${soundwave.id}:${PASSING.name}"]`),
-              `tap ${tap}: the catalog rendered the session start/end`).toHaveCount(soundwave.sessions.includes(PASSING) ? 1 : 0);
+              `tap ${tap}: the catalog rendered the session start/end`).toHaveCount(soundwave.sessions.some(session => session.name === PASSING.name && session.liveness === "live") ? 1 : 0);
             // Compare this press's node, not a sticky flag on reused rows that
             // may have been pressed in an earlier iteration.
             await expect.poll(() => pressed.evaluate((node, { x, y }) => node.ownerDocument.elementFromPoint(x, y)?.closest(".conversation-row") !== node, point),

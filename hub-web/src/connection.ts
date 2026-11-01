@@ -33,7 +33,7 @@ import {
 } from "./connection-state";
 import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
-import { sessionRunning, sessionsPath } from "./worker-visibility";
+import { sessionRunning, sessionStopped, sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
 import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
@@ -93,7 +93,7 @@ export interface HubCallbacks {
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
-  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number): void;
+  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number, stoppedSessions?: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
   /** `scrollback` is a pre-v3 daemon's raw pane bytes; a v3 daemon sends pane_bootstrap instead (cas-f285). */
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>): void;
@@ -242,6 +242,7 @@ export class HubConnectionSupervisor {
   private attempt = 0;
   private eventAbort?: AbortController;
   private catalogRequest?: Promise<HubSession[]>;
+  private readonly sessionBirths = new Map<string, string>();
   /** SSE and multiplexed events share this lane; event delivery never waits. */
   private readonly eventCatalog = new CoalescedRefresh(async () => {
     if (!this.desired || this.lifecycle.phase !== "live") return;
@@ -734,15 +735,20 @@ export class HubConnectionSupervisor {
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {
     signal.throwIfAborted();
     if (!this.catalogRequest) this.catalogRequest = (async () => {
-      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal);
+      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number; stopped_sessions?: HubSession[] }>("GET", sessionsPath(revealDormant()), undefined, signal);
       signal.throwIfAborted();
-      const running = new Set(response.sessions.filter(sessionRunning).map(session => session.name));
-      // Only a successful, authenticated catalog can retire demand. A timeout
-      // or an unreachable machine says nothing about its sessions' processes.
-      for (const name of new Set([...this.desiredSessions, ...this.endedSessions, ...response.sessions.map(session => session.name)])) {
-        this.setSessionEnded(name, !running.has(name));
+      const stopped = (response.stopped_sessions ?? []).filter(sessionStopped);
+      for (const session of [...stopped, ...response.sessions]) {
+        const previous = this.sessionBirths.get(session.name);
+        if (sessionStopped(session) || (previous && session.started_at && previous !== session.started_at)) this.setSessionEnded(session.name, true);
       }
-      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
+      // Let the owner archive the old birth's words before any attach can
+      // announce Live and flush. Missing rows never retire stream demand.
+      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs, stopped);
+      for (const session of response.sessions.filter(sessionRunning)) {
+        if (session.started_at) this.sessionBirths.set(session.name, session.started_at);
+        this.setSessionEnded(session.name, false);
+      }
       return response.sessions;
     })().finally(() => { this.catalogRequest = undefined; });
     const request = this.catalogRequest;

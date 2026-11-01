@@ -806,8 +806,8 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
 // cas-6c7a: a machine down past its catalog's freshness (30 s in the double)
 // can't send a fresh one. Whether the network is gone or the hub answers its
 // retryable 503, the list keeps its supervisors as last known, agreeing with
-// the open conversation and the footer; only a catalog the machine sends
-// empties the list. cas-c552: when only one of two machines is past its
+// the open conversation and the footer; only positive stopped-process
+// evidence empties the list. cas-c552: when only one of two machines is past its
 // freshness, the footer counts only its conversations as last known.
 test("HUB-J12 network switch: an outage past the catalog's freshness keeps the list, footer and conversation in agreement (cas-6c7a)", journeyPart, async ({ page, journey }) => {
   const atlas = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session })) };
@@ -849,10 +849,19 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       await expectFooter("2 conversations");
     });
   }
-  await journey.stage("The machines answer with no live supervisors: the list is empty", async () => {
+  const atlasSessions = [...atlas.sessions], studioSessions = [...studio.sessions];
+  await journey.stage("Missing catalog entries are unknown and keep both running rows", async () => {
     atlas.sessions.length = 0;
     studio.sessions.length = 0;
     await clock.advance(30_000);
+    await expect(row).toHaveCount(1);
+    await expect(studioRow).toHaveCount(1);
+    await expect(empty).toHaveCount(0);
+  });
+  await journey.stage("The machines positively confirm both daemons stopped: the list is empty", async () => {
+    atlas.sessions = atlasSessions.map(session => ({ ...session, liveness: "stale_metadata" }));
+    studio.sessions = studioSessions.map(session => ({ ...session, liveness: "stale_metadata" }));
+    await clock.advance(5_000);
     await expect(row).toHaveCount(0);
     await expect(studioRow).toHaveCount(0);
     await expect(empty).toBeVisible();

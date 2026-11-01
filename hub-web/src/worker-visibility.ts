@@ -30,7 +30,22 @@ export function pendingSessionLabel(session: HubSession | undefined, machineConn
   return session?.unreachable && machineConnected ? "Waiting for supervisor" : undefined;
 }
 
-/** A fresh catalog is authoritative, even when a missing destination has unsent messages. */
+/** Only positive process evidence can retire a destination. Catalog omission is unknown. */
+export function sessionStopped(session: HubSession): boolean {
+  return Boolean(session.ended) || session.liveness === "stale_metadata";
+}
+
+export function reconcileCatalog(previous: readonly HubSession[], listed: readonly HubSession[], stopped: readonly HubSession[] = []): HubSession[] {
+  const known = new Map<string, HubSession>(previous.map(session => [session.name, { ...session, stale: true }]));
+  for (const session of stopped) if (sessionStopped(session)) known.set(session.name, session);
+  for (const session of listed) {
+    if (session.liveness === "missing_endpoint" && known.has(session.name)) continue;
+    known.set(session.name, session);
+  }
+  return [...known.values()];
+}
+
+/** Freshness changes the label, never whether a last-known running daemon exists. */
 export function visibleCatalog(sessions: readonly HubSession[], catalogFresh = true, recovery = false): HubSession[] {
-  return catalogFresh ? sessions.filter(session => sessionRunning(session) && (recovery || !session.dormant)) : [];
+  return sessions.filter(sessionRunning).map(session => catalogFresh ? session : { ...session, stale: true });
 }

@@ -860,7 +860,7 @@ mod tests {
         assert_eq!(manager.cleanup_stale().unwrap(), 1);
         let ended = manager.ended_sessions().unwrap();
         assert_eq!(ended.len(), 1, "metadata cleanup must not erase positive stop evidence");
-        assert_eq!(ended[0].metadata.started_at, old.started_at);
+        assert_eq!(ended[0].metadata.created_at, old.created_at);
         assert!(!ended[0].ended.at.is_empty());
     }
 

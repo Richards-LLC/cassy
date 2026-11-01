@@ -11,6 +11,110 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
+    use crate::hooks::{HookInput, handle_hook};
+    use crate::mcp::server::CasCore;
+    use std::process::{Command, Stdio};
+
+    struct Owner(std::process::Child);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // A disposable, independently live process owns the fixture. EOF ends it;
+    // no sleeps, host PIDs, real factory rows or timing assumptions are needed.
+    let owner = Owner(
+        Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut env = TestEnvGuard::temp_home();
+    let project = env.home().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_FACTORY_SESSION", "factory-nested-review");
+    env.set("CAS_HOOK_HARNESS", "codex");
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    for role in [AgentRole::Supervisor, AgentRole::Worker] {
+        let id = format!("parent-{role}");
+        env.set("CAS_SESSION_ID", &id);
+        env.set("CAS_AGENT_NAME", "parent");
+        env.set("CAS_AGENT_ROLE", role.to_string());
+        let mut parent = Agent::new(id.clone(), "parent".into());
+        parent.role = role;
+        parent.factory_session = Some("factory-nested-review".into());
+        parent.pid = Some(owner.0.id());
+        stamp_pid_fingerprint(&mut parent, owner.0.id());
+        agents.register(&parent).unwrap();
+
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        assert!(
+            core.register_agent(id.clone(), "parent".into(), None)
+                .is_err(),
+            "an inherited CAS_SESSION_ID must not bind another live {role}'s MCP identity"
+        );
+        let nested_pid = std::process::id();
+        for event in [
+            DaemonEvent::SessionStart {
+                session_id: id.clone(),
+                agent_name: Some("parent".into()),
+                agent_role: Some(role.to_string()),
+                cc_pid: nested_pid,
+                clone_path: None,
+            },
+            DaemonEvent::SessionEnd {
+                session_id: id.clone(), cc_pid: Some(nested_pid),
+            },
+        ] {
+            assert!(matches!(
+                daemon.handle_socket_event(event).await,
+                DaemonResponse::Error { .. }
+            ));
+        }
+        assert!(matches!(
+            daemon.handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid }).await,
+            DaemonResponse::NoSession
+        ), "rejected registration must not publish the parent's identity in the socket map");
+        for event in ["SessionStart", "Stop", "SessionEnd"] {
+            handle_hook(
+                event,
+                HookInput {
+                    session_id: "nested-codex-thread".into(),
+                    cwd: project.to_string_lossy().into_owned(),
+                    hook_event_name: event.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let kept = agents
+                .get(&id)
+                .expect("nested lifecycle cannot retire its parent");
+            assert_eq!(kept.pid, parent.pid, "{role}: {event}");
+            assert_eq!(kept.status, parent.status, "{role}: {event}");
+            assert_eq!(kept.factory_session, parent.factory_session);
+        }
+        agents.heartbeat(&id).unwrap();
+    }
+    assert_eq!(
+        agents.list(None).unwrap().len(),
+        2,
+        "no nested ghost identities"
+    );
+}
+
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
 /// around queue writes and HTTP. A hub sweep already in flight must win;
 /// after it releases, the daemon must sync and keep competing holders out.

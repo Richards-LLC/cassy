@@ -576,8 +576,39 @@ impl CasCore {
         let agent_store = self.open_agent_store()?;
 
         match agent_store.get(agent_id) {
-            Ok(agent) if agent.is_alive() => Ok(()), // Already active
-            Ok(_agent) => {
+            Ok(mut agent) => {
+                // Repair rows corrupted by older nested-harness registration.
+                // A cached server-authenticated owner proves its own process;
+                // reviving status alone leaves the daemon reaping the exited
+                // child's PID on every heartbeat tick (cas-b815).
+                if self.has_server_internal_identity(agent_id)
+                    && matches!(
+                        crate::mcp::daemon::evaluate_liveness(
+                            &agent,
+                            crate::mcp::daemon::pid_alive,
+                            crate::mcp::daemon::pid_matches_fingerprint,
+                        ),
+                        crate::mcp::daemon::LivenessOutcome::Dead { .. }
+                    )
+                {
+                    let pid = std::process::id();
+                    agent.pid = Some(pid);
+                    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
+                    #[cfg(unix)]
+                    {
+                        let ppid = std::os::unix::process::parent_id();
+                        agent.ppid = Some(ppid);
+                        crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
+                    }
+                    agent_store.update(&agent).map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to repair agent process: {error}")),
+                        data: None,
+                    })?;
+                }
+                if agent.is_alive() {
+                    return Ok(());
+                }
                 // Agent exists but is stale/shutdown - revive it
                 info!(agent_id = %agent_id, "Reviving agent");
                 agent_store.revive(agent_id).map_err(|e| McpError {
@@ -1032,6 +1063,50 @@ mod role_registration_tests {
         assert_eq!(agent.name, "Primary (re-registered)");
         assert_eq!(agent.role, AgentRole::Supervisor);
         assert_eq!(agent.agent_type, AgentType::Primary);
+    }
+
+    #[test]
+    fn cached_owner_repairs_replaced_process_before_heartbeat_cas_b815() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SESSION", "factory-owner-repair");
+        for status in [
+            crate::types::AgentStatus::Active,
+            crate::types::AgentStatus::Stale,
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let root = init_cas_dir(project.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let id = core
+                .register_agent("owner".into(), "supervisor".into(), None)
+                .unwrap();
+            let agents = open_agent_store(&root).unwrap();
+            let mut corrupted = agents.get(&id).unwrap();
+            corrupted.pid = Some(i32::MAX as u32);
+            corrupted.ppid = None;
+            corrupted.status = status;
+            agents.update(&corrupted).unwrap();
+
+            assert_eq!(core.get_agent_id().unwrap(), id);
+            let repaired = agents.get(&id).unwrap();
+            assert!(
+                matches!(
+                    crate::mcp::daemon::evaluate_liveness(
+                        &repaired,
+                        crate::mcp::daemon::pid_alive,
+                        crate::mcp::daemon::pid_matches_fingerprint,
+                    ),
+                    crate::mcp::daemon::LivenessOutcome::Alive { .. }
+                ),
+                "the next daemon tick must not reap the live owner: {status}"
+            );
+            agents.heartbeat(&id).unwrap();
+            let owner = crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+                agents.as_ref(), Some("factory-owner-repair"),
+            ).expect("workers can still resolve the supervisor after its heartbeat");
+            assert_eq!(owner.agent_id, id);
+            assert_eq!(repaired.cc_session_id, corrupted.cc_session_id);
+        }
     }
 
     #[test]

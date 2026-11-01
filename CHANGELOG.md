@@ -44,6 +44,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Stopped conversations leave Commander automatically** — Ended and crashed sessions disappear without dismissal or attach retries. Machine outages keep running conversations available, and waiting messages to stopped sessions are saved as not sent.
 
+### Fixed — Factory
+
+- **Nested reviews preserve supervisor ownership** — Was: A disposable Codex
+  review could inherit the supervisor's identity, replace its process record,
+  and disable worker messages and the peer mailbox when it exited. → Now:
+  Nested harnesses cannot take over a live factory identity or run lifecycle
+  cleanup against it; the authenticated owner also repairs older exited-PID
+  records before heartbeats resume.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

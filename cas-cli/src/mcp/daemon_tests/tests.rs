@@ -11,6 +11,83 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
+#[cfg(unix)]
+#[test]
+fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
+    use crate::hooks::{HookInput, handle_hook};
+    use crate::mcp::server::CasCore;
+    use std::process::{Command, Stdio};
+
+    struct Owner(std::process::Child);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // A disposable, independently live process owns the fixture. EOF ends it;
+    // no sleeps, host PIDs, real factory rows or timing assumptions are needed.
+    let owner = Owner(
+        Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut env = TestEnvGuard::temp_home();
+    let project = env.home().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_FACTORY_SESSION", "factory-nested-review");
+    env.set("CAS_HOOK_HARNESS", "codex");
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    for role in [AgentRole::Supervisor, AgentRole::Worker] {
+        let id = format!("parent-{role}");
+        env.set("CAS_SESSION_ID", &id);
+        env.set("CAS_AGENT_NAME", "parent");
+        env.set("CAS_AGENT_ROLE", role.to_string());
+        let mut parent = Agent::new(id.clone(), "parent".into());
+        parent.role = role;
+        parent.factory_session = Some("factory-nested-review".into());
+        parent.pid = Some(owner.0.id());
+        stamp_pid_fingerprint(&mut parent, owner.0.id());
+        agents.register(&parent).unwrap();
+
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        assert!(
+            core.register_agent(id.clone(), "parent".into(), None)
+                .is_err(),
+            "an inherited CAS_SESSION_ID must not bind another live {role}'s MCP identity"
+        );
+        for event in ["SessionStart", "Stop", "SessionEnd"] {
+            handle_hook(
+                event,
+                HookInput {
+                    session_id: "nested-codex-thread".into(),
+                    cwd: project.to_string_lossy().into_owned(),
+                    hook_event_name: event.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let kept = agents
+                .get(&id)
+                .expect("nested lifecycle cannot retire its parent");
+            assert_eq!(kept.pid, parent.pid, "{role}: {event}");
+            assert_eq!(kept.status, parent.status, "{role}: {event}");
+            assert_eq!(kept.factory_session, parent.factory_session);
+        }
+        agents.heartbeat(&id).unwrap();
+    }
+    assert_eq!(
+        agents.list(None).unwrap().len(),
+        2,
+        "no nested ghost identities"
+    );
+}
+
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
 /// around queue writes and HTTP. A hub sweep already in flight must win;
 /// after it releases, the daemon must sync and keep competing holders out.
@@ -242,8 +319,14 @@ fn supervisor_registration_records_own_model_and_effort() {
     ]);
     let mut agent = Agent::new_with_role("lead".into(), "lead".into(), AgentRole::Supervisor);
     apply_factory_worker_metadata(&mut agent, None);
-    assert_eq!(agent.metadata.get("supervisor_model").map(String::as_str), Some("claude-opus-5-5"));
-    assert_eq!(agent.metadata.get("supervisor_effort").map(String::as_str), Some("high"));
+    assert_eq!(
+        agent.metadata.get("supervisor_model").map(String::as_str),
+        Some("claude-opus-5-5")
+    );
+    assert_eq!(
+        agent.metadata.get("supervisor_effort").map(String::as_str),
+        Some("high")
+    );
     assert!(!agent.metadata.contains_key("worker_model"));
 }
 
@@ -398,7 +481,10 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         assert!(reused, "{worker_cli} registration must reuse the row");
         assert_eq!(resolved.id, original.id);
         assert_eq!(resolved.name, original.name);
-        assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session.as_str()));
+        assert_eq!(
+            resolved.cc_session_id.as_deref(),
+            Some(new_session.as_str())
+        );
         assert_eq!(
             agent_store
                 .get_lease("cas-742-lease")
@@ -435,7 +521,10 @@ fn cas_e9fc_clear_session_end_before_rebind_keeps_the_agent_registered() {
         let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
         let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
         task_store
-            .add(&Task::new("cas-e9fc-lease".to_string(), "scratch root".to_string()))
+            .add(&Task::new(
+                "cas-e9fc-lease".to_string(),
+                "scratch root".to_string(),
+            ))
             .expect("seed task");
         let old_session = "cd08c932-378b-4b5c-a69a-c5ade0b8aa62";
         let new_session = "34398e29-2e78-46c0-b17f-127c407f02e4";
@@ -838,14 +927,24 @@ fn stale_factory_worker_queues_exact_forced_process_tree_shutdown() {
     let mut worker = Agent::new("stale-worker-id".to_string(), "stale-worker".to_string());
     worker.role = AgentRole::Worker;
     worker.factory_session = Some("factory-gh236".to_string());
-    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("queue stale factory worker").expect("factory worker must queue shutdown");
+    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker)
+        .expect("queue stale factory worker")
+        .expect("factory worker must queue shutdown");
     let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
-    let request = queue.peek(10).expect("peek shutdown queue").into_iter().find(|request| request.id == request_id).expect("exact shutdown request");
+    let request = queue
+        .peek(10)
+        .expect("peek shutdown queue")
+        .into_iter()
+        .find(|request| request.id == request_id)
+        .expect("exact shutdown request");
     assert_eq!(request.action, cas_store::SpawnAction::Shutdown);
     assert_eq!(request.worker_names, vec!["stale-worker"]);
     assert!(request.force);
     assert_eq!(request.factory_session.as_deref(), Some("factory-gh236"));
-    assert_eq!(queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"), None);
+    assert_eq!(
+        queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"),
+        None
+    );
 }
 
 // =========================================================================
@@ -1744,7 +1843,10 @@ fn source_scan_classifies_test_modules_by_relative_boundary() {
 
     let (sites_checked, violations) = scan_production_pid_assignments(&src_root);
 
-    assert_eq!(sites_checked, 1, "only the production assignment is scanned");
+    assert_eq!(
+        sites_checked, 1,
+        "only the production assignment is scanned"
+    );
     assert_eq!(
         violations.len(),
         1,

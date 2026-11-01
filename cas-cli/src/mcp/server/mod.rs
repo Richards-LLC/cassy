@@ -380,7 +380,8 @@ impl CasCore {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 peer.notify_resource_list_changed(),
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -793,7 +794,6 @@ impl CasCore {
             warn!(%error, "supervisor handoff publication will retry at startup");
         }
 
-
         if source == AgentIdentitySource::ServerInternal {
             match agent_store.get(&canonical_id) {
                 Ok(registered) => crate::mcp::daemon::recover_supervisor_verification_dispatches(
@@ -959,8 +959,6 @@ mod prompts;
 mod resources;
 mod runtime;
 
-#[cfg(feature = "mcp-proxy")]
-pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};
 pub use runtime::run_server;
 #[cfg(feature = "mcp-proxy")]
 pub use runtime::{
@@ -969,6 +967,10 @@ pub use runtime::{
     read_proxy_health_cache, read_proxy_snapshot_cache, write_empty_proxy_snapshot_cache,
     write_proxy_catalog_cache, write_proxy_health_cache, write_proxy_snapshot_cache,
     write_proxy_snapshot_cache_for_config, write_unavailable_proxy_snapshot_cache,
+};
+#[cfg(feature = "mcp-proxy")]
+pub(crate) use runtime::{
+    install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy,
 };
 
 #[cfg(test)]
@@ -1035,6 +1037,50 @@ mod role_registration_tests {
     }
 
     #[test]
+    fn cached_owner_repairs_replaced_process_before_heartbeat_cas_b815() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SESSION", "factory-owner-repair");
+        for status in [
+            crate::types::AgentStatus::Active,
+            crate::types::AgentStatus::Stale,
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let root = init_cas_dir(project.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let id = core
+                .register_agent("owner".into(), "supervisor".into(), None)
+                .unwrap();
+            let agents = open_agent_store(&root).unwrap();
+            let mut corrupted = agents.get(&id).unwrap();
+            corrupted.pid = Some(i32::MAX as u32);
+            corrupted.ppid = None;
+            corrupted.status = status;
+            agents.update(&corrupted).unwrap();
+
+            assert_eq!(core.get_agent_id().unwrap(), id);
+            let repaired = agents.get(&id).unwrap();
+            assert!(
+                matches!(
+                    crate::mcp::daemon::evaluate_liveness(
+                        &repaired,
+                        crate::mcp::daemon::pid_alive,
+                        crate::mcp::daemon::pid_matches_fingerprint,
+                    ),
+                    crate::mcp::daemon::LivenessOutcome::Alive { .. }
+                ),
+                "the next daemon tick must not reap the live owner: {status}"
+            );
+            agents.heartbeat(&id).unwrap();
+            let owner = crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+                agents.as_ref(), Some("factory-owner-repair"),
+            ).expect("workers can still resolve the supervisor after its heartbeat");
+            assert_eq!(owner.agent_id, id);
+            assert_eq!(repaired.cc_session_id, corrupted.cc_session_id);
+        }
+    }
+
+    #[test]
     fn context_reset_server_registration_reuses_worker_identity_for_claude_and_codex() {
         for worker_cli in ["claude", "codex"] {
             let _env = TestEnvGuard::with_optional_vars(&[
@@ -1063,7 +1109,12 @@ mod role_registration_tests {
             original.cc_session_id = Some(new_session.clone());
             store.register(&original).unwrap();
             store
-                .try_claim("cas-742-server-lease", &original.id, 600, Some("in progress"))
+                .try_claim(
+                    "cas-742-server-lease",
+                    &original.id,
+                    600,
+                    Some("in progress"),
+                )
                 .unwrap();
 
             let core = CasCore::with_daemon(cas_root.clone(), None, None);

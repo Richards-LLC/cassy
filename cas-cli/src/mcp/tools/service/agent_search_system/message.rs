@@ -233,7 +233,7 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 }
 
 pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
-    "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
+    "Reply contract, with the diagram, callout, table and colored-code forms Commander renders: see `cas-supervisor/references/operator-reply.md`.";
 
 fn commander_alias_reply_hint() -> String {
     format!(

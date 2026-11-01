@@ -603,10 +603,11 @@ pub enum VerificationStatus {
     SupervisorCall,
     /// System dispatch marker: no verifier check has run yet.
     Pending,
-    /// Verification failed with error
-    Error,
     /// Verification skipped (force bypass)
     Skipped,
+    /// Verification failed, or a newer writer supplied an unknown verdict.
+    #[serde(other)]
+    Error,
 }
 
 impl fmt::Display for VerificationStatus {
@@ -633,10 +634,85 @@ impl FromStr for VerificationStatus {
             "pending" => Ok(VerificationStatus::Pending),
             "error" => Ok(VerificationStatus::Error),
             "skipped" => Ok(VerificationStatus::Skipped),
-            _ => Err(TypeError::Parse(format!(
-                "invalid verification status: {s}"
-            ))),
+            // A newer writer must never turn an unreadable verdict into an
+            // approval (or make an entire history unreadable).
+            _ => Ok(VerificationStatus::Error),
         }
+    }
+}
+
+impl VerificationStatus {
+    /// Base value understood by every released store and sync reader.
+    pub fn storage_status(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Skipped => "skipped",
+            Self::Error | Self::Pending | Self::SupervisorCall => "error",
+        }
+    }
+
+    pub fn storage_detail(self) -> Option<&'static str> {
+        match self {
+            Self::Pending => Some("pending"),
+            Self::SupervisorCall => Some("supervisor_call"),
+            _ => None,
+        }
+    }
+
+    /// Old writers know only the base status. Their terminal verdict wins over
+    /// any detail left by a newer writer; unknown extensions fail closed.
+    pub fn from_storage(status: &str, detail: Option<&str>) -> Self {
+        if status.eq_ignore_ascii_case("error") {
+            match detail {
+                Some("pending") => Self::Pending,
+                Some("supervisor_call") => Self::SupervisorCall,
+                _ => Self::Error,
+            }
+        } else {
+            status.parse().unwrap_or(Self::Error)
+        }
+    }
+}
+
+// Flatten this envelope into Verification so old serde readers see a known,
+// non-approving status and ignore the additive semantic detail. Keep the enum's
+// public spelling for MCP requests and human output.
+mod verification_status_wire {
+    use super::VerificationStatus;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct WireStatus {
+        #[serde(default = "default_status")]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_detail: Option<String>,
+    }
+
+    fn default_status() -> String {
+        "approved".into()
+    }
+
+    pub fn serialize<S: Serializer>(
+        status: &VerificationStatus,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        WireStatus {
+            status: status.storage_status().into(),
+            status_detail: status.storage_detail().map(str::to_owned),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<VerificationStatus, D::Error> {
+        let wire = WireStatus::deserialize(deserializer)?;
+        Ok(VerificationStatus::from_storage(
+            &wire.status,
+            wire.status_detail.as_deref(),
+        ))
     }
 }
 
@@ -791,7 +867,7 @@ pub struct Verification {
     pub issuer_agent_id: Option<String>,
 
     /// Verification status
-    #[serde(default)]
+    #[serde(flatten, with = "verification_status_wire")]
     pub status: VerificationStatus,
 
     /// Confidence score (0.0 to 1.0)
@@ -1049,7 +1125,16 @@ mod tests {
             VerificationStatus::from_str("skipped").unwrap(),
             VerificationStatus::Skipped
         );
-        assert!(VerificationStatus::from_str("invalid").is_err());
+        for unknown in ["future_verdict", "", "APPROVED_BUT_UNRECOGNIZED"] {
+            assert_eq!(
+                VerificationStatus::from_str(unknown).unwrap(),
+                VerificationStatus::Error
+            );
+            assert_eq!(
+                serde_json::from_value::<VerificationStatus>(serde_json::json!(unknown)).unwrap(),
+                VerificationStatus::Error
+            );
+        }
     }
 
     #[test]

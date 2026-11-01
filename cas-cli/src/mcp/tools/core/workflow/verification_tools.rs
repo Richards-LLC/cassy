@@ -226,13 +226,16 @@ impl CasCore {
         // Parse all caller-selected verdict state before a missing-dispatch
         // recovery can persist a new proof boundary. An invalid status must
         // remain failure-atomic rather than leaving a fresh pending dispatch.
-        let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(
+        if !matches!(
+            req.status.to_ascii_lowercase().as_str(),
+            "approved" | "rejected" | "supervisor_call" | "pending" | "error" | "skipped"
+        ) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
                 "Invalid verification status. Expected: approved, rejected, supervisor_call, error, or skipped.",
-            ),
-            data: None,
-        })?;
+            ));
+        }
+        let status = VerificationStatus::from_storage(&req.status, None);
 
         if status == VerificationStatus::Pending {
             return Err(Self::error(

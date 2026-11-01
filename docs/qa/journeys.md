@@ -452,7 +452,8 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 13. Both machines reconnect — both rows and the full conversation count return to live
 14. The machine stays down past its catalog's freshness — with only Atlas offline and Studio live, both Atlas conversations are last known and the footer says "2 conversations · 1 last known" (cas-c552)
 15. Atlas reconnects — both rows and the full conversation count return to live
-16. The machines answer with no live supervisors — the list is empty and the footer says "0 conversations"
+16. Missing catalog entries are unknown and keep both running rows — a successful incomplete catalog cannot hide a running conversation
+17. The machines positively confirm both daemons stopped — the list is empty and the footer says "0 conversations"
 
 #### Expected experience
 

@@ -349,6 +349,49 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
 
 /// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input
 /// change, but can be rebound across a docs-only commit without rerunning.
+/// Start names what close will check, and one park reply names every failure.
+#[tokio::test]
+async fn start_lists_close_requirements_and_park_reports_every_failure() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::write(f.worker_path.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n").unwrap();
+    git(&f.worker_path, &["add", "."]);
+    git(&f.worker_path, &["commit", "-q", "-m", &format!("docs({ID}): seed the changelog")]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
+    for requirement in [
+        "Close checks",
+        "Branch: factory/br-worker to main",
+        "Changelog:",
+        "Focused proof:",
+        "Adversarial probe:",
+        "Proof targets: unrelated",
+        "Close reason:",
+    ] {
+        assert!(started.contains(requirement), "{requirement}: {started}");
+    }
+    assert!(!started.contains("exceed the response budget"), "{started}");
+
+    let artifacts = crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None);
+    let ledger_dir = &artifacts.task_dirs(ID)[0];
+    std::fs::create_dir_all(ledger_dir).unwrap();
+    std::fs::write(ledger_dir.join("LEDGER.md"), "not a ledger\n").unwrap();
+
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "the CI run passed",
+    })).await;
+    for gate in [
+        "PROOF CLAIM RECEIPT REQUIRED",
+        "QA LEDGER REJECTED",
+        "CHANGELOG [Unreleased] REQUIRED",
+        "FOCUSED PROOF REQUIRED",
+    ] {
+        assert!(refused.contains(gate), "{gate}: {refused}");
+    }
+    assert_eq!(f.task().status, TaskStatus::InProgress, "a refused delivery stays with its worker");
+}
+
 #[tokio::test]
 async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();

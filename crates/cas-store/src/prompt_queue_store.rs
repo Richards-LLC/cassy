@@ -5528,6 +5528,17 @@ fn supervisor_delivery_kind(
         return Ok(None);
     }
     let has_agents = agents_table_exists(conn)?;
+    // A passive Cassy notice to a live worker rides its next turn's digest.
+    // Other worker instructions (verdict, conflict, unblock) still transport.
+    if has_agents && matches!(origin, Some(QueueOrigin::Daemon)) && split_quiet_marker(prompt).0
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE role='worker' AND factory_session IS ?1
+               AND (name=?2 OR id=?2) AND status IN ('active','idle'))",
+            params![session, target], |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(Some(NOTICE_DIGEST_KIND.into()));
+    }
     let supervisor: Option<String> = if has_agents {
         conn.query_row(
             "SELECT id FROM agents WHERE role='supervisor' AND factory_session IS ?1
@@ -5635,6 +5646,22 @@ fn supervisor_delivery_kind(
     if task.is_empty() || head.len() != 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Ok(None);
     }
+    // Cassy owns verdict/close once this exact delivery has landed. Keep a
+    // late readiness fact, but do not ask the supervisor to merge it again.
+    if conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+        [], |row| row.get::<_, bool>(0))?
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN ('awaiting_merge','closed')
+               AND CASE WHEN json_valid(deliverables) THEN
+                   json_extract(deliverables,'$.factory_branch_anchor') = ?2
+                   AND COALESCE(json_extract(deliverables,'$.green_merge_commit'), '') <> ''
+                   AND COALESCE(json_extract(deliverables,'$.merge_conflicted'), 0) = 0
+               ELSE 0 END)",
+            params![task, head], |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(Some(DIGEST.into()));
+    }
     let episode = format!(
         "merge_ready:{}",
         serde_json::to_string(&(&supervisor, &task, &head))?
@@ -5646,6 +5673,27 @@ fn supervisor_delivery_kind(
         |row| row.get(0),
     )?;
     Ok(Some(if exists { DIGEST.into() } else { episode }))
+}
+
+/// Retire pending readiness atomically with Cassy's successful merge record.
+/// Episode metadata is store-authored and binds owner, task and delivery tip;
+/// a new delivery, explicit interrupt or independent blocker keeps its wake.
+pub(crate) fn digest_merged_readiness(conn: &Connection, task_id: &str) -> Result<()> {
+    if !conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_queue')",
+        [], |row| row.get::<_, bool>(0))?
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE prompt_queue SET kind='supervisor_digest'
+         WHERE processed_at IS NULL AND transport_delivered_at IS NULL AND acked_at IS NULL
+           AND urgent=0 AND kind GLOB 'merge_ready:*'
+           AND json_extract(CASE WHEN json_valid(substr(kind,13)) THEN substr(kind,13) ELSE '[]' END, '$[1]')=?1
+           AND json_extract(CASE WHEN json_valid(substr(kind,13)) THEN substr(kind,13) ELSE '[]' END, '$[2]')=
+               (SELECT json_extract(deliverables,'$.factory_branch_anchor') FROM tasks WHERE id=?1)",
+        [task_id],
+    )?;
+    Ok(())
 }
 
 /// Metadata-only evidence shared by the watchdog read and atomic bounce write.

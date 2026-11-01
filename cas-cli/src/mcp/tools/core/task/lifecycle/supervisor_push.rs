@@ -454,7 +454,7 @@ pub(crate) enum ApprovedCloseRetry {
 }
 
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
-/// merged delivery, so it neither waits for a merge reply nor re-closes.
+/// merged delivery, in its next-turn digest without waking it.
 pub(crate) fn queue_cassy_merge_close_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -470,7 +470,8 @@ pub(crate) fn queue_cassy_merge_close_notice(
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                "{}Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id,
                 if task.deliverables.parked_close_reason.is_some() {
                     "with your parked close reason"
@@ -484,7 +485,7 @@ pub(crate) fn queue_cassy_merge_close_notice(
 }
 
 /// cas-e9d6: tell the worker once that a supervisor merge parked its lane
-/// tip and released its lease, so it neither resumes nor re-closes.
+/// tip and released its lease. This is next-turn context, not a worker action.
 pub(crate) fn queue_merged_lane_parked_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -495,7 +496,8 @@ pub(crate) fn queue_merged_lane_parked_notice(
         (
             format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
             format!(
-                "Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                "{}Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id
             ),
             format!("Merged and parked by Cassy: {}", task.id),

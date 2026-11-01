@@ -1279,6 +1279,9 @@ impl TaskStore for SqliteTaskStore {
                     admission.as_str(),
                 ],
             )?;
+            if rows == 1 {
+                crate::prompt_queue_store::digest_merged_readiness(tx, task_id)?;
+            }
             Ok(rows == 1)
         })
     }

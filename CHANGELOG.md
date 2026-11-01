@@ -66,6 +66,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Stopped conversations leave Commander automatically** — Ended and crashed sessions disappear without dismissal or attach retries. Machine outages keep running conversations available, and waiting messages to stopped sessions are saved as not sent.
 
+- **Live conversations tolerate unavailable session catalogs** — Explicit sends use the current live connection, and reconnects settle while catalog reads retry. Drafts from older clients keep their words; old session sends cannot alter a replacement's delivery status, and failed draft archives preserve the original copy. Stale-session cleanup retains stop evidence for devices that reconnect later.
+
 ### Fixed — Factory
 
 - **Nested reviews preserve supervisor ownership** — Was: A disposable Codex

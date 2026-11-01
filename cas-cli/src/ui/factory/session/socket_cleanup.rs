@@ -73,6 +73,20 @@ pub(super) fn inventory_lock(sessions: &Path, reap: bool) -> io::Result<Option<f
     Ok(Some(file))
 }
 
+/// Share the mutator's record lock after taking the namespace lock.
+pub(super) fn metadata_lock(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let lock = fs::OpenOptions::new().read(true).write(true).create(true)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.with_extension("json.lock"))?;
+    let metadata = lock.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "factory record lock is not owned"));
+    }
+    fs2::FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
+}
+
 /// Reap only the exact dead receipt inspected by update. The GUI probe is
 /// advisory for metadata; socket deletion still needs the native kernel proof.
 pub(super) fn reap_metadata_locked(
@@ -97,18 +111,11 @@ pub(super) fn reap_metadata_locked(
     }
     // The app's progress/hold mutator uses this per-record lock. Take it after
     // the namespace lock so it cannot rename an older receipt over our reap.
-    let json_lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path.with_extension("json.lock"))?;
-    let lock_metadata = json_lock.metadata()?;
-    if !lock_metadata.is_file() || lock_metadata.uid() != uid || lock_metadata.nlink() != 1 {
-        return Ok(false);
-    }
-    fs2::FileExt::lock_exclusive(&json_lock)?;
+    let _json_lock = match metadata_lock(path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
+        Err(error) => return Err(error),
+    };
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -156,6 +163,7 @@ pub(super) fn reap_metadata_locked(
     {
         return Ok(false);
     }
+    super::retain_end_receipt(sessions, &metadata)?;
     fs::remove_file(path)?;
     Ok(true)
 }

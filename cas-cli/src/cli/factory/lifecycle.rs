@@ -234,7 +234,7 @@ fn end_session_with(
             // checked) before the record that names its store is removed.
             #[cfg(unix)]
             reap_session_worker_groups(name, &session.metadata, "after the daemon exited");
-            manager.remove_metadata(name)?;
+            manager.remove_metadata_if_current(&session.metadata)?;
             return Ok(EndSessionOutcome::CleanedStale);
         }
         RecordedDaemon::Unknown => {
@@ -338,7 +338,7 @@ fn end_session_with(
     if let Some(cause) = reap_cause {
         reap_session_worker_groups(name, &session.metadata, cause);
     }
-    manager.remove_metadata(name)?;
+    manager.remove_metadata_if_current(&session.metadata)?;
     Ok(EndSessionOutcome::Ended)
 }
 
@@ -424,7 +424,7 @@ fn force_clear_stale_session(
         &session.metadata,
         "after the operator confirmed the daemon is gone (--force-stale)",
     );
-    manager.remove_metadata(name)?;
+    manager.remove_metadata_if_current(&session.metadata)?;
     Ok(EndSessionOutcome::CleanedStale)
 }
 

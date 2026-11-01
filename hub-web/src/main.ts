@@ -3972,6 +3972,7 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
     for (const send of history.pendingSends()) {
       if (!retired(key, send.sessionStartedAt) || (send.state !== "held" && send.state !== "sending")) continue;
       retiredIds.add(send.id);
+      liveSendApprovals.get(key)?.delete(send.id);
       const queue = heldSends.get(key);
       const held = queue?.find(item => item.clientRef === send.id);
       if (held) { clearTimeout(held.expiry); heldSince.delete(held.clientRef); queue!.splice(queue!.indexOf(held), 1); }

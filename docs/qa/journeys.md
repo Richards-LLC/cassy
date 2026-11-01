@@ -514,7 +514,7 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 
 - **Entry:** `/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of one project
 - **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; stopped sessions disappear automatically
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`, `hub-web/src/worker-visibility.ts`, `cas-cli/src/hub/server.rs`
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`, `hub-web/src/worker-visibility.ts`, `cas-cli/src/hub/server.rs`, `cas-cli/src/ui/factory/session.rs`, `cas-cli/src/cli/factory/lifecycle.rs`
 - **Suite:** `hub-web/e2e/journeys/session-identity.journey.ts`
 - **Gaps:** the daemon's session-bound history page, the catalog's last activity and the hub's End session are doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
 
@@ -544,6 +544,10 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 - Every canonical project has one closed outlined card across machines, including singletons. Machine chips expose online state and filter; rows expose supplied harness/email or gracefully omit them. Verify boundaries at 1280 and 390 pixels in light, dark and forced colors (cas-6024).
 - Needs you pins operator decisions above the cards; unread alone never pins. All/Needs you/machine filters intersect search with an explicit no-results recovery. A shortcut opens its own session without sending an answer.
 - Collapse by keyboard retains focus and survives reload on this device; search temporarily reveals matches. The paired-machine footer applies the same machine filter and keeps machine-management access.
+
+- Catalog failure on a live connection cannot hold an explicit send. A reconnect with health, authentication and event-stream proof settles even while catalog reads fail; held older words still need a matching session birth before replay.
+- Upgrading a running session preserves drafts with no recorded birth. A missing identity alone never proves a stop. A rejected message from an older birth cannot change a replacement's new in-flight messages. If archiving a stopped draft fails, the original durable draft survives reload.
+- A phone offline during a daemon crash and native stale cleanup receives the retained stop receipt on reconnect and removes its cached running row. A positively stopped focused conversation closes; a replacement becomes selectable without automatically opening.
 
 ### HUB-J15 · See a delivery problem as attention, not conversation
 

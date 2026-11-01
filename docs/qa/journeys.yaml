@@ -74,6 +74,11 @@ bug_families:
     tasks: [cas-6f79]
     invariants: [HUB-J14-PROJECT-DISPLAY-NAME]
     journeys: [HUB-J14]
+  held-send-lifetime:
+    title: Offline auto-send discloses its two-minute wait and requires Retry after expiry
+    tasks: [cas-1c0e]
+    invariants: [HUB-J12-HELD-SEND-LIFETIME]
+    journeys: [HUB-J11, HUB-J12]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -111,11 +116,6 @@ owner_groups:
     - hub-web/src/cloud-brand.ts
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
-  held-send-lifetime:
-    title: Offline auto-send discloses its two-minute wait and requires Retry after expiry
-    tasks: [cas-1c0e]
-    invariants: [HUB-J12-HELD-SEND-LIFETIME]
-    journeys: [HUB-J11, HUB-J12]
 invariants:
   HUB-J14-POSITIVE-STOP-AND-BIRTH:
     statement: Missing, failed and stale catalogs preserve last-known running sessions; only positive stop evidence retires them. Held sends and drafts belong to a session start identity, and restored messages apply already known stop evidence before replay.

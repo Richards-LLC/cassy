@@ -144,6 +144,57 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn legacy_factory_owner_accepts_its_actual_unstamped_parent_cas_b815() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "legacy-parent-factory");
+    let project = env.home().join("project");
+    let root = init_cas_dir(&project).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let parent_pid = std::os::unix::process::parent_id();
+    for role in [AgentRole::Supervisor, AgentRole::Worker] {
+        let id = format!("legacy-{role}");
+        let mut owner = Agent::new(id.clone(), id.clone());
+        owner.role = role;
+        owner.factory_session = Some("legacy-parent-factory".into());
+        owner.pid = Some(std::process::id());
+        stamp_pid_fingerprint(&mut owner, std::process::id());
+        // OpenCode-style legacy rows have a real MCP parent but no parent
+        // fingerprint because its name was not recognised as a harness.
+        owner.ppid = Some(parent_pid);
+        owner.metadata.remove(PPID_STARTTIME_KEY);
+        agents.register(&owner).unwrap();
+        let (refreshed, _) = register_session_start_agent(
+            &root, agents.as_ref(), &id, Some(&id), Some(&role.to_string()), parent_pid, None,
+        ).expect("the live fingerprinted MCP child proves its actual parent owns this identity");
+        assert_eq!(refreshed.id, id);
+        assert_eq!(agents.get(&id).unwrap().pid, Some(parent_pid));
+    }
+}
+
+#[test]
+fn expired_factory_owner_from_old_hostname_can_reregister_cas_b815() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "renamed-host-factory");
+    let project = env.home().join("project");
+    let root = init_cas_dir(&project).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let mut retired = Agent::new("renamed-host-owner".into(), "owner".into());
+    retired.role = AgentRole::Supervisor;
+    retired.status = AgentStatus::Stale;
+    retired.factory_session = Some("renamed-host-factory".into());
+    retired.machine_id = Some("older-hostname.invalid".into());
+    retired.pid = Some(i32::MAX as u32);
+    agents.register(&retired).unwrap();
+    let (current, _) = register_session_start_agent(
+        &root, agents.as_ref(), &retired.id, Some("owner"), Some("supervisor"), std::process::id(), None,
+    ).expect("an exited owner under the previous hostname is replaceable");
+    assert_eq!(current.id, retired.id);
+    assert_eq!(current.pid, Some(std::process::id()));
+    assert_eq!(current.machine_id, Some(Agent::get_or_generate_machine_id()));
+}
+
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
 /// around queue writes and HTTP. A hub sweep already in flight must win;
 /// after it releases, the daemon must sync and keep competing holders out.

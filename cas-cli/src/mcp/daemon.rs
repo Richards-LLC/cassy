@@ -212,8 +212,15 @@ pub(crate) fn ensure_factory_process_owner(
     if owner_pid.is_none() && parent.is_none() {
         return Ok(()); // A dead predecessor can be replaced.
     }
-    // Hostnames can change. An exited predecessor above is replaceable, but
-    // local PID evidence must not authorise a live identity on another host.
+    if [incoming_pid, incoming_ppid]
+        .into_iter()
+        .flatten()
+        .any(|pid| owner_pid == Some(pid) || parent == Some(pid))
+    {
+        return Ok(());
+    }
+    // A matching process above owns this identity even after a hostname
+    // change. Only a non-matching caller can be refused as another machine.
     if prior
         .machine_id
         .as_deref()
@@ -222,13 +229,6 @@ pub(crate) fn ensure_factory_process_owner(
         return Err(crate::store::StoreError::Other(format!(
             "Factory identity {id} belongs to another machine"
         )));
-    }
-    if [incoming_pid, incoming_ppid]
-        .into_iter()
-        .flatten()
-        .any(|pid| owner_pid == Some(pid) || parent == Some(pid))
-    {
-        return Ok(());
     }
     Err(crate::store::StoreError::Other(format!(
         "Factory identity {id} belongs to another live harness; nested harnesses must use their own session identity"

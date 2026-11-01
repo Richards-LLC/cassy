@@ -62,7 +62,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   cleanup against it; the authenticated owner also repairs older exited-PID
   records before heartbeats resume. Tool policy checks keep enforcing their
   denials for nested callers, and legacy parent records and exited rows from
-  an earlier hostname can recover normally.
+  an earlier hostname can recover normally. Live owners also keep lifecycle
+  hooks and MCP reconnection working when their hostname changes.
 
 ## [3.95.0] - 2026-11-01
 

@@ -12,8 +12,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::test_support::TestEnvGuard;
 
 #[cfg(unix)]
-#[test]
-fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
+#[tokio::test]
+async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
     use crate::hooks::{HookInput, handle_hook};
     use crate::mcp::server::CasCore;
     use std::process::{Command, Stdio};
@@ -43,6 +43,11 @@ fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
     env.set("CAS_FACTORY_SESSION", "factory-nested-review");
     env.set("CAS_HOOK_HARNESS", "codex");
     let agents = crate::store::open_agent_store(&root).unwrap();
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
     for role in [AgentRole::Supervisor, AgentRole::Worker] {
         let id = format!("parent-{role}");
         env.set("CAS_SESSION_ID", &id);
@@ -61,6 +66,28 @@ fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 .is_err(),
             "an inherited CAS_SESSION_ID must not bind another live {role}'s MCP identity"
         );
+        let nested_pid = std::process::id();
+        for event in [
+            DaemonEvent::SessionStart {
+                session_id: id.clone(),
+                agent_name: Some("parent".into()),
+                agent_role: Some(role.to_string()),
+                cc_pid: nested_pid,
+                clone_path: None,
+            },
+            DaemonEvent::SessionEnd {
+                session_id: id.clone(), cc_pid: Some(nested_pid),
+            },
+        ] {
+            assert!(matches!(
+                daemon.handle_socket_event(event).await,
+                DaemonResponse::Error { .. }
+            ));
+        }
+        assert!(matches!(
+            daemon.handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid }).await,
+            DaemonResponse::NoSession
+        ), "rejected registration must not publish the parent's identity in the socket map");
         for event in ["SessionStart", "Stop", "SessionEnd"] {
             handle_hook(
                 event,

@@ -1948,6 +1948,23 @@ impl EmbeddedDaemon {
 
     /// Handle events from hooks via Unix socket
     async fn handle_socket_event(&self, event: DaemonEvent) -> DaemonResponse {
+        let process_identity = match &event {
+            DaemonEvent::SessionStart {
+                session_id, cc_pid, ..
+            } => Some((session_id, *cc_pid)),
+            DaemonEvent::SessionEnd {
+                session_id, cc_pid: Some(pid),
+            } => Some((session_id, *pid)),
+            _ => None,
+        };
+        if let Some((id, pid)) = process_identity
+            && let Ok(store) = open_agent_store(&self.config.cas_root)
+            && let Err(error) = ensure_factory_process_owner(store.as_ref(), id, Some(pid), None)
+        {
+            return DaemonResponse::Error {
+                message: error.to_string(),
+            };
+        }
         match event {
             DaemonEvent::SessionStart {
                 session_id,
@@ -2135,9 +2152,11 @@ impl EmbeddedDaemon {
         // Only adopt as our own agent if the PID matches our Claude Code parent.
         // Other agents' daemons will discover their agent via PID-based adoption
         // in the heartbeat loop.
-        if is_our_agent {
+        if is_our_agent
+            && let Some(registered_id) = registered_id
+        {
             let mut guard = self.agent_id.write().await;
-            *guard = Some(registered_id.unwrap_or(session_id));
+            *guard = Some(registered_id);
         }
     }
 

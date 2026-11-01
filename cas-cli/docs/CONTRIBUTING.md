@@ -77,6 +77,13 @@ label and the durable reply reference.
 
 ## Supervisor succession and committed-work recovery
 
+Factory registrations belong to their live harness process. A nested review
+that inherits `CAS_SESSION_ID`, name and role cannot re-register that identity
+from a different process, publish a socket mapping for it, or apply lifecycle
+hooks to its owner. Replacement MCP servers under the same fingerprinted harness
+remain valid. The authenticated cached owner repairs an exited PID left by older
+nested registrations before its next heartbeat, preserving its durable session.
+
 Worker liveness uses concrete turn and process evidence. While a recycled
 worker's transcript is unresolved, its own recent activity or outbound message
 to the supervisor/director can establish execution within the configured stall

@@ -390,7 +390,7 @@ test("HUB-J12 network switch: a reheld send expires at its original two-minute d
     await expect(held).toHaveCount(0);
     await expect(page.locator("#message-status")).not.toContainText("go out by itself");
     expect(hub.sends).toHaveLength(0);
-    await expect(log.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+    await expect(log.getByRole("button", { name: "Edit message", exact: true })).toBeVisible();
     hub.upstreamBack(PELICAN);
     await clock.advance(8_000);
     expect(hub.sends).toHaveLength(0); // Later recovery cannot revive an expired auto-send.

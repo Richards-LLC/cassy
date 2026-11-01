@@ -21794,6 +21794,9 @@ mod cas_bf890_notice_digest_tests {
                 "READY TO MERGE\n\n<cas-director-ready>{{\"task_id\":\"{}\",\"factory_tip\":\"{}\"}}</cas-director-ready>",
                 task.id, head.to_string().repeat(40),
             );
+            let turn = |mode| store.surface_for_recipient_within_budget(
+                "lead-sup", Some(SESSION), mode, 50, 10000,
+            ).unwrap().rows.iter().map(|row| row.id).collect::<Vec<_>>();
             if merge_first { record_merge(); }
             let body = ready('a');
             let id = store.enqueue_urgent_with_outcome("director", "lead-sup", &body,
@@ -21803,12 +21806,12 @@ mod cas_bf890_notice_digest_tests {
                 record_merge();
             }
             assert!(selected(&store).is_empty(), "Cassy already merged this delivery; no supervisor wake (merge_first={merge_first})");
-            assert!(drain(&store, HookDrain::Unseen).is_empty());
-            assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![id]);
+            assert!(turn(HookDrain::Unseen).is_empty());
+            assert_eq!(turn(HookDrain::NoticeDigest), vec![id]);
             let retained = store.poll_named_for_recipient("lead-sup", Some(SESSION), &[id]).unwrap();
             // pin: digest routing preserves the complete queued READY envelope for explicit reads.
             assert_eq!(retained[0].prompt, body, "full READY evidence remains readable");
-            assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
+            assert!(turn(HookDrain::NoticeDigest).is_empty());
             let fresh = store.enqueue_urgent_with_outcome("director", "lead-sup", &ready('b'),
                 Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
             let blocker = store.enqueue_urgent_with_outcome("director", "lead-sup",

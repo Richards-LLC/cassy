@@ -2100,7 +2100,16 @@ impl CasService {
         let ready_contract = (worker_action_kind
             == Some(crate::prompt_revalidation::WorkerActionKind::Ready))
         .then(|| message.clone());
-        if let Some(kind) = worker_action_kind {
+        let worker_to_own_supervisor = role == "worker"
+            && factory_session.as_deref().is_some_and(|session| !session.trim().is_empty())
+            && agent_from_store.as_ref().is_some_and(|agent| agent.role == cas_types::AgentRole::Worker)
+            && resolved_target_agent.as_ref().is_some_and(|agent| {
+                agent.role == cas_types::AgentRole::Supervisor
+                    && agent.factory_session.as_deref() == factory_session.as_deref()
+            });
+        if worker_to_own_supervisor {
+            // Untyped startup readiness needs the same ownership facts as
+            // status/ready. This footer grants no extra wake authority.
             // Read current ownership independently of a report's task_id: the
             // report can concern a parked predecessor while its successor runs.
             let tasks = crate::store::open_task_store_local(&self.inner.cas_root)
@@ -2118,6 +2127,8 @@ impl CasService {
                     active.join(", "),
                 ));
             }
+        }
+        if let Some(kind) = worker_action_kind {
             message = crate::prompt_revalidation::attach_worker_action_envelope(
                 &message,
                 kind,

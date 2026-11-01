@@ -603,11 +603,11 @@ pub enum VerificationStatus {
     SupervisorCall,
     /// System dispatch marker: no verifier check has run yet.
     Pending,
-    /// Verification failed with error
-    #[serde(other)]
-    Error,
     /// Verification skipped (force bypass)
     Skipped,
+    /// Verification failed, or a newer writer supplied an unknown verdict.
+    #[serde(other)]
+    Error,
 }
 
 impl fmt::Display for VerificationStatus {

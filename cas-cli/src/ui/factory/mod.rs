@@ -55,6 +55,7 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
+pub(crate) use app::provisioning::provisioner_executable;
 pub(crate) use app::provisioning::{
     installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
 };

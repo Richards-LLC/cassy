@@ -139,6 +139,8 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "server_start",
     "server_stop",
     "server_list",
+    // A worker's candidate binary, built by the factory daemon
+    "candidate_request",
     // Disposable database branches
     "db_branch_create",
     "db_branch_show",

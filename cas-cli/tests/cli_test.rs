@@ -207,6 +207,30 @@ fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
     let found = path("worker");
     assert!(found.status.success(), "{}", String::from_utf8_lossy(&found.stderr));
     assert_eq!(String::from_utf8(found.stdout).unwrap().trim(), binary);
+    // The worker role never builds, even with the builder present.
+    let worker_build = cas_cmd(root)
+        .current_dir(root)
+        .env("CAS_AGENT_ROLE", "worker")
+        .args(["qa", "candidate", "build", "--task", "cas-0227"])
+        .output()
+        .unwrap();
+    assert!(!worker_build.status.success());
+    assert!(String::from_utf8_lossy(&worker_build.stderr).contains("candidate_request"), "{worker_build:?}");
+    // A later build repoints `candidate`; the path a ledger cites stays that build's own.
+    let task_dir = candidate.parent().unwrap();
+    let revision_dir = task_dir.join("candidates/abc");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    std::fs::write(revision_dir.join("cas"), "built candidate\n").unwrap();
+    std::fs::remove_dir_all(&candidate).unwrap();
+    std::os::unix::fs::symlink("candidates/abc", &candidate).unwrap();
+    let cited = path("worker");
+    assert_eq!(
+        String::from_utf8(cited.stdout).unwrap().trim(),
+        revision_dir.join("cas").display().to_string()
+    );
+    std::fs::remove_file(&candidate).unwrap();
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(candidate.join("cas"), "built candidate\n").unwrap();
 
     // No compiler runs: exercise the real wrapper with a builder boundary
     // that publishes the same manifest as the Python builder, plus Git chatter.

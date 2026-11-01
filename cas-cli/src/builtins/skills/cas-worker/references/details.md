@@ -80,7 +80,10 @@ Load `task` and `coordination`. For an assigned QA-pass task, also load
 task_id=<delivery-id>` and the round's ledger. Recording closes the QA task;
 implementation-task close verification remains supervisor-owned.
 `server_start`/`server_list`/`server_stop` (owned servers only) are the assigned
-server exception, with `cas-servers`. Fleet, merges, cleanup and database control
+server exception, with `cas-servers`. `factory action=candidate_request
+task_id=<own-task> revision=<full-sha>` is the candidate exception; never ask the
+supervisor for a candidate the daemon can build, and never run Cargo for one. A refusal
+names why. Fleet, merges, cleanup and database control
 belong to the supervisor even where the runtime exposes them.
 
 Operational bugs use `cas config get issues.repo` and

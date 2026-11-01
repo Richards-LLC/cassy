@@ -3542,6 +3542,11 @@ impl FactoryDaemon {
             self.session_name.clone(),
             std::sync::Arc::clone(&self.shutdown),
         );
+        // A worker's candidate request builds here, with no supervisor turn.
+        let _candidate_queue = crate::factory_candidate_queue::spawn_runner(
+            self.app.cas_dir().to_path_buf(),
+            std::sync::Arc::clone(&self.shutdown),
+        );
         // cas-77f39 (GH #1210, factory loop v2 §5): output frames are capped
         // and coalesced; input echo is drawn at once. The caps are read once,
         // before this thread becomes a lane.

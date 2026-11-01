@@ -620,8 +620,9 @@ fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-/// cas-d0e6: a task's canonical candidate directory, from its id alone.
-fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBuf, PathBuf)> {
+/// A task's artifact directory, from its id alone. Relative roots are the main
+/// checkout's, wherever this runs: the daemon's builder checkout gets cleaned.
+pub(crate) fn candidate_task_dir(cas_root: &Path, task: &str) -> Result<PathBuf> {
     ensure!(
         task.starts_with("cas-")
             && task.len() > 4
@@ -630,20 +631,32 @@ fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBu
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
         "invalid task id {task:?}"
     );
-    let cas_root = cas_root.context("No Cassy project; run cas init first")?;
-    let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
     let config = crate::config::Config::load(cas_root)?;
     let artifacts =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let artifacts = if artifacts.is_absolute() {
         artifacts
     } else {
-        project.join(artifacts)
+        cas_root.parent().unwrap_or(cas_root).join(artifacts)
     };
-    let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
-        .join(task)
-        .join("candidate");
+    Ok(crate::config::project_factory_artifacts_root(cas_root, &artifacts).join(task))
+}
+
+/// cas-d0e6: a task's canonical candidate directory, from its id alone.
+fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBuf, PathBuf)> {
+    let cas_root = cas_root.context("No Cassy project; run cas init first")?;
+    let candidate_dir = candidate_task_dir(cas_root, task)?.join("candidate");
+    let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
     Ok((project, candidate_dir))
+}
+
+/// `candidate` points at the newest build's own revision directory. Callers cite
+/// that directory, which a later build for the task leaves alone.
+fn immutable_candidate_dir(candidate_dir: &Path) -> PathBuf {
+    match (std::fs::read_link(candidate_dir), candidate_dir.parent()) {
+        (Ok(target), Some(task_dir)) => task_dir.join(target),
+        _ => candidate_dir.to_path_buf(),
+    }
 }
 
 fn candidate_path_command(task: &str) -> String {
@@ -655,11 +668,11 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         CandidateCommand::Build { task, rev, plan } => (task, rev, plan),
         CandidateCommand::Path { task } => {
             let (_, candidate_dir) = candidate_dir_for_task(cas_root, task)?;
-            let binary = candidate_dir.join("cas");
+            let binary = immutable_candidate_dir(&candidate_dir).join("cas");
             ensure!(
                 binary.is_file(),
-                "no QA candidate built for {task} yet (expected {}); ask the supervisor to run \
-                 `cas qa candidate build --task {task} --rev <sha>`",
+                "no QA candidate built for {task} yet (expected {}); a worker requests one with \
+                 `factory action=candidate_request task_id={task} revision=<sha>`",
                 binary.display()
             );
             println!("{}", binary.display());
@@ -705,7 +718,8 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
     }
     ensure!(
         std::env::var("CAS_AGENT_ROLE").ok().as_deref() != Some("worker"),
-        "candidate builds are supervisor/operator-owned; ask the supervisor for the exact-tip binary"
+        "a worker never builds a candidate in its own process; request it with \
+         `factory action=candidate_request task_id={task} revision=<sha>`"
     );
     let script = project.join("scripts/qa-candidate-build.py");
     ensure!(
@@ -714,6 +728,7 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
          Use an up-to-date Cassy source checkout, then rerun:\n\
            cas qa candidate build --task {task} \\\n    --rev {revision}"
     );
+    let _one_build_per_machine = crate::factory_candidate_queue::hold_machine_build_lock()?;
     let status = Command::new("python3")
         .arg(script)
         .arg("--repo")
@@ -741,8 +756,8 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         receipt.revision == revision,
         "candidate receipt does not match requested revision"
     );
-    receipt.candidate_dir = layout.candidate_dir;
-    receipt.receipt_file = layout.receipt_file;
+    receipt.candidate_dir = immutable_candidate_dir(&layout.candidate_dir);
+    receipt.receipt_file = receipt.candidate_dir.join("RECEIPT.json");
     if cli.json {
         println!("{}", serde_json::to_string(&receipt)?);
     } else {

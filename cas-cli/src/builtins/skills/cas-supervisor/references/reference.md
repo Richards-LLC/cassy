@@ -26,14 +26,18 @@ base has a queue, otherwise one assembly build + test of the epic tip and its
 note on the epic. Child closes reference that proof. A non-Rust
 `risk=platform` task still carries its worker `platform_proof` receipt.
 
-For a Cassy source CLI QA walk requiring an exact-tip binary, run
-`cas qa candidate build --task <task-id> --rev <sha>` as supervisor. The command
-uses release/assembly Zig and scratch resolution and the warm native Cargo
-target; it writes `cas`, `VERSION.txt`, `SHA256SUMS` and `RECEIPT.json` under
-the task's canonical artifact `candidate/` directory. Give the version and
-binary SHA-256 to the QA reviewer, who resolves the binary with
-`cas qa candidate path --task <task-id>` instead of a typed hashed path. The command builds evidence only and
-does not run or replace the epic's release checks.
+A worker or QA reviewer requesting an exact-tip binary for a Cassy source CLI
+walk calls `factory action=candidate_request task_id=<own-task> revision=<sha>`.
+The factory daemon builds it from a checkout it keeps at the default branch tip,
+one build per machine under the build guard, and messages the requester; you get
+no turn and owe no hand-off. Run `cas qa candidate build --task <task-id> --rev
+<sha>` yourself only for your own work, such as the batch epic-tip candidate: it
+waits for that machine lock and writes `cas`, `VERSION.txt`, `SHA256SUMS` and
+`RECEIPT.json` to the task's `candidates/<revision>/`. `candidate/` points at the
+newest; a later build never replaces a cited one, and asking again for a published
+revision reuses it. These directories stay until task artifacts are cleaned. The command
+builds evidence only and does not run or replace the epic's release checks. A
+request from another machine is not routed: it builds on that machine's daemon.
 
 For a proof produced on another machine, use the worker's
 [cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs):

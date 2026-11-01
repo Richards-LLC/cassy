@@ -163,20 +163,15 @@ export function purgeConversations(storage: EnumerableStorage | undefined, machi
 }
 
 /** A conversation composer draft (cas-7752). */
-export type Draft = {
-  text: string;
-  caret: number;
-  /** Stable across reloads; legacy drafts acquire one when next saved. */
-  id?: string;
-};
+export type Draft = { text: string; caret: number };
 
 /** A stored draft, or undefined when blank or malformed; the caret is clamped to the text. */
 export function validDraft(raw: unknown): Draft | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const { text, caret, id } = raw as { text?: unknown; caret?: unknown; id?: unknown };
+  const { text, caret } = raw as { text?: unknown; caret?: unknown };
   if (typeof text !== "string" || !text.trim()) return undefined;
   const at = typeof caret === "number" && Number.isFinite(caret) ? Math.max(0, Math.min(Math.trunc(caret), text.length)) : text.length;
-  return { text, caret: at, ...(typeof id === "string" && id.length > 0 && id.length <= 128 ? { id } : {}) };
+  return { text, caret: at };
 }
 
 /**

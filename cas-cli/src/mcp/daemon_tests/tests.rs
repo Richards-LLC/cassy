@@ -77,7 +77,8 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 clone_path: None,
             },
             DaemonEvent::SessionEnd {
-                session_id: id.clone(), cc_pid: Some(nested_pid),
+                session_id: id.clone(),
+                cc_pid: Some(nested_pid),
             },
         ] {
             assert!(matches!(
@@ -85,10 +86,15 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 DaemonResponse::Error { .. }
             ));
         }
-        assert!(matches!(
-            daemon.handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid }).await,
-            DaemonResponse::NoSession
-        ), "rejected registration must not publish the parent's identity in the socket map");
+        assert!(
+            matches!(
+                daemon
+                    .handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid })
+                    .await,
+                DaemonResponse::NoSession
+            ),
+            "rejected registration must not publish the parent's identity in the socket map"
+        );
         for event in ["SessionStart", "Stop", "SessionEnd"] {
             handle_hook(
                 event,
@@ -110,29 +116,42 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
         // Identity isolation must preserve tool-policy enforcement even when
         // the caller belongs to a different process (verifier cas-b815).
         for (tool, tool_input) in [
-            ("mcp__claude_ai_Slack__slack_send_message", serde_json::json!({
-                "channel": "synthetic-proof-channel", "text": "must not be sent"
-            })),
-            ("Write", serde_json::json!({
-                "file_path": env.home().join("outside-worktree.txt"), "content": "denied"
-            })),
+            (
+                "mcp__claude_ai_Slack__slack_send_message",
+                serde_json::json!({
+                    "channel": "synthetic-proof-channel", "text": "must not be sent"
+                }),
+            ),
+            (
+                "Write",
+                serde_json::json!({
+                    "file_path": env.home().join("outside-worktree.txt"), "content": "denied"
+                }),
+            ),
             ("Bash", serde_json::json!({"command": "cargo build"})),
         ] {
             if tool == "Bash" && role != AgentRole::Worker {
                 continue;
             }
-            let output = handle_hook("PreToolUse", HookInput {
-                session_id: "nested-codex-thread".into(),
-                cwd: project.to_string_lossy().into_owned(),
-                hook_event_name: "PreToolUse".into(),
-                tool_name: Some(tool.into()),
-                tool_input: Some(tool_input),
-                ..Default::default()
-            }).unwrap();
+            let output = handle_hook(
+                "PreToolUse",
+                HookInput {
+                    session_id: "nested-codex-thread".into(),
+                    cwd: project.to_string_lossy().into_owned(),
+                    hook_event_name: "PreToolUse".into(),
+                    tool_name: Some(tool.into()),
+                    tool_input: Some(tool_input),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             let wire = serde_json::to_value(output).unwrap();
-            assert_eq!(wire.pointer("/hookSpecificOutput/permissionDecision")
-                .and_then(serde_json::Value::as_str), Some("deny"),
-                "foreign-process {role} must retain {tool} policy denial: {wire}");
+            assert_eq!(
+                wire.pointer("/hookSpecificOutput/permissionDecision")
+                    .and_then(serde_json::Value::as_str),
+                Some("deny"),
+                "foreign-process {role} must retain {tool} policy denial: {wire}"
+            );
             assert_eq!(agents.get(&id).unwrap().pid, parent.pid);
         }
         agents.heartbeat(&id).unwrap();
@@ -166,8 +185,15 @@ fn legacy_factory_owner_accepts_its_actual_unstamped_parent_cas_b815() {
         owner.metadata.remove(PPID_STARTTIME_KEY);
         agents.register(&owner).unwrap();
         let (refreshed, _) = register_session_start_agent(
-            &root, agents.as_ref(), &id, Some(&id), Some(&role.to_string()), parent_pid, None,
-        ).expect("the live fingerprinted MCP child proves its actual parent owns this identity");
+            &root,
+            agents.as_ref(),
+            &id,
+            Some(&id),
+            Some(&role.to_string()),
+            parent_pid,
+            None,
+        )
+        .expect("the live fingerprinted MCP child proves its actual parent owns this identity");
         assert_eq!(refreshed.id, id);
         assert_eq!(agents.get(&id).unwrap().pid, Some(parent_pid));
     }
@@ -188,11 +214,21 @@ fn expired_factory_owner_from_old_hostname_can_reregister_cas_b815() {
     retired.pid = Some(i32::MAX as u32);
     agents.register(&retired).unwrap();
     let (current, _) = register_session_start_agent(
-        &root, agents.as_ref(), &retired.id, Some("owner"), Some("supervisor"), std::process::id(), None,
-    ).expect("an exited owner under the previous hostname is replaceable");
+        &root,
+        agents.as_ref(),
+        &retired.id,
+        Some("owner"),
+        Some("supervisor"),
+        std::process::id(),
+        None,
+    )
+    .expect("an exited owner under the previous hostname is replaceable");
     assert_eq!(current.id, retired.id);
     assert_eq!(current.pid, Some(std::process::id()));
-    assert_eq!(current.machine_id, Some(Agent::get_or_generate_machine_id()));
+    assert_eq!(
+        current.machine_id,
+        Some(Agent::get_or_generate_machine_id())
+    );
 }
 
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease

@@ -194,7 +194,26 @@ pub(crate) fn ensure_factory_process_owner(
     if prior.role == AgentRole::Standard || prior.status == AgentStatus::Shutdown {
         return Ok(());
     }
-    // Do not interpret another machine's PID in this host's process table.
+    let liveness = evaluate_liveness(&prior, pid_alive, pid_matches_fingerprint);
+    let process_alive = matches!(&liveness, LivenessOutcome::Alive { .. });
+    let parent = prior.ppid.filter(|&pid| pid > 1).filter(|&pid| {
+        prior
+            .metadata
+            .get(PPID_STARTTIME_KEY)
+            .and_then(|value| value.parse().ok())
+            .is_some_and(|starttime| pid_matches_fingerprint(pid, starttime))
+            // Legacy/unknown harness names (including OpenCode) may have no
+            // parent stamp. The live fingerprinted MCP child can still prove
+            // its exact current parent, without trusting a bare/recycled PPID.
+            || (matches!(&liveness, LivenessOutcome::Alive { fingerprint_checked: true, .. })
+                && prior.pid.and_then(crate::agent_id::get_parent_of_pid) == Some(pid))
+    });
+    let owner_pid = prior.pid.filter(|_| process_alive);
+    if owner_pid.is_none() && parent.is_none() {
+        return Ok(()); // A dead predecessor can be replaced.
+    }
+    // Hostnames can change. An exited predecessor above is replaceable, but
+    // local PID evidence must not authorise a live identity on another host.
     if prior
         .machine_id
         .as_deref()
@@ -203,21 +222,6 @@ pub(crate) fn ensure_factory_process_owner(
         return Err(crate::store::StoreError::Other(format!(
             "Factory identity {id} belongs to another machine"
         )));
-    }
-    let process_alive = matches!(
-        evaluate_liveness(&prior, pid_alive, pid_matches_fingerprint),
-        LivenessOutcome::Alive { .. }
-    );
-    let parent = prior.ppid.filter(|&pid| pid > 1).filter(|&pid| {
-        prior
-            .metadata
-            .get(PPID_STARTTIME_KEY)
-            .and_then(|value| value.parse().ok())
-            .is_some_and(|starttime| pid_matches_fingerprint(pid, starttime))
-    });
-    let owner_pid = prior.pid.filter(|_| process_alive);
-    if owner_pid.is_none() && parent.is_none() {
-        return Ok(()); // A dead predecessor can be replaced.
     }
     if [incoming_pid, incoming_ppid]
         .into_iter()

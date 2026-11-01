@@ -133,7 +133,10 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     // A headless review can inherit every factory identity variable. Reject
     // its lifecycle before normalizing the native thread ID or writing any
     // parent activity, registration, model observation or SessionEnd cleanup.
-    if cas_core::env_overlay::var("CAS_FACTORY_MODE").as_deref() == Ok("1")
+    // Permission hooks must always run their normal policy handlers, including
+    // for a nested process. An empty output here would silently allow tools.
+    if !matches!(event_name, "PreToolUse" | "PermissionRequest")
+        && cas_core::env_overlay::var("CAS_FACTORY_MODE").as_deref() == Ok("1")
         && let Ok(id) = cas_core::env_overlay::var("CAS_SESSION_ID")
         && !id.trim().is_empty()
         && let Some(root) = cas_root.as_deref()

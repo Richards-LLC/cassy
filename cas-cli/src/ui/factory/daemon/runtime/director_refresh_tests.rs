@@ -46,7 +46,7 @@ fn r1_blocked_idle_does_not_duplicate_the_lifecycle_wake() {
     for _ in 0..3 {
         let idle = crate::ui::factory::director::DirectorEvent::WorkerIdle { worker: "merge-w".into(), active_task: None };
         let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[idle]);
-        assert!(prompts.is_empty(), "blocked idle must use the lifecycle episode, not a direct prompt: {prompts:?}");
+        assert!(prompts.is_empty());
     }
     let rows = queue.peek_all(20).unwrap();
     // pin: dispatch handoff is the only waking source during this owned episode.

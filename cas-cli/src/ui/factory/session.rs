@@ -538,7 +538,7 @@ impl SessionManager {
                     || (require_dead && daemon_identity_is_live(&metadata)) {
                     return Ok(false);
                 }
-                retain_end_receipt(&self.sessions_dir, &metadata)?;
+                // Red control: reproduce the original missing stop receipt.
                 fs::remove_file(path)?;
                 true
             }

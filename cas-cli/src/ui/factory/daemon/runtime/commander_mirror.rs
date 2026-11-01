@@ -108,6 +108,24 @@ fn claude_prompt(value: &Value) -> Option<String> {
         .or_else(|| text_blocks(value, path, "text"))
 }
 
+/// A send waiting during startup can arrive through our prompt hook instead
+/// of Claude's input queue. Only its incoming Commander envelope starts a
+/// reply binding; ordinary hook context never becomes a terminal question.
+fn claude_commander_hook(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("attachment")
+        || value.pointer("/attachment/type").and_then(Value::as_str) != Some("hook_additional_context")
+        || value.pointer("/attachment/hookEvent").and_then(Value::as_str) != Some("UserPromptSubmit") {
+        return None;
+    }
+    let context = value.pointer("/attachment/content")?.as_array()?.iter()
+        .filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+    // This header is emitted by factory_inbox::render_rows_with_header.
+    // The marker remains a hint: scan_supervisor_replies verifies the row's
+    // paired-device origin, factory and recipient before using its reply_to.
+    (context.lines().any(|line| line.trim() == "[incoming messages]")
+        && commander_marker(&context).is_some()).then_some(context)
+}
+
 fn human_provenance(value: &Value) -> bool {
     if ["isMeta", "isSidechain", "isCompactSummary"].iter()
         .any(|key| value.get(key).and_then(Value::as_bool) == Some(true)) {
@@ -194,7 +212,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
             cas_mux::SupervisorCli::Claude => {
                 if value.get("isMeta").and_then(Value::as_bool) != Some(true)
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
-                    && let Some(prompt) = claude_prompt(value)
+                    && let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
                 {
                     let key = value
                         .get("promptId")
@@ -866,6 +884,7 @@ mod tests {
                 serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":attachment}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated","attachment":{"type":"file","prompt":"unrelated file content"}}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Ordinary hook context"]}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"quoted-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Example: [cas #999 operator Alice@phone verified 0s first]"]}}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"stop-hook","attachment":{"type":"hook_additional_context","hookEvent":"Stop","content":["[cas #999 operator Alice@phone verified 0s first] A stop reminder is not consumed input"]}}),
                 serde_json::json!({"timestamp":at(5),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement answer"}],"stop_reason":"end_turn"}}),
             ] {

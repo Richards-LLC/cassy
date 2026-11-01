@@ -103,7 +103,7 @@ pub(crate) fn runner_is_live(cas_root: &Path) -> bool {
 
 pub(crate) fn mark_runner_live(cas_root: &Path) -> Result<()> {
     std::fs::create_dir_all(queue_dir(cas_root))?;
-    std::fs::write(queue_dir(cas_root).join(RUNNER_HEARTBEAT), b"")?;
+    std::fs::write(queue_dir(cas_root).join(RUNNER_HEARTBEAT), Utc::now().to_rfc3339())?;
     Ok(())
 }
 

@@ -2,7 +2,7 @@
  * Source: docs/design/design-tokens.json -> hub-web/src/tokens.css + hub-web/src/glass.css (token blocks only).
  * Scheme: light by default, dark under prefers-color-scheme: dark; html[data-scheme="light"|"dark"] forces one.
  * Sync and check: node hub-web/scripts/sync-cassy-tokens.mjs (cassy hub-web/DESIGN.md "Shared tokens").
- * cassy-tokens-sha256: 58af54024354b52c8203841ceeea6bf22809e2a592d1d5130beaf9d395c413f2
+ * cassy-tokens-sha256: 8b94e4e70bcb0aa519f17954061beefd4ac460b3bcf5350b685a4a247c29933d
  */
 /* House roles (src/tokens.css) */
 :root {
@@ -81,7 +81,8 @@
   --color-verdict: #2E3A9F;
   --color-action: #2E3A9F;
   --color-focus: #2E3A9F;
-  --state-idle: #6B7280;
+  --state-idle: #4F8A6A;
+  --state-off: #6B7280;
   --color-series-neutral: #6B7280;
   --canvas: #F7F4EE;
   --panel: #FFFFFF;
@@ -202,7 +203,8 @@
     --color-verdict: #A9B3FF;
     --color-action: #A9B3FF;
     --color-focus: #A9B3FF;
-    --state-idle: #9AA1AF;
+    --state-idle: #3E8A63;
+    --state-off: #9AA1AF;
     --color-series-neutral: #9AA1AF;
     --canvas: #12141A;
     --panel: #191C24;
@@ -323,7 +325,8 @@ html[data-scheme="light"] {
   --color-verdict: #2E3A9F;
   --color-action: #2E3A9F;
   --color-focus: #2E3A9F;
-  --state-idle: #6B7280;
+  --state-idle: #4F8A6A;
+  --state-off: #6B7280;
   --color-series-neutral: #6B7280;
   --canvas: #F7F4EE;
   --panel: #FFFFFF;
@@ -443,7 +446,8 @@ html[data-scheme="dark"] {
   --color-verdict: #A9B3FF;
   --color-action: #A9B3FF;
   --color-focus: #A9B3FF;
-  --state-idle: #9AA1AF;
+  --state-idle: #3E8A63;
+  --state-off: #9AA1AF;
   --color-series-neutral: #9AA1AF;
   --canvas: #12141A;
   --panel: #191C24;

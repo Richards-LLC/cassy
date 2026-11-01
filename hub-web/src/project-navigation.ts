@@ -43,6 +43,10 @@ export class ProjectNavigation {
   private filter: Filter = "all";
   private collapsed = new Set<string>();
   private dismissedEnded = new Set<string>();
+  // QA cas-51f6 F02: dismissed rows stay reachable on this page by search and
+  // by the list's Show dismissed control, where each can be restored.
+  private showDismissed = false;
+  private dismissedToggle?: HTMLElement;
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: Open; end?: End; options: Options };
 
   constructor() {
@@ -71,6 +75,13 @@ export class ProjectNavigation {
   private dismissEnded(row: ConversationRow): void {
     if (!row.ended) return;
     this.dismissedEnded.add(endedSessionKey(row));
+    this.saveDismissedEnded();
+    const latest = this.latest;
+    if (latest) this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+  }
+
+  private restoreEnded(row: ConversationRow): void {
+    this.dismissedEnded.delete(endedSessionKey(row));
     this.saveDismissedEnded();
     const latest = this.latest;
     if (latest) this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
@@ -132,6 +143,9 @@ export class ProjectNavigation {
       groups.set(key, [...groups.get(key) ?? [], row]);
     }
     const ordered: HTMLElement[] = [];
+    const dismissedCount = (options.allRows ?? rows).filter((row) => this.isDismissedEnded(row)).length;
+    if (dismissedCount === 0) this.showDismissed = false;
+    const reachDismissed = this.showDismissed || options.searchActive === true;
     const decisions = rows.filter((row) => !this.isDismissedEnded(row) && needsYou(row) && matches(row))
       .sort((a, b) => byText(projectName(a), projectName(b)) || compareSupervisorRows(a, b));
     if (decisions.length) {
@@ -154,7 +168,7 @@ export class ProjectNavigation {
     } else this.pinned?.remove();
 
     for (const [key, members] of [...groups].sort(([, a], [, b]) => compareProjectCards(a, b))) {
-      const visible = members.filter((row) => matches(row) && !this.isDismissedEnded(row));
+      const visible = members.filter((row) => matches(row) && (reachDismissed || !this.isDismissedEnded(row)));
       if (!visible.length) continue;
       let card = this.cards.get(key);
       if (!card) {
@@ -224,14 +238,31 @@ export class ProjectNavigation {
       const newest = sorted.reduce<ConversationRow | undefined>((best, row) => rank(row) > (best ? rank(best) : -Infinity) ? row : best, undefined);
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
-      const nested = sorted.map((row) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
-      card.rows.render(card.body, nested, open, end, (row) => this.dismissEnded(row));
+      const nested = sorted.map((row) => ({ ...row, ...(this.isDismissedEnded(row) ? { dismissed: true } : {}), supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
+      card.rows.render(card.body, nested, open, end, (row) => row.dismissed ? this.restoreEnded(row) : this.dismissEnded(row));
       ordered.push(card.node);
     }
     if (!ordered.length && rows.length) {
       const empty = this.empty ??= document.createElement("p"); empty.className = "project-nav-empty";
-      empty.textContent = this.filter === "all" && rows.some((row) => this.isDismissedEnded(row)) ? "Dismissed sessions are hidden from this list and remain in session history." : "No conversations match this filter. Choose All to see your projects.";
+      empty.textContent = this.filter === "all" && rows.some((row) => this.isDismissedEnded(row)) ? "Dismissed sessions are hidden from this list. Choose Show dismissed sessions to see or restore them." : "No conversations match this filter. Choose All to see your projects.";
       ordered.push(empty);
+    }
+    if (dismissedCount > 0 && !options.searchActive) {
+      const wrap = this.dismissedToggle ??= document.createElement("div");
+      wrap.className = "conversation-topline project-nav-dismissed";
+      let button = wrap.querySelector("button");
+      if (!button) { button = document.createElement("button"); button.type = "button"; button.className = "conversation-action"; wrap.append(button); }
+      const text = `${this.showDismissed ? "Hide" : "Show"} ${dismissedCount} dismissed ${dismissedCount === 1 ? "session" : "sessions"}`;
+      if (button.textContent !== text) button.textContent = text;
+      button.setAttribute("aria-pressed", String(this.showDismissed));
+      const toggle = button;
+      button.onclick = () => {
+        this.showDismissed = !this.showDismissed;
+        const latest = this.latest;
+        if (latest) this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+        toggle.focus({ preventScroll: true });
+      };
+      ordered.push(wrap);
     }
     const kept = new Set(ordered);
     for (const child of [...container.children]) if (!kept.has(child as HTMLElement)) child.remove();

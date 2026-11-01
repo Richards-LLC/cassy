@@ -63,6 +63,8 @@ export interface ConversationRow {
   needsYou?: boolean;
   operatorReason?: string;
   supervisorState?: "working" | "idle" | "needs-you" | "offline";
+  /** An ended session this device dismissed, shown again so it can be restored. */
+  dismissed?: boolean;
   /**
    * One of several live sessions of a project on one machine (cas-55a4). The
    * rows sit together under one heading; the most recently active one is
@@ -690,21 +692,25 @@ export class ConversationList {
     control.onmousedown = (event) => { if (event.detail > 1) event.preventDefault(); };
   }
 
-  /** Hide an ended session from this device's conversation list; its history stays available. */
+  /** Hide an ended session from this device's conversation list, or restore
+   * one that was dismissed; its history stays available either way. */
   private renderDismissEnded(control: HTMLElement, row: ConversationRow, dismiss: (row: ConversationRow) => void): void {
-    const signature = JSON.stringify([row.supervisor, row.ended?.at]);
+    const signature = JSON.stringify([row.supervisor, row.ended?.at, row.dismissed === true]);
     if (control.dataset.signature === signature) return;
     control.dataset.signature = signature;
     control.dataset.state = "dismiss";
     const button = control.ownerDocument.createElement("button");
     button.type = "button";
     button.className = "conversation-end-cancel";
-    button.textContent = "Dismiss";
-    button.setAttribute("aria-label", `Dismiss ended session ${row.supervisor}`);
+    button.textContent = row.dismissed ? "Restore" : "Dismiss";
+    button.setAttribute("aria-label", `${row.dismissed ? "Restore dismissed" : "Dismiss ended"} session ${row.supervisor}`);
     button.onclick = () => {
       const neighbours = this.neighbours(row.key);
       dismiss(row);
-      this.landAfterEnd(control, neighbours);
+      // A row still shown (restored, or dismissed while dismissed rows are
+      // shown) keeps focus on its new control; a hidden row lands nearby.
+      if (control.isConnected) control.querySelector("button")?.focus({ preventScroll: true });
+      else this.landAfterEnd(control, neighbours);
     };
     control.replaceChildren(button);
   }

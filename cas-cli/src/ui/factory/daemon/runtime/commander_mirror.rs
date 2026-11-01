@@ -89,15 +89,23 @@ fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
         .collect())
 }
 
-/// Read text/image user input without treating tool results as operator input.
+/// Read consumed text/image input without treating queue bookkeeping, file
+/// attachments or tool results as operator input. Claude can absorb a startup
+/// or mid-turn send as queued_command instead of emitting a user record.
 fn claude_prompt(value: &Value) -> Option<String> {
-    if value.pointer("/message/content").and_then(Value::as_array)
+    let path = match value.get("type").and_then(Value::as_str) {
+        Some("user") => "/message/content",
+        Some("attachment")
+            if value.pointer("/attachment/type").and_then(Value::as_str) == Some("queued_command") => "/attachment/prompt",
+        _ => return None,
+    };
+    if value.pointer(path).and_then(Value::as_array)
         .is_some_and(|blocks| blocks.iter().any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))) {
         return None;
     }
-    value.pointer("/message/content").and_then(Value::as_str)
+    value.pointer(path).and_then(Value::as_str)
         .map(str::to_owned)
-        .or_else(|| text_blocks(value, "/message/content", "text"))
+        .or_else(|| text_blocks(value, path, "text"))
 }
 
 fn human_provenance(value: &Value) -> bool {
@@ -137,8 +145,7 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
     for value in values {
         let Some(at) = timestamp(value) else { continue };
         let (key, prompt) = match cli {
-            cas_mux::SupervisorCli::Claude
-                if value.get("type").and_then(Value::as_str) == Some("user") => {
+            cas_mux::SupervisorCli::Claude => {
                 let Some(key) = value.get("promptId").or_else(|| value.get("uuid"))
                     .and_then(Value::as_str).filter(|id| !id.is_empty()) else { continue };
                 let Some(prompt) = claude_prompt(value) else { continue };
@@ -163,6 +170,7 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty() || !human_provenance(value)
             || value.get("payload").is_some_and(|payload| !human_provenance(payload))
+            || value.get("attachment").is_some_and(|attachment| !human_provenance(attachment))
             || crate::hooks::handlers::handlers_middle::is_harness_prompt(&prompt) {
             continue;
         }
@@ -184,8 +192,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
-                if value.get("type").and_then(Value::as_str) == Some("user")
-                    && value.get("isMeta").and_then(Value::as_bool) != Some(true)
+                if value.get("isMeta").and_then(Value::as_bool) != Some(true)
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
                     && let Some(prompt) = claude_prompt(value)
                 {
@@ -1592,12 +1599,21 @@ mod tests {
     #[test]
     fn terminal_operator_prompt_is_captured_before_the_supervisor_finishes() {
         let mut env = crate::test_support::TestEnvGuard::new();
-        for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Claude] {
+        for (cli, queued) in [
+            (cas_mux::SupervisorCli::Codex, false),
+            (cas_mux::SupervisorCli::Claude, false),
+            (cas_mux::SupervisorCli::Claude, true),
+        ] {
             let now = Utc::now();
             // cas-7cd1: a real typed message that pastes harness-shaped text
             // after its own words is still the operator's.
             let question = "Message from lifecycle team: please check this capture\n<environment_context>\n  <shell>bash</shell>\n</environment_context>";
             let input = |id: &str, text: &str, at: DateTime<Utc>| match cli {
+                cas_mux::SupervisorCli::Claude if queued => vec![serde_json::json!({
+                    "timestamp":at.to_rfc3339(),"type":"attachment","uuid":id,"userType":"external",
+                    "attachment":{"type":"queued_command","origin":{"kind":"human"},
+                        "prompt":[{"type":"image","source":{}},{"type":"text","text":text}]}
+                })],
                 cas_mux::SupervisorCli::Claude => vec![serde_json::json!({
                     "timestamp":at.to_rfc3339(),"type":"user","uuid":format!("uuid-{id}"),"promptId":id,
                     "origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","userType":"external",
@@ -1623,6 +1639,16 @@ mod tests {
                 let mut records = input(&format!("injected-{index}"), "Ordinary looking machine text", now);
                 records.last_mut().unwrap()[field] = provenance;
                 values.extend(records);
+            }
+            if queued {
+                for (field, provenance) in [
+                    ("origin", serde_json::json!({"kind":"task-notification"})),
+                    ("isMeta", serde_json::json!(true)),
+                ] {
+                    let mut records = input(field, "Ordinary looking queued machine text", now);
+                    records[0]["attachment"][field] = provenance;
+                    values.extend(records);
+                }
             }
             for (index, text) in [
                 "[cas #77 operator Daniel@Phone verified 0s first] Commander send",

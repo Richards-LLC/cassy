@@ -10,6 +10,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Commander boot replies
 
 - **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
+- **Claude queued answers keep their conversation** — Messages consumed during startup or a same-name restart retain their original message and paired device when the answer reaches Commander.
 
 ### Fixed — Commander messages
 

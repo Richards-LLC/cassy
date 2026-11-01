@@ -167,7 +167,7 @@ fn fetch_bounded(repo: &Path, branch: &str) -> Result<()> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["fetch", "--quiet", "origin", &refspec])
+        .args(["fetch", "--quiet", "origin", refspec.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -390,8 +390,8 @@ impl Runner {
         let stdout_path = log.with_extension("json");
         let mut command = Command::new(&self.program);
         command
-            .args(["qa", "candidate", "build", "--task", &request.task])
-            .args(["--rev", &request.revision, "--json"])
+            .args(["qa", "candidate", "build", "--task", request.task.as_str()])
+            .args(["--rev", request.revision.as_str(), "--json"])
             .current_dir(&checkout)
             .stdin(Stdio::null())
             .stdout(std::fs::File::create(&stdout_path)?)
@@ -465,7 +465,7 @@ pub(crate) fn spawn_runner(
     cas_root: PathBuf,
     shutdown: Arc<AtomicBool>,
 ) -> Option<std::thread::JoinHandle<()>> {
-    let program = match crate::ui::factory::app::provisioning::provisioner_executable() {
+    let program = match crate::ui::factory::provisioner_executable() {
         Ok(program) => program,
         Err(error) => {
             tracing::warn!(%error, "candidate builds disabled: this daemon cannot name its binary");

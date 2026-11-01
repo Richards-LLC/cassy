@@ -11,7 +11,6 @@ use rmcp::model::RawContent;
 use tempfile::TempDir;
 
 use super::*;
-use crate::mcp::server::AgentIdentitySource;
 use crate::mcp::{CasCore, CasService};
 use crate::test_support::TestEnvGuard;
 use crate::types::{Agent, AgentRole, Task, TaskStatus};
@@ -84,7 +83,7 @@ impl Fixture {
             agents.try_claim(id, holder, 600, None).unwrap();
         }
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
-        core.bind_agent_identity("robin-id".into(), AgentIdentitySource::ServerInternal).unwrap();
+        core.set_agent_id_for_testing("robin-id".to_string());
         mark_runner_live(&cas_root).unwrap();
         Self {
             _env: env,

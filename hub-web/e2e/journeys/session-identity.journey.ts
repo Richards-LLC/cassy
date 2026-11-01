@@ -89,6 +89,87 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
   });
 });
 
+test("HUB-J14 a live explicit send does not depend on a catalog read", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "live-send", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await page.route("https://atlas.test/v1/sessions", route => route.abort("failed"));
+  await page.locator("#message-text").fill("Send through the current live attach");
+  await page.locator("#message-send").click();
+  await journey.stage("A catalog failure cannot block this explicit send", async () => {
+    await expect.poll(() => hub.sends.map(send => send.text)).toEqual(["Send through the current live attach"]);
+  });
+});
+
+test("HUB-J14 upgrading a running session preserves a legacy draft", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "legacy", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await page.locator("#message-text").fill("Words written before birth tracking");
+  await page.addInitScript(() => {
+    const key = "cas-commander-conversation:drafts:v1";
+    const drafts = JSON.parse(localStorage.getItem(key) ?? "{}");
+    for (const row of Object.values(drafts) as { value: { id?: string; sessionStartedAt?: string } }[]) { delete row.value.sessionStartedAt; delete row.value.id; }
+    localStorage.setItem(key, JSON.stringify(drafts));
+  });
+  await page.reload();
+  await journey.stage("Missing birth is unknown, not evidence of a stopped session", async () => {
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await expect(page.locator("#message-text")).toHaveValue("Words written before birth tracking");
+    await expect(page.getByRole("region", { name: "Saved messages" })).not.toContainText("Draft not sent");
+    expect(hub.sends).toHaveLength(0);
+  });
+});
+
+test("HUB-J14 an old rejected send cannot settle the replacement's in-flight message", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "replacement", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await hub.down(machine.id, { sockets: "close" });
+  await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+  await page.locator("#message-text").fill("Old held words"); await page.locator("#message-send").click();
+  await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+  machine.sessions[0]!.started_at = journeyStamp(); await hub.up(machine.id);
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await expect(page.getByRole("log").locator('.bub[data-state="error"]')).toContainText("Old held words");
+  await page.locator("#message-text").fill("New send A"); await page.locator("#message-send").click();
+  await expect.poll(() => hub.sends.length).toBe(1);
+  await page.locator("#message-text").fill("New send B"); await page.locator("#message-send").click();
+  await journey.stage("New sends keep their own receipt state", async () => {
+    await expect.poll(() => hub.sends.length).toBe(2);
+    await expect(page.getByRole("log").locator('.bub[data-state="sending"]')).toHaveCount(2);
+    await expect(page.getByRole("log").locator('.bub[data-state="unconfirmed"]')).toHaveCount(0);
+  });
+});
+
+test("HUB-J14 a failed stopped-draft archive retains its durable words", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "archive", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await page.locator("#message-text").fill("Keep these words if storage fails");
+  await page.evaluate(() => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function(...args: Parameters<IDBObjectStore["put"]>) {
+      if (this.name === "attention") throw new DOMException("controlled archive failure", "QuotaExceededError");
+      return put.apply(this, args);
+    };
+  });
+  machine.sessions[0]!.started_at = journeyStamp(); await hub.announceCatalog(machine.id);
+  await expect(page.getByRole("region", { name: "Saved messages" })).toContainText("Browser storage could not save this draft");
+  await journey.stage("Failed archival leaves the original durable draft available after reload", async () => {
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("cas-commander-conversation:drafts:v1"))).toContain("Keep these words if storage fails");
+    await page.reload();
+    const saved = page.getByRole("region", { name: "Saved messages" });
+    await expect(saved).toContainText("Draft not sent"); await saved.locator("summary").click();
+    await expect(saved).toContainText("Keep these words if storage fails");
+    expect(hub.sends).toHaveLength(0);
+  });
+});
+
 // cas-55a4: three live gabber-studio sessions on one machine, as the
 // operator's Pixel saw them on 2026-09-30. noble-cheetah-84 wrote to Commander
 // yesterday and is idle; calm-puma-34 is the busy one and has never written

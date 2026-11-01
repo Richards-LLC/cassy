@@ -851,6 +851,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stale_removal_retains_end_evidence() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        let old = create_metadata("crashed", i32::MAX as u32, "supervisor", &[], None, None, None);
+        manager.save_metadata(&old).unwrap();
+        assert_eq!(manager.cleanup_stale().unwrap(), 1);
+        let ended = manager.ended_sessions().unwrap();
+        assert_eq!(ended.len(), 1, "metadata cleanup must not erase positive stop evidence");
+        assert_eq!(ended[0].metadata.started_at, old.started_at);
+        assert!(!ended[0].ended.at.is_empty());
+    }
+
     /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
     /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander
     /// launches take, saved metadata without one, so a CAS_ROOT daemon's

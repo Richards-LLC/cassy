@@ -1306,6 +1306,27 @@ describe("Commander live connection lifecycle", () => {
     await waitFor(() => expect(subscriptions()).toHaveLength(2));
   });
 
+  it("recovers transport after offline even when the catalog fails", async () => {
+    const hub = transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    const connection = supervisor(await storedMachine("catalog-recovery"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hints.dispatchEvent(new Event("offline"));
+    await waitFor(() => expect(connection.snapshot().phase).not.toBe("live"));
+    const original = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(new Response("catalog busy", { status: 503 })) : original(input, init)));
+    hints.dispatchEvent(new Event("online"));
+    await waitFor(() => expect(hub.streams.length).toBeGreaterThan(1));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(hub.streams.at(-1)!.signal.aborted).toBe(false);
+  });
+
   it("keeps a responsive machine live when the session catalog fails under load", async () => {
     transport(true);
     TransportSocket.instances = [];

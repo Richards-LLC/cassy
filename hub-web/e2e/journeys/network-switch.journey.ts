@@ -155,7 +155,7 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
       if (beat === 3) await expect(header).toHaveText(" · Unsteady");
     }
     await expect(header).toHaveText(" · Reconnecting");
-    await expect(row).toHaveText("Reconnecting");
+    await expect(row).toHaveText("You: While unsteady");
     await expect(footer).toHaveText("Reconnecting");
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // The composer's line follows the outage from unsteady to lost.
@@ -832,9 +832,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       await expect(header).toHaveText(" · Reconnecting");
       for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) await clock.advance(5_000);
       await expect(header).toHaveText(" · Reconnecting");
-      await expect(row).toContainText("Reconnecting · last known");
-      if (down.length === 1) await expect(studioRow).not.toContainText("last known");
-      else await expect(studioRow).toContainText("last known");
+      await expect(row).toContainText("Last known");
+      await expect(row).not.toContainText(/retry|Reconnecting|message pending/i);
+      if (down.length === 1) await expect(studioRow).not.toContainText(/last known/i);
+      else await expect(studioRow).toContainText("Last known");
       await expect(empty).toHaveCount(0);
       await expectFooter(count);
     });
@@ -844,7 +845,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       for (const id of down) await hub.up(id);
       await clock.advance(10_000);
       await expect(header).toHaveText(" · Live");
-      await expect(list).not.toContainText("last known");
+      await expect(list).not.toContainText(/last known/i);
       await expectFooter("2 conversations");
     });
   }

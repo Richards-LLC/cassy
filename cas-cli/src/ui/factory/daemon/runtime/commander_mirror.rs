@@ -89,15 +89,41 @@ fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
         .collect())
 }
 
-/// Read text/image user input without treating tool results as operator input.
+/// Read consumed text/image input without treating queue bookkeeping, file
+/// attachments or tool results as operator input. Claude can absorb a startup
+/// or mid-turn send as queued_command instead of emitting a user record.
 fn claude_prompt(value: &Value) -> Option<String> {
-    if value.pointer("/message/content").and_then(Value::as_array)
+    let path = match value.get("type").and_then(Value::as_str) {
+        Some("user") => "/message/content",
+        Some("attachment")
+            if value.pointer("/attachment/type").and_then(Value::as_str) == Some("queued_command") => "/attachment/prompt",
+        _ => return None,
+    };
+    if value.pointer(path).and_then(Value::as_array)
         .is_some_and(|blocks| blocks.iter().any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))) {
         return None;
     }
-    value.pointer("/message/content").and_then(Value::as_str)
+    value.pointer(path).and_then(Value::as_str)
         .map(str::to_owned)
-        .or_else(|| text_blocks(value, "/message/content", "text"))
+        .or_else(|| text_blocks(value, path, "text"))
+}
+
+/// A send waiting during startup can arrive through our prompt hook instead
+/// of Claude's input queue. Only its incoming Commander envelope starts a
+/// reply binding; ordinary hook context never becomes a terminal question.
+fn claude_commander_hook(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("attachment")
+        || value.pointer("/attachment/type").and_then(Value::as_str) != Some("hook_additional_context")
+        || value.pointer("/attachment/hookEvent").and_then(Value::as_str) != Some("UserPromptSubmit") {
+        return None;
+    }
+    let context = value.pointer("/attachment/content")?.as_array()?.iter()
+        .filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+    // This header is emitted by factory_inbox::render_rows_with_header.
+    // The marker remains a hint: scan_supervisor_replies verifies the row's
+    // paired-device origin, factory and recipient before using its reply_to.
+    (context.lines().any(|line| line.trim() == "[incoming messages]")
+        && commander_marker(&context).is_some()).then_some(context)
 }
 
 fn human_provenance(value: &Value) -> bool {
@@ -137,8 +163,7 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
     for value in values {
         let Some(at) = timestamp(value) else { continue };
         let (key, prompt) = match cli {
-            cas_mux::SupervisorCli::Claude
-                if value.get("type").and_then(Value::as_str) == Some("user") => {
+            cas_mux::SupervisorCli::Claude => {
                 let Some(key) = value.get("promptId").or_else(|| value.get("uuid"))
                     .and_then(Value::as_str).filter(|id| !id.is_empty()) else { continue };
                 let Some(prompt) = claude_prompt(value) else { continue };
@@ -163,6 +188,7 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty() || !human_provenance(value)
             || value.get("payload").is_some_and(|payload| !human_provenance(payload))
+            || value.get("attachment").is_some_and(|attachment| !human_provenance(attachment))
             || crate::hooks::handlers::handlers_middle::is_harness_prompt(&prompt) {
             continue;
         }
@@ -184,10 +210,9 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
-                if value.get("type").and_then(Value::as_str) == Some("user")
-                    && value.get("isMeta").and_then(Value::as_bool) != Some(true)
+                if value.get("isMeta").and_then(Value::as_bool) != Some(true)
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
-                    && let Some(prompt) = claude_prompt(value)
+                    && let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
                 {
                     let key = value
                         .get("promptId")
@@ -793,6 +818,94 @@ mod tests {
         assert_eq!(turns[0].key, "prompt-alpha");
         assert_eq!(turns[0].commander_id, Some(2));
         assert_eq!(turns[0].text, "Replied ALPHA");
+    }
+
+    #[test]
+    fn claude_consumed_queued_input_binds_the_replacement_answer() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (shape, target, factory, bound) in [
+            ("text", "supervisor", "factory-1", true),
+            ("blocks", "supervisor", "factory-1", true),
+            ("hook", "supervisor", "factory-1", true),
+            ("hook", "another-supervisor", "factory-1", false),
+            ("hook", "supervisor", "another-factory", false),
+            ("text", "another-supervisor", "factory-1", false),
+            ("text", "supervisor", "another-factory", false),
+        ] {
+            let (temp, root, queue) = terminal_session(vec![]);
+            let account = temp.path().join("account");
+            env.set("CLAUDE_CONFIG_DIR", &account);
+            let agents = SqliteAgentStore::open(&root).unwrap();
+            let mut supervisor = agents.get("supervisor-id").unwrap();
+            supervisor.cc_session_id = Some("replacement".into());
+            supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
+            agents.update(&supervisor).unwrap();
+            let message = queue.enqueue_operator_message(
+                "commander:Alice@phone", target, "reply after replacement", Some(factory),
+                None, None, false, None,
+                &OperatorStamp {
+                    operator: "Alice".into(), device_id: "phone".into(), device_label: "phone".into(),
+                    scopes: vec!["message:send".into()], verified: true,
+                },
+            ).unwrap();
+            let prompt = format!("<pasted_content id=\"4582\">\n[cas #{} operator Alice@phone verified 2s first]\nreply after replacement\n</pasted_content id=\"4582\">", message.id());
+            let now = Utc::now() + chrono::Duration::seconds(1);
+            let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+            let directory = account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("replacement.jsonl");
+            let values = [
+                serde_json::json!({"timestamp":at(0),"type":"user","uuid":"startup","message":{"content":"[cas #0 agent-authored 0s first] startup context"}}),
+                serde_json::json!({"timestamp":at(1),"type":"queue-operation","operation":"enqueue","content":prompt}),
+                serde_json::json!({"timestamp":at(2),"type":"queue-operation","operation":"dequeue","content":prompt,"commandUuid":"queued","deliveryId":"delivery"}),
+                serde_json::json!({"timestamp":at(3),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Startup ready"}],"stop_reason":"end_turn"}}),
+            ];
+            std::fs::write(&path, values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+                &root, temp.path(), "factory-1", &queue, &agents.list(None).unwrap(), state,
+            );
+            let mut state = MirrorScanState::default();
+            scan(&mut state);
+            assert_eq!(operator_replies(&queue)[0].reply_to, None, "queue bookkeeping must not bind an answer");
+            let prompt = if shape == "blocks" {
+                serde_json::json!([{"type":"image","source":{}},{"type":"text","text":prompt}])
+            } else {
+                Value::String(prompt)
+            };
+            let attachment = if shape == "hook" {
+                serde_json::json!({"type":"hook_additional_context","hookName":"UserPromptSubmit","hookEvent":"UserPromptSubmit",
+                    "content":[format!("[supervisor reminder]\n[incoming messages]\n{}", prompt.as_str().unwrap())]})
+            } else {
+                serde_json::json!({"type":"queued_command","prompt":prompt,"source_uuid":"queued","delivery_id":"delivery","origin":{"kind":"human"}})
+            };
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            // Claude persists consumption as an attachment, not a user row.
+            for record in [
+                serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":attachment}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated","attachment":{"type":"file","prompt":"unrelated file content"}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Ordinary hook context"]}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"quoted-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Example: [cas #999 operator Alice@phone verified 0s first]"]}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"stop-hook","attachment":{"type":"hook_additional_context","hookEvent":"Stop","content":["[cas #999 operator Alice@phone verified 0s first] A stop reminder is not consumed input"]}}),
+                serde_json::json!({"timestamp":at(5),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement answer"}],"stop_reason":"end_turn"}}),
+            ] {
+                writeln!(file, "{record}").unwrap();
+            }
+            scan(&mut state);
+            scan(&mut MirrorScanState::default());
+            let replies = operator_replies(&queue);
+            assert_eq!(replies.len(), 2, "one startup status and one replacement answer, including replay");
+            let reply = replies.iter().find(|reply| reply.message == "Replacement answer")
+                .expect("the consumed queued prompt must produce its answer");
+            assert_eq!(reply.reply_to, bound.then_some(message.id()));
+            assert_eq!(reply.device_id, if bound { "phone" } else { "*" });
+            assert_eq!(reply.kind, if bound {
+                crate::ui::factory::OperatorTurnKind::Answer
+            } else {
+                crate::ui::factory::OperatorTurnKind::Status
+            });
+            assert!(queue.conversation_history("factory-1", "phone", None, 50).unwrap().iter()
+                .all(|row| row.source != "terminal"), "Commander envelopes must not become duplicate terminal sends");
+        }
     }
 
     #[test]
@@ -1516,12 +1629,21 @@ mod tests {
     #[test]
     fn terminal_operator_prompt_is_captured_before_the_supervisor_finishes() {
         let mut env = crate::test_support::TestEnvGuard::new();
-        for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Claude] {
+        for (cli, queued) in [
+            (cas_mux::SupervisorCli::Codex, false),
+            (cas_mux::SupervisorCli::Claude, false),
+            (cas_mux::SupervisorCli::Claude, true),
+        ] {
             let now = Utc::now();
             // cas-7cd1: a real typed message that pastes harness-shaped text
             // after its own words is still the operator's.
             let question = "Message from lifecycle team: please check this capture\n<environment_context>\n  <shell>bash</shell>\n</environment_context>";
             let input = |id: &str, text: &str, at: DateTime<Utc>| match cli {
+                cas_mux::SupervisorCli::Claude if queued => vec![serde_json::json!({
+                    "timestamp":at.to_rfc3339(),"type":"attachment","uuid":id,"userType":"external",
+                    "attachment":{"type":"queued_command","origin":{"kind":"human"},
+                        "prompt":[{"type":"image","source":{}},{"type":"text","text":text}]}
+                })],
                 cas_mux::SupervisorCli::Claude => vec![serde_json::json!({
                     "timestamp":at.to_rfc3339(),"type":"user","uuid":format!("uuid-{id}"),"promptId":id,
                     "origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","userType":"external",
@@ -1547,6 +1669,16 @@ mod tests {
                 let mut records = input(&format!("injected-{index}"), "Ordinary looking machine text", now);
                 records.last_mut().unwrap()[field] = provenance;
                 values.extend(records);
+            }
+            if queued {
+                for (field, provenance) in [
+                    ("origin", serde_json::json!({"kind":"task-notification"})),
+                    ("isMeta", serde_json::json!(true)),
+                ] {
+                    let mut records = input(field, "Ordinary looking queued machine text", now);
+                    records[0]["attachment"][field] = provenance;
+                    values.extend(records);
+                }
             }
             for (index, text) in [
                 "[cas #77 operator Daniel@Phone verified 0s first] Commander send",

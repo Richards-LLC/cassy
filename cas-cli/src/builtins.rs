@@ -4974,6 +4974,18 @@ This is the body content."#;
                 })
                 .unwrap_or_else(|| panic!("{label} catalog missing operator-reply.md"));
             assert_eq!(contract.content, source, "{label} catalog source drifted");
+            // cas-1e52: Commander renders diagrams, callouts, colored code and
+            // tables; the contract must steer replies to them, not ban them.
+            assert!(
+                !contract.content.contains("Use only the Markdown subset"),
+                "{label} operator-reply.md still restricts replies to the old subset"
+            );
+            for form in ["```mermaid", "> [!WARNING]", "```bash", "|---|"] {
+                assert!(
+                    contract.content.contains(form),
+                    "{label} operator-reply.md must name the rendered form {form:?}"
+                );
+            }
         }
     }
 

@@ -3,24 +3,30 @@ import { journeyDay, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
 
-for (const replacement of [false, true]) {
-  test(`HUB-J14 held messages and drafts ${replacement ? "do not cross a replacement birth" : "survive a resume of the same birth"}`, journeyPart, async ({ page, journey }) => {
+for (const identity of ["resume", "replacement", "unknown"] as const) {
+  test(`HUB-J14 held messages and drafts respect ${identity} session identity`, journeyPart, async ({ page, journey }) => {
     const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "birth-test", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
     const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+    if (identity === "unknown") delete machine.sessions[0]!.started_at;
     await journey.open(); await showConversationList(page);
     await page.locator(".conversation-row").click();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
+    if (identity === "unknown") {
+      await page.locator("#message-text").fill("Explicit send to the current live attach");
+      await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
+      await expect.poll(() => hub.sends.length).toBe(1);
+    }
     await hub.down(machine.id, { sockets: "close" });
     await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
     await page.locator("#message-text").fill("Held for the original session");
     await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
     await expect(page.getByRole("log")).toContainText("Waiting for the connection");
     await page.locator("#message-text").fill("Draft for the original session");
-    if (replacement) machine.sessions[0]!.started_at = journeyStamp();
+    if (identity === "replacement") machine.sessions[0]!.started_at = journeyStamp();
     await hub.up(machine.id);
     await expect(page.locator("#conversation-connection")).toContainText("Live");
     await journey.stage("Only the same session birth can keep its words", async () => {
-      if (replacement) {
+      if (identity === "replacement") {
         await expect(page.locator("#message-text")).toHaveValue("");
         expect(hub.sends).toHaveLength(0);
         await showConversationList(page);
@@ -30,8 +36,12 @@ for (const replacement of [false, true]) {
         for (const summary of await saved.locator("summary").all()) await summary.click();
         await expect(saved).toContainText("Held for the original session");
         await expect(saved).toContainText("Draft for the original session");
-      } else {
+      } else if (identity === "resume") {
         await expect.poll(() => hub.sends.map(send => send.text)).toEqual(["Held for the original session"]);
+        await expect(page.locator("#message-text")).toHaveValue("Draft for the original session");
+      } else {
+        expect(hub.sends.map(send => send.text)).toEqual(["Explicit send to the current live attach"]);
+        await expect(page.getByRole("log")).toContainText("Waiting for the connection");
         await expect(page.locator("#message-text")).toHaveValue("Draft for the original session");
       }
     });

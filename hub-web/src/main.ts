@@ -945,6 +945,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
+      if (state.phase !== "live") unknownBirthApprovals.delete(key);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
       // cas-ff22: answers in flight on the old socket never come; a live
@@ -3009,7 +3010,7 @@ function rememberDraft(key: string, draft: Draft | undefined): void {
     // share an archive with an earlier draft, even in a same-name session.
     const sameWords = previous?.text === draft.text;
     const machineId = key.slice(0, key.indexOf(":")), session = key.slice(key.indexOf(":") + 1);
-    const birth = draft.sessionStartedAt ?? (sameWords ? previous?.sessionStartedAt : undefined) ?? sessions.get(machineId)?.find(item => item.name === session)?.started_at;
+    const birth = sameWords && previous ? previous.sessionStartedAt : draft.sessionStartedAt ?? sessions.get(machineId)?.find(item => item.name === session)?.started_at;
     draft = { ...draft, id: sameWords && previous?.id ? previous.id : crypto.randomUUID(), ...(birth === undefined ? {} : { sessionStartedAt: birth }) };
     conversationDrafts.set(key, draft);
   } else { draft = undefined; conversationDrafts.delete(key); }
@@ -3571,6 +3572,9 @@ function scheduleReceiptCheck(key: string): void {
  */
 type HeldSend = { clientRef: string; supervisor: string; text: string; replyTo?: number; expiry: ReturnType<typeof setTimeout> };
 const heldSends = new Map<string, HeldSend[]>();
+/** Older hubs omit started_at. An explicit click can use its current live
+ * attach, but never grants replay after a disconnect or a page reload. */
+const unknownBirthApprovals = new Map<string, Set<string>>();
 const flushingHeldSends = new HeldSendFlushes();
 const HELD_SEND_MS = 120_000;
 
@@ -3950,7 +3954,7 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
   const retired = (key: string, birth?: string) => {
     const destination = destinations.get(key.slice(machine.id.length + 1));
     return destination !== undefined && (sessionStopped(destination)
-      || (birth !== undefined && destination.started_at !== undefined && birth !== destination.started_at));
+      || (destination.started_at !== undefined && birth !== destination.started_at));
   };
   // Capture the focused composer before the catalog removes its destination;
   // inactive conversations and drafts restored after reload need the same path.
@@ -4065,12 +4069,13 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
         if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) return false;
         const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
         const pending = history.pendingSends().find(send => send.id === held.clientRef);
-        if (!birth || pending?.sessionStartedAt !== birth) return false;
+        if (birth ? pending?.sessionStartedAt !== birth : !unknownBirthApprovals.get(key)?.has(held.clientRef) || !sessionIsUp(machine.id, session)) return false;
         const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
           () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
         if (result === "waiting") { waiting = true; return false; }
         if (result === "not-saved") return false;
         return async () => {
+          unknownBirthApprovals.get(key)?.delete(held.clientRef);
           clearTimeout(held.expiry);
           history.release(held.clientRef);
           if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
@@ -4129,6 +4134,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   const clientRef = retryOf ?? crypto.randomUUID();
   const at = Date.now();
   const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
+  const explicitUnknownAttach = !birth && sessionIsUp(machine.id, session) ? attachStates.get(key) : undefined;
   const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(birth === undefined ? {} : { sessionStartedAt: birth }), ...(replyTo === undefined ? {} : { replyTo }) };
   const result = retryOf
     ? await sendJournal.retry(scope, retryOf, credentialFence(machine), send)
@@ -4145,6 +4151,10 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     return false;
   }
   if (conversationPersistenceBlocked.has(machine.id)) return false;
+  if (explicitUnknownAttach && attachStates.get(key) === explicitUnknownAttach) {
+    const approved = unknownBirthApprovals.get(key) ?? new Set<string>();
+    approved.add(clientRef); unknownBirthApprovals.set(key, approved);
+  }
   if (retryOf) {
     // A live receipt can arrive while the Retry transaction commits.
     const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);

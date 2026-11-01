@@ -7,8 +7,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-- Commander keeps running sessions visible through catalog failures and dormant supervisor reads. Stopped-session evidence is explicit, and held messages and drafts stay with their original session start rather than following a replacement with the same name.
-
 ### Fixed — Commander hub
 
 - **Slow boot retries keep their route ownership** — A failed service start
@@ -37,6 +35,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   to other tracked inputs and mismatched served assets still refuse publication.
 
 ### Fixed — Commander
+
+- **Running sessions survive catalog failures** — Running dormant daemons and last-known sessions stay listed until the hub positively confirms a stop. Held messages and drafts keep their original session start identity, and restored messages immediately apply known stop evidence.
 
 - **Unsent drafts stay reachable when a session stops** — Focused and inactive drafts move to Saved messages, survive reload, and can be copied while other conversations stay open. A same-name replacement starts with an empty composer.
 

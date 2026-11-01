@@ -4047,12 +4047,15 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     let mut dormant = fixture_session("orphaned-supervisor");
     dormant.dormant = true;
     dormant.workers.clear();
+    let mut stopped = fixture_session("stopped");
+    stopped.liveness = DaemonLiveness::StaleMetadata;
     let source = RecordingReadModel::with_sessions(vec![
         fixture_session("factory-a"),
         empty_supervisor,
         bare,
         hung_empty,
         dormant,
+        stopped,
     ]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
@@ -4098,17 +4101,18 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
         default_catalog["freshness_threshold_secs"],
         crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS
     );
+    assert_eq!(default_catalog["stopped_sessions"][0]["name"], "stopped");
     assert_eq!(
         names(default_catalog),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=0").await),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?dormant=1").await),
@@ -4117,18 +4121,6 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     assert_eq!(
         names(fetch("/v1/sessions?workers=1&dormant=1").await),
         vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
-    );
-}
-
-/// cas-94e1: metadata can outlive the supervisor pane and must be marked
-/// dormant rather than treated as a live Commander conversation.
-#[test]
-fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
-    let mut dormant = fixture_session("orphaned-supervisor");
-    dormant.dormant = true;
-    assert!(
-        super::server::supervisor_sessions(vec![dormant], false).is_empty(),
-        "a non-empty supervisor name is not proof of a live supervisor"
     );
 }
 

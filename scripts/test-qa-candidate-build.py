@@ -157,7 +157,7 @@ if sys.argv[1]=='run':
                 record_before = target_record.read_bytes()
                 with mock.patch.dict(os.environ,{'FIXTURE_BINARY':str(later_binary)}):
                     candidate['build'](repo,later,destination)
-                self.assertEqual(json.loads((destination/'RECEIPT.json').read_text())['revision'],later)
+                self.assertEqual(destination.resolve().name,later)
                 self.assertEqual(cited.read_bytes(),cited_bytes)
                 # Asking again for a published revision reuses it without a compile.
                 target_record.unlink()

@@ -1029,7 +1029,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
         Some("https://launchd-proof.invalid:10046/"));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[test]
 fn service_start_retries_tailscale_before_publication() {
     let home = private_home();
@@ -1039,6 +1039,17 @@ fn service_start_retries_tailscale_before_publication() {
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
     install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
     fs::write(home.path().join("mock-port"), "10047").unwrap();
+    // Reboot leaves Serve's configuration pointing at the previous ephemeral shim.
+    let (dead_port, _reservation) = reserve_refused_loopback_port();
+    let old_target = format!("http://127.0.0.1:{dead_port}");
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let old_record = serde_json::from_value(serde_json::json!({
+        "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "old",
+        "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 10047,
+        "tailscale_serve_target": old_target
+    })).unwrap();
+    paths.write_process_record(&old_record).unwrap();
+    fs::write(home.path().join("mock-route"), &old_target).unwrap();
     let mut child = cas_process_command(home.path(), bin.as_os_str())
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve-port", "10047"])
@@ -1052,8 +1063,40 @@ fn service_start_retries_tailscale_before_publication() {
             "service never completed publication");
         thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(paths.read_process_record().unwrap().public_url.as_deref(),
-        Some("https://localhost:10047/"));
+    let record = paths.read_process_record().unwrap();
+    assert_eq!(record.public_url.as_deref(), Some("https://localhost:10047/"));
+    let target = record.tailscale_serve_target.unwrap();
+    assert_ne!(target, old_target);
+    assert_eq!(fs::read_to_string(home.path().join("mock-route")).unwrap(), target);
+    assert!(ureq::get(&format!("{target}/v1/health"))
+        .timeout(Duration::from_secs(1)).call().is_ok(), "replacement shim is healthy");
+}
+
+#[cfg(unix)]
+#[test]
+fn service_publication_failure_survives_exit_in_status_and_logs() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) echo 'publication denied by fixture' >&2; exit 1 ;;\nesac\n{}",
+        include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
+    install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
+    fs::write(home.path().join("mock-port"), "10047").unwrap();
+    let output = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "serve", "--port", "0", "--launched-by", "service",
+            "--tailscale-serve", "--tailscale-serve-port", "10047"])
+        .output().unwrap();
+    assert!(!output.status.success(), "failed publication must trigger service-manager restart");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("publication denied by fixture"), "{stderr}");
+    let log = fs::read_to_string(home.path().join(".cas/hub/hub.log")).unwrap();
+    assert!(log.contains("publication denied by fixture"), "{log}");
+    let status = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "status", "--json"]).output().unwrap();
+    assert!(!status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(status["tailscale_serve"]["message"].as_str().unwrap()
+        .contains("publication denied by fixture"), "{status}");
 }
 
 #[cfg(unix)]

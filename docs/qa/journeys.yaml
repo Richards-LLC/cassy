@@ -965,6 +965,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J12-DURABLE-SEND-REF
   - HUB-J5-SEND-WITHOUT-PANE-LEASE
   - HUB-J5-RECEIPT-STAGES

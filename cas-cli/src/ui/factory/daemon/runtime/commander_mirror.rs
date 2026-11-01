@@ -864,8 +864,8 @@ mod tests {
             scan(&mut MirrorScanState::default());
             let replies = operator_replies(&queue);
             assert_eq!(replies.len(), 2, "one startup status and one replacement answer, including replay");
-            let reply = &replies[1];
-            assert_eq!(reply.message, "Replacement answer");
+            let reply = replies.iter().find(|reply| reply.message == "Replacement answer")
+                .expect("the consumed queued prompt must produce its answer");
             assert_eq!(reply.reply_to, bound.then_some(message.id()));
             assert_eq!(reply.device_id, if bound { "phone" } else { "*" });
             assert_eq!(reply.kind, if bound {

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker assignments
+
+- **One assignment turn at spawn and queue advance** — Startup, the supervisor's brief and the assigned task arrive together. Queued successors survive delivery after automatic start, and worker ready/status messages name any current task.
+
 ### Fixed — Factory blocker alerts
 
 - **One alert per blocker episode** — Director blocked and idle signals share the durable task lifecycle queue, stay quiet during owned verification waits, and escalate once after the deadline. Native background jobs keep a worker busy until their completion notice.

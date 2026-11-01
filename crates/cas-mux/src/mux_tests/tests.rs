@@ -1809,6 +1809,21 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
         "dynamic Codex cs MCP env must include CAS_FACTORY_SESSION; args={:?}",
         pty_config.args
     );
+    // Exercise the same config builder and backend selection used by launch.
+    let assignment = "Assigned task cas-abcd: show, start and implement it";
+    mux.set_worker_startup_prompt("dynamic-worker", Some(assignment.into()));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+        let mut spec = WorkerSpec::codex_default("dynamic-worker");
+        spec.cli = cli;
+        let config = mux.build_add_worker_config("dynamic-worker", PathBuf::from("/tmp/test"),
+            None, "supervisor", None, Some(spec));
+        assert_eq!(config.args.iter().filter(|arg| arg.as_str() == assignment).count(), 1,
+            "the assigned launch must carry one initial message for {cli:?}");
+        // pin: assigned startup must replace the generic Codex task-selection prompt.
+        assert!(!config.args.iter().any(|arg| arg.starts_with("I'm initiating Cassy worker startup now:")));
+
+    }
+
 }
 
 #[test]

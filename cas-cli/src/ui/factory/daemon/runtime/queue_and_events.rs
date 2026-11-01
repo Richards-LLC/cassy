@@ -1052,12 +1052,22 @@ fn deliver_worker_task_brief(
     task_title: &str,
     worker_cli: cas_mux::SupervisorCli,
 ) -> anyhow::Result<i64> {
-    let queue = open_prompt_queue_store(cas_dir)?;
-    let summary = format!("Assigned task: {task_id}");
+    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli);
+    let id = crate::task_assignment::enqueue_spawn_message(
+        cas_dir, factory_session, worker_name, task_id, &message,
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Compose before launching: the first model turn has startup, task and brief.
+pub(crate) fn worker_spawn_prompt(
+    cas_dir: &std::path::Path, worker_name: &str, task_id: &str,
+    task_title: &str, worker_cli: cas_mux::SupervisorCli,
+) -> String {
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
     let mut message = format!(
-        "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
-         you now.\n\
+        "You were spawned for task {task_id} — \"{task_title}\". This is your task to start.\n\
          Start with `{worker_prefix}task action=show id={task_id}`, then \
          `{worker_prefix}task action=start id={task_id}` before you change any code.\n\n\
          {test_policy}",
@@ -1089,15 +1099,17 @@ fn deliver_worker_task_brief(
         message.push_str("\n\n");
         message.push_str(&instruction);
     }
-    let id = queue.enqueue_with_summary(
-        "director",
-        worker_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
-    super::delivery::wake_daemon_after_enqueue(cas_dir);
-    Ok(id)
+    let startup = format!(
+        "Cassy worker startup: run {worker_prefix}coordination action=whoami. Your session is automatically registered; do not call session_start.\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required.\n"
+    );
+    let message = if worker_cli == cas_mux::SupervisorCli::Claude {
+        // Claude consumes its role contract in this initial prompt; the other
+        // harnesses already carry it in their native developer/rules surface.
+        format!("{}\n\n{startup}\n{message}", cas_mux::claude_worker_contract(worker_name))
+    } else {
+        format!("{startup}\n{message}")
+    };
+    crate::prompt_revalidation::attach_assignment_envelope(&message, Some(task_id))
 }
 
 /// Surface stale output-path instructions before a worker acts on them. This is
@@ -15127,6 +15139,32 @@ mod tests {
             .unwrap()
             .remove(0)
             .prompt;
+        assert!(cas_mux::missing_contract_elements(&prompt, cas_mux::ContractRole::Worker).is_empty(),
+            "the single spawn message must include the worker startup contract");
+        deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,
+            &task.title, cas_mux::SupervisorCli::Claude).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-1".into(),
+            cas_types::AgentRole::Worker);
+        worker.factory_session = Some("factory-session".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        task.assignee = Some(worker.name.clone());
+        crate::store::open_task_store_cached(&cas_dir).unwrap().update(&task).unwrap();
+        crate::task_assignment::enqueue(&cas_dir, &task).unwrap();
+        // An ordered spawn starts its head at registration. It still shares
+        // the initial assignment rather than creating another model turn.
+        task.status = cas_types::TaskStatus::InProgress;
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
+            .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue.peek_all(10).unwrap().remove(0);
+        assert!(crate::prompt_revalidation::assignment_stale_task(
+            &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
+        ).is_none(), "an initial assignment still waiting for transport must become a continuation");
+        queue.record_recipient_transport_delivered(row.id, &worker.name).unwrap();
+        queue.mark_transport_delivered(row.id).unwrap();
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
+        assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(

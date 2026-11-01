@@ -176,6 +176,61 @@ fn apply_agent_role(agent: &mut Agent, role: AgentRole) {
     }
 }
 
+/// Inherited factory environment identifies a pane, not a nested harness.
+/// Only that pane's registered process or its MCP child may refresh a live
+/// identity. A replacement MCP under the same fingerprinted harness is valid;
+/// a disposable `codex exec` review under a different parent is not.
+pub(crate) fn ensure_factory_process_owner(
+    store: &dyn crate::store::AgentStore,
+    id: &str,
+    incoming_pid: Option<u32>,
+    incoming_ppid: Option<u32>,
+) -> crate::store::Result<()> {
+    let prior = match store.get(id) {
+        Ok(prior) => prior,
+        Err(crate::store::StoreError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if prior.role == AgentRole::Standard || prior.status == AgentStatus::Shutdown {
+        return Ok(());
+    }
+    // Do not interpret another machine's PID in this host's process table.
+    if prior
+        .machine_id
+        .as_deref()
+        .is_some_and(|machine| machine != Agent::get_or_generate_machine_id())
+    {
+        return Err(crate::store::StoreError::Other(format!(
+            "Factory identity {id} belongs to another machine"
+        )));
+    }
+    let process_alive = matches!(
+        evaluate_liveness(&prior, pid_alive, pid_matches_fingerprint),
+        LivenessOutcome::Alive { .. }
+    );
+    let parent = prior.ppid.filter(|&pid| pid > 1).filter(|&pid| {
+        prior
+            .metadata
+            .get(PPID_STARTTIME_KEY)
+            .and_then(|value| value.parse().ok())
+            .is_some_and(|starttime| pid_matches_fingerprint(pid, starttime))
+    });
+    let owner_pid = prior.pid.filter(|_| process_alive);
+    if owner_pid.is_none() && parent.is_none() {
+        return Ok(()); // A dead predecessor can be replaced.
+    }
+    if [incoming_pid, incoming_ppid]
+        .into_iter()
+        .flatten()
+        .any(|pid| owner_pid == Some(pid) || parent == Some(pid))
+    {
+        return Ok(());
+    }
+    Err(crate::store::StoreError::Other(format!(
+        "Factory identity {id} belongs to another live harness; nested harnesses must use their own session identity"
+    )))
+}
+
 /// Register while preserving the store's general anti-forgery contract, then
 /// explicitly reconcile a role that came from the harness environment or a
 /// typed server-internal caller. `AgentStore::register` deliberately preserves
@@ -186,6 +241,7 @@ pub(crate) fn register_with_role_reconciliation(
     agent: &Agent,
     configured_role: Option<AgentRole>,
 ) -> crate::store::Result<Agent> {
+    ensure_factory_process_owner(store, &agent.id, agent.pid, agent.ppid)?;
     let mut agent = agent.clone();
     if let Ok(prior) = store.get(&agent.id)
         && prior.role == agent.role

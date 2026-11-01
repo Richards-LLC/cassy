@@ -319,14 +319,8 @@ fn supervisor_registration_records_own_model_and_effort() {
     ]);
     let mut agent = Agent::new_with_role("lead".into(), "lead".into(), AgentRole::Supervisor);
     apply_factory_worker_metadata(&mut agent, None);
-    assert_eq!(
-        agent.metadata.get("supervisor_model").map(String::as_str),
-        Some("claude-opus-5-5")
-    );
-    assert_eq!(
-        agent.metadata.get("supervisor_effort").map(String::as_str),
-        Some("high")
-    );
+    assert_eq!(agent.metadata.get("supervisor_model").map(String::as_str), Some("claude-opus-5-5"));
+    assert_eq!(agent.metadata.get("supervisor_effort").map(String::as_str), Some("high"));
     assert!(!agent.metadata.contains_key("worker_model"));
 }
 
@@ -481,10 +475,7 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         assert!(reused, "{worker_cli} registration must reuse the row");
         assert_eq!(resolved.id, original.id);
         assert_eq!(resolved.name, original.name);
-        assert_eq!(
-            resolved.cc_session_id.as_deref(),
-            Some(new_session.as_str())
-        );
+        assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session.as_str()));
         assert_eq!(
             agent_store
                 .get_lease("cas-742-lease")
@@ -521,10 +512,7 @@ fn cas_e9fc_clear_session_end_before_rebind_keeps_the_agent_registered() {
         let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
         let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
         task_store
-            .add(&Task::new(
-                "cas-e9fc-lease".to_string(),
-                "scratch root".to_string(),
-            ))
+            .add(&Task::new("cas-e9fc-lease".to_string(), "scratch root".to_string()))
             .expect("seed task");
         let old_session = "cd08c932-378b-4b5c-a69a-c5ade0b8aa62";
         let new_session = "34398e29-2e78-46c0-b17f-127c407f02e4";
@@ -927,24 +915,14 @@ fn stale_factory_worker_queues_exact_forced_process_tree_shutdown() {
     let mut worker = Agent::new("stale-worker-id".to_string(), "stale-worker".to_string());
     worker.role = AgentRole::Worker;
     worker.factory_session = Some("factory-gh236".to_string());
-    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker)
-        .expect("queue stale factory worker")
-        .expect("factory worker must queue shutdown");
+    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("queue stale factory worker").expect("factory worker must queue shutdown");
     let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
-    let request = queue
-        .peek(10)
-        .expect("peek shutdown queue")
-        .into_iter()
-        .find(|request| request.id == request_id)
-        .expect("exact shutdown request");
+    let request = queue.peek(10).expect("peek shutdown queue").into_iter().find(|request| request.id == request_id).expect("exact shutdown request");
     assert_eq!(request.action, cas_store::SpawnAction::Shutdown);
     assert_eq!(request.worker_names, vec!["stale-worker"]);
     assert!(request.force);
     assert_eq!(request.factory_session.as_deref(), Some("factory-gh236"));
-    assert_eq!(
-        queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"),
-        None
-    );
+    assert_eq!(queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"), None);
 }
 
 // =========================================================================
@@ -1843,10 +1821,7 @@ fn source_scan_classifies_test_modules_by_relative_boundary() {
 
     let (sites_checked, violations) = scan_production_pid_assignments(&src_root);
 
-    assert_eq!(
-        sites_checked, 1,
-        "only the production assignment is scanned"
-    );
+    assert_eq!(sites_checked, 1, "only the production assignment is scanned");
     assert_eq!(
         violations.len(),
         1,

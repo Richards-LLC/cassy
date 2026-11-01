@@ -380,8 +380,7 @@ impl CasCore {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 peer.notify_resource_list_changed(),
-            )
-            .await;
+            ).await;
         }
     }
 
@@ -577,8 +576,39 @@ impl CasCore {
         let agent_store = self.open_agent_store()?;
 
         match agent_store.get(agent_id) {
-            Ok(agent) if agent.is_alive() => Ok(()), // Already active
-            Ok(_agent) => {
+            Ok(mut agent) => {
+                // Repair rows corrupted by older nested-harness registration.
+                // A cached server-authenticated owner proves its own process;
+                // reviving status alone leaves the daemon reaping the exited
+                // child's PID on every heartbeat tick (cas-b815).
+                if self.has_server_internal_identity(agent_id)
+                    && matches!(
+                        crate::mcp::daemon::evaluate_liveness(
+                            &agent,
+                            crate::mcp::daemon::pid_alive,
+                            crate::mcp::daemon::pid_matches_fingerprint,
+                        ),
+                        crate::mcp::daemon::LivenessOutcome::Dead { .. }
+                    )
+                {
+                    let pid = std::process::id();
+                    agent.pid = Some(pid);
+                    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
+                    #[cfg(unix)]
+                    {
+                        let ppid = std::os::unix::process::parent_id();
+                        agent.ppid = Some(ppid);
+                        crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
+                    }
+                    agent_store.update(&agent).map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to repair agent process: {error}")),
+                        data: None,
+                    })?;
+                }
+                if agent.is_alive() {
+                    return Ok(());
+                }
                 // Agent exists but is stale/shutdown - revive it
                 info!(agent_id = %agent_id, "Reviving agent");
                 agent_store.revive(agent_id).map_err(|e| McpError {
@@ -794,6 +824,7 @@ impl CasCore {
             warn!(%error, "supervisor handoff publication will retry at startup");
         }
 
+
         if source == AgentIdentitySource::ServerInternal {
             match agent_store.get(&canonical_id) {
                 Ok(registered) => crate::mcp::daemon::recover_supervisor_verification_dispatches(
@@ -959,6 +990,8 @@ mod prompts;
 mod resources;
 mod runtime;
 
+#[cfg(feature = "mcp-proxy")]
+pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};
 pub use runtime::run_server;
 #[cfg(feature = "mcp-proxy")]
 pub use runtime::{
@@ -967,10 +1000,6 @@ pub use runtime::{
     read_proxy_health_cache, read_proxy_snapshot_cache, write_empty_proxy_snapshot_cache,
     write_proxy_catalog_cache, write_proxy_health_cache, write_proxy_snapshot_cache,
     write_proxy_snapshot_cache_for_config, write_unavailable_proxy_snapshot_cache,
-};
-#[cfg(feature = "mcp-proxy")]
-pub(crate) use runtime::{
-    install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy,
 };
 
 #[cfg(test)]
@@ -1109,12 +1138,7 @@ mod role_registration_tests {
             original.cc_session_id = Some(new_session.clone());
             store.register(&original).unwrap();
             store
-                .try_claim(
-                    "cas-742-server-lease",
-                    &original.id,
-                    600,
-                    Some("in progress"),
-                )
+                .try_claim("cas-742-server-lease", &original.id, 600, Some("in progress"))
                 .unwrap();
 
             let core = CasCore::with_daemon(cas_root.clone(), None, None);

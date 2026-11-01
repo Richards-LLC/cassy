@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory
+
+- **Nested reviews preserve supervisor ownership** — Was: A disposable Codex
+  review could inherit the supervisor's identity, replace its process record,
+  and disable worker messages and the peer mailbox when it exited. → Now:
+  Nested harnesses cannot take over a live factory identity or run lifecycle
+  cleanup against it; the authenticated owner also repairs older exited-PID
+  records before heartbeats resume.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

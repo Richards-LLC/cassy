@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Supervisor replies
+
+- **Supervisors answer with diagrams, callouts, colored code and tables** — Was:
+  The reply contract limited operator answers to bold, bullets, lists,
+  inline code and links, so Commander's rich rendering went unused. → Now: The
+  contract, the pane guidance on every harness and the pointer beside each
+  Commander question steer supervisors to a diagram for a flow, a callout for
+  bad news or a decision, a language-tagged block for commands and a table for
+  a comparison, with a worked example and what the terminal pane shows.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

@@ -3558,8 +3558,8 @@ mod tests {
     #[test]
     fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
         for (command, args) in [
-            ("codex", vec!["--yolo", "-c", "x=y", "startup"]),
-            ("nice", vec!["-n", "10", "codex", "--yolo", "startup"]),
+            ("codex", vec!["--yolo", "-c", "x=y", CODEX_WORKER_STARTUP_PREFIX, "-c", "late=value"]),
+            ("nice", vec!["-n", "10", "codex", "--yolo", CODEX_WORKER_STARTUP_PREFIX]),
             (
                 "claude",
                 vec!["--session-id", "new-session", "--model", "opus"],

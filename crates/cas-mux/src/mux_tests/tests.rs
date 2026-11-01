@@ -1819,7 +1819,9 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
             None, "supervisor", None, Some(spec));
         assert_eq!(config.args.iter().filter(|arg| arg.as_str() == assignment).count(), 1,
             "the assigned launch must carry one initial message for {cli:?}");
-        assert_eq!(config.args.last().map(String::as_str), Some(assignment));
+        // pin: assigned startup must replace the generic Codex task-selection prompt.
+        assert!(!config.args.iter().any(|arg| arg.starts_with("I'm initiating Cassy worker startup now:")));
+
     }
 
 }

@@ -381,7 +381,7 @@ impl HubTransportReport {
             ),
             None,
             None,
-            "Run `cas hub restart --tailscale-serve` to republish the pairing route without removing hub supervision.".to_owned(),
+            "Run `cas hub restart --tailscale-serve`.".to_owned(),
         )
     }
 
@@ -451,7 +451,7 @@ fn host_tailscale_default() -> Result<bool> {
     Ok(host_transport_mode()?.publishes())
 }
 
-// A service must exit on failed publication so launchd KeepAlive retries boot startup.
+// Failed publication must trigger launchd KeepAlive or systemd Restart=on-failure.
 fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool) -> bool {
     mode.publishes() && (service_startup || mode == HubTransportMode::Required)
 }
@@ -2170,7 +2170,7 @@ fn serve_foreground_logged(
                 tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let proxy_port = proxy_listener.local_addr()?.port();
             let ensure_started = Instant::now();
-            let service_startup = cfg!(target_os = "macos") && args.launched_by == "service";
+            let service_startup = args.launched_by == "service";
             let ensure_result = if service_startup {
                 tailscale_manager.ensure_for_service(proxy_port, tailscale_port, prior_serve_target).await
             } else {
@@ -2181,13 +2181,25 @@ fn serve_foreground_logged(
                 "{}",
                 hub_log_line(&format!(
                     "Tailscale Serve ensure {} in {}ms",
-                    if ensure_result.is_ok() { "succeeded" } else { "refused" },
+                    match &ensure_result {
+                        Ok(_) => "succeeded".to_owned(),
+                        Err(error) => format!("failed: {error:#}"),
+                    },
                     ensure_started.elapsed().as_millis(),
                 )),
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
                 Err(error) if publication_failure_is_fatal(transport_mode, service_startup) => {
+                    if service_startup {
+                        // Keep the cause observable between manager restarts. The
+                        // next start captures old ownership before replacing this
+                        // record, and a successful publication clears the warning.
+                        let _ = tailscale_manager.disable_owned();
+                        record.transport_warning = Some(format!("{error:#}"));
+                        paths.write_process_record(&record)?;
+                        startup_guard.disarm();
+                    }
                     let context = if service_startup {
                         "Tailscale Serve service startup exhausted its bounded retries"
                     } else {
@@ -2896,6 +2908,9 @@ fn status_verdict(
     transport: &HubTransportReport,
     audit: &crate::hub::AuditWriterReport,
 ) -> Result<()> {
+    if transport.is_supervised_unavailable() {
+        anyhow::bail!("Tailscale Serve publication failed; see status above");
+    }
     anyhow::ensure!(live, "cas hub is not ready; see status above");
     // cas-621ec: a hub serving outside its installed service has no restart
     // supervision; that is an error, not a footnote.
@@ -3063,8 +3078,13 @@ fn render_transport_status(report: &HubTransportReport) -> String {
         return format!("Tailscale Serve: OK - {message}");
     }
 
-    let mut lines = if report.message.starts_with("hub is supervised but not publishable") {
-        vec!["Tailscale Serve: FAIL - supervised hub is not publishable".to_owned()]
+    let mut lines = if let Some(cause) = report.message.strip_prefix(
+        "hub is supervised but not publishable: Tailscale Serve is unavailable: "
+    ) {
+        let mut lines = vec!["Tailscale Serve: FAIL - supervised hub is not publishable".to_owned()];
+        lines.extend(crate::cloud::presence::wrap_line(&format!("Cause: {cause}"))
+            .lines().map(|line| format!("  {line}")));
+        lines
     } else if let Some(issue) = report.message.strip_prefix("Tailscale: ") {
         issue.lines().enumerate().map(|(index, line)| {
             if index == 0 { format!("Tailscale Serve: FAIL - {line}") }
@@ -3767,6 +3787,13 @@ pub(crate) fn hub_transport_report(
         Err(error) => return HubTransportReport::unavailable(error.to_string()),
     };
     let live = record.is_some_and(|record| record_is_ready(paths, record));
+    if !live
+        && let Some(record) = record
+        && record.launched_by.as_deref() == Some("service")
+        && let Some(warning) = &record.transport_warning
+    {
+        return HubTransportReport::supervised_unavailable(warning);
+    }
     if let Some(holder) = paths
         .lock_holders()
         .into_iter()
@@ -4189,7 +4216,7 @@ mod tests {
             )));
         assert_eq!(
             render_transport_status(&report),
-            "Tailscale Serve: FAIL - supervised hub is not publishable\n  remedy: Run `cas hub restart --tailscale-serve` to republish the pairing route without removing hub supervision."
+            "Tailscale Serve: FAIL - supervised hub is not publishable\n  Cause: tailscale command timed out\n  remedy: Run `cas hub restart --tailscale-serve`."
         );
     }
 
@@ -4706,9 +4733,9 @@ mod tests {
     }
 
     #[test]
-    fn macos_auto_service_publication_failure_is_fatal_cas_3f03e() {
+    fn auto_service_publication_failure_is_fatal_cas_3f03e() {
         assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
-            "launchd must retry Auto publication after bounded startup retries");
+            "the service manager must retry Auto publication after bounded startup retries");
         assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
             "interactive Auto may retain loopback with a visible warning");
         assert!(publication_failure_is_fatal(HubTransportMode::Required, false));

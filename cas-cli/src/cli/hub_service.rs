@@ -886,6 +886,10 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     let has_limit = definition
         .lines()
         .any(|line| line.trim_start().starts_with("LimitNOFILE="));
+    // Older Cassy units hid stderr from journalctl. Keep operator-selected
+    // destinations; only replace the exact setting our template generated.
+    let legacy_stderr = "StandardError=append:%h/.cas/hub/hub.log";
+    let has_legacy_stderr = definition.lines().any(|line| line.trim() == legacy_stderr);
     let missing_resources = ["CPUWeight=1000", "MemoryLow=1G"]
         .into_iter()
         .filter(|setting| {
@@ -894,7 +898,7 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if has_policy && has_limit && missing_resources.is_empty() {
+    if has_policy && has_limit && missing_resources.is_empty() && !has_legacy_stderr {
         return None;
     }
     let mut lines = Vec::new();
@@ -904,7 +908,11 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
         if !has_policy && line.trim_start().starts_with("RestartForceExitStatus=") {
             continue;
         }
-        lines.push(line.to_owned());
+        lines.push(if line.trim() == legacy_stderr {
+            "StandardError=journal".to_owned()
+        } else {
+            line.to_owned()
+        });
         if !inserted && line.trim_start().starts_with("Restart=") {
             lines.push(desired.clone());
             inserted = true;
@@ -2086,7 +2094,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nCPUWeight=1000\nMemoryLow=1G\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nCPUWeight=1000\nMemoryLow=1G\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -2835,7 +2843,7 @@ exit 0
         assert!(!unit.to_ascii_lowercase().contains("token"));
         assert!(!unit.contains("credentials"));
         assert!(unit.contains("StandardOutput=append:%h/.cas/hub/hub.log"));
-        assert!(unit.contains("StandardError=append:%h/.cas/hub/hub.log"));
+        assert!(unit.contains("StandardError=journal"));
     }
 
     /// The unit as generated before cas-621ec, with `Restart=on-failure` only.
@@ -2893,6 +2901,8 @@ exit 0
             upgrade_systemd_restart_policy(&pre_limit).as_deref(),
             Some(current.as_str())
         );
+        let pre_journal = current.replace("StandardError=journal", "StandardError=append:%h/.cas/hub/hub.log");
+        assert_eq!(upgrade_systemd_restart_policy(&pre_journal).as_deref(), Some(current.as_str()));
         let pre_isolation = current.replace("CPUWeight=1000\nMemoryLow=1G\n", "");
         assert_eq!(
             upgrade_systemd_restart_policy(&pre_isolation).as_deref(),
@@ -2916,7 +2926,9 @@ exit 0
             "RestartSec=3\n",
             "RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\nCPUWeight=80\nMemoryLow=2G\n",
         );
+        let edited = edited.replace("StandardError=append:%h/.cas/hub/hub.log", "StandardError=journal+console");
         let upgraded = upgrade_systemd_restart_policy(&edited).unwrap();
+        assert!(upgraded.contains("StandardError=journal+console"));
         let service = service_lines(&upgraded);
         assert!(service.contains(&"CPUWeight=80"), "{upgraded}");
         assert!(service.contains(&"MemoryLow=2G"), "{upgraded}");

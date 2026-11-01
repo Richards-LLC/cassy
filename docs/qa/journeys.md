@@ -893,7 +893,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 3. Send pasted paths and unknown slash text as messages (cas-62ea)
 4. Submit an exact Usage token from the composer (cas-62ea)
 5. Cancel Clear, then confirm Exit for the named supervisor
-6. Settle Exit from the ended catalog after its status request loses the daemon
+6. Remove the stopped session after Exit without claiming an unobserved command result
 7. Open the quick controls and read the permission explanation
 8. Read adjacent Raw output and return by keyboard
 

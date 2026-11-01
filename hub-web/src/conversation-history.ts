@@ -716,10 +716,10 @@ export class ConversationHistory {
    * deadline. Held sends are not on the wire and are left alone. Returns the
    * ids that changed.
    */
-  unconfirmInFlight(now: number): string[] {
+  unconfirmInFlight(now: number, ids?: ReadonlySet<string>): string[] {
     const changed: string[] = [];
     for (const event of this.events) {
-      if (event.kind !== "send" || event.value.state !== "sending" || event.value.held || event.value.notificationId !== undefined || event.value.sentAt === undefined) continue;
+      if (event.kind !== "send" || (ids && !ids.has(event.value.id)) || event.value.state !== "sending" || event.value.held || event.value.notificationId !== undefined || event.value.sentAt === undefined) continue;
       event.value.state = "unconfirmed";
       event.value.unconfirmedAt = now;
       changed.push(event.value.id);

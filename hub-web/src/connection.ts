@@ -515,8 +515,12 @@ export class HubConnectionSupervisor {
         try {
           await this.refreshSessions(anySignal([this.eventAbort!.signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
         } catch (error) {
-          this.eventAbort?.abort();
-          throw error;
+          // Missing catalog data is unknown. Health, auth and events already
+          // succeeded; only an authentication refusal invalidates that proof.
+          if (error instanceof AuthenticationError || this.eventAbort?.signal.aborted) {
+            this.eventAbort?.abort();
+            throw error;
+          }
         }
       }
       liveSince = Date.now();
@@ -526,11 +530,11 @@ export class HubConnectionSupervisor {
       this.connectionLost = false;
       this.transition("live", "live");
       // Catalog freshness is independent of authentication and transport.
-      if (!recovering) this.refreshCatalog();
+      this.refreshCatalog();
       this.startHeartbeat();
       // Event-stream loss alone does not condemn terminal transports that
       // still answer. A proved machine outage already abandoned them.
-      if (recovering) this.reattachDesired("Reconnected after checking running sessions");
+      if (recovering) this.reattachDesired("Reconnected");
       else this.ensureAttachesPending();
       // A session can become ready before this event stream. Its earlier
       // flush was fenced while the machine was attaching; wake it now, after

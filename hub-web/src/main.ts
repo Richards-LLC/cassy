@@ -945,7 +945,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
-      if (state.phase !== "live") unknownBirthApprovals.delete(key);
+      if (state.phase !== "live") liveSendApprovals.delete(key);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
       // cas-ff22: answers in flight on the old socket never come; a live
@@ -3067,9 +3067,10 @@ function captureMessageDraft(): void {
   rememberComposerDraft();
   const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
   const draft = conversationDrafts.get(key);
-  const archiving = draft?.id && savingStoppedDrafts.has(draft.id);
-  messageDraft = archiving ? "" : draft?.text ?? "";
-  messageDraftSelection = archiving ? 0 : draft?.caret ?? 0;
+  // Keep showing the original words until their archive commits. A failed
+  // write must not leave an empty composer deleting the only durable copy.
+  messageDraft = draft?.text ?? "";
+  messageDraftSelection = draft?.caret ?? 0;
 }
 
 function restoreMessageDraft(): void {
@@ -3572,9 +3573,9 @@ function scheduleReceiptCheck(key: string): void {
  */
 type HeldSend = { clientRef: string; supervisor: string; text: string; replyTo?: number; expiry: ReturnType<typeof setTimeout> };
 const heldSends = new Map<string, HeldSend[]>();
-/** Older hubs omit started_at. An explicit click can use its current live
- * attach, but never grants replay after a disconnect or a page reload. */
-const unknownBirthApprovals = new Map<string, Set<string>>();
+/** Explicit intent can use the current live attach without a catalog read,
+ * but never grants replay after a disconnect or a page reload. */
+const liveSendApprovals = new Map<string, Set<string>>();
 const flushingHeldSends = new HeldSendFlushes();
 const HELD_SEND_MS = 120_000;
 
@@ -3954,7 +3955,7 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
   const retired = (key: string, birth?: string) => {
     const destination = destinations.get(key.slice(machine.id.length + 1));
     return destination !== undefined && (sessionStopped(destination)
-      || (destination.started_at !== undefined && birth !== destination.started_at));
+      || (destination.started_at !== undefined && birth !== undefined && birth !== destination.started_at));
   };
   // Capture the focused composer before the catalog removes its destination;
   // inactive conversations and drafts restored after reload need the same path.
@@ -3963,16 +3964,14 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
     if (!key.startsWith(`${machine.id}:`) || !retired(key, draft.sessionStartedAt) || !draft.text.trim()) continue;
     if (!draft.id) rememberDraft(key, draft);
     void saveStoppedDraft(machine, key, conversationDrafts.get(key)!);
-    const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-    if (composer?.dataset.threadKey === key && composer.value === draft.text) composer.value = "";
   }
   let unsent = 0;
   for (const [key, history] of conversationHistories) {
     if (!key.startsWith(`${machine.id}:`)) continue;
-    let changed = false;
+    const retiredIds = new Set<string>();
     for (const send of history.pendingSends()) {
-      if (!retired(key, send.sessionStartedAt)) continue;
-      changed = true;
+      if (!retired(key, send.sessionStartedAt) || (send.state !== "held" && send.state !== "sending")) continue;
+      retiredIds.add(send.id);
       const queue = heldSends.get(key);
       const held = queue?.find(item => item.clientRef === send.id);
       if (held) { clearTimeout(held.expiry); heldSince.delete(held.clientRef); queue!.splice(queue!.indexOf(held), 1); }
@@ -3987,10 +3986,10 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
         });
       }
     }
-    if (!changed) continue;
-    history.unconfirmInFlight(Date.now());
-    if (messageDelivery?.session === key) messageDelivery = undefined;
-    if (messageStatus?.session === key) messageStatus = undefined;
+    if (!retiredIds.size) continue;
+    history.unconfirmInFlight(Date.now(), retiredIds);
+    if (messageDelivery?.session === key && retiredIds.has(messageDelivery.clientRef)) messageDelivery = undefined;
+    if (messageStatus?.session === key && !heldSends.get(key)?.length) messageStatus = undefined;
   }
   if (unsent) toast(`${unsent === 1 ? "1 waiting message was" : `${unsent} waiting messages were`} not sent because the session stopped. Saved on this browser.`);
   void persistPendingSends();
@@ -4016,6 +4015,8 @@ async function saveStoppedDraft(machine: StoredMachine, key: string, draft: Draf
     await attentionStore.put(item);
     if (conversationDrafts.get(key)?.id === draft.id) {
       savingStoppedDrafts.delete(draft.id);
+      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (composer?.dataset.threadKey === key && composer.value === draft.text) composer.value = "";
       rememberDraft(key, undefined);
     }
   } catch {
@@ -4056,10 +4057,8 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
   await persistPendingSends();
   await flushingHeldSends.run(key, async () => {
     if (!heldSends.get(key)?.length) return;
-    // A live socket cannot identify a same-name replacement. Read its start
-    // identity before replaying; a failed catalog leaves messages held.
-    try { await connections.get(machine.id)?.refreshSessions(); } catch { return; }
-    await persistPendingSends();
+    let catalogRead = false;
+    let catalogAttempted = false;
     let waiting = false;
     try {
       const history = conversationHistory(key);
@@ -4067,15 +4066,32 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
       await drainHeld(queue, async (held) => {
         const accepted = machines.get(machine.id);
         if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) return false;
-        const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
-        const pending = history.pendingSends().find(send => send.id === held.clientRef);
-        if (birth ? pending?.sessionStartedAt !== birth : !unknownBirthApprovals.get(key)?.has(held.clientRef) || !sessionIsUp(machine.id, session)) return false;
+        // Explicit intent on this uninterrupted live attach needs no catalog
+        // round trip. Replayed/offline words still need a matching known birth.
+        const approval = liveSendApprovals.get(key);
+        const approved = () => !!approval?.has(held.clientRef) && liveSendApprovals.get(key) === approval;
+        if (!approved() && !catalogAttempted) {
+          catalogAttempted = true;
+          try { await connections.get(machine.id)?.refreshSessions(); catalogRead = true; } catch { /* Unknown; retry while transport is live. */ }
+          await persistPendingSends();
+        }
+        const attach = attachStates.get(key);
+        const validDestination = () => {
+          if (!sessionIsUp(machine.id, session)) return false;
+          if (approved()) return true;
+          const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
+          const pending = history.pendingSends().find(send => send.id === held.clientRef);
+          return catalogRead && attachStates.get(key) === attach && birth !== undefined && pending?.sessionStartedAt === birth;
+        };
+        if (!validDestination()) { waiting = !catalogRead; return false; }
         const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
-          () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
+          // Journal claims await IndexedDB. Recheck identity at the actual write
+          // so a reconnect during that wait cannot borrow a newer live socket.
+          () => validDestination() && !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
         if (result === "waiting") { waiting = true; return false; }
         if (result === "not-saved") return false;
         return async () => {
-          unknownBirthApprovals.get(key)?.delete(held.clientRef);
+          liveSendApprovals.get(key)?.delete(held.clientRef);
           clearTimeout(held.expiry);
           history.release(held.clientRef);
           if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
@@ -4134,7 +4150,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   const clientRef = retryOf ?? crypto.randomUUID();
   const at = Date.now();
   const birth = destination.birth;
-  const explicitUnknownAttach = !birth ? destination.attach : undefined;
+  const explicitLiveAttach = destination.attach;
   const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(birth === undefined ? {} : { sessionStartedAt: birth }), ...(replyTo === undefined ? {} : { replyTo }) };
   const result = retryOf
     ? await sendJournal.retry(scope, retryOf, credentialFence(machine), send)
@@ -4151,9 +4167,9 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     return false;
   }
   if (conversationPersistenceBlocked.has(machine.id)) return false;
-  if (explicitUnknownAttach && attachStates.get(key) === explicitUnknownAttach) {
-    const approved = unknownBirthApprovals.get(key) ?? new Set<string>();
-    approved.add(clientRef); unknownBirthApprovals.set(key, approved);
+  if (explicitLiveAttach?.phase === "live" && attachStates.get(key) === explicitLiveAttach) {
+    const approved = liveSendApprovals.get(key) ?? new Set<string>();
+    approved.add(clientRef); liveSendApprovals.set(key, approved);
   }
   if (retryOf) {
     // A live receipt can arrive while the Retry transaction commits.

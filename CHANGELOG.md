@@ -58,8 +58,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander
 
-- **Offline messages show their send deadline** — Waiting messages and the composer explain the two-minute automatic-send window, after which the words stay available for Edit or Retry.
-
 - **Running sessions survive catalog failures** — Running dormant daemons and last-known sessions stay listed until the hub positively confirms a stop. Held messages and drafts keep their original session start identity, and restored messages immediately apply known stop evidence.
 
 - **Unsent drafts stay reachable when a session stops** — Focused and inactive drafts move to Saved messages, survive reload, and can be copied while other conversations stay open. A same-name replacement starts with an empty composer.

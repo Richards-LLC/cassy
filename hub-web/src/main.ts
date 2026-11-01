@@ -3883,7 +3883,7 @@ async function cancelWaitingMessage(machineId: string, session: string, id: stri
 function heldSendStatus(machineId: string, session: string): string {
   const label = machines.get(machineId)?.label ?? "the machine";
   const machine = connectionStates.get(machineId);
-  const after = "Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.";
+  const after = "Your message will go out by itself when it's back.";
   // Unsteady, or a doubted socket being probed: it is being checked.
   if (machine?.phase === "live" && (machine.degraded || connections.get(machineId)?.holdsMessages())) return `${unsteadyBanner(label)} ${after}`;
   if (sessionOnlyDrop(machineId, session)) return `${conversationLabel(machineId, session)} on ${label} is reconnecting. ${after}`;

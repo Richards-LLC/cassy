@@ -79,11 +79,6 @@ bug_families:
     tasks: [cas-6f79]
     invariants: [HUB-J14-PROJECT-DISPLAY-NAME]
     journeys: [HUB-J14]
-  held-send-lifetime:
-    title: Offline auto-send discloses its two-minute wait and requires Retry after expiry
-    tasks: [cas-1c0e]
-    invariants: [HUB-J12-HELD-SEND-LIFETIME]
-    journeys: [HUB-J11, HUB-J12]
   claude-queued-replacement-reply:
     title: Consumed queued Claude inputs retain Commander message and paired-device reply binding
     tasks: [cas-33e6]
@@ -313,10 +308,6 @@ invariants:
       task: cas-9e46
     statement: An open phone reconnects to the replacement daemon and is counted by its next completed loop pass
     check: 'Use the real HUB-J11 daemon-replacement and hub-restart stages; require a fresh Welcome and commander_clients >= 1 in the first published post-Welcome completed-pass snapshot for the current daemon PID; retain loop passes and timestamps.'
-  HUB-J12-HELD-SEND-LIFETIME:
-    statement: While offline, both held-message and composer copy disclose the finite two-minute automatic-send window; expired words remain available with Edit and Retry and never send on a later reconnect without a new click.
-    check: Run the original-deadline reheld-send case in network-switch.journey.ts, then hold a real native-hub message through the wall-clock timeout on desktop and phone; read heldAt and error state back from the journal and verify no expired text enters prompt_queue when the hub returns.
-    bug: {task: cas-1c0e}
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -1289,7 +1280,7 @@ journeys:
   - Open the conversation — the thread is live
   - The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting,
     and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection
-    — auto-sends for up to 2 minutes; after that, choose Retry.") and not sent; the attention rail raises no transport alarm of its own, and its counts
+    — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts
     agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
   - It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces
     the return), the held message goes out exactly once and is delivered, and no transport alarm is left
@@ -1478,7 +1469,6 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J12-GOAL
-  - HUB-J12-HELD-SEND-LIFETIME
   - HUB-J12-DURABLE-SEND-REF
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS

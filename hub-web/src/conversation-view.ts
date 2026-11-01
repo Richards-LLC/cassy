@@ -1609,8 +1609,8 @@ export class ConversationView {
       const state = document.createElement("span");
       state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
       // Held while the machine is unreachable (cas-0978): not on the wire yet,
-      // and it can auto-send once within the disclosed two-minute wait.
-      state.textContent = send.held ? "Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry."
+      // and it will be sent by itself, once, when the machine is back.
+      state.textContent = send.held ? "Waiting for the connection — sends when it's back"
         : this.history.awaitsConfirmation(send) ? `Waiting for ${(this.options.machine && machineName(this.options.machine)) || "the machine"} to confirm…`
           : "Sending…";
       bubble.append(state);

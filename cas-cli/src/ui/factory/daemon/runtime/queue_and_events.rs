@@ -15157,6 +15157,15 @@ mod tests {
         crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
         assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
             .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue.peek_all(10).unwrap().remove(0);
+        assert!(crate::prompt_revalidation::assignment_stale_task(
+            &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
+        ).is_none(), "an initial assignment still waiting for transport must become a continuation");
+        queue.record_recipient_transport_delivered(row.id, &worker.name).unwrap();
+        queue.mark_transport_delivered(row.id).unwrap();
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
+        assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(

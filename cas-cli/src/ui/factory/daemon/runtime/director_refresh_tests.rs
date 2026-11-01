@@ -45,7 +45,14 @@ fn r1_blocked_idle_does_not_duplicate_the_lifecycle_wake() {
         "merge-w", None, LifecycleTransition::Blocked, &chrono::Utc::now().to_rfc3339()).unwrap();
     for _ in 0..3 {
         let idle = crate::ui::factory::director::DirectorEvent::WorkerIdle { worker: "merge-w".into(), active_task: None };
-        let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[idle]);
+        let mut inputs = fixture.app.delivery_request(std::slice::from_ref(&idle)).read(None);
+        inputs.set_idle_liveness([("merge-w".into(), Some(
+            crate::mcp::tools::service::worker_liveness::Observation {
+                state: crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput,
+                evidence: "recorded task_complete".into(),
+            }
+        ))].into());
+        let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery_from(&[idle], inputs);
         assert!(prompts.is_empty());
     }
     let rows = queue.peek_all(20).unwrap();

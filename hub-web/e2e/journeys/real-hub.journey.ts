@@ -848,7 +848,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
     await page.getByRole("textbox", { name: "Your message", exact: true }).fill("Keep this stopped-session instruction");
     await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
-    await expect(page.getByText("Waiting for the connection — sends when it's back", { exact: true })).toBeVisible();
+    await expect(page.getByText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.", { exact: true })).toBeVisible();
     await command("daemon-stop");
     await command("start");
     await expect(rows).toHaveCount(0);

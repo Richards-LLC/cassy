@@ -88,7 +88,7 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
     document.body.replaceChildren(view.element);
     view.update();
     const line = (text: string) => [...view.element.querySelectorAll<HTMLElement>(".bub")].find((bubble) => bubble.textContent?.includes(text))?.querySelector(".conversation-delivery")?.textContent;
-    expect(line("Waiting for the network")).toBe("Waiting for the connection — sends when it's back");
+    expect(line("Waiting for the network")).toBe("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
     // Two in a row read as one notice on the second (cas-b00c); neither claims it arrived.
     expect(line("On the wire, no receipt yet")).toBeUndefined();
     expect(line("Receipt never came")).toContain("2 messages not confirmed");

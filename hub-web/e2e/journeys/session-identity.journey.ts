@@ -1,6 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
-import { journeyDay, journeyStamp } from "./clock";
-import { SCOPES, type Machine } from "./hub-double";
+import { journeyDay, journeyNow, journeyStamp } from "./clock";
+import { HubDouble, SCOPES, type Machine } from "./hub-double";
 
 // cas-55a4: three live gabber-studio sessions on one machine, as the
 // operator's Pixel saw them on 2026-09-30. noble-cheetah-84 wrote to Commander
@@ -364,49 +364,96 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
     const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
     await expect(liveSupervisor.locator(".supervisor-state")).not.toHaveClass(/offline/);
-    await expect(old.locator(".conversation-row")).toHaveCount(1);
-    await expect(old.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
+    await expect(ended.locator(".conversation-when")).toBeVisible();
+    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
+    const clearEnded = old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true });
+    await clearEnded.scrollIntoViewIfNeeded();
+    await expect(clearEnded).toBeInViewport();
+  });
+
+  await journey.stage("An ended row offers Dismiss, while the live row stays protected", async () => {
+    const old = list.getByRole("group", { name: /^pulse-card ·/ });
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await ended.scrollIntoViewIfNeeded();
+    await expect(old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true })).toBeVisible();
+    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
+    await expect(liveSupervisor).toBeVisible();
   });
 
   for (const mode of ["light", "dark", "forced-colors"] as const) {
-    await journey.stage(`Running idle stays green in ${mode}`, async () => {
+    await journey.stage(`Live idle stays distinct from offline in ${mode}`, async () => {
       await page.emulateMedia({ colorScheme: mode === "dark" ? "dark" : "light", forcedColors: mode === "forced-colors" ? "active" : "none" });
       const card = list.getByRole("group", { name: /^pulse-card ·/ });
       const idle = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Idle", exact: true });
+      const offline = card.locator(".conversation-row").filter({ hasText: "watchful-heron-16" }).getByRole("img", { name: "Offline", exact: true });
       await card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).click();
       await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
       await expect(idle).toHaveAttribute("title", "Idle");
+      await expect(offline).toHaveAttribute("title", "Offline");
       const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
+      expect(await look(idle)).not.toEqual(await look(offline));
       // A live idle dot uses the live green, never the old gray idle token.
       if (mode !== "forced-colors") {
         expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
+      } else {
+        expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
       }
     });
   }
   await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
 
-  await journey.stage("Stopped sessions stay hidden on phone and desktop, and a running replacement returns (cas-f8ab)", async () => {
+  await journey.stage("Dismiss on the phone and keep ended sessions hidden on the desktop", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await back();
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
-    for (const width of [390, 1280]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
-      await back();
-      await expect(old.locator(".conversation-row")).toHaveCount(1);
-      await expect(list.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
-    }
-    // The metadata and history are retained; navigation is strictly running sessions.
-    expect(hub.machine("atlas").sessions.filter(session => session.ended)).toHaveLength(3);
-    const replacement = { ...endedSession("watchful-heron-16", 60_000), liveness: "live" as const, ended: undefined, machine_online: true };
-    machine.sessions = machine.sessions.map(row => row.name === replacement.name ? replacement : row);
-    await hub.announceCatalog("atlas");
-    await expect(old.locator(".conversation-row")).toHaveCount(2);
-    machine.sessions = machine.sessions.map(row => row.project === "pulse-card" ? { ...row, liveness: "stale_metadata" as const } : row);
-    await hub.announceCatalog("atlas");
-    await expect(old).toHaveCount(0);
-    machine.sessions = machine.sessions.map(row => row.name === "golden-jaguar-44" ? { ...row, liveness: "live" as const } : row);
-    await hub.announceCatalog("atlas");
+    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
+    await expect(ended).toHaveCount(0);
+    await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(1);
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    await old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true }).click();
     await expect(old.locator(".conversation-row")).toHaveCount(1);
+    await expect(old.locator(".conversation-topline .conversation-action")).toBeHidden();
+    await expect(liveSupervisor).toBeVisible();
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    // The hub keeps the preference; a fresh browser has no local dismissal keys.
+    await expect.poll(() => hub.machine("atlas").sessions.filter(row => row.dismissed).length).toBe(3);
+    for (let tick = 0; tick < 3; tick++) {
+      for (const row of hub.machine("atlas").sessions) if (row.ended) row.ended.at = journeyStamp(tick * 1000);
+      await hub.announceCatalog("atlas");
+      await expect(old.locator(".conversation-row")).toHaveCount(1);
+    }
+    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 }, timezoneId: "UTC" });
+    try {
+      const desktop = await context.newPage();
+      await desktop.clock.install({ time: journeyNow() });
+      const otherDevice = new HubDouble(desktop, { machines: [machine, other], paired: ["atlas", "borealis"] });
+      await otherDevice.install();
+      await desktop.goto(page.url());
+      await otherDevice.seedPaired();
+      await desktop.reload();
+      const desktopRows = desktop.locator("#conversation-list .project-card").filter({ hasText: "pulse-card" }).locator(".conversation-row");
+      await expect(desktopRows).toHaveCount(1);
+      await desktop.reload();
+      await expect(desktopRows).toHaveCount(1);
+      // Reusing a supervisor name with a new birth must appear when it ends.
+      const replacement = { ...endedSession("watchful-heron-16", 60_000), started_at: journeyStamp(30_000) };
+      machine.sessions = machine.sessions.map(row => row.name === replacement.name ? replacement : row);
+      await hub.announceCatalog("atlas");
+      await expect(old.locator(".conversation-row")).toHaveCount(2);
+      await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
+      await expect.poll(() => machine.sessions.find(row => row.name === replacement.name)?.dismissed).toBe(true);
+      await desktop.reload();
+      await expect(desktopRows).toHaveCount(1);
+    } finally { await context.close(); }
     await page.reload();
     await expect(old.locator(".conversation-row")).toHaveCount(1);
+    await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(0);
+    await expect(list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toContainText("calm-puma-34");
     const capture = process.env.FULL_NAV_CAPTURE_DIR;
     const widths = capture ? [1280, 390] : [390];
     const schemes = capture ? ["light", "dark", "forced-colors"] as const : ["forced-colors"] as const;

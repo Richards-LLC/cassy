@@ -108,7 +108,7 @@
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and indexed QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and temporal memory/search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - startup, selected conversation state and reply grants.
-- `hub-web/src/project-navigation.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/machine-version.ts` - running-only grouped navigation, machine outage status, machine versions and release lookup.
+- `hub-web/src/project-navigation.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/machine-version.ts` - grouped navigation, machine versions and release lookup.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - authenticated streams, recovery and session subscriptions.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/dismissed-asks.ts` - history paging, receipt progress, windowed turns and per-thread dismissal persistence.
 - `hub-web/src/provider-mark.ts` - harness/provider avatar marks, state dots and model/effort header labels.

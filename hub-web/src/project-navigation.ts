@@ -6,12 +6,14 @@ export interface NavigationMachine { id: string; label: string; online?: boolean
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
-interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean }
-interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
+interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[]; dismissEnded?: (row: ConversationRow) => Promise<void> }
+interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
+const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
 const projectName = (row: ConversationRow) => rowProjectName(row) || row.supervisor;
 const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.key;
+const endedSessionKey = (row: ConversationRow) => `${row.machineId}\u0000${row.session}\u0000${row.startedAt ?? ""}`;
 
 /**
  * cas-ade2: the register's order is alphabetical and never follows activity,
@@ -40,6 +42,9 @@ export class ProjectNavigation {
   private empty?: HTMLElement;
   private filter: Filter = "all";
   private collapsed = new Set<string>();
+  private dismissedEnded = new Set<string>();
+  private pendingDismissals = new Set<string>();
+  private syncAttempted = new Set<string>();
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: Open; end?: End; options: Options };
 
   constructor() {
@@ -47,11 +52,63 @@ export class ProjectNavigation {
       const values: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
       if (Array.isArray(values)) this.collapsed = new Set(values.filter((value): value is string => typeof value === "string"));
     } catch { /* Storage may be unavailable; this device still works in memory. */ }
-
+    try {
+      const values: unknown = JSON.parse(localStorage.getItem(DISMISSED_ENDED_KEY) ?? "[]");
+      if (Array.isArray(values)) this.dismissedEnded = new Set(values.filter((value): value is string => typeof value === "string"));
+    } catch { /* Storage may be unavailable; this device still works in memory. */ }
   }
 
   private save(): void {
     try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...this.collapsed])); } catch { /* No storage requirement for navigation. */ }
+  }
+
+  private saveDismissedEnded(): void {
+    try { localStorage.setItem(DISMISSED_ENDED_KEY, JSON.stringify([...this.dismissedEnded])); } catch { /* Dismissal still lasts for this page. */ }
+  }
+
+  private isDismissedEnded(row: ConversationRow): boolean {
+    return row.ended !== undefined && (row.dismissed === true || this.dismissedEnded.has(endedSessionKey(row)));
+  }
+
+  private dismissEnded(row: ConversationRow): void {
+    if (!row.ended) return;
+    void this.persistDismissal(row);
+  }
+
+  private async persistDismissal(row: ConversationRow, keepHidden = false): Promise<void> {
+    const key = endedSessionKey(row);
+    if (row.dismissed || this.pendingDismissals.has(key)) return;
+    this.pendingDismissals.add(key);
+    this.dismissedEnded.add(key);
+    this.saveDismissedEnded();
+    const latest = this.latest;
+    if (!latest) { this.pendingDismissals.delete(key); return; }
+    this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    try {
+      await latest.options.dismissEnded?.(row);
+    } catch {
+      if (!keepHidden) this.dismissedEnded.delete(key);
+      this.saveDismissedEnded();
+      const current = this.latest!;
+      this.render(current.container, current.rows, current.open, current.end, current.options);
+      const error = current.container.ownerDocument.createElement("p");
+      error.setAttribute("role", "alert");
+      error.textContent = keepHidden
+        ? `Could not save the dismissal for ${row.supervisor} on your other devices. It stays hidden here; reload after reconnecting to sync it.`
+        : `Could not dismiss ${row.supervisor}. Try Dismiss again to save it on your other devices.`;
+      current.container.append(error);
+    } finally { this.pendingDismissals.delete(key); }
+  }
+
+  private clearProjectEnded(project: string): void {
+    const latest = this.latest;
+    if (!latest) return;
+    for (const row of latest.options.allRows ?? latest.rows) {
+      if (row.ended && projectKey(row) === project) void this.persistDismissal(row);
+    }
+    const target = this.cards.get(project)?.toggle ?? latest.container;
+    if (!(target instanceof HTMLButtonElement) && !target.hasAttribute("tabindex")) target.tabIndex = -1;
+    target.focus({ preventScroll: true });
   }
 
   setFilter(filter: Filter): void {
@@ -86,7 +143,20 @@ export class ProjectNavigation {
 
   render(container: HTMLElement, rows: readonly ConversationRow[], open: Open, end?: End, options: Options = {}): void {
     this.latest = { container, rows, open, end, options };
-    rows = rows.filter(row => !row.ended);
+    // Carry forward a pre-upgrade dismissal only when its exact receipt matches.
+    // A different birth with the same supervisor must never inherit it.
+    for (const row of options.allRows ?? rows) {
+      const legacy = `${row.key}\u0000${row.ended?.at ?? ""}`;
+      const migrated = row.ended && this.dismissedEnded.delete(legacy);
+      if (migrated) this.saveDismissedEnded();
+      const key = endedSessionKey(row);
+      if (row.ended && !row.dismissed && (migrated || this.dismissedEnded.has(key)) && !this.syncAttempted.has(key)) {
+        // A tab can close between saving locally and the hub's receipt. Replay
+        // that preference on reload, once per page, without resurrecting it.
+        this.syncAttempted.add(key);
+        void this.persistDismissal(row, true);
+      }
+    }
     const document = container.ownerDocument;
     const machines = options.machines ?? [...new Map(rows.map((row) => [row.machineId, { id: row.machineId, label: row.host, online: row.machine_online }])).values()];
     const filters = document.getElementById("conversation-filters");
@@ -98,7 +168,7 @@ export class ProjectNavigation {
       groups.set(key, [...groups.get(key) ?? [], row]);
     }
     const ordered: HTMLElement[] = [];
-    const decisions = rows.filter((row) => needsYou(row) && matches(row))
+    const decisions = rows.filter((row) => !this.isDismissedEnded(row) && needsYou(row) && matches(row))
       .sort((a, b) => byText(projectName(a), projectName(b)) || compareSupervisorRows(a, b));
     if (decisions.length) {
       const section = this.pinned ??= document.createElement("section");
@@ -120,7 +190,7 @@ export class ProjectNavigation {
     } else this.pinned?.remove();
 
     for (const [key, members] of [...groups].sort(([, a], [, b]) => compareProjectCards(a, b))) {
-      const visible = members.filter((row) => matches(row));
+      const visible = members.filter((row) => matches(row) && !this.isDismissedEnded(row));
       if (!visible.length) continue;
       let card = this.cards.get(key);
       if (!card) {
@@ -130,13 +200,14 @@ export class ProjectNavigation {
         const heading = document.createElement("p"); heading.className = "conversation-group-head sr-only"; heading.setAttribute("aria-hidden", "true");
         const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "project-card-toggle";
         const header = document.createElement("div"); header.className = "conversation-topline";
-        header.append(toggle);
+        const clearEnded = document.createElement("button"); clearEnded.type = "button"; clearEnded.className = "conversation-action"; clearEnded.textContent = "Clear ended";
+        header.append(toggle, clearEnded);
         const chips = document.createElement("div"); chips.className = "project-machine-chips";
         const summary = document.createElement("p"); summary.className = "project-card-summary";
         const body = document.createElement("div"); body.className = "project-card-rows"; body.id = `project-rows-${encodeURIComponent(key)}`;
         toggle.setAttribute("aria-controls", body.id);
         node.append(heading, header, chips, summary, body);
-        card = { node, heading, toggle, chips, summary, body, rows: new ConversationList() };
+        card = { node, heading, toggle, clearEnded, chips, summary, body, rows: new ConversationList() };
         this.cards.set(key, card);
       }
       const name = projectName(members[0]!);
@@ -156,6 +227,11 @@ export class ProjectNavigation {
         current.toggle.setAttribute("aria-expanded", String(!current.body.hidden));
         this.save();
       };
+      const hasEndedToClear = (options.allRows ?? rows).some((row) => projectKey(row) === key && row.ended !== undefined && !this.isDismissedEnded(row));
+      card.clearEnded.hidden = !hasEndedToClear;
+      card.clearEnded.className = hasEndedToClear ? "conversation-action" : "";
+      card.clearEnded.setAttribute("aria-label", `Clear ended sessions in ${name}`);
+      card.clearEnded.onclick = () => this.clearProjectEnded(key);
       const chipMarkup = hosts.map((row) => {
         const machine = options.machines?.find(machine => machine.id === row.machineId);
         const online = machine?.online ?? row.machine_online;
@@ -185,12 +261,12 @@ export class ProjectNavigation {
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
       const nested = sorted.map((row) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
-      card.rows.render(card.body, nested, open, end);
+      card.rows.render(card.body, nested, open, end, (row) => this.dismissEnded(row));
       ordered.push(card.node);
     }
     if (!ordered.length && rows.length) {
       const empty = this.empty ??= document.createElement("p"); empty.className = "project-nav-empty";
-      empty.textContent = "No conversations match this filter. Choose All to see your projects.";
+      empty.textContent = this.filter === "all" && rows.some((row) => this.isDismissedEnded(row)) ? "Dismissed sessions are hidden from this list and remain in session history." : "No conversations match this filter. Choose All to see your projects.";
       ordered.push(empty);
     }
     const kept = new Set(ordered);

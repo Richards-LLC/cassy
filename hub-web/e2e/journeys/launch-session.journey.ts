@@ -303,7 +303,7 @@ test("HUB-J13 New session says a reconnecting machine is reconnecting, then load
     await journey.open();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await hub.down("atlas", { sockets: "close" });
-    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Last known", { timeout: 20_000 });
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Reconnecting", { timeout: 20_000 });
   });
 
   await journey.stage("New session says it is reconnecting and offers nothing that can only fail", async () => {

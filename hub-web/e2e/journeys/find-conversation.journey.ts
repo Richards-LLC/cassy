@@ -809,16 +809,25 @@ for (const width of [1280, 390]) {
       return rows.map(row => row.id).filter(id => id.startsWith("atlas:event:")).sort();
     }), { message: "a deliberate exit files no attention item" }).toEqual(["atlas:event:9103"]);
     await hub.announceCatalog(machine.id);
-    await journey.stage("Ended sessions leave navigation without retrying (cas-f8ab)", async () => {
-      await expect(page.locator("#conversation-list .conversation-row")).toHaveCount(0);
-      await expect(page.locator(".project-card")).toHaveCount(0);
-      await expect(page.locator("#message-text")).toBeHidden();
+    await journey.stage("Session ended accounts for every worker", async () => {
+      await expect(page.locator("#conversation-attention")).toBeHidden();
+      await expect(page.locator("#conversation-connection")).toContainText("Ended");
+      await expect(page.locator(".session-end-receipt")).toContainText("Supervisor and 2 workers stopped");
+      await expect(page.locator(".session-end-receipt")).toContainText("/exit");
+      await expect(page.locator(".session-end-receipt .session-end-orphans")).toContainText("Still alive: worker-c");
+      await expect(page.locator("#message-send")).toBeDisabled();
+      await expect(page.locator("#message-status")).toContainText("New session");
+      await expect(page.locator("#message-text")).toHaveValue("Keep this draft");
       await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
-      // End evidence and worker accounting remain in the hub's history model.
-      expect(session.ended).toMatchObject({ workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"] });
-      await showConversationList(page);
-      await expect(page.locator(".conversation-row")).toHaveCount(0);
+      if (width === 390) await page.locator("#conversation-fleet").click();
+      await expect(page.locator("#status-view")).toContainText("Session ended");
+      await expect(page.locator("#status-view")).toContainText("Stopped: worker-a, worker-b");
+      await expect(page.locator("#status-view")).toContainText("Still alive: worker-c");
+      await expect(page.locator("#status-view .status-agent")).toHaveCount(0);
+      if (width === 390) await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
     });
+    await showConversationList(page);
+    await expect(page.locator(".conversation-row").first()).toContainText("Ended");
   });
 }
 

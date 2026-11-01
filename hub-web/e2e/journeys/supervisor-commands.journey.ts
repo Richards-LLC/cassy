@@ -79,7 +79,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(mutations()[2].body).toMatchObject({ command: "exit", confirmed: true });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
       });
-      await journey.stage("Remove the stopped session after Exit without claiming an unobserved command result", async () => {
+      await journey.stage("Settle Exit from the ended catalog after its status request loses the daemon", async () => {
         const request = mutations()[2].body as { client_ref: string };
         const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/exit" });
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
@@ -88,11 +88,12 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: [...session.workers], orphans: [], unverified: [] };
         session.liveness = "stale_metadata"; session.workers = [];
         await hub.announceCatalog(machine.id);
-        await expect(page.locator("#conversation-list .conversation-row")).toHaveCount(0);
-        await expect(page.locator("#message-text")).toBeHidden();
-        await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
-        // The catalog's stop removes navigation, without inferring harness
-        // execution from a missing row or displaying an endless command retry.
+        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        await expect(receipt).toContainText("Session ended after Exit");
+        await expect(receipt).not.toContainText("not sent");
+        await expect(receipt).not.toContainText("Retry");
+        await expect(page.locator("#conversation-connection")).toContainText("Ended");
+        for (const receipt of await page.locator(".supervisor-command-receipt").filter({ hasText: "/usage" }).all()) await expect(receipt).toHaveAttribute("data-phase", "observed");
         expect(mutations()).toHaveLength(3);
       });
     });

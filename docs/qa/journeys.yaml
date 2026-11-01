@@ -20,11 +20,6 @@ bug_families:
     title: Failed starts and resumed publication preserve stopped foreign Serve targets; exact recorded targets still recover after outages
     tasks: [cas-bf4e]
     # Native regression: hub::tailscale::tests::failed_start_preserves_stopped_foreign_route; real disposable Serve10443 proof.
-  stopped-session-retries:
-    title: Stopped conversations disappear while machine outages recover once per machine
-    tasks: [cas-f8ab]
-    invariants: [HUB-J14-RUNNING-ONLY]
-    journeys: [HUB-J14, HUB-J11, HUB-J12]
   live-idle-status-dot:
     title: Live idle supervisors and waiting workers never share the offline treatment
     tasks: [cas-7389]
@@ -112,10 +107,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  HUB-J14-RUNNING-ONLY:
-    statement: Commander lists running sessions only; pending messages never resurrect stopped destinations, and machine outages do not multiply retry labels.
-    check: Run the real stopped-session part of HUB-J14 and the catalog reconciliation regression; verify crashed/ended absence, no attach frames for two minutes, pending settlement, running replacement and HUB-J11/HUB-J12 recovery.
-    bug: {task: cas-f8ab}
   HUB-J17-UNDO-SHELL-FOCUS:
     statement: A visible focused Undo remains the keyboard target after Raw output closes and a new session rebuilds the phone shell.
     check: Run the HUB-J17 phone Raw output success cases in fleet-ops.journey.ts; add a session while Undo is focused, read back the updated catalog, and assert Undo retains focus.
@@ -348,7 +339,7 @@ invariants:
       its daemon is proven on a real machine at epic assembly'
   HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD:
     statement: A live supervisor with no workers has no worker count; the connected machine and active session retain live status beside ended receipts; ended rows say Ended with their time and can be dismissed individually or cleared per project without removing history or offering controls for live sessions. Dismissal is stored on the hub by session birth and remains hidden through catalog updates, reloads and other paired browsers; a later birth with the same supervisor name still appears.
-    check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip, pill-radius chip and running active row. Ended and crashed sessions never appear, including with dormant recovery enabled or a pending message. Empty project cards disappear; a running replacement reappears without reload. Verify desktop and 390px viewports, retained protocol history and zero attaches to stopped destinations for two minutes on the real hub. A machine outage stays at machine level while last-known running rows remain and recover (HUB-J11/HUB-J12).
+    check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip and non-offline active row, pill-radius chip, plain Ended preview and visible end time, row and project dismissal, live-row exclusion, persistence across reload and retained protocol history. Dismiss at 390px, change ended.at through three catalog updates, and reload an independent 1280px browser; the dismissed rows remain hidden and a replacement birth appears. Run project-navigation.test.ts to cover interrupted dismissal sync and migration replay.
     bug: {task: cas-51f6}
   HUB-J14-PROJECT-DISPLAY-NAME:
     statement: A project card reads the project's display name, else its folder name, and never its canonical id; the canonical id still groups the project's sessions across machines and remains available as the name's title.
@@ -356,7 +347,7 @@ invariants:
     bug: {task: cas-6f79}
   HUB-J14-IDLE-OFFLINE-DOT:
     statement: A live idle supervisor has a hollow green dot; offline alone has the neutral dot. Working is solid green. State dots have accessible state names and remain distinguishable in light, dark and forced colors, with ended receipts retaining their neutral circle.
-    check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses the online green and verify accessible state names. Stopped sessions are absent; compare offline treatment using a running session during a machine outage. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
+    check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses the online green and verify accessible state names. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
     bug: {task: cas-7389}
   HUB-J15-WARNING-HEADER-FITS:
     statement: At 390px a delivery-warning badge, identity and every header action fit inside the viewport in light and dark; Raw output retains its accessible name and uses its icon while the badge is visible.
@@ -1653,7 +1644,6 @@ journeys:
   invariants:
   - HUB-J14-GOAL
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
-  - HUB-J14-RUNNING-ONLY
   - HUB-J14-PROJECT-DISPLAY-NAME
   - HUB-J14-IDLE-OFFLINE-DOT
   traffic:

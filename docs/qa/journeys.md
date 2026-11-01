@@ -130,7 +130,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Edge paths
 
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
-- A machine becomes unreachable while a message is pending: its last-known running row stays without a repeated retry/pending line; machine recovery is shown once. A fresh catalog that confirms the destination stopped removes its row and settles the waiting message as Not sent, retaining its words in Saved messages.
+- A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
 - At 390px the machine name's glyphs fit vertically inside the clipped host line, in light and dark. Its full machine and supervisor identity stays available when the codename yields; long machine names still ellipsise horizontally. The header parts also cover desktop identity, forced colors, reduced motion, increased contrast, and a keyboard revisit (cas-9412).
 - Many rows: the list is not sorted by attention.
 - On a Mac, every surface names the palette chord "⌘K" (the list search and the Appearance & commands tooltip, with a conversation open too), never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
@@ -510,14 +510,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 ### HUB-J14 · Tell a project's live sessions apart
 
 - **Entry:** `/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of one project
-- **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; stopped sessions disappear automatically
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`, `hub-web/src/worker-visibility.ts`, `cas-cli/src/hub/server.rs`
+- **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; I can retire a stale one
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`, `cas-cli/src/hub/dismissed_sessions.rs`
 - **Suite:** `hub-web/e2e/journeys/session-identity.journey.ts`
 - **Gaps:** the daemon's session-bound history page, the catalog's last activity and the hub's End session are doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
 
 #### Steps
 
-1. See a project's live sessions together — the project's rows sit under one heading naming the conversation count (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity, and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85") before any is opened; at 1280×720 every row is in view. A single-supervisor project with no workers has no worker-count summary, and its machine chip is a pill. Ended and crashed sessions are absent, even with dormant recovery enabled or pending operator messages; they make no attach attempts for two minutes on the real hub. A project with no running sessions has no card. A running replacement appears without reloading. Per-row Dismiss and Clear ended are unnecessary; earlier history remains readable. A focused draft cannot keep the stopped conversation interactive, and unsent words remain available under Saved messages.
+1. See a project's live sessions together — the project's rows sit under one heading naming the conversation count (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity, and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85") before any is opened; at 1280×720 every row is in view. A single-supervisor project with no workers has no worker-count summary; a connected machine and active row keep their live status beside ended receipts; its machine chip is a pill; ended sessions with no stopped workers say "Ended" with the end time, can be dismissed individually or cleared for the project, and remain in session history; live sessions have no dismiss control. Dismiss and Clear ended survive repeated catalog updates, changed end timestamps, reloads and a separately paired browser; a later generation of the same supervisor still appears
 2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
 4. Read the empty session's raw output — the header's Raw output opens the supervisor's terminal text ("The supervisor is ready.") though it has not written to me; Escape returns to Raw output and the empty thread
@@ -895,7 +895,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 3. Send pasted paths and unknown slash text as messages (cas-62ea)
 4. Submit an exact Usage token from the composer (cas-62ea)
 5. Cancel Clear, then confirm Exit for the named supervisor
-6. Remove the stopped session after Exit without claiming an unobserved command result
+6. Settle Exit from the ended catalog after its status request loses the daemon
 7. Open the quick controls and read the permission explanation
 8. Read adjacent Raw output and return by keyboard
 

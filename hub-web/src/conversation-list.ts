@@ -338,7 +338,7 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
-  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void> };
+  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; dismissEnded?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
    * a polite live region, until ENDED_NOTICE_MS passes or another one ends.
@@ -358,8 +358,8 @@ export class ConversationList {
   private press?: { pointerId: number; pointerType: string; key: string; x: number; y: number; released: boolean; opened?: boolean; timer?: ReturnType<typeof setTimeout> };
   /** The document whose pointer events this list follows. */
   private watched?: Document;
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
-    this.latest = { container, rows, open, end };
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>, dismissEnded?: (row: ConversationRow) => void): void {
+    this.latest = { container, rows, open, end, dismissEnded };
     const document = container.ownerDocument;
     this.watch(document);
     const ordered: HTMLElement[] = [];
@@ -417,7 +417,10 @@ export class ConversationList {
         const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
         this.renderEnd(control, row, end);
         ordered.push(control);
-
+      } else if (row.ended && dismissEnded) {
+        const control = extra(`dismiss:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
+        this.renderDismissEnded(control, row, dismissEnded);
+        ordered.push(control);
       }
     }
     for (const [key, node] of this.extras) {
@@ -577,7 +580,7 @@ export class ConversationList {
     const container = latest.container.isConnected || !latest.container.id
       ? latest.container
       : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
-    this.render(container, latest.rows, latest.open, latest.end);
+    this.render(container, latest.rows, latest.open, latest.end, latest.dismissEnded);
   }
 
   /** The ended row is gone; if focus went with it, land it on the nearest thing left. */
@@ -688,5 +691,22 @@ export class ConversationList {
     control.onmousedown = (event) => { if (event.detail > 1) event.preventDefault(); };
   }
 
-
+  /** Hide an ended session from this device's conversation list; its history stays available. */
+  private renderDismissEnded(control: HTMLElement, row: ConversationRow, dismiss: (row: ConversationRow) => void): void {
+    const signature = JSON.stringify([row.supervisor, row.ended?.at]);
+    if (control.dataset.signature === signature) return;
+    control.dataset.signature = signature;
+    control.dataset.state = "dismiss";
+    const button = control.ownerDocument.createElement("button");
+    button.type = "button";
+    button.className = "conversation-end-cancel";
+    button.textContent = "Dismiss";
+    button.setAttribute("aria-label", `Dismiss ended session ${row.supervisor}`);
+    button.onclick = () => {
+      const neighbours = this.neighbours(row.key);
+      dismiss(row);
+      this.landAfterEnd(control, neighbours);
+    };
+    control.replaceChildren(button);
+  }
 }

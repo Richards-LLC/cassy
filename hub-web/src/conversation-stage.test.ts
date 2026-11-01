@@ -189,7 +189,7 @@ it("ends the thread, row and composer together after the supervisor exits, namin
   expect(container.textContent).toContain("Ended");
   expect(container.textContent).not.toContain("Working");
   const session = { name: "s", supervisor: "patient-pelican-9", workers: ["worker-c"], liveness: "stale_metadata" as const, ended };
-  expect(visibleCatalog([session])).toEqual([]);
+  expect(visibleCatalog([session], () => false)).toEqual([session]);
   expect(sessionReachable(session)).toBe(false);
   expect(planSupervisorSend({ text: "Continue", ended: true, machineLabel: "Atlas", session: "s", supervisor: session.supervisor, daemonAttach: true, scopes: ["message-send"], leaseHeldByMe: true, leaseControllerLabel: undefined })).toMatchObject({ kind: "blocked", block: "ended" });
 });

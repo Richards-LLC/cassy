@@ -2007,14 +2007,16 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         }).collect::<Vec<_>>().join("\n");
         // pin: next.id is the dynamically selected queue successor, not fixed prose.
         assert!(received.contains(&next.id), "next-turn inbox omitted the started assignment: {received}");
-        let ready = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
-            "action":"message", "target":"supervisor", "kind":"ready", "summary":"ready",
-            "message":"Ready for work. My queue is empty.",
-        })).unwrap())).await.unwrap();
-        assert!(!ready.is_error.unwrap_or(false), "{ready:?}");
-        let pending = queue.peek_all(100).unwrap();
-        let status = pending.iter().rev().find(|row| row.source == WORKER).unwrap();
-        assert!(status.prompt.contains(&next.id));
+        for kind in [None, Some("status"), Some("ready")] {
+            let ready = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"message", "target":"supervisor", "kind":kind, "summary":"ready",
+                "message":"Ready for work. My queue is empty.",
+            })).unwrap())).await.unwrap();
+            assert!(!ready.is_error.unwrap_or(false), "{ready:?}");
+            let pending = queue.peek_all(100).unwrap();
+            let status = pending.iter().rev().find(|row| row.source == WORKER).unwrap();
+            assert!(status.prompt.contains(&next.id), "owned successor omitted for kind={kind:?}");
+        }
         let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
             "action":"start", "id":"cas-8488c",
         })).unwrap())).await;

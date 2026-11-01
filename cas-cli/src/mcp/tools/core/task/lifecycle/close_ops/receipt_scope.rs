@@ -107,7 +107,7 @@ pub(super) fn park_refusal(
     delivery_ranges: Option<&[(String, String)]>,
 ) -> Option<String> {
     let refusals = park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges);
-    (!refusals.is_empty()).then(|| gate_preflight::park_reply(refusals))
+    (!refusals.is_empty()).then(|| super::gate_preflight::park_reply(refusals))
 }
 
 /// Every receipt-scope refusal at this tip, not just the first.

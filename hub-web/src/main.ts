@@ -3001,7 +3001,13 @@ function paintDraftNote(): void {
 
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
 function rememberDraft(key: string, draft: Draft | undefined): void {
-  if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
+  if (draft?.text.trim()) {
+    const previous = conversationDrafts.get(key);
+    // Caret moves and shell captures keep the same identity; new words do not
+    // share an archive with an earlier draft, even in a same-name session.
+    draft = { ...draft, id: previous?.text === draft.text && previous.id ? previous.id : crypto.randomUUID() };
+    conversationDrafts.set(key, draft);
+  } else { draft = undefined; conversationDrafts.delete(key); }
   const machineId = key.slice(0, key.indexOf(":"));
   const saved = drafts.save(key, conversationPersistenceBlocked.has(machineId) ? undefined : draft);
   if (saved === "too-long" || saved === "not-saved") draftsNotKept.set(key, saved); else draftsNotKept.delete(key);
@@ -3934,6 +3940,14 @@ function settleSendsForPairingLoss(machine: StoredMachine): void {
  * settle definitely unsent messages, and never replay them into a later birth. */
 function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly HubSession[]): void {
   const running = new Set(listed.filter(sessionRunning).map(item => item.name));
+  // Capture the focused composer before the catalog removes its destination;
+  // inactive conversations and drafts restored after reload need the same path.
+  rememberComposerDraft();
+  for (const [key, draft] of conversationDrafts) {
+    if (!key.startsWith(`${machine.id}:`) || running.has(key.slice(machine.id.length + 1)) || !draft.text.trim()) continue;
+    if (!draft.id) rememberDraft(key, draft);
+    void saveStoppedDraft(machine, key, conversationDrafts.get(key)!);
+  }
   let unsent = 0;
   for (const [key, history] of conversationHistories) {
     if (!key.startsWith(`${machine.id}:`) || running.has(key.slice(machine.id.length + 1))) continue;
@@ -3958,6 +3972,36 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
   }
   if (unsent) toast(`${unsent === 1 ? "1 waiting message was" : `${unsent} waiting messages were`} not sent because the session stopped. Saved on this browser.`);
   void persistPendingSends();
+}
+
+/** Move a typed draft to the existing Saved messages route before clearing its
+ * composer store. Its stable identity makes a reload between the two writes
+ * idempotent, including after the saved notice has been dismissed. */
+const savingStoppedDrafts = new Set<string>();
+async function saveStoppedDraft(machine: StoredMachine, key: string, draft: Draft): Promise<void> {
+  if (conversationPersistenceBlocked.has(machine.id) || !draft.id || savingStoppedDrafts.has(draft.id)) return;
+  const id = `${machine.id}:stopped-draft:${draft.id}`;
+  savingStoppedDrafts.add(draft.id);
+  const item = attention.find(item => item.id === id) ?? createAttentionItem({
+    id, machineId: machine.id, machineLabel: machine.label, kind: "stopped_message", createdAt: new Date().toISOString(),
+  }, {
+    headline: "Draft not sent",
+    detail: "The session stopped. Your draft is saved in Details; copy it to send to a running supervisor.",
+    severity: "critical", action: "none", payload: { session: key.slice(machine.id.length + 1), message: draft.text }, fingerprint: id,
+  });
+  attention = [item, ...attention.filter(existing => existing.id !== id)];
+  try {
+    await attentionStore.put(item);
+    if (conversationDrafts.get(key)?.id === draft.id) rememberDraft(key, undefined);
+  } catch {
+    // Keep the original draft for the next catalog/reload to try again. The
+    // in-memory notice still lets the operator copy it before leaving.
+    item.detail = "Browser storage could not save this draft. Keep this page open and copy the words from Details.";
+    toast("Could not save the stopped session's draft. Copy it from Saved messages before leaving this page.");
+  } finally {
+    savingStoppedDrafts.delete(draft.id);
+    render();
+  }
 }
 
 /**
@@ -4777,7 +4821,7 @@ function renderConversationList(): void {
 
 /** Saved words remain reachable even when their last conversation has gone. */
 function renderStoppedMessageNotices(container: HTMLElement): void {
-  const notices = selectedSession ? [] : attention.filter(item => item.kind === "stopped_message" && !item.acknowledgedAt);
+  const notices = attention.filter(item => item.kind === "stopped_message" && !item.acknowledgedAt);
   let panel = document.querySelector<HTMLElement>("#stopped-message-notices");
   if (!notices.length) { panel?.remove(); return; }
   if (!panel) {

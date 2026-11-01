@@ -197,13 +197,13 @@ async function cleanup() {
   }
   state = undefined;
 }
-function startDaemon() {
-  state.daemon = launch(
+function startDaemon(session = state.session) {
+  const daemon = launch(
     [
       "factory",
       "daemon",
       "--session",
-      state.session,
+      session,
       "--cwd",
       state.project,
       "--workers",
@@ -212,10 +212,18 @@ function startDaemon() {
       "--no-phone-home",
       "--foreground",
       "--supervisor-name",
-      "journey-supervisor",
+      session === state.session ? "journey-supervisor" : session,
     ],
-    "daemon-process.log",
+    `${session}-daemon-process.log`,
   );
+  if (session === state.session) state.daemon = daemon;
+  else {
+    state.extraDaemons ??= [];
+    state.extraDaemons.push(daemon);
+    state.namedDaemons ??= new Map();
+    state.namedDaemons.set(session, daemon);
+  }
+  return daemon;
 }
 // Real daemon processes create both stale metadata and an end receipt; no
 // catalog payloads are fabricated for the stopped-session regression.
@@ -568,12 +576,16 @@ const server = createServer(async (req, res) => {
           return { started: true };
         case "/stopped-sessions":
           return stoppedSessions();
-        case "/daemon-stop":
-          await stop(state.daemon);
-          return { daemonPid: state.daemon.pid };
-        case "/daemon-start":
-          startDaemon();
-          return { daemonPid: state.daemon.pid };
+        case "/daemon-stop": {
+          const daemon = data.session ? state.namedDaemons?.get(data.session) : state.daemon;
+          if (!daemon) throw Error("unknown owned fixture daemon");
+          await stop(daemon);
+          return { daemonPid: daemon.pid };
+        }
+        case "/daemon-start": {
+          const daemon = startDaemon(data.session);
+          return { daemonPid: daemon.pid };
+        }
         case "/attachment": {
           const path = join(state.project, ".cas", "factory-daemon", state.session + ".loop.json");
           const loop = existsSync(path) ? JSON.parse(await readFile(path, "utf8")) : {};

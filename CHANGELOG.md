@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander hub
+
+- **Service startup restores the tailnet route after reboot** — Was: A Linux hub
+  could settle on loopback after Tailscale was briefly unavailable, leaving Serve
+  pointed at a dead shim. → Now: Both service managers retry publication and
+  restart failed starts; status retains the failure cause and systemd records
+  errors in its journal.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

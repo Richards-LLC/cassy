@@ -820,7 +820,7 @@ mod tests {
                     scopes: vec!["message:send".into()], verified: true,
                 },
             ).unwrap();
-            let prompt = format!("<pasted_content id=\"4582\">\n[cas #{} operator Alice@phone verified 2s first]\nreply after replacement\n</pasted_content id=\"4582\">", message.id);
+            let prompt = format!("<pasted_content id=\"4582\">\n[cas #{} operator Alice@phone verified 2s first]\nreply after replacement\n</pasted_content id=\"4582\">", message.id());
             let now = Utc::now() + chrono::Duration::seconds(1);
             let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
             let directory = account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
@@ -859,7 +859,7 @@ mod tests {
             assert_eq!(replies.len(), 2, "one startup status and one replacement answer, including replay");
             let reply = &replies[1];
             assert_eq!(reply.message, "Replacement answer");
-            assert_eq!(reply.reply_to, bound.then_some(message.id));
+            assert_eq!(reply.reply_to, bound.then_some(message.id()));
             assert_eq!(reply.device_id, if bound { "phone" } else { "*" });
             assert_eq!(reply.kind, if bound {
                 crate::ui::factory::OperatorTurnKind::Answer

@@ -118,7 +118,7 @@ test("HUB-J14 upgrading a running session preserves a legacy draft", journeyPart
   await journey.stage("Missing birth is unknown, not evidence of a stopped session", async () => {
     await expect(page.locator("#conversation-connection")).toContainText("Live");
     await expect(page.locator("#message-text")).toHaveValue("Words written before birth tracking");
-    await expect(page.getByRole("region", { name: "Saved messages" })).not.toContainText("Draft not sent");
+    await expect(page.getByText("Draft not sent", { exact: true })).toHaveCount(0);
     expect(hub.sends).toHaveLength(0);
   });
 });

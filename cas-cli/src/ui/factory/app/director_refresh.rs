@@ -263,7 +263,6 @@ impl IdleLivenessRequest {
 /// revalidated against, and the `Blocks` dependencies that gate dispatch.
 pub(crate) struct DeliveryInputs {
     pub(super) answered_blocked_workers: std::collections::HashSet<String>,
-    pub(super) verification_waits: HashMap<String, String>,
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
     /// Liveness of each idle worker, observed off the loop.
@@ -287,7 +286,6 @@ impl DeliveryInputs {
     #[cfg(test)]
     pub(crate) fn failed_for_test() -> Self {
         Self {
-            verification_waits: HashMap::new(),
             answered_blocked_workers: Default::default(),
             data: Err(anyhow::anyhow!("test: the fresh read failed")),
             blocks_deps: Vec::new(),
@@ -392,11 +390,6 @@ impl DeliveryRequest {
                 .filter(|agent| crate::mcp::tools::core::task::block_hold::worker_has_answered_blocker(
                     &self.cas_dir, &agent.id, &self.supervisor,
                 )).map(|agent| agent.name.clone()).collect()).unwrap_or_default(),
-            verification_waits: self.blocked_tasks.iter().filter_map(|task| {
-                crate::mcp::tools::core::task::block_hold::owned_verification_wait(
-                    &self.cas_dir, task, &self.supervisor,
-                ).map(|dispatch| (task.clone(), dispatch))
-            }).collect(),
             data,
             blocks_deps,
             idle_liveness,

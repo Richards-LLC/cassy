@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory blocker alerts
+
+- **One alert per blocker episode** — Director blocked and idle signals share the durable task lifecycle queue, stay quiet during owned verification waits, and escalate once after the deadline. Native background jobs keep a worker busy until their completion notice.
+
+
 ### Fixed — Supervisor replies
 
 - **Supervisors answer with diagrams, callouts, colored code and tables** — Was:

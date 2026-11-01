@@ -245,7 +245,7 @@ fn presence_silence_and_positions_are_bounded_closed_values() {
 
 #[test]
 fn presence_epoch_is_atomic_and_bound_to_cloud_account_and_machine() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_hub_tempdir();
     let mut principal: MachinePrincipal = serde_json::from_value(json!({
         "wire_version":1, "cloud_origin":"https://cloud.example", "account_id":"account", "machine_id":"machine",
         "hub_id":"hub", "grant_id":"grant", "grant_generation":"1", "feed_generation":"1", "active_epoch":"1",

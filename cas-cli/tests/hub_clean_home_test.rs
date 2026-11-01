@@ -1172,7 +1172,10 @@ esac
     let mut replacement = None;
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
-            if record.pid == child.id() && record.tailscale_serve_target.is_some() {
+            if record.pid == child.id() && record.tailscale_serve_target.is_some()
+                && paths.read_lock_owner().is_some_and(|owner|
+                    owner.pid == child.id() && owner.phase == "running")
+            {
                 replacement = record.tailscale_serve_target;
                 break;
             }

@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander tables
+
+- **Reply tables read as tables, not code boxes** — Was: A table in a reply sat
+  in a dark rounded panel with monospace numbers, no row rules, a blank
+  nameless header over the label column and Copy buttons floating above an
+  empty band. → Now: Tables are ruled rows in the bubble's own font, with
+  numbers right-aligned in tabular figures, a blank corner left as an empty
+  cell, and compact Copy Markdown and Copy CSV buttons on the table's closing
+  rule, at phone and desktop widths in light and dark.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

@@ -1992,6 +1992,11 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert!(briefs.iter().any(|row| row.target == WORKER
             && row.prompt.contains(&next.id)
             && row.prompt.contains(&active_branch)), "{briefs:?}");
+        let successor = briefs.iter().find(|row| row.target == WORKER
+            && row.prompt.contains(&next.id) && row.prompt.contains(&active_branch)).unwrap();
+        assert!(crate::prompt_revalidation::assignment_stale_task(
+            &successor.prompt, next.status, next.assignee.as_deref(), WORKER,
+        ).is_none());
         // Read through the same recipient boundary as the worker's next turn:
         // an auto-started assignment must survive InProgress revalidation.
         let received = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({

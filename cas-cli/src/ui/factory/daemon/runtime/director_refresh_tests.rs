@@ -49,6 +49,7 @@ fn r1_blocked_idle_does_not_duplicate_the_lifecycle_wake() {
         assert!(prompts.is_empty(), "blocked idle must use the lifecycle episode, not a direct prompt: {prompts:?}");
     }
     let rows = queue.peek_all(20).unwrap();
+    // pin: dispatch handoff is the only waking source during this owned episode.
     assert_eq!(rows.iter().filter(|row| !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 1,
         "the dispatch handoff is the sole wake while verification owns the next step");
 }

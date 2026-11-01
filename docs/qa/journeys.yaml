@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  stopped-session-drafts:
+    title: Focused and inactive unsent drafts stay reachable when their sessions stop
+    tasks: [cas-45b8]
+    invariants: [HUB-J14-STOPPED-DRAFT-REACHABLE]
+    journeys: [HUB-J3, HUB-J14]
   stopped-session-retries:
     title: Stopped conversations disappear while machine outages recover once per machine
     tasks: [cas-f8ab]
@@ -98,6 +103,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J14-STOPPED-DRAFT-REACHABLE:
+    statement: Focused and inactive unsent drafts from stopped sessions remain readable and copyable through Saved messages after reload; stopped rows stay absent and a same-name replacement starts empty.
+    check: Extend the HUB-J3 supervisor exit case with two drafts and two stopped sessions at desktop and phone widths; read both through Details after reload. Walk the real candidate in light and dark, read Copy and persisted payloads, and check the existing held-message route without sending to a stopped session.
+    bug: {task: cas-45b8}
   HUB-J14-RUNNING-ONLY:
     statement: Commander lists running sessions only; pending messages never resurrect stopped destinations, and machine outages do not multiply retry labels.
     check: Run the real stopped-session part of HUB-J14 and the catalog reconciliation regression; verify crashed/ended absence, no attach frames for two minutes, pending settlement, running replacement and HUB-J11/HUB-J12 recovery.
@@ -731,6 +740,7 @@ journeys:
   - HUB-J3-GOAL
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
+  - HUB-J14-STOPPED-DRAFT-REACHABLE
   - HUB-J3-DELIBERATE-EXIT-QUIET
   - HUB-J3-STABLE-ORDER
   - HUB-J3-MACHINE-VERSIONS
@@ -1631,6 +1641,7 @@ journeys:
   - HUB-J14-GOAL
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
   - HUB-J14-RUNNING-ONLY
+  - HUB-J14-STOPPED-DRAFT-REACHABLE
   - HUB-J14-PROJECT-DISPLAY-NAME
   - HUB-J14-IDLE-OFFLINE-DOT
   traffic:

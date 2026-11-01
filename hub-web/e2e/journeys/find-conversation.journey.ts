@@ -770,7 +770,10 @@ test.describe("on a Mac", () => {
 for (const width of [1280, 390]) {
   test(`HUB-J3 supervisor exit ends the conversation at ${width} (cas-cec1)`, journeyPart, async ({ page, journey }) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
-    const machine: Machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, workers: ["worker-a", "worker-b", "worker-c"] }] };
+    const machine: Machine = { ...ATLAS, sessions: [
+      { ...ATLAS.sessions[0]!, workers: ["worker-a", "worker-b", "worker-c"] },
+      { ...ATLAS.sessions[0]!, name: "second-draft", supervisor: "second-draft" },
+    ] };
     const session = machine.sessions[0]!;
     const hub = await journey.hub({ machines: [machine], paired: [machine.id] });
     await journey.open();
@@ -778,8 +781,13 @@ for (const width of [1280, 390]) {
     await expect(page.locator("#message-text")).toBeVisible();
     await journey.stage("Supervisor and workers are live", async () => {
       await expect(page.locator("#conversation-connection")).toContainText("Live");
-      await page.locator("#message-text").fill("Keep this draft");
+      await page.locator("#message-text").fill("Keep this inactive draft");
+      await showConversationList(page);
+      await page.locator('[data-thread-key="atlas:second-draft"]').click();
+      await page.locator("#message-text").fill("Keep this focused draft");
+      await expect(page.locator("#message-text")).toBeFocused();
     });
+    machine.sessions[1]!.liveness = "stale_metadata";
     session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"], unverified: [] };
     session.liveness = "stale_metadata";
     session.workers = ["worker-c"];
@@ -818,6 +826,30 @@ for (const width of [1280, 390]) {
       expect(session.ended).toMatchObject({ workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"] });
       await showConversationList(page);
       await expect(page.locator(".conversation-row")).toHaveCount(0);
+    });
+    await journey.stage("Focused and inactive drafts remain in Saved messages after reload (cas-45b8)", async () => {
+      const saved = page.getByRole("region", { name: "Saved messages" });
+      const readSavedDrafts = async () => {
+        await expect(saved.locator("article")).toHaveCount(2);
+        for (const details of await saved.locator("details").all()) {
+          if (!await details.evaluate(node => (node as HTMLDetailsElement).open)) await details.locator("summary").click();
+        }
+        await expect(saved).toContainText("Keep this inactive draft");
+        await expect(saved).toContainText("Keep this focused draft");
+      };
+      await readSavedDrafts();
+      await page.reload();
+      await expect(page.locator(".conversation-row")).toHaveCount(0);
+      await readSavedDrafts();
+      // A new supervisor with the same name starts with an empty composer;
+      // the archived words stay reachable beside other live conversations.
+      session.ended = undefined;
+      session.liveness = "live";
+      await hub.announceCatalog(machine.id);
+      await page.locator(".conversation-row").click();
+      await expect(page.locator("#message-text")).toHaveValue("");
+      await showConversationList(page);
+      await readSavedDrafts();
     });
   });
 }

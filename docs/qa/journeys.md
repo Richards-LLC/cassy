@@ -135,6 +135,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Many rows: the list is not sorted by attention.
 - On a Mac, every surface names the palette chord "⌘K" (the list search and the Appearance & commands tooltip, with a conversation open too), never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
 
+Stopped-session draft regression (cas-45b8): type in two conversations, leave one draft inactive and the other composer focused, stop both sessions, and read both drafts through Saved messages after reload. A same-name replacement opens empty, with archived words still reachable.
+
 ### HUB-J4 · Read the conversation history
 
 - **Entry:** a conversation with earlier turns from past days

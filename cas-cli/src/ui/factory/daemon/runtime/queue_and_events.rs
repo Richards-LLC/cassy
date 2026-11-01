@@ -13392,7 +13392,7 @@ mod tests {
         let live = daemon.live_operator_message(id).unwrap().unwrap();
         assert_eq!(serde_json::to_value(&live).unwrap()["client_ref"], "ben-send",
             "a lost live ACK must remain correlatable through the durable turn");
-        let retried = daemon.dispatch_commander_control(send).await.unwrap().unwrap();
+        let retried = daemon.dispatch_commander_control(send.clone()).await.unwrap().unwrap();
         assert_eq!(serde_json::to_value(retried).unwrap()["MessageQueued"]["notification_id"], id,
             "retrying the same client_ref must return the original row");
         assert_eq!(live.state, "acknowledged");
@@ -13443,6 +13443,38 @@ mod tests {
             else { panic!("expected conversation history"); };
             assert_eq!(messages[0].state, updates[0].state,
                 "{device}'s history must agree with actual supervisor transport");
+        }
+        // A recipient can read a queued send before daemon transport. That
+        // stronger receipt must clear Queued on both devices and live views.
+        let mut read_send = send;
+        if let super::super::delivery::CommanderControl::SendMessage { client_ref, .. } = &mut read_send {
+            *client_ref = Some("ben-read".into());
+        }
+        let Some(crate::ui::factory::DaemonMessage::MessageQueued { notification_id: read_id, .. }) =
+            daemon.dispatch_commander_control(read_send).await.unwrap()
+        else { panic!("expected read-case receipt"); };
+        daemon.conversation_history_page("watch-read".into(), "phone", None, 20).unwrap();
+        let target = queue.queued_prompt(read_id).unwrap().unwrap().target;
+        queue.poll_unseen_for_recipient(&target, Some("provision-test"), 20).unwrap();
+        assert!(queue.message_delivery_report(read_id).unwrap().unwrap().delivered_at.is_none(),
+            "a recipient read must not invent a transport write");
+        assert_eq!(daemon.live_operator_message(read_id).unwrap().unwrap().state, "delivered");
+        let root_for_scan = root.clone();
+        daemon.queue_jobs.submit_mirror_scan(move |state| {
+            let queue = super::super::prompt_queue_jobs::job_thread_prompt_queue(&root_for_scan).unwrap();
+            super::super::commander_mirror::scan_supervisor_replies(
+                &root_for_scan, root_for_scan.parent().unwrap(), "provision-test", queue.as_ref(), &[], state,
+            );
+        });
+        daemon.queue_jobs.apply_completions();
+        let updates = daemon.queue_jobs.take_operator_messages();
+        assert!(updates.iter().any(|message| message.notification_id == read_id && message.state == "delivered"),
+            "a read must publish a live delivery-state update without a reply or page reload");
+        for device in ["phone", "desktop"] {
+            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                .conversation_history_page(format!("read-{device}"), device, None, 20).unwrap()
+            else { panic!("expected read history"); };
+            assert_eq!(messages.iter().find(|message| message.notification_id == read_id).unwrap().state, "delivered");
         }
     }
 

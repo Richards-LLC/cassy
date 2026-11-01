@@ -180,7 +180,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const sameControl = (label: string) => label.replace(/#\d+$/, "");
     await expect.poll(async () => sameControl(await focused()), { message: "focus is on Copy again after the page is rebuilt" }).toBe(sameControl(copy));
     await expect(sheet.locator("article.attention-item").first().locator("details")).toHaveAttribute("open", "");
-    atlas.pop();
+    atlas[atlas.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
     await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
     await sheet.locator(".attention-dismiss").focus();

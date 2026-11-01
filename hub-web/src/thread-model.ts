@@ -11,6 +11,7 @@
  * later turn lands inside it.
  */
 import type { ConversationEvent, ConversationSend } from "./conversation-history";
+import { hasBlockMarkdown } from "./markdown-renderer";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import type { WorkEvent } from "./work-events";
 
@@ -202,12 +203,13 @@ export function statusAsks(message: string): boolean {
   return STATUS_ASK.test(message);
 }
 
-/** Fenced source must reach Markdown rendering, regardless of status length. */
-const STATUS_FENCE = /^ {0,3}(?:`{3,}|~{3,})/m;
-
-/** Only a short, plain status with no ask folds into the quiet coalesced line. */
+/**
+ * Only a short status with no ask folds into the quiet coalesced line. A fence,
+ * callout, heading, list or table needs its full rendering at any length; the
+ * line paints inline Markdown itself.
+ */
 export function foldsAsStatus(message: string): boolean {
-  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message) && !STATUS_FENCE.test(message)
+  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message) && !hasBlockMarkdown(message)
     && !messageBlocks(message).some(block => block.type === "table");
 }
 

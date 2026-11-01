@@ -1460,10 +1460,10 @@ export class ConversationView {
     line.dataset.count = String(item.count);
     line.dataset.expanded = String(expanded);
     if (expanded) {
-      line.append(...item.replies.map((reply) => { const p = document.createElement("p"); p.textContent = reply.message; return p; }));
+      line.append(...item.replies.map((reply) => { const p = document.createElement("p"); appendInline(document, p, reply.message); return p; }));
     } else {
-      line.textContent = coalesceText(item);
-      line.title = item.replies.map((reply) => reply.message).join("\n");
+      appendInline(document, line, coalesceText(item));
+      line.title = item.replies.map((reply) => plainTextMarkdown(reply.message)).join("\n");
     }
     const more = document.createElement("button"); more.type = "button"; more.className = "coalesce-expand";
     more.textContent = expanded ? "Show less" : "Show full update";

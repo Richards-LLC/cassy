@@ -15127,6 +15127,12 @@ mod tests {
             .unwrap()
             .remove(0)
             .prompt;
+        assert!(cas_mux::missing_contract_elements(&prompt, cas_mux::ContractRole::Worker).is_empty(),
+            "the single spawn message must include the worker startup contract");
+        deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,
+            &task.title, cas_mux::SupervisorCli::Claude).unwrap();
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
+            .peek_all(10).unwrap().len(), 1, "registration retries must reuse the assignment");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(

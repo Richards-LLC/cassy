@@ -367,6 +367,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
     await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
     await expect(ended.locator(".conversation-when")).toBeVisible();
+    await expect(ended.locator(".supervisor-state")).toHaveClass(/offline/);
     await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
     const clearEnded = old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true });
     await clearEnded.scrollIntoViewIfNeeded();

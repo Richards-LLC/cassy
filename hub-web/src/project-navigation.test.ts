@@ -50,6 +50,14 @@ describe("project-first navigation", () => {
     }
   });
 
+  it("shows a stopped session as disconnected on a machine that is still online, and a live idle one as idle", () => {
+    const nav = setup();
+    const ended = { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] };
+    new ProjectNavigation().render(nav, [row("stopped-swan", { supervisorState: "idle", attention: 1, machine_online: true, ended }), row("resting-owl", { supervisorState: "idle", machine_online: true })], () => undefined, async () => undefined);
+    expect(nav.querySelector('[data-thread-key="stopped-swan"] .supervisor-state')?.getAttribute("aria-label")).toBe("Offline");
+    expect(nav.querySelector('[data-thread-key="resting-owl"] .supervisor-state')?.getAttribute("aria-label")).toBe("Idle");
+  });
+
   it("orders cards by project name and rows by supervisor, and activity never moves either (cas-ade2)", () => {
     const nav = setup();
     const navigation = new ProjectNavigation();

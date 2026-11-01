@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Keep every Commander phone header action inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
+
 ### Fixed — Commander boot replies
 
 - **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.

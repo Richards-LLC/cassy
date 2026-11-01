@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  phone-warning-header:
+    title: Warning badges preserve every phone conversation header action
+    tasks: [cas-a929]
+    invariants: [HUB-J15-WARNING-HEADER-FITS]
+    journeys: [HUB-J15]
   session-lifecycle-identity:
     title: Unknown catalog state retains running rows and held words never cross a daemon birth
     tasks: [cas-209f]
@@ -371,6 +376,10 @@ invariants:
     statement: A live idle supervisor has a hollow green dot; offline alone has the neutral dot. Working is solid green. State dots have accessible state names and remain distinguishable in light, dark and forced colors, with ended receipts retaining their neutral circle.
     check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses the online green and verify accessible state names. Stopped sessions are absent; compare offline treatment using a running session during a machine outage. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
     bug: {task: cas-7389}
+  HUB-J15-WARNING-HEADER-FITS:
+    statement: At 390px a delivery-warning badge, identity and every header action fit inside the viewport in light and dark; Raw output retains its accessible name and uses its icon while the badge is visible.
+    check: Extend the existing HUB-J15 phone attention stage; verify every header action and identity bounding box stays inside 390px, then open the unchanged Attention sheet. Prove strict real-build polish in both themes.
+    bug: {task: cas-a929}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
       away once resolved, and nothing claims I replied when I didn't
@@ -1765,6 +1774,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J15-GOAL
+  - HUB-J15-WARNING-HEADER-FITS
   - HUB-J15-NOTICE-PERSISTENCE
   traffic:
     share_pct: null

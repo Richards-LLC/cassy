@@ -198,7 +198,7 @@ test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line 
     await expect(page.locator("#conversation-connection")).not.toHaveText(" · Live");
     await send(page, "Send this when Atlas is back");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
-    await expect(status).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
+    await expect(status).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
   });
   await journey.stage("Atlas comes back: the message goes out once and the waiting line clears", async () => {
     await hub.up("atlas");

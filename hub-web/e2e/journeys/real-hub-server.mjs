@@ -214,7 +214,7 @@ function startDaemon(session = state.session) {
       "--supervisor-name",
       session === state.session ? "journey-supervisor" : session,
     ],
-    `${session}-daemon-process.log`,
+    session === state.session ? "daemon-process.log" : `${session}-daemon-process.log`,
   );
   if (session === state.session) state.daemon = daemon;
   else {

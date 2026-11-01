@@ -163,7 +163,12 @@ export function purgeConversations(storage: EnumerableStorage | undefined, machi
 }
 
 /** A conversation composer draft (cas-7752). */
-export type Draft = { text: string; caret: number; /** Stable across reloads; legacy drafts acquire one when next saved. */ id?: string };
+export type Draft = {
+  text: string;
+  caret: number;
+  /** Stable across reloads; legacy drafts acquire one when next saved. */
+  id?: string;
+};
 
 /** A stored draft, or undefined when blank or malformed; the caret is clamped to the text. */
 export function validDraft(raw: unknown): Draft | undefined {

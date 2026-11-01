@@ -311,9 +311,6 @@ export class HubDouble {
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
   constructor(private readonly page: Page, private readonly options: DoubleOptions) {
-    // Current hubs identify each daemon birth. Keep it stable across reads;
-    // a replacement fixture changes started_at explicitly, just as the hub does.
-    for (const machine of options.machines) for (const session of machine.sessions) session.started_at ??= this.stamp(-60_000);
     this.composerUploads = options.composerUploads ?? new Map();
     for (const [session, rows] of Object.entries(options.pendingReplies ?? {})) this.pendingReplies.set(session, [...rows]);
   }

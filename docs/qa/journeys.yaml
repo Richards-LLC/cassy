@@ -16,11 +16,6 @@ bug_families:
     tasks: [cas-a929]
     invariants: [HUB-J15-WARNING-HEADER-FITS]
     journeys: [HUB-J15]
-  session-lifecycle-identity:
-    title: Unknown catalog state retains running rows and held words never cross a daemon birth
-    tasks: [cas-209f]
-    invariants: [HUB-J14-POSITIVE-STOP-AND-BIRTH]
-    journeys: [HUB-J14, HUB-J11, HUB-J12]
   hub-serve-route-ownership:
     title: Failed starts and resumed publication preserve stopped foreign Serve targets; exact recorded targets still recover after outages
     tasks: [cas-bf4e]
@@ -122,10 +117,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  HUB-J14-POSITIVE-STOP-AND-BIRTH:
-    statement: Missing, failed and stale catalogs preserve last-known running sessions; only positive stop evidence retires them. Held sends and drafts belong to a session start identity, and restored messages apply already known stop evidence before replay.
-    check: Reproduce dormant omission, catalog failure beyond freshness, same-name replacement during outage, and catalog-before-journal restoration on a disposable real hub. Compare true resume with replacement, and run HUB-J11, HUB-J12 and HUB-J14.
-    bug: {task: cas-209f}
   HUB-J14-STOPPED-DRAFT-REACHABLE:
     statement: Focused and inactive unsent drafts from stopped sessions remain readable and copyable through Saved messages after reload; stopped rows stay absent and a same-name replacement starts empty.
     check: Extend the HUB-J3 supervisor exit case with two drafts and two stopped sessions at desktop and phone widths; read both through Details after reload. Walk the real candidate in light and dark, read Copy and persisted payloads, and check the existing held-message route without sending to a stopped session.
@@ -772,7 +763,6 @@ journeys:
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
   - HUB-J14-STOPPED-DRAFT-REACHABLE
-  - HUB-J14-POSITIVE-STOP-AND-BIRTH
   - HUB-J3-DELIBERATE-EXIT-QUIET
   - HUB-J3-STABLE-ORDER
   - HUB-J3-MACHINE-VERSIONS

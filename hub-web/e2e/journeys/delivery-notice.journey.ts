@@ -195,7 +195,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const sameControl = (label: string) => label.replace(/#\d+$/, "");
     await expect.poll(async () => sameControl(await focused()), { message: "focus is on Copy again after the page is rebuilt" }).toBe(sameControl(copy));
     await expect(sheet.locator("article.attention-item").first().locator("details")).toHaveAttribute("open", "");
-    atlas[atlas.length - 1]!.liveness = "stale_metadata";
+    atlas.pop();
     await hub.announceCatalog("atlas");
     await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
     await sheet.locator(".attention-dismiss").focus();
@@ -232,7 +232,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     sessions.push({ name: "Accounting-quiet-otter-3", supervisor: "quiet-otter-3", project_dir: "/projects/Ledger", workers: [], liveness: "live" });
     await hub.announceCatalog("atlas");
     await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
-    sessions[sessions.length - 1]!.liveness = "stale_metadata";
+    sessions.pop();
     await expect(badge).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
   });
@@ -267,7 +267,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     expect(await staleCopy!.boundingBox(), "the replaced Copy has no geometry").toBeNull();
     await expect(attentionItems.locator("details")).toHaveAttribute("open", "");
     await expectDetailsCopyRow(attentionItems, "Copy has its own row at1280px too after a catalog redraw");
-    sessions[sessions.length - 1]!.liveness = "stale_metadata";
+    sessions.pop();
     await hub.announceCatalog("atlas");
     await expectDetailsCopyRow(attentionItems, "Copy keeps its row after the catalog settles");
     await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);

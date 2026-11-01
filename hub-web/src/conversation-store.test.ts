@@ -177,8 +177,8 @@ describe("stored conversation cleanup on load", () => {
 describe("drafts across a reload (cas-7752)", () => {
   it("a draft comes back for its conversation with its caret, and a blank or sent draft is gone", () => {
     const storage = memoryStorage();
-    draftStore(storage).save("atlas:patient-pelican-9", { text: "Draft: ask about the flaky pairing test", caret: 6, id: "draft-one", sessionStartedAt: "2026-11-01T00:00:00Z" });
-    expect(draftStore(storage).load().get("atlas:patient-pelican-9")).toEqual({ text: "Draft: ask about the flaky pairing test", caret: 6, id: "draft-one", sessionStartedAt: "2026-11-01T00:00:00Z" });
+    draftStore(storage).save("atlas:patient-pelican-9", { text: "Draft: ask about the flaky pairing test", caret: 6, id: "draft-one" });
+    expect(draftStore(storage).load().get("atlas:patient-pelican-9")).toEqual({ text: "Draft: ask about the flaky pairing test", caret: 6, id: "draft-one" });
     draftStore(storage).save("atlas:patient-pelican-9", { text: "   ", caret: 0 });
     expect(draftStore(storage).load().size).toBe(0);
     draftStore(storage).save("atlas:patient-pelican-9", { text: "again", caret: 5 });

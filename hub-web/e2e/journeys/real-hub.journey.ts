@@ -796,7 +796,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     stopped = await command("stopped-sessions");
     page.on("request", request => {
       const path = new URL(request.url()).pathname;
-      if (path.includes("/attach")) traffic.push({ path, at: Date.now() });
+      if (path.includes("/attach")) traffic.push({ path, at: performance.now() });
     });
     page.on("response", response => {
       if (new URL(response.url()).pathname !== "/v1/sessions") return;
@@ -804,7 +804,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     });
     page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
       if (typeof payload !== "string") return;
-      try { const frame = JSON.parse(payload); if (frame.subscribe) traffic.push({ path: new URL(socket.url()).pathname, frame, at: Date.now() }); } catch { /* Pane bytes. */ }
+      try { const frame = JSON.parse(payload); if (frame.subscribe) traffic.push({ path: new URL(socket.url()).pathname, frame, at: performance.now() }); } catch { /* Pane bytes. */ }
     }));
     await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
     const pairing = new URL(fixture!.pairUrl); pairing.pathname = "/commander/";
@@ -825,9 +825,9 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
       await expect(rows).toHaveCount(1);
       await page.screenshot({ path: join(directory, `running-only-${colorScheme}-${width}.png`) });
     }
-    const started = Date.now();
-    await expect.poll(() => Date.now() - started, { timeout: 125_000, intervals: [1000] }).toBeGreaterThanOrEqual(120_000);
-    observationMs = Date.now() - started;
+    const started = performance.now();
+    await expect.poll(() => performance.now() - started, { timeout: 125_000, intervals: [1000] }).toBeGreaterThanOrEqual(120_000);
+    observationMs = performance.now() - started;
     expect(traffic.filter(entry => /crashed-journey|ended-journey/.test(JSON.stringify(entry)))).toEqual([]);
     // The running session remains through a machine outage, without one retry
     // line per row. Its own fresh Welcome proves automatic recovery.

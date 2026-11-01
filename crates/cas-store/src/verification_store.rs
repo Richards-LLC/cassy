@@ -142,6 +142,12 @@ fn validate_verification_authority_with_conn(
 /// Re-exported via `cas_store::VERIFICATION_SCHEMA` so the migration runner in
 /// `cas-cli` can bootstrap the base tables before applying ALTER migrations.
 /// See cas-bdb9 / EPIC cas-9fdb.
+pub const VERIFICATION_STATUS_DETAIL_STATEMENT: &str =
+    "ALTER TABLE verifications ADD COLUMN status_detail TEXT";
+pub const VERIFICATION_STATUS_NORMALIZE_STATEMENT: &str =
+    "UPDATE verifications SET status_detail = status, status = 'error'
+     WHERE status IN ('pending', 'supervisor_call')";
+
 pub const VERIFICATION_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS verifications (
     id TEXT PRIMARY KEY,
@@ -153,6 +159,7 @@ CREATE TABLE IF NOT EXISTS verifications (
     dispatch_id TEXT,
     issuer_agent_id TEXT,
     status TEXT NOT NULL DEFAULT 'approved',
+    status_detail TEXT,
     confidence REAL,
     summary TEXT NOT NULL DEFAULT '',
     files_reviewed TEXT NOT NULL DEFAULT '[]',
@@ -322,7 +329,8 @@ impl SqliteVerificationStore {
         let provenance = VerificationProvenance::from_str(&provenance_str).unwrap_or_default();
 
         let status_str: String = row.get(8)?;
-        let status = VerificationStatus::from_str(&status_str).unwrap_or_default();
+        let detail: Option<String> = row.get(14)?;
+        let status = VerificationStatus::from_storage(&status_str, detail.as_deref());
 
         let created_at_str: String = row.get(13)?;
         let created_at = DateTime::parse_from_rfc3339(&created_at_str)
@@ -493,7 +501,7 @@ pub fn get_verification_for_dispatch(
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at
+                    duration_ms, created_at, status_detail
              FROM verifications WHERE dispatch_id = ?1
              ORDER BY created_at DESC, id DESC LIMIT 1",
             params![dispatch_id],
@@ -521,8 +529,8 @@ fn insert_verification_with_conn(conn: &Connection, verification: &Verification)
     conn.execute(
         "INSERT INTO verifications
          (id, task_id, agent_id, verification_type, provenance, capability_id, dispatch_id,
-          issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+          issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at, status_detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             verification.id,
             verification.task_id,
@@ -532,12 +540,13 @@ fn insert_verification_with_conn(conn: &Connection, verification: &Verification)
             verification.capability_id,
             verification.dispatch_id,
             verification.issuer_agent_id,
-            verification.status.to_string(),
+            verification.status.storage_status(),
             verification.confidence,
             verification.summary,
             files_reviewed_json,
             verification.duration_ms.map(|v| v as i64),
             verification.created_at.to_rfc3339(),
+            verification.status.storage_detail(),
         ],
     )?;
 
@@ -579,7 +588,7 @@ pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                 dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                duration_ms, created_at FROM verifications WHERE id = ?1",
+                duration_ms, created_at, status_detail FROM verifications WHERE id = ?1",
             params![verification.id],
             SqliteVerificationStore::parse_verification,
         )
@@ -601,14 +610,15 @@ pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -
         serde_json::to_string(&verification.files_reviewed).unwrap_or_else(|_| "[]".to_string());
     conn.execute(
         "UPDATE verifications SET status = ?2, confidence = ?3, summary = ?4,
-         files_reviewed = ?5, duration_ms = ?6 WHERE id = ?1",
+         files_reviewed = ?5, duration_ms = ?6, status_detail = ?7 WHERE id = ?1",
         params![
             verification.id,
-            verification.status.to_string(),
+            verification.status.storage_status(),
             verification.confidence,
             verification.summary,
             files,
-            verification.duration_ms.map(|v| v as i64)
+            verification.duration_ms.map(|v| v as i64),
+            verification.status.storage_detail(),
         ],
     )?;
     save_verification_issues_with_conn(&conn, verification)
@@ -1469,23 +1479,21 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
         || dispatch.delivery_transaction_id.is_some()
         || dispatch.repository.is_none()
     {
-        return Err(StoreError::Parse(
-            format!(
-                "repository proof invalidation requires the latest task-only repository dispatch (named {} bound head {}; latest {} bound head {})",
-                dispatch.id,
-                dispatch
-                    .repository
-                    .as_ref()
-                    .map(|proof| proof.head_commit.as_str())
-                    .unwrap_or("unbound"),
-                latest.id,
-                latest
-                    .repository
-                    .as_ref()
-                    .map(|proof| proof.head_commit.as_str())
-                    .unwrap_or("unbound")
-            ),
-        ));
+        return Err(StoreError::Parse(format!(
+            "repository proof invalidation requires the latest task-only repository dispatch (named {} bound head {}; latest {} bound head {})",
+            dispatch.id,
+            dispatch
+                .repository
+                .as_ref()
+                .map(|proof| proof.head_commit.as_str())
+                .unwrap_or("unbound"),
+            latest.id,
+            latest
+                .repository
+                .as_ref()
+                .map(|proof| proof.head_commit.as_str())
+                .unwrap_or("unbound")
+        )));
     }
     if dispatch.state == VerificationDispatchState::Invalidated {
         tx.commit()?;
@@ -1738,8 +1746,13 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
             "exact reviewed scope was not invalidated".to_string(),
         ));
     }
-    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0))?;
-    let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
+    let prior_notes: String = tx.query_row(
+        "SELECT notes FROM tasks WHERE id = ?1",
+        params![task.id],
+        |row| row.get(0),
+    )?;
+    let safe_notes =
+        crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
     let rows = tx.execute(
         "UPDATE tasks SET status = ?1, notes = ?2, updated_at = ?3
          WHERE id = ?4 AND status = ?5",
@@ -1860,7 +1873,13 @@ pub fn correct_parked_delivery_execution_note(
     reason: &str,
 ) -> Result<ProofScopeCorrectionOutcome> {
     correct_parked_delivery_proof_scope_inner(
-        cas_dir, corrected_task, expected_updated_at, supervisor_agent_id, reason, true, false,
+        cas_dir,
+        corrected_task,
+        expected_updated_at,
+        supervisor_agent_id,
+        reason,
+        true,
+        false,
     )
 }
 
@@ -1911,9 +1930,11 @@ fn correct_parked_delivery_proof_scope_inner(
 
     let observed_work_target_merge = if require_merged_delivery
         && !delivery.as_ref().is_some_and(|(_, state)| {
-            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
-        })
-    {
+            matches!(
+                *state,
+                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
+            )
+        }) {
         let target_branch = corrected_task
             .deliverables
             .work_target
@@ -1924,7 +1945,11 @@ fn correct_parked_delivery_proof_scope_inner(
                 "SELECT EXISTS(SELECT 1 FROM observed_delivery_merges
                  WHERE task_id = ?1 AND target_branch = ?2
                    AND (?3 IS NULL OR source_commit_sha = ?3))",
-                params![corrected_task.id, branch, corrected_task.deliverables.factory_branch_anchor],
+                params![
+                    corrected_task.id,
+                    branch,
+                    corrected_task.deliverables.factory_branch_anchor
+                ],
                 |row| row.get::<_, bool>(0),
             )?,
             None => false,
@@ -1935,7 +1960,10 @@ fn correct_parked_delivery_proof_scope_inner(
 
     if require_merged_delivery
         && !delivery.as_ref().is_some_and(|(_, state)| {
-            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+            matches!(
+                *state,
+                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
+            )
         })
         && !observed_work_target_merge
     {
@@ -1946,7 +1974,10 @@ fn correct_parked_delivery_proof_scope_inner(
 
     if !allow_merged_delivery
         && delivery.as_ref().is_some_and(|(_, state)| {
-            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+            matches!(
+                *state,
+                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
+            )
         })
     {
         return Err(StoreError::Parse(
@@ -1985,8 +2016,10 @@ fn correct_parked_delivery_proof_scope_inner(
             ));
         }
         if *state != WorkerDeliveryState::Stale
-            && !(matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
-                && allow_merged_delivery)
+            && !(matches!(
+                *state,
+                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
+            ) && allow_merged_delivery)
         {
             let changed = tx.execute(
                 "UPDATE worker_delivery_transactions
@@ -2022,8 +2055,13 @@ fn correct_parked_delivery_proof_scope_inner(
         }
     }
 
-    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
-    let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
+    let prior_notes: String = tx.query_row(
+        "SELECT notes FROM tasks WHERE id = ?1",
+        params![corrected_task.id],
+        |row| row.get(0),
+    )?;
+    let safe_notes =
+        crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
@@ -2287,7 +2325,11 @@ pub fn request_changes_for_parked_delivery(
             ],
         )?;
     }
-    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
+    let prior_notes: String = tx.query_row(
+        "SELECT notes FROM tasks WHERE id = ?1",
+        params![task_id],
+        |row| row.get(0),
+    )?;
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
     let task_changed = tx.execute(
         "UPDATE tasks
@@ -3041,6 +3083,15 @@ impl VerificationStore for SqliteVerificationStore {
             conn.execute_batch(VERIFICATION_SCHEMA)?;
             crate::shared_db::ensure_column(
                 &conn,
+                "verifications",
+                "status_detail",
+                VERIFICATION_STATUS_DETAIL_STATEMENT,
+            )?;
+            // Repair pre-release rows too; released processes may keep this
+            // same database open while this version rolls out.
+            conn.execute(VERIFICATION_STATUS_NORMALIZE_STATEMENT, [])?;
+            crate::shared_db::ensure_column(
+                &conn,
                 "verification_dispatches",
                 "repository_proof",
                 VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
@@ -3119,7 +3170,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at
+                        duration_ms, created_at, status_detail
                  FROM verifications WHERE id = ?1",
                 params![id],
                 Self::parse_verification,
@@ -3142,7 +3193,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at
+                        duration_ms, created_at, status_detail
                  FROM verifications WHERE id = ?1",
                 params![verification.id],
                 Self::parse_verification,
@@ -3171,7 +3222,7 @@ impl VerificationStore for SqliteVerificationStore {
              task_id = ?2, agent_id = ?3, verification_type = ?4, provenance = ?5,
              capability_id = ?6, dispatch_id = ?7, issuer_agent_id = ?8, status = ?9,
              confidence = ?10, summary = ?11, files_reviewed = ?12, duration_ms = ?13,
-             created_at = ?14
+             created_at = ?14, status_detail = ?15
              WHERE id = ?1",
             params![
                 verification.id,
@@ -3182,12 +3233,13 @@ impl VerificationStore for SqliteVerificationStore {
                 verification.capability_id,
                 verification.dispatch_id,
                 verification.issuer_agent_id,
-                verification.status.to_string(),
+                verification.status.storage_status(),
                 verification.confidence,
                 verification.summary,
                 files_reviewed_json,
                 verification.duration_ms.map(|v| v as i64),
                 verification.created_at.to_rfc3339(),
+                verification.status.storage_detail(),
             ],
         )?;
 
@@ -3220,7 +3272,7 @@ impl VerificationStore for SqliteVerificationStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at
+                    duration_ms, created_at, status_detail
              FROM verifications WHERE task_id = ?1
              ORDER BY created_at DESC",
         )?;
@@ -3242,7 +3294,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at
+                        duration_ms, created_at, status_detail
                  FROM verifications WHERE task_id = ?1
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id],
@@ -3271,7 +3323,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at
+                        duration_ms, created_at, status_detail
                  FROM verifications WHERE task_id = ?1 AND verification_type = ?2
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id, verification_type.to_string()],
@@ -3295,7 +3347,7 @@ impl VerificationStore for SqliteVerificationStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at
+                    duration_ms, created_at, status_detail
              FROM verifications ORDER BY created_at DESC LIMIT ?1",
         )?;
 
@@ -3315,8 +3367,11 @@ impl VerificationStore for SqliteVerificationStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at
-             FROM verifications WHERE status = ?1
+                    duration_ms, created_at, status_detail
+             FROM verifications WHERE (CASE
+                 WHEN status = 'error' AND status_detail IN ('pending', 'supervisor_call') THEN status_detail
+                 WHEN status IN ('approved', 'rejected', 'skipped') THEN status
+                 ELSE 'error' END) = ?1
              ORDER BY created_at DESC",
         )?;
 
@@ -3388,9 +3443,16 @@ mod tests {
         task.proof_targets.push("cas --lib close_ops".into());
         task.updated_at = Utc::now();
 
-        assert!(correct_parked_delivery_proof_targets(
-            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
-        ).is_err());
+        assert!(
+            correct_parked_delivery_proof_targets(
+                dir.path(),
+                &task,
+                expected_updated_at,
+                "supervisor",
+                "widen proof"
+            )
+            .is_err()
+        );
         let receipt = crate::build_worker_completion_receipt(
             &cas_types::WorkerCompletionReceiptInput {
                 task_id: task.id.clone(),
@@ -3409,16 +3471,33 @@ mod tests {
             Utc::now(),
         );
         crate::create_worker_delivery(
-            dir.path(), &receipt, WorkerDeliveryState::AwaitingMerge, "worker"
-        ).unwrap();
+            dir.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingMerge,
+            "worker",
+        )
+        .unwrap();
         crate::record_observed_delivery_merge(
-            dir.path(), &task.id, "commit:1111111111111111111111111111111111111111",
-            "epic/other", "1111111111111111111111111111111111111111",
-            "2222222222222222222222222222222222222222", "supervisor",
-        ).unwrap();
-        assert!(correct_parked_delivery_proof_targets(
-            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
-        ).is_err(), "an observation on a different WorkTarget cannot authorize correction");
+            dir.path(),
+            &task.id,
+            "commit:1111111111111111111111111111111111111111",
+            "epic/other",
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+            "supervisor",
+        )
+        .unwrap();
+        assert!(
+            correct_parked_delivery_proof_targets(
+                dir.path(),
+                &task,
+                expected_updated_at,
+                "supervisor",
+                "widen proof"
+            )
+            .is_err(),
+            "an observation on a different WorkTarget cannot authorize correction"
+        );
         crate::record_observed_delivery_merge(
             dir.path(),
             &task.id,
@@ -3427,10 +3506,16 @@ mod tests {
             "1111111111111111111111111111111111111111",
             "2222222222222222222222222222222222222222",
             "supervisor",
-        ).unwrap();
+        )
+        .unwrap();
         correct_parked_delivery_proof_targets(
-            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
-        ).expect("authenticated exact-SHA observation must permit correction");
+            dir.path(),
+            &task,
+            expected_updated_at,
+            "supervisor",
+            "widen proof",
+        )
+        .expect("authenticated exact-SHA observation must permit correction");
         assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
     }
 
@@ -3696,35 +3781,86 @@ mod tests {
     fn rollout_statuses_keep_legacy_storage_and_round_trip() {
         let (store, dir) = create_test_store();
         let conn = Connection::open(dir.path().join("cas.db")).unwrap();
-        for status in [VerificationStatus::Pending, VerificationStatus::SupervisorCall] {
-            let mut verification = Verification::error(format!("ver-{status}"), "cas-rollout".into(), "Waiting for a decision".into());
+        for status in [
+            VerificationStatus::Pending,
+            VerificationStatus::SupervisorCall,
+        ] {
+            let mut verification = Verification::error(
+                format!("ver-{status}"),
+                "cas-rollout".into(),
+                "Waiting for a decision".into(),
+            );
             verification.status = status;
             store.add(&verification).unwrap();
             // The persisted and synced legacy status is a safe non-approval.
-            let stored: String = conn.query_row("SELECT status FROM verifications WHERE id=?1", [&verification.id], |row| row.get(0)).unwrap();
-            assert_eq!(stored, "error", "released binaries must never see a new enum value");
+            let stored: String = conn
+                .query_row(
+                    "SELECT status FROM verifications WHERE id=?1",
+                    [&verification.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                stored, "error",
+                "released binaries must never see a new enum value"
+            );
             let wire = serde_json::to_value(&verification).unwrap();
             assert_eq!(wire["status"], "error");
-            assert_eq!(serde_json::from_value::<Verification>(wire).unwrap().status, status);
+            assert_eq!(
+                serde_json::from_value::<Verification>(wire).unwrap().status,
+                status
+            );
             assert_eq!(store.get(&verification.id).unwrap().status, status);
             assert_eq!(store.list_by_status(status).unwrap().len(), 1);
-            assert!(store.list_by_status(VerificationStatus::Error).unwrap().is_empty());
+            assert!(
+                store
+                    .list_by_status(VerificationStatus::Error)
+                    .unwrap()
+                    .is_empty()
+            );
 
             // A terminal result from an old writer must supersede stale detail.
-            conn.execute("UPDATE verifications SET status='approved' WHERE id=?1", [&verification.id]).unwrap();
-            assert_eq!(store.get(&verification.id).unwrap().status, VerificationStatus::Approved);
+            conn.execute(
+                "UPDATE verifications SET status='approved' WHERE id=?1",
+                [&verification.id],
+            )
+            .unwrap();
+            assert_eq!(
+                store.get(&verification.id).unwrap().status,
+                VerificationStatus::Approved
+            );
             verification.status = VerificationStatus::Rejected;
             store.update(&verification).unwrap();
-            assert_eq!(store.get(&verification.id).unwrap().status, VerificationStatus::Rejected);
+            assert_eq!(
+                store.get(&verification.id).unwrap().status,
+                VerificationStatus::Rejected
+            );
 
             // Upgrade rows already written by the pre-release implementation.
-            conn.execute("UPDATE verifications SET status=?2 WHERE id=?1", params![verification.id, status.to_string()]).unwrap();
+            conn.execute(
+                "UPDATE verifications SET status=?2 WHERE id=?1",
+                params![verification.id, status.to_string()],
+            )
+            .unwrap();
         }
+        conn.execute_batch("ALTER TABLE verifications DROP COLUMN status_detail")
+            .unwrap();
         let reopened = SqliteVerificationStore::open(dir.path()).unwrap();
-        for status in [VerificationStatus::Pending, VerificationStatus::SupervisorCall] {
+        for status in [
+            VerificationStatus::Pending,
+            VerificationStatus::SupervisorCall,
+        ] {
             let id = format!("ver-{status}");
             assert_eq!(reopened.get(&id).unwrap().status, status);
-            assert_eq!(conn.query_row("SELECT status FROM verifications WHERE id=?1", [id], |row| row.get::<_, String>(0)).unwrap(), "error");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM verifications WHERE id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "error"
+            );
         }
     }
 
@@ -4747,6 +4883,13 @@ mod credential_redaction_tests {
 pub const REQUEST_CHANGES_AUDIT_PREFIX: &str = "Decision: changes requested by supervisor. ";
 
 /// Format the replicated decision exactly as the transactional writer does.
-pub fn request_changes_audit_note(at: chrono::DateTime<chrono::Utc>, reason: &str, branch_handling: &str) -> String {
-    format!("[{}] {REQUEST_CHANGES_AUDIT_PREFIX}{reason}\n\nBranch handling: {branch_handling}", at.format("%Y-%m-%d %H:%M"))
+pub fn request_changes_audit_note(
+    at: chrono::DateTime<chrono::Utc>,
+    reason: &str,
+    branch_handling: &str,
+) -> String {
+    format!(
+        "[{}] {REQUEST_CHANGES_AUDIT_PREFIX}{reason}\n\nBranch handling: {branch_handling}",
+        at.format("%Y-%m-%d %H:%M")
+    )
 }

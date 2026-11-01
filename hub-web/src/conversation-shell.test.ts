@@ -64,6 +64,7 @@ describe("cold-load list states (journey F14)", () => {
     // cas-a56c: someone sent a link by whoever runs the machine is told where it goes.
     expect(unpaired.kind === "text" && unpaired.text).toContain("pairing link");
     const empty = conversationListState(true, [{ catalogReceived: true, phase: "live" }, { catalogReceived: false, phase: "failed" }]);
+    // pin: the empty state must name its live action and never offer stopped sessions.
     expect(empty.kind === "text" && empty.text).toBe("No live supervisors listed. Start one with New session.");
     // cas-a56c: the way on is named in the controls' own words, without "recovery" jargon.
     expect(empty.kind === "text" && empty.text).toContain("New session");

@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Verification
 
+- **Incomplete verification records cannot approve work** — Was: Synced JSON
+  without a status field defaulted to approved. → Now: Missing status defaults
+  to error and cannot authorize task close; complete records keep their status.
 - **Mixed-version verification readers fail closed** — Was: Older binaries could
   interpret new pending and supervisor-question statuses as approved. → Now:
   Stored and synced records use a compatible error status plus separate detail;

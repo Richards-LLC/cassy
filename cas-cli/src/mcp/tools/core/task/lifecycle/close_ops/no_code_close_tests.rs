@@ -1987,10 +1987,29 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), next_base);
         assert_eq!(git(repo, &["rev-parse", LANE]), delivered);
         assert!(agents.get_lease("cas-8488-b").unwrap().is_some());
-        let briefs = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap().poll_all(100).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+        let briefs = queue.peek_all(100).unwrap();
         assert!(briefs.iter().any(|row| row.target == WORKER
             && row.prompt.contains(&next.id)
             && row.prompt.contains(&active_branch)), "{briefs:?}");
+        // Read through the same recipient boundary as the worker's next turn:
+        // an auto-started assignment must survive InProgress revalidation.
+        let received = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"inbox_poll",
+        })).unwrap())).await.unwrap();
+        let received = received.content.iter().filter_map(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // pin: next.id is the dynamically selected queue successor, not fixed prose.
+        assert!(received.contains(&next.id), "next-turn inbox omitted the started assignment: {received}");
+        let ready = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"message", "target":"supervisor", "kind":"ready", "summary":"ready",
+            "message":"Ready for work. My queue is empty.",
+        })).unwrap())).await.unwrap();
+        assert!(!ready.is_error.unwrap_or(false), "{ready:?}");
+        let pending = queue.peek_all(100).unwrap();
+        let status = pending.iter().rev().find(|row| row.source == WORKER).unwrap();
+        assert!(status.prompt.contains(&next.id));
         let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
             "action":"start", "id":"cas-8488-c",
         })).unwrap())).await;

@@ -1029,6 +1029,45 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
         Some("https://launchd-proof.invalid:10046/"));
 }
 
+/// Auto services remain useful locally when publication cannot be configured.
+#[cfg(unix)]
+#[test]
+fn auto_service_without_tailscale_keeps_healthy_loopback() {
+    for cause in ["missing", "NeedsLogin", "NeedsMachineAuth"] {
+        let home = private_home();
+        let bin = home.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        if cause != "missing" {
+            install_tailscale_mock(home.path(), &bin.join("tailscale"),
+                &format!("#!/bin/sh\nprintf '%s' '{{\"BackendState\":\"{cause}\",\"Self\":{{}}}}'\n"));
+        }
+        let mut child = cas_process_command(home.path(), bin.as_os_str())
+            .args(["hub", "serve", "--port", "0", "--launched-by", "service", "--tailscale-serve"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let _cleanup = LegacyHubCleanup(vec![child.id()]);
+        let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        loop {
+            if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
+            assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(),
+                "Auto service must keep loopback for {cause}");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let record = paths.read_process_record().unwrap();
+        assert!(record.public_url.is_none());
+        assert!(record.transport_warning.is_some(), "fallback must explain {cause}");
+        assert!(ureq::get(&format!("http://127.0.0.1:{}/v1/health", record.port))
+            .timeout(Duration::from_secs(1)).call().is_ok());
+        let output = cas_command(home.path(), bin.as_os_str())
+            .args(["hub", "status", "--json"]).output().unwrap();
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["tailscale_serve"]["status"], "ok", "healthy fallback: {status}");
+        assert!(status["tailscale_serve"]["message"].as_str().unwrap().contains("loopback-only"));
+        let log = fs::read_to_string(paths.root().join("hub.log")).unwrap();
+        assert!(log.contains(if cause == "missing" { "unavailable" } else { cause }), "{log}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn service_start_retries_tailscale_before_publication() {

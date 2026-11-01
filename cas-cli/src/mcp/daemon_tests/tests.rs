@@ -67,6 +67,10 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 .is_err(),
             "an inherited CAS_SESSION_ID must not bind another live {role}'s MCP identity"
         );
+        assert!(core.get_registered_agent_id_read_only().is_err(),
+            "read-only guidance must not cache another live {role}'s identity");
+        assert!(core.get_agent_id().is_err(),
+            "a refused read-only lookup must not authorize later tools");
         let nested_pid = std::process::id();
         for event in [
             DaemonEvent::SessionStart {

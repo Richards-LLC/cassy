@@ -11,6 +11,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  hub-serve-route-ownership:
+    title: Failed starts and resumed publication preserve stopped foreign Serve targets; exact recorded targets still recover after outages
+    tasks: [cas-bf4e]
+    # Native regression: hub::tailscale::tests::failed_start_preserves_stopped_foreign_route; real disposable Serve10443 proof.
   stopped-session-drafts:
     title: Focused and inactive unsent drafts stay reachable when their sessions stop
     tasks: [cas-45b8]

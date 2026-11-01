@@ -201,8 +201,7 @@ impl TailscaleServeManager {
                     (previous.https_port == https_port
                         && handlers == vec![("/".to_owned(), previous.local_target.clone())])
                         || self.dead_recorded_mapping(https_port, &handlers).is_some()
-                        || dead_known_target(prior_target.as_ref(), https_port, &handlers)
-                        || dead_receipted_port_target(&previous, https_port, &handlers).is_some(),
+                        || dead_known_target(prior_target.as_ref(), https_port, &handlers),
                     "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
                 );
                 self.run(&[
@@ -385,10 +384,9 @@ impl TailscaleServeManager {
         };
         let before = self.serve_status()?;
         let handlers = handlers_on_port(&before, https_port);
+        // A dead loopback service may belong to the operator. Only an exact
+        // receipt or process target proves this mapping was published by Cassy.
         let recorded = self.dead_recorded_mapping(https_port, &handlers);
-        let legacy_dead_target = owned
-            .as_ref()
-            .and_then(|receipt| dead_receipted_port_target(receipt, https_port, &handlers));
         let mut receipt = match owned.or_else(|| {
             recorded.as_ref().map(|target| TailscaleServeReceipt {
                 schema_version: 1,
@@ -415,7 +413,7 @@ impl TailscaleServeManager {
             return Ok(None);
         }
         if handlers != vec![("/".to_owned(), receipt.local_target.clone())] {
-            if let Some(target) = recorded.or(legacy_dead_target) {
+            if let Some(target) = recorded {
                 receipt.local_target = target;
             }
         }
@@ -707,22 +705,6 @@ fn dead_known_target(
     })
 }
 
-fn dead_receipted_port_target(
-    receipt: &TailscaleServeReceipt,
-    https_port: u16,
-    handlers: &[(String, String)],
-) -> Option<String> {
-    if receipt.https_port != https_port || handlers.len() != 1 || handlers[0].0 != "/" {
-        return None;
-    }
-    let target = &handlers[0].1;
-    // Older hubs wrote the receipt after Serve publication. A forced kill
-    // could therefore leave the previous hub's receipt beside a newer dead
-    // shim. The private receipt proves Cassy owned this HTTPS port; the sole
-    // dead loopback proxy and unchanged root path identify its successor.
-    (target != &receipt.local_target && dead_loopback_target(target)).then(|| target.clone())
-}
-
 fn classify_stderr(stderr: &[u8]) -> &'static str {
     let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     if text.contains("not logged in") || text.contains("logged out") {
@@ -956,39 +938,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn legacy_stale_receipt_reclaims_dead_loopback_shim_without_process_record() {
-        let temp = private_tempdir();
-        let (binary, state, calls) = stateful_mock(temp.path());
-        let hub = temp.path().join("hub");
-        let manager = TailscaleServeManager::with_executable(&hub, &binary);
-        let old = manager.ensure(4173, 443).unwrap();
-        let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let replacement = format!("http://127.0.0.1:{dead_port}");
-        fs::write(&state, &replacement).unwrap();
-        assert!(!hub.join("process.json").exists());
-        assert_ne!(old.local_target, replacement);
-        assert_eq!(
-            manager.disable_owned().unwrap().unwrap().local_target,
-            replacement
-        );
-        assert!(!state.exists());
-
-        fs::write(hub.join(RECEIPT_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        fs::write(&state, &replacement).unwrap();
-        let next = manager.ensure(4174, 443).unwrap();
-        assert_eq!(next.local_target, "http://127.0.0.1:4174");
-        assert_eq!(fs::read_to_string(&state).unwrap(), next.local_target);
-        assert_eq!(
-            fs::read_to_string(calls)
+    fn failed_start_preserves_stopped_foreign_route() {
+        for has_process_record in [false, true] {
+            let temp = private_tempdir();
+            let (binary, state, _calls) = stateful_mock(temp.path());
+            let hub = temp.path().join("hub");
+            let manager = TailscaleServeManager::with_executable(&hub, &binary);
+            let old = manager.ensure(4173, 443).unwrap();
+            let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
                 .unwrap()
-                .matches("serve --https=443 off")
-                .count(),
-            2
-        );
+                .local_addr()
+                .unwrap()
+                .port();
+            let foreign = format!("http://127.0.0.1:{dead_port}");
+            if has_process_record {
+                let record: super::super::HubProcessRecord =
+                    serde_json::from_value(serde_json::json!({
+                        "pid": 999999, "bind": "127.0.0.1", "port": 4173,
+                        "version": "test", "started_at": "test",
+                        "tailscale_serve_port": 443, "tailscale_serve_target": old.local_target
+                    })).unwrap();
+                crate::hub::HubRuntimePaths::new(&hub)
+                    .write_process_record(&record)
+                    .unwrap();
+            }
+            fs::write(&state, &foreign).unwrap();
+            // Service publication fails before Serve inspection. Its cleanup
+            // must not mistake a stopped operator service for a newer hub shim.
+            let script = fs::read_to_string(&binary).unwrap();
+            let failing = script.replace(
+                "case \"$*\" in",
+                "if [ \"$*\" = 'status --json' ]; then exit 9; fi\ncase \"$*\" in",
+            );
+            crate::test_paths::warm_stub(&binary, &failing);
+            assert!(manager.ensure(4174, 443).is_err());
+            let error = manager.disable_owned().unwrap_err().to_string();
+            assert!(error.contains("mapping changed"), "{error}");
+            assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
+            assert_eq!(manager.owned_receipt().unwrap().unwrap(), old);
+
+            // Once Tailscale responds again, startup must preserve it too.
+            crate::test_paths::warm_stub(&binary, &script);
+            let error = manager.ensure(4174, 443).unwrap_err().to_string();
+            assert!(error.contains("already owned"), "{error}");
+            assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
+        }
     }
 
     #[test]

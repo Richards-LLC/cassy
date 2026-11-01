@@ -7,7 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-- Keep every Commander phone header action inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
+### Fixed — Commander phone header
+
+- **Delivery warnings keep actions visible** — Every phone header action stays inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
 
 ### Fixed — Commander boot replies
 

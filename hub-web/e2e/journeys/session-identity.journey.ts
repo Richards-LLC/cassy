@@ -90,7 +90,7 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
 });
 
 test("HUB-J14 a live explicit send does not depend on a catalog read", journeyPart, async ({ page, journey }) => {
-  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "live-send", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "live-send", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
   const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
   await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");
@@ -103,7 +103,7 @@ test("HUB-J14 a live explicit send does not depend on a catalog read", journeyPa
 });
 
 test("HUB-J14 upgrading a running session preserves a legacy draft", journeyPart, async ({ page, journey }) => {
-  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "legacy", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "legacy", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
   const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
   await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");
@@ -124,7 +124,7 @@ test("HUB-J14 upgrading a running session preserves a legacy draft", journeyPart
 });
 
 test("HUB-J14 an old rejected send cannot settle the replacement's in-flight message", journeyPart, async ({ page, journey }) => {
-  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "replacement", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "replacement", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
   const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
   await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");
@@ -146,7 +146,7 @@ test("HUB-J14 an old rejected send cannot settle the replacement's in-flight mes
 });
 
 test("HUB-J14 a failed stopped-draft archive retains its durable words", journeyPart, async ({ page, journey }) => {
-  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "archive", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "archive", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
   const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
   await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");

@@ -40,6 +40,9 @@ fn same_session_birth(a: &SessionMetadata, b: &SessionMetadata) -> bool {
 }
 
 fn write_end_receipt(sessions: &Path, receipt: &EndedSession) -> std::io::Result<()> {
+    if !valid_session_name(&receipt.metadata.name) {
+        return Err(std::io::Error::other("invalid session name in end receipt"));
+    }
     let dir = sessions.join("ended");
     fs::create_dir_all(&dir)?;
     let temporary = tempfile::NamedTempFile::new_in(&dir)?;
@@ -448,6 +451,7 @@ impl SessionManager {
             return Err(std::io::Error::other("invalid session name"));
         }
         let metadata = self.load_metadata(&self.sessions_dir.join(format!("{name}.json")))?;
+        if metadata.name != name { return Err(std::io::Error::other("session metadata name mismatch")); }
         write_end_receipt(&self.sessions_dir, &EndedSession { metadata, ended })
     }
 
@@ -534,6 +538,7 @@ impl SessionManager {
         let _record_lock = socket_cleanup::metadata_lock(&path)?;
         let removed = match self.load_metadata(&path) {
             Ok(metadata) => {
+                if metadata.name != session_name { return Err(std::io::Error::other("session metadata name mismatch")); }
                 if expected.is_some_and(|expected| !same_session_birth(expected, &metadata))
                     || (require_dead && daemon_identity_is_live(&metadata)) {
                     return Ok(false);

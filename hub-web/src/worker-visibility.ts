@@ -36,7 +36,7 @@ export function sessionStopped(session: HubSession): boolean {
 }
 
 export function reconcileCatalog(previous: readonly HubSession[], listed: readonly HubSession[], stopped: readonly HubSession[] = []): HubSession[] {
-  const known = new Map(previous.map(session => [session.name, { ...session, stale: true }]));
+  const known = new Map<string, HubSession>(previous.map(session => [session.name, { ...session, stale: true }]));
   for (const session of stopped) if (sessionStopped(session)) known.set(session.name, session);
   for (const session of listed) {
     if (session.liveness === "missing_endpoint" && known.has(session.name)) continue;

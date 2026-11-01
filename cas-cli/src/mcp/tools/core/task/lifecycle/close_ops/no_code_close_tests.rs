@@ -2015,6 +2015,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert!(!ready.is_error.unwrap_or(false), "{ready:?}");
             let pending = queue.peek_all(100).unwrap();
             let status = pending.iter().rev().find(|row| row.source == WORKER).unwrap();
+            // pin: the emitted status must name the dynamically selected queue successor.
             assert!(status.prompt.contains(&next.id), "owned successor omitted for kind={kind:?}");
         }
         let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({

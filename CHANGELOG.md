@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.95.0] - 2026-11-01
+
 ### Fixed — Verification
 
 - **Incomplete verification records cannot approve work** — Was: Synced JSON

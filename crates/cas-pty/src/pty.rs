@@ -457,7 +457,7 @@ lists the catalog and `{prefix}skill action=show id=<skill>` returns its instruc
 `{prefix}verification` and record your own verdict with `{prefix}verification action=qa_record \
 task_id=<delivery-id> status=approved|rejected summary=\"...\" ledger_path=<LEDGER.md>`. \
 Recording the verdict closes the QA task. The supervisor `{prefix}factory` tool is not yours, \
-except server_start/server_list/server_stop (owned servers only) for an assigned server task. Directed messages wake an idle supervisor after debounce and pair rate limits. \
+except server_start/server_list/server_stop (owned servers only) for an assigned server task, and candidate_request task_id=<own-task> revision=<full-sha> when a walk needs a binary: the daemon builds it and messages you. Directed messages wake an idle supervisor after debounce and pair rate limits. \
 Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use kind=status|ready for actionable updates that allow work to continue. \
 When required supervisor review or approval prevents further work, add a blocker task note, \
 call `{prefix}task action=update id=<task-id> status=blocked`, then \

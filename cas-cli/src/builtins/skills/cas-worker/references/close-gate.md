@@ -105,8 +105,9 @@ checks the entry format.
 
 - Demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
   before parking; cite its commit-bound bundle or real-build ledger. A
-  binary-driven ledger runs the supervisor's exact-tip candidate, never a
-  compile of your own (cas-qa-craft's evidence-ledger names the sources). Terminal
+  binary-driven ledger runs an exact-tip candidate from `factory
+  action=candidate_request`, never a compile of your own (cas-qa-craft's
+  evidence-ledger names the sources). Terminal
   paths also need `cas-cli-craft`'s `terminal-qa: PASS` receipt. Docs/test/CI-only
   deliveries do not trigger visual QA.
 - Human-facing output (a user-facing label, a demo, or a deliverable a person

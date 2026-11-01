@@ -50,9 +50,10 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    vendored fixtures; these are the only two required API artifacts ([API
    format](references/evidence-bundle.md#api-surfaces)). Register long-lived servers through
    `cas-servers`; never substitute fixtures.
-   For a Cassy source CLI binary, ask the supervisor to run
-   `cas qa candidate build --task <task-id> --rev <sha>`, then get the binary's path with
-   `cas qa candidate path --task <task-id>` (never type the hashed path) and cite its receipt.
+   For a Cassy source CLI binary, including a fixture revision committed in your own checkout, call
+   `factory action=candidate_request task_id=<your-task> revision=<full-sha>`, then end the turn. The factory
+   daemon messages you the path, version, hash, receipt and log. Later,
+   `cas qa candidate path --task <task-id>` gives the newest build's own path; cite that path and its receipt.
 5. Capture rendered cells with screenshots, CLI cells with terminal captures, and API cells with
    HTTP transcripts. Choose evidence labels by how the result was obtained using
    the scaffold and [evidence guidance](references/evidence-ledger.md). When

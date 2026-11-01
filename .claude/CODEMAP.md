@@ -79,6 +79,7 @@
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - semantic allowlist, native mappings and outcome evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
+- `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - a worker's typed candidate request, its checks, the daemon's build queue and the daemon-managed builder checkout.
 - `cas-cli/src/worker_task_queue.rs` - ordered worker backlog policy, start authorization, delivery handoff and durable daemon reconciliation.
 
 ## MCP and delivery gates

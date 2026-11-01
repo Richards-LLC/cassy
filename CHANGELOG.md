@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — QA candidates
+
+- **Candidates build on a worker's request** — Was: Every QA candidate took a
+  supervisor turn to start and a message back with the hash, and a request could
+  go stale in the hand-off. → Now: `factory action=candidate_request` names the
+  worker's own active task and an exact revision reachable in its own checkout;
+  the factory daemon builds it from a checkout it keeps at the default branch tip,
+  one build per machine under the build guard, and messages the worker the path,
+  version, revision, hash and log, or the exact error. A newer request replaces a
+  queued one, and a refusal names why. The worker refusal of direct builds stays.
+- **A later build keeps a cited candidate** — Was: Each build overwrote
+  `<task>/candidate`, so a ledger's cited binary could disappear. → Now: Each
+  revision lives in `<task>/candidates/<revision>/` and `candidate` points at the
+  newest; asking again for a published revision reuses it without compiling.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

@@ -1034,7 +1034,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
 ) -> Result<LifecyclePushResult, String> {
     emit_task_lifecycle_transition_in_project(
         supervisor_queue, prompt_queue, agent_store, task_id, task_title,
-        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None,
+        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None, false,
     )
 }
 
@@ -1053,6 +1053,7 @@ fn emit_task_lifecycle_transition_in_project(
     occurrence_id: &str,
     branch_tip: Option<&str>,
     cas_dir: Option<&Path>,
+    escalation: bool,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some((supervisor, recipient)) =
@@ -1061,21 +1062,22 @@ fn emit_task_lifecycle_transition_in_project(
         return Ok(LifecyclePushResult::NoSupervisor);
     };
 
-    let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+    let verification_wait = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
     });
-    let answered_blocker = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+    let answered_blocker = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
     });
 
-    let key = transition_key(
-        task_id,
-        old_status,
-        new_status,
-        factory_session.as_deref(),
-        kind,
-        occurrence_id,
-    );
+    let key = if kind == LifecycleTransition::Blocked && let Some(root) = cas_dir {
+        let task = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+            .get(task_id).map_err(|e| e.to_string())?;
+        let (_, episode) = super::super::block_hold::alert_episode(root, &task)?;
+        format!("{task_id}:blocked-episode:{}:{}:{episode}:{}", factory_session.as_deref().unwrap_or(""), recipient.id,
+            if escalation { "deadline" } else { "initial" })
+    } else {
+        transition_key(task_id, old_status, new_status, factory_session.as_deref(), kind, occurrence_id)
+    };
     let now = Utc::now();
     let payload = json!({
         "task_id": task_id,
@@ -1121,6 +1123,15 @@ fn emit_task_lifecycle_transition_in_project(
     // Fully complete occurrence — no side effects.
     if prompt_already_delivered {
         return Ok(LifecyclePushResult::AlreadyComplete { notification_id });
+    }
+
+    // Episode retries can arrive with newer activity timestamps. Recover the
+    // original payload rather than changing the envelope under its durable key.
+    if already_existed {
+        let notification = supervisor_queue.get(notification_id).map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("missing lifecycle outbox row {notification_id}"))?;
+        let pq = prompt_queue.ok_or_else(|| "prompt_queue unavailable; lifecycle outbox remains pending".to_string())?;
+        return deliver_lifecycle_outbox_row_with_agents(supervisor_queue, pq, &notification, Some(agent_store));
     }
 
     // The owning supervisor already knows about lifecycle mutations they performed.
@@ -1183,6 +1194,82 @@ fn emit_task_lifecycle_transition_in_project(
     } else {
         Ok(LifecyclePushResult::Enqueued { notification_id })
     }
+}
+
+/// Reconcile the director's blocked/liveness signals with the lifecycle
+/// outbox, never a direct prompt. The outbox is the durable episode memory:
+/// one initial alert and, once its owner/deadline releases the wait, at most
+/// one escalation. Runs on the daemon's store lane; `now` is injectable.
+pub(crate) fn reconcile_blocked_task_alert(
+    root: &Path,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    if task.status != TaskStatus::Blocked {
+        return Ok(());
+    }
+    let Some(actor) = task.assignee.as_deref() else {
+        return Ok(());
+    };
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    let session = resolve_lifecycle_factory_session(agents.as_ref(), actor);
+    let Some((_, recipient)) = lifecycle_notice_owner(agents.as_ref(), session.as_deref()) else {
+        return Ok(());
+    };
+    let sq = open_supervisor_queue_store(root).map_err(|e| e.to_string())?;
+    let pq = open_prompt_queue_store(root).map_err(|e| e.to_string())?;
+    let (start, _) = super::super::block_hold::alert_episode(root, &task)?;
+    let emit = |escalation, reason| {
+        emit_task_lifecycle_transition_in_project(
+            sq.as_ref(),
+            Some(pq.as_ref()),
+            agents.as_ref(),
+            &task.id,
+            &task.title,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            actor,
+            reason,
+            LifecycleTransition::Blocked,
+            &start.min(task.updated_at).to_rfc3339(),
+            None,
+            Some(root),
+            escalation,
+        )
+    };
+    emit(false, None)?;
+    if super::super::block_hold::owned_verification_wait_at(root, task_id, &recipient.id, now)
+        .is_some()
+        || super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
+    {
+        return Ok(());
+    }
+    let mut deadline = start + chrono::Duration::minutes(5);
+    if let Some(dispatch) =
+        cas_store::get_latest_verification_dispatch(root, task_id).map_err(|e| e.to_string())?
+        && super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
+    {
+        deadline = if matches!(
+            dispatch.state,
+            cas_types::VerificationDispatchState::Pending
+                | cas_types::VerificationDispatchState::Claimed
+        ) {
+            deadline.min(dispatch.deadline_at)
+        } else {
+            now
+        };
+    }
+    if now >= deadline {
+        emit(
+            true,
+            Some(
+                "Blocker deadline reached or verification ended; inspect the live task and resolve its next step.",
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// Source marker for the verification-dispatch handoff (cas-8725).
@@ -1730,6 +1817,7 @@ impl CasCore {
             occurrence_id,
             branch_tip,
             Some(&self.cas_root),
+            false,
         ) {
             Err(e) if e.contains("prompt_queue unavailable") => {
                 if let Some(open_err) = open_err {

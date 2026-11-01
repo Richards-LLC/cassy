@@ -109,12 +109,21 @@ pub(crate) fn owned_verification_wait(
     task_id: &str,
     recipient: &str,
 ) -> Option<String> {
+    owned_verification_wait_at(cas_dir, task_id, recipient, chrono::Utc::now())
+}
+
+pub(crate) fn owned_verification_wait_at(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    recipient: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
     use cas_types::{AgentRole, VerificationDispatchState};
     let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id).ok()??;
     if !matches!(
         dispatch.state,
         VerificationDispatchState::Pending | VerificationDispatchState::Claimed
-    ) || dispatch.deadline_at <= chrono::Utc::now()
+    ) || dispatch.deadline_at <= now
     {
         return None;
     }
@@ -131,6 +140,40 @@ pub(crate) fn owned_verification_wait(
         return None;
     }
     blocked_only_by_verification_wait(cas_dir, task_id, &dispatch.id).then_some(dispatch.id)
+}
+
+/// A blocker episode survives activity writes, supervisor turns and daemon
+/// restarts. A new hold, status transition, assignee or verification cycle is a
+/// new episode. Legacy tasks without a hold use their durable status event.
+pub(crate) fn alert_episode(
+    cas_dir: &std::path::Path,
+    task: &Task,
+) -> Result<(chrono::DateTime<chrono::Utc>, String), String> {
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let hold = read(tasks.as_ref(), &task.id)?;
+    let events = crate::store::open_event_store(cas_dir).map_err(|e| e.to_string())?;
+    let transition = events
+        .list_for_entity(cas_types::EventEntityType::Task, &task.id, 256)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|event| event.event_type == cas_types::EventType::TaskBlocked)
+        .map(|event| event.created_at);
+    let start = hold
+        .map(|hold| hold.when)
+        .into_iter()
+        .chain(transition)
+        .max()
+        .unwrap_or(task.created_at);
+    let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, &task.id)
+        .map_err(|e| e.to_string())?
+        .filter(|dispatch| blocked_only_by_verification_wait(cas_dir, &task.id, &dispatch.id));
+    let key = serde_json::json!([
+        task.assignee,
+        start.to_rfc3339(),
+        dispatch.map(|dispatch| dispatch.id)
+    ])
+    .to_string();
+    Ok((start, key))
 }
 
 /// cas-7fc3: whether `task_id` is Blocked by nothing but the exact

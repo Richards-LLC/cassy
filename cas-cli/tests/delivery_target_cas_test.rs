@@ -1545,3 +1545,26 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
         .expect("git merge-base")
         .success()
 }
+
+/// A real pending-CI refusal must durably arm an exact-SHA retry.
+#[tokio::test]
+async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
+    let home = TempDir::new().unwrap();
+    let fake_bin = TempDir::new().unwrap();
+    let gh = fake_bin.path().join("gh");
+    cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
+if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
+cat <<'JSON'
+{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}
+JSON
+"#);
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
+    env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    let fixture = arm_delivery("pendingretry", "pending-ci-retry", &mut env).await;
+    let refusal = run_merge(&fixture).await;
+    assert!(refusal.contains("CI PENDING"), "{refusal}");
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+    let request = fixture.cas_root.join("merge-ci-retries").join(format!("{}.json", fixture.task_id));
+    assert!(request.exists(), "pending CI refusal must survive a daemon restart: {refusal}");
+}

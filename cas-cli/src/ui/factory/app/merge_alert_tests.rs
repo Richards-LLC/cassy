@@ -169,7 +169,7 @@ impl Fixture {
         store.update(&task).unwrap();
     }
 
-    fn ci(&self, conclusion: Option<&str>) {
+    pub(crate) fn ci(&self, conclusion: Option<&str>) {
         std::fs::write(
             self.app.cas_dir.join("ci.json"),
             serde_json::json!({"check_runs": [{

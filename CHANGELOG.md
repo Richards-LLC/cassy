@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — 3.96 release scope
+
+- **Keep established session navigation** — Session listing keeps its 3.95 behavior while this release ships message delivery, reply recovery, supervisor identity, onboarding preservation and hub-route fixes.
+
 ### Fixed — Commander phone header
 
 - **Delivery warnings keep actions visible** — Every phone header action stays inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.

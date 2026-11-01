@@ -5501,12 +5501,17 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     f.app = app(reopened, vec![ended.clone()]);
     let (status, rows) = f.call("GET", "/v1/sessions", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(rows["sessions"][0]["dismissed"], true);
-    assert!(rows["sessions"][0]["ended"].is_object(), "history remains available");
+    assert_eq!(rows["sessions"], serde_json::json!([]), "ended history is not a navigation destination");
+    let markers = std::fs::read_dir(f.hub_root.join("dismissed-sessions")).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(markers.len(), 1, "the legacy dismissal stays durable across hub restart");
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(markers[0].path()).unwrap()).unwrap();
+    assert_eq!(marker, serde_json::json!({"session": ended.name, "started_at": ended.started_at}));
     // The same codename ending again is a new generation; stale dismissal cannot hide it.
     ended.started_at = Some("2026-10-31T12:00:00Z".into());
     f.app = app(f.auth.clone(), vec![ended.clone(), fixture_session("live-a")]);
     let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(rows["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["sessions"][0]["name"], "live-a");
     assert_eq!(rows["sessions"][0]["dismissed"], false);
     for (path, body) in [
         ("/v1/sessions/ended-a/dismiss", body),
@@ -6523,7 +6528,8 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert_eq!(rows[0].machine_online, Some(false));
     manager.remove_metadata(&metadata.name).unwrap();
     assert!(manager.list_sessions_read_only().unwrap().is_empty());
-    let rows = super::server::supervisor_sessions(LocalSessionReadModel::default().list_sessions().unwrap(), false);
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert!(super::server::supervisor_sessions(rows.clone(), false).is_empty(), "ended history is readable but never listed in Commander");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].ended, Some(outcome));
     assert_eq!(rows[0].liveness, DaemonLiveness::StaleMetadata);

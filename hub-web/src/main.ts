@@ -16,7 +16,7 @@ import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, sessionRunning, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
@@ -718,8 +718,7 @@ function visibleSessions(machineId: string): HubSession[] {
   const state = connectionStates.get(machineId);
   const kept = !fresh && !(state?.phase === "live" && !state.degraded);
   // cas-9846: until the machine answers, its cached catalog is shown as last known.
-  const listed = visibleCatalog(sessions.get(machineId) ?? [], name => cachedCatalogs.has(machineId) || (conversationHistories.get(sessionKey(machineId, name))?.hasPending() ?? false),
-    fresh || kept, revealDormant);
+  const listed = visibleCatalog(sessions.get(machineId) ?? [], fresh || kept, revealDormant);
   return kept ? listed.map((session) => session.unreachable ? session : { ...session, stale: true }) : listed;
 }
 
@@ -1012,17 +1011,22 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
       for (const item of items) {
-        connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
         if (item.ended) supervisorCommands.get(sessionKey(machine.id, item.name))?.ended(item.ended.reason);
       }
       retireEndedSessionNotices(machine.id, items);
-      // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
-      sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
+      settleSendsForStoppedSessions(machine, items);
+      sessions.set(machine.id, items);
+      const stoppedSelection = selectedMachineId === machine.id && selectedSession !== undefined
+        && !items.some(item => item.name === selectedSession && sessionRunning(item));
+      if (stoppedSelection) commitSelection({ machineId: machine.id });
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
       attachPreviewedSession(machine.id);
       attachIncomingConversationPreviews(machine.id, items);
       updateConversationViews();
-      render();
+      // A stopped destination cannot stay interactive just because its draft
+      // still has focus. captureMessageDraft keeps the words before removal.
+      render(true, stoppedSelection);
+      if (stoppedSelection && !document.querySelector("dialog[open]")) document.querySelector<HTMLElement>("#conversation-search")?.focus();
     },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
@@ -3014,6 +3018,13 @@ function purgeMachineConversations(machineId: string, options: { forgetInMemory:
   const machine = machines.get(machineId);
   if (machine) void sendJournal.purge(machineId, credentialFence(machine)).catch(() => { showComposerStatus("Browser storage refused to remove this machine's saved conversation. Retry removal before using it again.", "error"); });
   purgeConversations(conversationStorage, machineId);
+  for (const item of attention.filter(item => item.machineId === machineId && item.kind === "stopped_message")) {
+    item.payload = undefined;
+    item.headline = "Saved message cleared";
+    item.detail = "The saved message was cleared when this machine's pairing was removed.";
+    item.acknowledgedAt = new Date().toISOString();
+    void attentionStore.put(item);
+  }
   for (const key of [...storedSends.keys()]) if (key.startsWith(`${machineId}:`)) storedSends.delete(key);
   for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
   if (options.forgetInMemory) {
@@ -3919,6 +3930,36 @@ function settleSendsForPairingLoss(machine: StoredMachine): void {
   if (changed) { updateConversationViews(); renderConversationList(); }
 }
 
+/** A responding machine confirmed these destinations stopped. Keep the words,
+ * settle definitely unsent messages, and never replay them into a later birth. */
+function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly HubSession[]): void {
+  const running = new Set(listed.filter(sessionRunning).map(item => item.name));
+  let unsent = 0;
+  for (const [key, history] of conversationHistories) {
+    if (!key.startsWith(`${machine.id}:`) || running.has(key.slice(machine.id.length + 1))) continue;
+    for (const held of heldSends.get(key) ?? []) {
+      clearTimeout(held.expiry); heldSince.delete(held.clientRef);
+    }
+    heldSends.delete(key);
+    for (const send of history.pendingSends()) {
+      if (send.state === "held" && history.reject(send.id, "This session stopped. This message was not sent.")) {
+        unsent++;
+        void addAttention(machine, undefined, "stopped_message", {
+          headline: "Waiting message not sent",
+          detail: "The session stopped. Your message is saved in Details; copy it to send to a running supervisor.",
+          severity: "critical", action: "none", payload: { session: key.slice(machine.id.length + 1), message: send.text },
+          fingerprint: `${machine.id}:stopped-send:${send.id}`,
+        });
+      }
+    }
+    history.unconfirmInFlight(Date.now());
+    if (messageDelivery?.session === key) messageDelivery = undefined;
+    if (messageStatus?.session === key) messageStatus = undefined;
+  }
+  if (unsent) toast(`${unsent === 1 ? "1 waiting message was" : `${unsent} waiting messages were`} not sent because the session stopped. Saved on this browser.`);
+  void persistPendingSends();
+}
+
 /**
  * The session is live again: take back control this browser held when the
  * connection dropped (cas-7b31), then send what was held. A take the hub
@@ -4185,7 +4226,7 @@ function restorePairDialogPlace(place: PairDialogPlace): void {
 /** Each machine's accent, recorded when it first pairs so later pairings never re-colour it (cas-50a7). */
 const machineAccentStore = storageAccentStore((() => { try { return window.localStorage; } catch { return undefined; } })());
 
-function render(captureDraft = true): void {
+function render(captureDraft = true, stoppedSelection = false): void {
   // Every row, header and accent below reads its colour from this fleet.
   setMachineAccentFleet(machines.keys(), machineAccentStore);
   if (captureDraft) capturePairingDraft();
@@ -4319,7 +4360,7 @@ function render(captureDraft = true): void {
   const composing = (isEditableElement(active) && app.contains(active)) || inOpenPalette;
   const decision = renderDecision({
     signatureChanged: signature !== lastShellSignature,
-    composing,
+    composing: composing && !stoppedSelection,
     pairingStepChanged: pairingView !== lastPairingView,
     focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,
   });
@@ -4679,10 +4720,12 @@ function renderConversationList(): void {
     const merge = attention.find((item) => item.machineId === machine.id && item.session === session.name && !item.acknowledgedAt && item.kind === "awaiting_merge");
     const needsYou = waiting > 0 || Boolean(merge);
     // A kept catalog can still carry yesterday's positive online bit.
-    const machineOnline = connectionStates.get(machine.id)?.phase === "live" && session.machine_online !== false;
+    const machineState = connectionStates.get(machine.id);
+    const machineOnline = machineState?.phase === "live" && session.machine_online !== false;
+    const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live", conversationStatusLabel(machine.id, session.name)) ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4698,12 +4741,8 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()), allRows: rows, dismissEnded: async (row) => {
-    const session = sessions.get(row.machineId)?.find((item) => item.name === row.session);
-    const connection = connections.get(row.machineId);
-    if (!session?.started_at || !connection) throw new Error("Session identity unavailable");
-    await connection.dismissEndedSession(row.session, session.started_at);
-  } });
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -4736,6 +4775,23 @@ function renderConversationList(): void {
   refreshConnectionLog?.();
 }
 
+/** Saved words remain reachable even when their last conversation has gone. */
+function renderStoppedMessageNotices(container: HTMLElement): void {
+  const notices = selectedSession ? [] : attention.filter(item => item.kind === "stopped_message" && !item.acknowledgedAt);
+  let panel = document.querySelector<HTMLElement>("#stopped-message-notices");
+  if (!notices.length) { panel?.remove(); return; }
+  if (!panel) {
+    panel = document.createElement("section"); panel.id = "stopped-message-notices";
+    panel.setAttribute("aria-label", "Saved messages");
+  }
+  container.append(panel);
+  renderAttentionPanel(panel, notices, {
+    dismiss: acknowledgeAttentionGroup, act: performAttentionAction,
+    copy: async payload => { await navigator.clipboard.writeText(payload); toast("Details copied"); },
+  });
+  const heading = panel.querySelector("h2"); if (heading) heading.textContent = "Saved messages";
+}
+
 /**
  * cas-d043 G03: messages this browser kept during an outage survive a reload,
  * but until the machine answers there is no conversation to show them in, so
@@ -4753,7 +4809,7 @@ function keptMessagesLine(): string {
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
 function conversationHeaderLabel(machineId: string, session: string | undefined): string {
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return "Ended";
-  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live", conversationStatusLabel(machineId, session)) ?? conversationStatusLabel(machineId, session);
+  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live") ?? conversationStatusLabel(machineId, session);
 }
 
 /**

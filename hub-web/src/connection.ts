@@ -33,7 +33,7 @@ import {
 } from "./connection-state";
 import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
-import { sessionsPath } from "./worker-visibility";
+import { sessionRunning, sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
 import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
@@ -507,19 +507,29 @@ export class HubConnectionSupervisor {
       }
       this.transition("attaching", "attaching");
       const response = await this.withStageTimeout("attaching", (signal) => this.openEventStream(signal));
+      const recovering = this.connectionLost;
+      if (recovering) {
+        // After a machine outage it may have rebooted. Check the authoritative
+        // catalog before replaying any session demand or waiting messages.
+        try {
+          await this.refreshSessions(anySignal([this.eventAbort!.signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+        } catch (error) {
+          this.eventAbort?.abort();
+          throw error;
+        }
+      }
       liveSince = Date.now();
       this.resumeStage = "resolving";
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
-      const recovering = this.connectionLost;
       this.connectionLost = false;
       this.transition("live", "live");
       // Catalog freshness is independent of authentication and transport.
-      this.refreshCatalog();
+      if (!recovering) this.refreshCatalog();
       this.startHeartbeat();
       // Event-stream loss alone does not condemn terminal transports that
       // still answer. A proved machine outage already abandoned them.
-      if (recovering) this.reattachDesired("Reconnected after the network changed");
+      if (recovering) this.reattachDesired("Reconnected after checking running sessions");
       else this.ensureAttachesPending();
       // A session can become ready before this event stream. Its earlier
       // flush was fenced while the machine was attaching; wake it now, after
@@ -726,6 +736,12 @@ export class HubConnectionSupervisor {
     if (!this.catalogRequest) this.catalogRequest = (async () => {
       const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal);
       signal.throwIfAborted();
+      const running = new Set(response.sessions.filter(sessionRunning).map(session => session.name));
+      // Only a successful, authenticated catalog can retire demand. A timeout
+      // or an unreachable machine says nothing about its sessions' processes.
+      for (const name of new Set([...this.desiredSessions, ...this.endedSessions, ...response.sessions.map(session => session.name)])) {
+        this.setSessionEnded(name, !running.has(name));
+      }
       this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
       return response.sessions;
     })().finally(() => { this.catalogRequest = undefined; });
@@ -959,15 +975,7 @@ export class HubConnectionSupervisor {
     return this.acquireLease(session, force);
   }
 
-  /**
-   * End a session (cas-55a4): the hub stops its daemon the way `cas kill`
-   * does. Needs factory-manage; a refusal throws like any other request.
-   */
-  async dismissEndedSession(session: string, startedAt: string): Promise<void> {
-    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
-    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
-  }
-
+  /** Stop the daemon through the hub; requires factory-manage. */
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
   }
@@ -1335,7 +1343,7 @@ export class HubConnectionSupervisor {
     else await installationLock(this.machine.id, rotate);
   }
 
-  /** A durable end receipt stops retries; transport closure alone does not. */
+  /** A confirmed stop or catalog removal fences retries; transport closure alone does not. */
   setSessionEnded(session: string, ended: boolean): void {
     if (!ended) {
       if (this.endedSessions.delete(session) && this.endedAttachRequests.delete(session)) {
@@ -1343,6 +1351,7 @@ export class HubConnectionSupervisor {
       }
       return;
     }
+    if (this.endedSessions.has(session)) return;
     this.endedSessions.add(session);
     // A daemon replacement can be preceded by the old daemon's end receipt.
     // Keep the requested stream separate from active demand: ended sessions
@@ -1356,6 +1365,7 @@ export class HubConnectionSupervisor {
     const socket = this.sockets.get(session);
     if (socket) this.retireLegacySocket(socket);
     this.sockets.delete(session);
+    this.transitionAttach(session, "idle", "idle");
   }
 
   async attach(session: string): Promise<void> {

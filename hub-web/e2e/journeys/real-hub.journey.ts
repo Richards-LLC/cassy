@@ -796,7 +796,7 @@ test("HUB-J14 real hub supervisor-only card shows live status and keeps a dismis
     return { state: node.className, fill: getComputedStyle(node).backgroundColor, active: fill("var(--state-ok)"), idle: fill("var(--state-idle)"), off: fill("var(--state-off)") };
   });
   try {
-    fixture = await command("reset");
+    fixture = await command("reset", { endSession: true });
     const pairing = new URL(fixture!.pairUrl);
     secrets.push(fixture!.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? "");
     pairing.pathname = "/commander/";
@@ -812,7 +812,7 @@ test("HUB-J14 real hub supervisor-only card shows live status and keeps a dismis
     const list = page.getByRole("navigation", { name: "Choose a supervisor" });
     const card = list.locator(".project-card");
     await expect(card).toHaveCount(1);
-    const row = card.locator(".conversation-row").filter({ hasText: "real-hub-journey" });
+    const row = card.locator(".conversation-row").filter({ hasText: "journey-supervisor" });
     await expect(row).toHaveCount(1);
     await expect(card.locator(".project-card-summary")).toBeHidden();
     await expect(card.getByRole("button", { name: /^Filter conversations on .+, online$/ })).toBeVisible();
@@ -823,7 +823,7 @@ test("HUB-J14 real hub supervisor-only card shows live status and keeps a dismis
     expect(live.fill).not.toBe(live.off);
     await page.screenshot({ path: join(directory, "J01-live-card.png") });
 
-    await card.getByRole("button", { name: /^End session real-hub-journey on / }).click();
+    await card.getByRole("button", { name: /^End session journey-supervisor on / }).click();
     await card.getByRole("button", { name: "End session", exact: true }).click();
     await expect(row.locator(".conversation-preview")).toHaveText("Ended", { timeout: 30_000 });
     const ended = await dot(row);
@@ -831,14 +831,14 @@ test("HUB-J14 real hub supervisor-only card shows live status and keeps a dismis
     expect(ended.fill).toBe(ended.off);
     await page.screenshot({ path: join(directory, "J02-ended.png") });
 
-    await card.getByRole("button", { name: "Dismiss ended session real-hub-journey", exact: true }).click();
+    await card.getByRole("button", { name: "Dismiss ended session journey-supervisor", exact: true }).click();
     await expect(card).toHaveCount(0);
     await list.getByRole("button", { name: "Show 1 dismissed session", exact: true }).click();
     await expect(row).toHaveCount(1);
     await page.screenshot({ path: join(directory, "J03-dismissed-shown.png") });
-    await card.getByRole("button", { name: "Restore dismissed session real-hub-journey", exact: true }).click();
+    await card.getByRole("button", { name: "Restore dismissed session journey-supervisor", exact: true }).click();
     await page.reload();
-    await expect(card.getByRole("button", { name: "Dismiss ended session real-hub-journey", exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Dismiss ended session journey-supervisor", exact: true })).toBeVisible();
     await page.screenshot({ path: join(directory, "J04-restored.png") });
     passed = true;
   } finally {

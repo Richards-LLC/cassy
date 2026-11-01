@@ -1903,21 +1903,21 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         git(&checkout, &["reset", "--hard", "main"]);
         std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
         git(&checkout, &["add", "."]);
-        git(&checkout, &["commit", "-qm", "feat(cas-8488-a): task A"]);
+        git(&checkout, &["commit", "-qm", "feat(cas-8488a): task A"]);
         git(&checkout, &["push", "-q", "--force", "origin", LANE]);
         let delivered = git(&checkout, &["rev-parse", "HEAD"]);
-        let first = assigned("cas-8488-a", TaskType::Task, "main");
+        let first = assigned("cas-8488a", TaskType::Task, "main");
         f.put(&first);
         claim(&f, &first.id);
-        for id in ["cas-8488-b", "cas-8488-c"] {
+        for id in ["cas-8488b", "cas-8488c"] {
             let mut next = assigned(id, TaskType::Task, "epic/next");
             next.status = TaskStatus::Open;
             next.assignee = None;
             f.put(&next);
         }
         let queued = call(&f.supervisor, serde_json::json!({
-            "action":"update", "id":"cas-8488-b", "assignee":WORKER,
-            "task_ids":["cas-8488-b", "cas-8488-c"],
+            "action":"update", "id":"cas-8488b", "assignee":WORKER,
+            "task_ids":["cas-8488b", "cas-8488c"],
         })).await;
         assert!(!queued.contains("REJECTED"), "{queued}");
         if !park {
@@ -1955,7 +1955,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
                 .await.expect("close must reach the handoff barrier").unwrap();
             assert_eq!(f.task(&first.id).status, TaskStatus::Closed);
-            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             tokio::time::pause();
             tokio::time::advance(std::time::Duration::from_secs(56)).await;
             let error = dispatch.await.unwrap().unwrap_err();
@@ -1969,24 +1969,24 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert_eq!(f.task(&first.id).status,
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
         {
-            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             // The real close/park committed during another queue operation. Its
             // durable cursor survives the failed immediate handoff and restart.
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
-            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             drop(queue_lock);
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "other-session").await.unwrap();
-            assert_eq!(f.task("cas-8488-b").status, TaskStatus::Open);
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
-        let next = f.task("cas-8488-b");
+        let next = f.task("cas-8488b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));
         let active_branch = git(&checkout, &["branch", "--show-current"]);
-        assert_eq!(active_branch, format!("factory/{WORKER}-cas-8488-b"));
+        assert_eq!(active_branch, format!("factory/{WORKER}-cas-8488b"));
         assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), next_base);
         assert_eq!(git(repo, &["rev-parse", LANE]), delivered);
-        assert!(agents.get_lease("cas-8488-b").unwrap().is_some());
+        assert!(agents.get_lease("cas-8488b").unwrap().is_some());
         let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
         let briefs = queue.peek_all(100).unwrap();
         assert!(briefs.iter().any(|row| row.target == WORKER
@@ -2016,14 +2016,14 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let status = pending.iter().rev().find(|row| row.source == WORKER).unwrap();
         assert!(status.prompt.contains(&next.id));
         let denied = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
-            "action":"start", "id":"cas-8488-c",
+            "action":"start", "id":"cas-8488c",
         })).unwrap())).await;
         assert!(denied.is_err(), "A second task must not start beside B: {denied:?}");
         assert!(denied.unwrap_err().message.contains("unrelated"),
             "An unrelated start needs general active-work guidance");
         let _ = call(closer, close).await;
-        assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
-        assert!(f.task("cas-8488-c").assignee.is_none());
+        assert_eq!(f.task("cas-8488c").status, TaskStatus::Open);
+        assert!(f.task("cas-8488c").assignee.is_none());
         if pending_brief {
             // A crash after enqueue but before clearing starting leaves this
             // durable state; recovery must still preserve a held successor.
@@ -2049,11 +2049,11 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
         }
         let blocked = call(&f.worker, serde_json::json!({
-            "action":"update", "id":"cas-8488-b", "status":"blocked",
+            "action":"update", "id":"cas-8488b", "status":"blocked",
         })).await;
-        assert_eq!(f.task("cas-8488-b").status, TaskStatus::Blocked, "{blocked}");
+        assert_eq!(f.task("cas-8488b").status, TaskStatus::Blocked, "{blocked}");
         crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
-        assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open,
+        assert_eq!(f.task("cas-8488c").status, TaskStatus::Open,
             "An execution waiting on a blocked hold must not advance its pending queue");
         if park {
             // Follow the recovery instruction: hold unfinished B, switch back
@@ -2068,13 +2068,13 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
                 .unwrap().get("queue-session", WORKER).unwrap();
             assert_eq!(queue.current_task.as_deref(), Some(next.id.as_str()));
-            assert_eq!(queue.pending, vec!["cas-8488-c"]);
+            assert_eq!(queue.pending, vec!["cas-8488c"]);
             assert!(agents.list_active_leases().unwrap().iter()
                 .filter(|lease| lease.agent_id == "nocode-worker-session")
                 .all(|lease| lease.task_id == first.id));
             std::fs::write(checkout.join("correction.txt"), "returned task A correction\n").unwrap();
             git(&checkout, &["add", "."]);
-            git(&checkout, &["commit", "-qm", "fix(cas-8488-a): correct returned delivery"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-8488a): correct returned delivery"]);
             git(&checkout, &["push", "-q", "origin", LANE]);
             let reparked = call(&f.worker, serde_json::json!({
                 "action":"close", "id":first.id, "reason":"Corrected returned delivery",
@@ -2084,7 +2084,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
                 .unwrap().get("queue-session", WORKER).unwrap();
             assert_eq!(queue.current_task.as_deref(), Some(next.id.as_str()));
-            assert_eq!(queue.pending, vec!["cas-8488-c"]);
+            assert_eq!(queue.pending, vec!["cas-8488c"]);
             git(&checkout, &["switch", &active_branch]);
             let _ = call(&f.worker, serde_json::json!({
                 "action":"update", "id":next.id, "status":"open",
@@ -2093,7 +2093,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
                 "action":"start", "id":next.id,
             })).await;
             assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "{resumed}");
-            assert_eq!(f.task("cas-8488-c").status, TaskStatus::Open);
+            assert_eq!(f.task("cas-8488c").status, TaskStatus::Open);
         }
     }
 }

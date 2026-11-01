@@ -21729,6 +21729,47 @@ mod cas_bf890_notice_digest_tests {
     /// A new tip, blocker, operator message and verification verdict keep
     /// independent delivery, and all supplemental evidence stays readable.
     #[test]
+    fn self_merged_ready_waits_in_digest_before_or_after_enqueue() {
+        use crate::{SqliteTaskStore, TaskStore};
+        for merge_first in [false, true] {
+            let (temp, store) = store();
+            register(&store, "lead-sup", "supervisor", "active", SESSION);
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = cas_types::Task::new("cas-self-merged".into(), "delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            tasks.add(&task).unwrap();
+            let record_merge = || assert!(tasks.record_merge_admission(&task.id, &"c".repeat(40),
+                cas_types::MergeCiAdmission::Green).unwrap());
+            let ready = |head: char| format!(
+                "READY TO MERGE\n\n<cas-director-ready>{{\"task_id\":\"{}\",\"factory_tip\":\"{}\"}}</cas-director-ready>",
+                task.id, head.to_string().repeat(40),
+            );
+            if merge_first { record_merge(); }
+            let body = ready('a');
+            let id = store.enqueue_urgent_with_outcome("director", "lead-sup", &body,
+                Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
+            if !merge_first {
+                assert_eq!(selected(&store), vec![id], "an outstanding merge needs action");
+                record_merge();
+            }
+            assert!(selected(&store).is_empty(), "Cassy already merged this delivery; no supervisor wake (merge_first={merge_first})");
+            assert!(drain(&store, HookDrain::Unseen).is_empty());
+            assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![id]);
+            let retained = store.poll_named_for_recipient("lead-sup", Some(SESSION), &[id]).unwrap();
+            assert_eq!(retained[0].prompt, body, "full READY evidence remains readable");
+            assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
+            let fresh = store.enqueue_urgent_with_outcome("director", "lead-sup", &ready('b'),
+                Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
+            let blocker = store.enqueue_urgent_with_outcome("director", "lead-sup",
+                &format!("<cas-blocker worker=\"w\" task_id=\"{}\">review failed</cas-blocker>", task.id),
+                Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
+            assert_eq!(selected(&store), vec![fresh, blocker], "new deliveries and blockers keep their independent wake");
+        }
+    }
+
+    #[test]
     fn supervisor_noise_merge_episode_has_one_wake() {
         use crate::{SqliteTaskStore, TaskStore};
         let (temp, store) = store();

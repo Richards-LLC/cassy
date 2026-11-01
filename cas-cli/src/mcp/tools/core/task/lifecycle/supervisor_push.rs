@@ -2049,6 +2049,43 @@ mod tests {
     }
 
     #[test]
+    fn merged_worker_notices_wait_for_next_turn_without_a_wake() {
+        use cas_store::HookDrain;
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-merge-notices")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents.register(&agent_in_session(
+            "merge-worker-id", "merge-worker", AgentRole::Worker, "sess-merge-notices",
+        )).unwrap();
+        let mut task = Task::new("cas-merge-notice".into(), "merged delivery".into());
+        task.assignee = Some("merge-worker".into());
+        let parked = queue_merged_lane_parked_notice(temp.path(), &task, "delivery-tip", "merge-tip")
+            .unwrap().unwrap();
+        let closed = queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap().unwrap();
+        assert_eq!(queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap(), Some(closed));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap().is_empty(),
+            "merged/parked facts must never reach worker wake transport");
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::Unseen, 10, 10000).unwrap().rows.is_empty());
+        let digest = queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+        assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
+        for row in &digest {
+            assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),
+                "the next turn must retain task and merge evidence");
+        }
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows.is_empty(), "digest is shown once");
+        let rejected = queue_rejected_merge_reopen_notice(temp.path(), &task, "verdict", "fix the regression")
+            .unwrap().unwrap();
+        assert_eq!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![rejected], "findings still wake the worker");
+    }
+
+    #[test]
     fn approved_verification_wakes_worker_once_to_retry_close_gh_1036() {
         let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wake")]);
         let temp = TempDir::new().unwrap();

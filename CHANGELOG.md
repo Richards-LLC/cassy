@@ -17,6 +17,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   bad news or a decision, a language-tagged block for commands and a table for
   a comparison, with a worked example and what the terminal pane shows.
 
+### Fixed — Commander diagrams
+
+- **A flowchart shows from start to finish** — Was: A diagram taller than 288 px
+  was cut mid-shape with no cue, including the reply guidance's own example, so
+  the end of the flow stayed hidden until the reader found Expand. → Now: A
+  rendered diagram shows whole at phone and desktop widths, and Expand appears
+  only on its source view, where long text can still overflow.
+
 ### Fixed — Commander diffs
 
 - **A hand-written diff shows its changes in color** — Was: A `diff` fence

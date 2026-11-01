@@ -1398,33 +1398,6 @@ fn worker_credential_env_round_trip_and_shared_policy_cas_82bc() {
         .unwrap().worker_credential_env.is_empty());
 }
 
-/// cas-4971: Jev was removed (cas-4971). A config file written by an older
-/// release with a `[jev]` section must still load, keep its other settings,
-/// and lose the retired section on the next save.
-#[test]
-fn retired_jev_section_loads_and_is_dropped_on_save_cas_4971() {
-    let temp = TempDir::new().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "[jev]\nenabled = true\nmodel = \"jev-1.13.0\"\nkey_file = \"/tmp/key\"\n\n\
-         [jev.gate]\nshadow = true\n\n[qa]\nuser_facing_labels = [\"mobile\"]\n",
-    )
-    .unwrap();
-
-    let loaded = Config::load(temp.path()).expect("a config with [jev] still loads");
-    assert!(loaded.retired_jev.is_some(), "the retired section is recognised");
-    assert_eq!(loaded.qa().user_facing_labels, vec!["mobile"]);
-    assert_eq!(loaded.get("jev.enabled"), None, "no jev.* key is readable");
-    assert!(loaded.list().iter().all(|(key, _)| !key.starts_with("jev.")));
-
-    loaded.save(temp.path()).unwrap();
-    let saved = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(!saved.contains("jev"), "the retired section is not written back: {saved}");
-    let reloaded = Config::load(temp.path()).unwrap();
-    assert!(reloaded.retired_jev.is_none());
-    assert_eq!(reloaded.qa().user_facing_labels, vec!["mobile"]);
-}
-
 /// cas-fd0a: an older config carrying the retired post-merge sweep keys
 /// still loads through `Config::load`, keeps its other settings, refuses the
 /// retired keys for get/set, and loses them on the next save.

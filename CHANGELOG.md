@@ -120,6 +120,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Published receipts feed the friction ledger** — Was: Release events were recorded only by the retired train. → Now: The existing published-receipt step records actual landing and publication timings with current tag history. A recording failure warns and preserves the verified receipt and draft.
 
+### Removed — Configuration
+
+- **Retired integration config shim** — Was: An obsolete integration table still
+  triggered deprecation notices and update rewrites. → Now: Old copies load
+  silently as unknown config, and generic retirement cleanup keeps its existing
+  supported targets.
+
 ## [3.93.0] - 2026-10-31
 
 ### Fixed — Factory recovery

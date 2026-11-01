@@ -211,25 +211,45 @@ fn factory_owner_from_old_hostname_can_reregister_cas_b815() {
         let id = format!("renamed-host-owner-{live}");
         let mut previous = Agent::new(id.clone(), id.clone());
         previous.role = AgentRole::Supervisor;
-        previous.status = if live { AgentStatus::Active } else { AgentStatus::Stale };
+        previous.status = if live {
+            AgentStatus::Active
+        } else {
+            AgentStatus::Stale
+        };
         previous.factory_session = Some("renamed-host-factory".into());
         previous.machine_id = Some("older-hostname.invalid".into());
-        previous.pid = Some(if live { std::process::id() } else { i32::MAX as u32 });
+        previous.pid = Some(if live {
+            std::process::id()
+        } else {
+            i32::MAX as u32
+        });
         if live {
             stamp_pid_fingerprint(&mut previous, std::process::id());
         }
         agents.register(&previous).unwrap();
         if live {
-            assert!(ensure_factory_process_owner(
-                agents.as_ref(), &id, Some(i32::MAX as u32), None,
-            ).is_err(), "a foreign process still cannot claim the renamed live owner");
+            assert!(
+                ensure_factory_process_owner(agents.as_ref(), &id, Some(i32::MAX as u32), None,)
+                    .is_err(),
+                "a foreign process still cannot claim the renamed live owner"
+            );
         }
         let (current, _) = register_session_start_agent(
-            &root, agents.as_ref(), &id, Some(&id), Some("supervisor"), std::process::id(), None,
-        ).expect("the matching live owner or an exited predecessor can refresh its hostname");
+            &root,
+            agents.as_ref(),
+            &id,
+            Some(&id),
+            Some("supervisor"),
+            std::process::id(),
+            None,
+        )
+        .expect("the matching live owner or an exited predecessor can refresh its hostname");
         assert_eq!(current.id, id);
         assert_eq!(current.pid, Some(std::process::id()));
-        assert_eq!(current.machine_id, Some(Agent::get_or_generate_machine_id()));
+        assert_eq!(
+            current.machine_id,
+            Some(Agent::get_or_generate_machine_id())
+        );
 
         // A reconnecting MCP must authenticate the same owner before treating
         // its old hostname as another machine, and refresh the persisted name.
@@ -239,7 +259,10 @@ fn factory_owner_from_old_hostname_can_reregister_cas_b815() {
         let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
         core.register_agent(id.clone(), id.clone(), None)
             .expect("MCP reconnect under the live owner survives a hostname change");
-        assert_eq!(agents.get(&id).unwrap().machine_id, Some(Agent::get_or_generate_machine_id()));
+        assert_eq!(
+            agents.get(&id).unwrap().machine_id,
+            Some(Agent::get_or_generate_machine_id())
+        );
     }
 }
 

@@ -86,7 +86,9 @@ nested registrations before its next heartbeat, preserving its durable session.
 Tool permission hooks always retain their policy checks, even for a nested
 caller. A live fingerprinted MCP child can prove its current parent when an
 older registration lacks a parent fingerprint; an exited registration remains
-replaceable after the host's name changes.
+replaceable after the host's name changes. A matching live owner authenticates
+before the hostname comparison, so its hooks and reconnecting MCP can refresh
+the stored hostname.
 
 Worker liveness uses concrete turn and process evidence. While a recycled
 worker's transcript is unresolved, its own recent activity or outbound message

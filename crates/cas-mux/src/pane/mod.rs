@@ -452,6 +452,7 @@ impl Pane {
             factory_session,
             active_workers,
             None,
+            None,
         )
     }
 
@@ -474,6 +475,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
         resume_session: Option<&str>,
+        startup_prompt: Option<&str>,
     ) -> Result<Self> {
         cli.backend().prepare_workdir(&cwd, config_dir)?;
         cli.backend().prepare_worker_catalog(&cwd);
@@ -492,6 +494,9 @@ impl Pane {
             teams,
             active_workers,
         );
+        if let Some(prompt) = startup_prompt {
+            config.set_worker_startup_prompt(cli.backend().name(), prompt);
+        }
         if let Some(id) = resume_session {
             config.resume_worker_session(cli.backend().name(), id)?;
         }

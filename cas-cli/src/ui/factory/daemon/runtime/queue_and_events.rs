@@ -1052,8 +1052,19 @@ fn deliver_worker_task_brief(
     task_title: &str,
     worker_cli: cas_mux::SupervisorCli,
 ) -> anyhow::Result<i64> {
-    let queue = open_prompt_queue_store(cas_dir)?;
-    let summary = format!("Assigned task: {task_id}");
+    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli);
+    let id = crate::task_assignment::enqueue_spawn_message(
+        cas_dir, factory_session, worker_name, task_id, &message,
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Compose before launching: the first model turn has startup, task and brief.
+pub(crate) fn worker_spawn_prompt(
+    cas_dir: &std::path::Path, worker_name: &str, task_id: &str,
+    task_title: &str, worker_cli: cas_mux::SupervisorCli,
+) -> String {
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
     let mut message = format!(
         "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
@@ -1089,15 +1100,17 @@ fn deliver_worker_task_brief(
         message.push_str("\n\n");
         message.push_str(&instruction);
     }
-    let id = queue.enqueue_with_summary(
-        "director",
-        worker_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
-    super::delivery::wake_daemon_after_enqueue(cas_dir);
-    Ok(id)
+    let startup = format!(
+        "Cassy worker startup: run {worker_prefix}coordination action=whoami. Your session is automatically registered; do not call session_start.\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required.\n"
+    );
+    let message = if worker_cli == cas_mux::SupervisorCli::Claude {
+        // Claude consumes its role contract in this initial prompt; the other
+        // harnesses already carry it in their native developer/rules surface.
+        format!("{}\n\n{startup}\n{message}", cas_mux::claude_worker_contract(worker_name))
+    } else {
+        format!("{startup}\n{message}")
+    };
+    crate::prompt_revalidation::attach_assignment_envelope(&message, Some(task_id))
 }
 
 /// Surface stale output-path instructions before a worker acts on them. This is

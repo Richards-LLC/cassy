@@ -3155,6 +3155,26 @@ impl FactoryApp {
         // Explicit spec overrides session default so the intro prompt matches the actual harness.
         let effective_cli = spec.as_ref().map(|s| s.cli).unwrap_or(self.worker_cli);
 
+        // Bind before launch so the first turn can carry the actual assignment.
+        // Store reads stay here; mux/pty only receive the composed text.
+        let startup = task_id.as_deref().and_then(|id| {
+            if !assign_task_to_new_worker(self.cas_dir(), id, &worker_name) {
+                return None;
+            }
+            let task = open_task_store_cached(self.cas_dir()).ok()?.get(id).ok()?;
+            if !matches!(task.status, cas_types::TaskStatus::Open | cas_types::TaskStatus::InProgress) {
+                return None;
+            }
+            let mut prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
+                self.cas_dir(), &worker_name, id, &task.title, effective_cli,
+            );
+            if let Some(instruction) = crate::worktree::node_modules_setup_instruction(&cwd) {
+                prompt.push_str(&format!("\n\n{instruction}"));
+            }
+            Some(prompt)
+        });
+        self.mux.set_worker_startup_prompt(&worker_name, startup.clone());
+
         if let Err(e) = self.mux.add_worker(
             &worker_name,
             cwd.clone(),
@@ -3197,26 +3217,28 @@ impl FactoryApp {
         // Track the worker name
         self.worker_names.push(worker_name.clone());
 
-        // cas-6913 / cas-7a94: pre-assign (or confirm early-assign) now that
-        // the worker name is final and the PTY is up. Best-effort — a failure
-        // here must not unwind the spawn.
-        if let Some(ref task_id) = task_id {
-            let ok = assign_task_to_new_worker(self.cas_dir(), task_id, &worker_name);
-            if !ok {
-                tracing::warn!(
-                    task_id = %task_id,
-                    worker = %worker_name,
-                    "cas-7a94: finish_worker_spawn pre-assign did not stick — \
-                     worker boots without the requested task"
-                );
+        if let (Some(prompt), Some(id), Some(session)) =
+            (startup.as_deref(), task_id.as_deref(), self.factory_session())
+        {
+            // The PTY launch handed off this exact initial argument. This is
+            // transport evidence only, never a claim that the model acted.
+            let receipt = crate::task_assignment::enqueue_spawn_message(
+                self.cas_dir(), session, &worker_name, id, prompt,
+            ).and_then(|row| {
+                let queue = crate::store::open_prompt_queue_store(self.cas_dir())?;
+                queue.record_recipient_transport_delivered(row, &worker_name)?;
+                queue.mark_transport_delivered(row)?;
+                Ok(())
+            });
+            if let Err(error) = receipt {
+                tracing::warn!(%error, %worker_name, "startup handoff receipt failed; registration will repair assignment");
             }
+            self.note_assignment_briefed(id, &worker_name);
+        } else {
+            crate::ui::factory::app::queue_codex_worker_intro_prompt(
+                self.cas_dir(), &worker_name, effective_cli,
+            );
         }
-
-        crate::ui::factory::app::queue_codex_worker_intro_prompt(
-            self.cas_dir(),
-            &worker_name,
-            effective_cli,
-        );
 
         // Update event detector so it recognizes this worker's events
         self.event_detector.add_worker(worker_name.clone());

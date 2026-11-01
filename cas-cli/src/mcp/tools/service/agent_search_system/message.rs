@@ -2101,6 +2101,23 @@ impl CasService {
             == Some(crate::prompt_revalidation::WorkerActionKind::Ready))
         .then(|| message.clone());
         if let Some(kind) = worker_action_kind {
+            // Read current ownership independently of a report's task_id: the
+            // report can concern a parked predecessor while its successor runs.
+            let tasks = crate::store::open_task_store_local(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            let mut identities = vec![display_name.as_str()];
+            if let Some(agent) = agent_from_store.as_ref() {
+                identities.push(agent.id.as_str());
+            }
+            let active = tasks.ids_by_assignees_and_statuses(
+                &identities, &[cas_types::TaskStatus::InProgress],
+            ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            if !active.is_empty() {
+                message.push_str(&format!(
+                    "\n\n[CAS current assignment: {} is InProgress for {display_name}; the worker is not unassigned.]",
+                    active.join(", "),
+                ));
+            }
             message = crate::prompt_revalidation::attach_worker_action_envelope(
                 &message,
                 kind,

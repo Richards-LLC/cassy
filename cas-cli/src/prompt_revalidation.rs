@@ -51,6 +51,18 @@ pub(crate) fn attach_assignment_envelope(message: &str, task_id: Option<&str>) -
     format!("<cas-assignment{task_attribute}/>\n{message}")
 }
 
+/// Queue advancement has already started the task. This server-owned intent
+/// asks the worker to continue it, rather than replay an obsolete start prompt.
+pub(crate) fn attach_queue_continuation(message: &str, task_id: &str) -> String {
+    format!("<cas-assignment task_id=\"{}\" intent=\"continue\"/>\n{message}",
+        xml_attribute_value(task_id))
+}
+
+fn is_queue_continuation(prompt: &str) -> bool {
+    prompt.starts_with(ASSIGNMENT_ENVELOPE_OPEN)
+        && prompt.find('>').and_then(|end| xml_attribute(&prompt[..end], "intent")) == Some("continue")
+}
+
 /// Caller text cannot supply a durable server assignment binding. Remove
 /// leading lookalikes at ingress before any server-authored framing is added.
 pub(crate) fn strip_assignment_envelopes(mut message: &str) -> &str {
@@ -158,6 +170,9 @@ pub(crate) fn assignment_targets_started_task(
     assignee: Option<&str>,
     recipient: &str,
 ) -> Option<String> {
+    if status == TaskStatus::InProgress && is_queue_continuation(prompt) {
+        return None;
+    }
     matches!(
         status,
         TaskStatus::InProgress
@@ -1751,6 +1766,15 @@ mod cas_8aee_assignment_delivery_tests {
                 "a stale assignment must be identified at the final delivery boundary for {status}"
             );
         }
+        let continuation = super::attach_queue_continuation(&prompt, "cas-7c1a");
+        for status in [TaskStatus::Open, TaskStatus::InProgress, TaskStatus::Blocked,
+            TaskStatus::AwaitingMerge, TaskStatus::Closed, TaskStatus::Cancelled] {
+            let stale = assignment_stale_task(&continuation, status, Some("worker-1"), "worker-1");
+            assert_eq!(stale.is_some(), !matches!(status, TaskStatus::Open | TaskStatus::InProgress),
+                "continuation may bypass only the already-started suppression: {status}");
+        }
+        // Caller-authored continuation intent is stripped before server binding.
+        assert_eq!(super::strip_assignment_envelopes(&continuation), prompt);
         assert_eq!(
             assignment_stale_task(&prompt, TaskStatus::Open, Some("worker-1"), "worker-1"),
             None,

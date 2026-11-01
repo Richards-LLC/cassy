@@ -1383,6 +1383,28 @@ impl PtyConfig {
     ///   so workers in clones can access the main repo's CAS state.
     /// * `supervisor_name` - For workers, the name of their supervisor (enables `target: supervisor`)
     #[allow(clippy::too_many_arguments)]
+    /// Replace the generic startup turn with the assignment prepared by CAS.
+    /// Call only on a worker launch config, before applying a resume selector.
+    pub fn set_worker_startup_prompt(&mut self, backend: &str, prompt: &str) {
+        match backend {
+            "codex" => {
+                // Worker constructors always put the startup prompt last.
+                if let Some(initial) = self.args.last_mut() {
+                    *initial = prompt.to_owned();
+                }
+            }
+            "opencode" => {
+                if let Some(index) = self.args.iter().position(|arg| arg == "--prompt") {
+                    self.args[index + 1] = prompt.to_owned();
+                }
+            }
+            // Both CLIs accept an initial positional prompt. Claude's canonical
+            // worker contract is included by the CAS message composer.
+            "claude" | "grok" => self.args.push(prompt.to_owned()),
+            _ => unreachable!("unsupported worker harness"),
+        }
+    }
+
     /// Continue a copied worker transcript while retaining the launch recipe.
     pub fn resume_worker_session(&mut self, backend: &str, id: &str) -> Result<()> {
         match backend {
@@ -3557,15 +3579,18 @@ mod tests {
             } else {
                 "codex"
             };
+            let assignment = "Assigned task cas-abcd";
+            config.set_worker_startup_prompt(backend, assignment);
             config
                 .resume_worker_session(backend, "old-session")
                 .unwrap();
             if backend == "codex" {
-                assert_eq!(config.args.last().map(String::as_str), Some("startup"));
+                assert_eq!(config.args.last().map(String::as_str), Some(assignment));
                 assert_eq!(config.args[config.args.len() - 2], "old-session");
                 let index = if command == "nice" { 3 } else { 0 };
                 assert_eq!(config.args[index], "resume");
             } else {
+                assert_eq!(config.args.last().map(String::as_str), Some(assignment));
                 assert!(!config.args.iter().any(|a| a == "--session-id"));
                 assert_eq!(&config.args[..2], &["--resume", "old-session"]);
                 assert_eq!(config.env[0].1, "old-session");

@@ -33,14 +33,14 @@ pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
 /// Queue the assignment once for the current live worker registration. This
 /// does not depend on the task appearing in the director's focused snapshot.
 pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>> {
-    enqueue_with_queue_occurrence(cas_dir, task, None)
+    enqueue_with_queue_occurrence(cas_dir, task, None, false)
 }
 
-pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64) -> crate::Result<Option<i64>> {
-    enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence))
+pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initial: bool) -> crate::Result<Option<i64>> {
+    enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence), initial)
 }
 
-fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>) -> crate::Result<Option<i64>> {
+fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool) -> crate::Result<Option<i64>> {
     let prompts = crate::config::Config::load(cas_dir)?
         .orchestration()
         .auto_prompt;
@@ -107,9 +107,12 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
             .map(|start| start.branch.as_str()).unwrap_or("see task details");
         text = format!("You have been assigned a new task:\nTask ID: {}\nTitle: {}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.\n\nView full details: {prefix}task action=show id={}\n\n{}\n\nWhile working, post progress notes with {prefix}task action=notes id={}.", task.id, task.title, task.id, WORKER_ASSIGNMENT_TEST_POLICY, task.id);
     }
+    if occurrence.is_some() && task.status == TaskStatus::InProgress {
+        text = crate::prompt_revalidation::attach_queue_continuation(&text, &task.id);
+    }
     let key = match occurrence {
-        Some(occurrence) => format!("task-queue-assignment:{}:{}:{occurrence}", task.id, worker.id),
-        None => format!("task-assignment:{}:{}", task.id, worker.id),
+        Some(occurrence) if !initial => format!("task-queue-assignment:{}:{}:{occurrence}", task.id, worker.id),
+        _ => assignment_key(session, &worker.name, &task.id),
     };
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
     let result = queue.enqueue_idempotent(
@@ -131,4 +134,25 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         cas_store::EnqueueIdempotentResult::Created(id)
         | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
     }))
+}
+
+/// Startup, registration repair and ordinary assignment share one durable row.
+/// A queue successor uses its own occurrence key, so a later continuation is
+/// never mistaken for the original launch instruction.
+pub(crate) fn assignment_key(session: &str, worker: &str, task: &str) -> String {
+    format!("task-assignment:{session}:{worker}:{task}")
+}
+
+pub(crate) fn enqueue_spawn_message(
+    cas_dir: &Path, session: &str, worker: &str, task: &str, message: &str,
+) -> crate::Result<i64> {
+    let result = crate::store::open_prompt_queue_store(cas_dir)?.enqueue_idempotent(
+        "task-assignment", worker, message, Some(session),
+        Some(&format!("Assigned task: {task}")), Some(cas_store::NotificationPriority::High),
+        &assignment_key(session, worker, task), Some(&cas_store::QueueOrigin::Daemon),
+    )?;
+    Ok(match result {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    })
 }

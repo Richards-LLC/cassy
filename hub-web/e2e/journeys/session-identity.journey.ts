@@ -488,7 +488,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
     await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
     await filters.getByRole("button", { name: "All", exact: true }).click();
-    await expect(list.locator(".conversation-row")).toHaveCount(3);
+    // Studio's two rows, pulse-card's live row and the restored old-demo row.
+    await expect(list.locator(".conversation-row")).toHaveCount(4);
     // A kept catalog's positive online bit must yield to a lost connection.
     await hub.down("atlas", { sockets: "close" });
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, offline", exact: true })).toBeVisible();

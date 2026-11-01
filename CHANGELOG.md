@@ -11,6 +11,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep established session navigation** — Session listing keeps its 3.95 behavior while this release ships message delivery, reply recovery, supervisor identity, onboarding preservation and hub-route fixes.
 
+### Fixed — Release review
+
+- **Preserve local access and authenticated input** — Was: missing Tailscale could
+  stop a service's loopback hub, and nested read-only lookups could borrow a
+  parent's identity. → Now: Auto services retain local access with a warning,
+  read-only identity checks enforce process ownership, and Commander holds
+  non-Claude input during confirmation dialogs and pending tool calls.
+- **Explain empty feedback and route recovery** — Was: empty feedback implied
+  unknown measurements and a refused foreign Serve route offered no recovery.
+  → Now: empty feedback says none recorded unless measurements were excluded;
+  route conflicts name an explicit port-scoped removal for operator review.
+
 ### Fixed — Commander phone header
 
 - **Delivery warnings keep actions visible** — Every phone header action stays inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
@@ -42,8 +54,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Service startup restores the tailnet route after reboot** — Was: A Linux hub
   could settle on loopback after Tailscale was briefly unavailable, leaving Serve
   pointed at a dead shim. → Now: Both service managers retry publication and
-  restart failed starts; status retains the failure cause and systemd records
-  errors in its journal.
+  restart transient failed starts; missing or signed-out Tailscale keeps Auto
+  services available on loopback with the cause in status and logs.
 
 ### Fixed — Friction ledger
 
@@ -59,10 +71,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   marked the private candidate checkout dirty and failed version verification.
   → Now: Verified generated assets preserve the clean source revision; changes
   to other tracked inputs and mismatched served assets still refuse publication.
-
-### Fixed — Commander
-
-- **Stopped conversations leave Commander automatically** — Ended and crashed sessions disappear without dismissal or attach retries. Machine outages keep running conversations available, and waiting messages to stopped sessions are saved as not sent.
 
 ### Fixed — Factory
 

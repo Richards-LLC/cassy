@@ -67,6 +67,12 @@ struct TailscaleTeardownReceipt {
     recorded_at: String,
 }
 
+/// Auto transport cannot publish until the operator installs or signs in.
+/// This is distinct from a daemon outage, which service managers retry.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct PublicationUnavailable(String);
+
 #[derive(Debug, Clone)]
 pub struct TailscaleServeManager {
     executable: OsString,
@@ -76,6 +82,10 @@ pub struct TailscaleServeManager {
 }
 
 impl TailscaleServeManager {
+    pub(crate) fn publication_needs_setup(error: &anyhow::Error) -> bool {
+        error.is::<PublicationUnavailable>()
+    }
+
     pub(crate) fn successful_ensure_budget() -> Duration {
         COMMAND_TIMEOUT * MAX_SUCCESSFUL_ENSURE_COMMANDS
     }
@@ -145,6 +155,7 @@ impl TailscaleServeManager {
             match manager.ensure_with_prior_target(local_port, https_port, prior_target.clone()) {
                 Ok(receipt) => return Ok(receipt),
                 Err(error) => {
+                    if error.is::<PublicationUnavailable>() { return Err(error); }
                     let Some(delay) = delays.next().map(Duration::from_secs)
                         .filter(|delay| deadline.remaining() > *delay)
                     else { return Err(error); };
@@ -168,8 +179,20 @@ impl TailscaleServeManager {
         prior_target: Option<(u16, String)>,
     ) -> Result<TailscaleServeReceipt> {
         let local_target = format!("http://127.0.0.1:{local_port}");
+        if !self.cli_available() {
+            return Err(PublicationUnavailable(format!(
+                "Tailscale CLI unavailable; install Tailscale to publish the route\nCLI: {}\nSocket: {}",
+                self.executable_display(), self.socket_display(),
+            )).into());
+        }
         let status = self.status()?;
         if let Some(issue) = self.login_issue_for(&status) {
+            if matches!(status.get("BackendState").and_then(Value::as_str),
+                Some("NeedsLogin" | "NeedsMachineAuth")) {
+                return Err(PublicationUnavailable(format!(
+                    "{issue}\nSign in to the selected daemon, then run `cas hub restart`."
+                )).into());
+            }
             anyhow::bail!("{issue}");
         }
         let dns_name = status

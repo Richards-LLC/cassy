@@ -10,12 +10,18 @@
 
 The existing `--no-tailscale-serve` flag remains available; `--loopback` is its
 discoverable alias. An explicit `TAILSCALE_SOCKET` follows both service and
-detached launches. A missing CLI retains the existing loopback fallback;
-an installed CLI that is signed out or cannot be probed refuses `hub start`.
+detached launches. In Auto mode a missing CLI or signed-out node keeps the
+hub on loopback with the cause in status and logs. Required mode still refuses
+publication failure and offers an explicit loopback alternative.
 
-The service retries startup publication within one shared deadline. If those
-attempts fail, launchd supervises the next attempt; `hub stop` removes the
-bootstrap job before stopping any remaining process.
+Both launchd and systemd service starts retry transient daemon/publication
+failures within one shared deadline, then restart a failed process. Missing
+CLI and sign-in requirements do not consume that retry budget. `hub stop`
+removes the service job before stopping any remaining process.
+
+Foreign Serve mappings remain untouched, including unproven legacy dead
+shims. The refusal names the selected CLI/socket and port-scoped removal;
+the operator must inspect ownership before explicitly clearing that port.
 
 Required-mode start and restart refusals keep the signed-in-socket retry on its
 own line and the explicit loopback alternative on the next line. Each command

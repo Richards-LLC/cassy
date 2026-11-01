@@ -451,9 +451,11 @@ fn host_tailscale_default() -> Result<bool> {
     Ok(host_transport_mode()?.publishes())
 }
 
-// Failed publication must trigger launchd KeepAlive or systemd Restart=on-failure.
-fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool) -> bool {
-    mode.publishes() && (service_startup || mode == HubTransportMode::Required)
+// Transient service failures trigger launchd/systemd restart; Auto retains
+// local access when publication needs operator setup instead of daemon recovery.
+fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool, error: &anyhow::Error) -> bool {
+    mode == HubTransportMode::Required || (mode.publishes() && service_startup
+        && !TailscaleServeManager::publication_needs_setup(error))
 }
 
 fn tailscale_policy(explicit_on: bool, explicit_off: bool, configured: bool) -> bool {
@@ -2195,7 +2197,7 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
-                Err(error) if publication_failure_is_fatal(transport_mode, service_startup) => {
+                Err(error) if publication_failure_is_fatal(transport_mode, service_startup, &error) => {
                     if service_startup {
                         // Keep the cause observable between manager restarts. The
                         // next start captures old ownership before replacing this
@@ -3810,8 +3812,7 @@ pub(crate) fn hub_transport_report(
             receipt.is_some() || record.is_some_and(tailscale_enabled),
         );
     }
-    if receipt.is_some() || (manager.cli_available()
-        && record.is_some_and(|record| record.transport_warning.is_some())) {
+    if receipt.is_some() {
         let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
         if let Some(issue) = issue {
             return HubTransportReport::fail_with_remedy(issue, None, None,
@@ -3830,9 +3831,6 @@ pub(crate) fn hub_transport_report(
             );
         }
         if let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
-            if record.is_some_and(|record| record.launched_by.as_deref() == Some("service")) {
-                return HubTransportReport::supervised_unavailable(warning);
-            }
             if manager.is_logged_in().unwrap_or(false) {
                 return HubTransportReport::ok(format!(
                     "hub is loopback-only; Tailscale is signed in but Serve publication failed: {warning}; run `cas hub restart --tailscale-serve` to publish the route"
@@ -4739,12 +4737,12 @@ mod tests {
 
     #[test]
     fn auto_service_publication_failure_is_fatal_cas_3f03e() {
-        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
+        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true, &anyhow::anyhow!("daemon unavailable")),
             "the service manager must retry Auto publication after bounded startup retries");
-        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
+        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false, &anyhow::anyhow!("daemon unavailable")),
             "interactive Auto may retain loopback with a visible warning");
-        assert!(publication_failure_is_fatal(HubTransportMode::Required, false));
-        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true));
+        assert!(publication_failure_is_fatal(HubTransportMode::Required, false, &anyhow::anyhow!("daemon unavailable")));
+        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true, &anyhow::anyhow!("daemon unavailable")));
     }
 
     #[test]

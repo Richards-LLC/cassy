@@ -8,7 +8,8 @@
 | Machine output | `hub status --json` retains its single document, including `record.transport_warning` and `tailscale_serve.message`; service errors go to stderr. |
 | Omitted | Raw Tailscale stderr remains private; the existing error classifier supplies safe causes. Retry timing stays in the service log. |
 
-Both launchd and systemd retry a service start that exhausts the bounded
+Auto keeps loopback available when the CLI is missing or sign-in is required.
+Both launchd and systemd retry a transient service start that exhausts the bounded
 publication attempts. The failed process record keeps the cause observable
 between restarts. Successful startup clears it. On Linux the service's stderr
 reaches the journal; startup and exit diagnostics also remain in hub.log.

@@ -21758,6 +21758,7 @@ mod cas_bf890_notice_digest_tests {
             assert!(drain(&store, HookDrain::Unseen).is_empty());
             assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![id]);
             let retained = store.poll_named_for_recipient("lead-sup", Some(SESSION), &[id]).unwrap();
+            // pin: digest routing preserves the complete queued READY envelope for explicit reads.
             assert_eq!(retained[0].prompt, body, "full READY evidence remains readable");
             assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
             let fresh = store.enqueue_urgent_with_outcome("director", "lead-sup", &ready('b'),

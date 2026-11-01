@@ -6,7 +6,8 @@ metadata:
 # Close Gate — Delivery
 
 Read at delivery. Review owns coding and test-quality judgments; this branch
-collects evidence and delivers the assigned task.
+collects evidence and delivers the assigned task. Task start lists what close
+will check. A refused park lists every failed gate: fix them all, retry once.
 
 ## Commit and push
 

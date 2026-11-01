@@ -11,6 +11,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **One alert per blocker episode** — Director blocked and idle signals share the durable task lifecycle queue, stay quiet during owned verification waits, and escalate once after the deadline. Native background jobs keep a worker busy until their completion notice.
 
+### Changed — Close gates
+
+- **Workers see close requirements at start and every park failure at once** — Was:
+  A worker learned each close requirement from a refusal, one per attempt, so
+  only 32% of tasks closed on the first attempt. → Now: The start context lists
+  what close will check for this task and project, and a refused park reports
+  proof claims, upkeep, ledger, QA evidence, unpushed tip, changelog, focused
+  proof and proof scope together in one reply.
 
 ### Fixed — Supervisor replies
 

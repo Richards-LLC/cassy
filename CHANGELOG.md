@@ -15,6 +15,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   restart failed starts; status retains the failure cause and systemd records
   errors in its journal.
 
+### Fixed — Friction ledger
+
+- **Release feedback excludes lifetime totals** — Was: Backfill dated all-time
+  retrieval counts as new measurements, inflating release evidence and allowing
+  repeat snapshots on later days. → Now: Backfill leaves feature measurements to
+  session end; reports exclude historical measurements without session
+  attribution and disclose their count while retaining scoped feedback.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

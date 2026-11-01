@@ -390,6 +390,19 @@ async fn start_lists_close_requirements_and_park_reports_every_failure() {
         assert!(refused.contains(gate), "{gate}: {refused}");
     }
     assert_eq!(f.task().status, TaskStatus::InProgress, "a refused delivery stays with its worker");
+
+    // A local-only tip joins the list, and its receipts are judged at that tip,
+    // but it can never move the recorded delivery anchor.
+    let anchor = f.task().deliverables.factory_branch_anchor;
+    std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 3; }\n").unwrap();
+    git(&f.worker_path, &["commit", "-qam", &format!("fix({ID}): local only")]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let unpushed = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    for expected in ["is not on origin", "FOCUSED PROOF REQUIRED", &tip[..12]] {
+        assert!(unpushed.contains(expected), "{expected}: {unpushed}");
+    }
+    assert_eq!(f.task().deliverables.factory_branch_anchor, anchor);
+    assert_eq!(f.task().status, TaskStatus::InProgress);
 }
 
 #[tokio::test]

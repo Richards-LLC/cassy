@@ -5,7 +5,7 @@ import { showConversationList } from "./responsive-goals";
 
 for (const replacement of [false, true]) {
   test(`HUB-J14 held messages and drafts ${replacement ? "do not cross a replacement birth" : "survive a resume of the same birth"}`, journeyPart, async ({ page, journey }) => {
-    const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "birth-test", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+    const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "birth-test", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
     const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
     await journey.open(); await showConversationList(page);
     await page.locator(".conversation-row").click();
@@ -39,7 +39,7 @@ for (const replacement of [false, true]) {
 }
 
 test("HUB-J14 a stopped catalog before journal restoration still exposes the saved message", journeyPart, async ({ page, journey }) => {
-  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "restore-test", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "restore-test", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
   const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
   await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");

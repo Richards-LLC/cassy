@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Commander keeps running sessions visible through catalog failures and dormant supervisor reads. Stopped-session evidence is explicit, and held messages and drafts stay with their original session start rather than following a replacement with the same name.
+
 ### Fixed — Commander hub
 
 - **Slow boot retries keep their route ownership** — A failed service start

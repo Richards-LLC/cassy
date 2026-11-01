@@ -16,7 +16,7 @@ import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { pendingSessionLabel, sessionRunning, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, reconcileCatalog, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
@@ -711,12 +711,9 @@ function setDormantRevealed(next: boolean): void {
 
 function visibleSessions(machineId: string): HubSession[] {
   const fresh = Date.now() < (catalogExpiresAt.get(machineId) ?? Infinity);
-  // cas-6c7a: a machine that is reconnecting (or unsteady) can't send a fresh
-  // catalog, so past its freshness the last one stays listed as last known
-  // beside the open conversation, never an empty list. A live machine's
-  // catalog still expires, and one it sends empty still empties the list.
-  const state = connectionStates.get(machineId);
-  const kept = !fresh && !(state?.phase === "live" && !state.degraded);
+  // A healthy transport can outlive catalog failures too. Expiry means
+  // last-known state; only positive process evidence removes a running row.
+  const kept = !fresh;
   // cas-9846: until the machine answers, its cached catalog is shown as last known.
   const listed = visibleCatalog(sessions.get(machineId) ?? [], fresh || kept, revealDormant);
   return kept ? listed.map((session) => session.unreachable ? session : { ...session, stale: true }) : listed;
@@ -997,7 +994,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       }
     },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
-    onSessions: (items, freshnessThresholdSecs) => {
+    onSessions: (listed, freshnessThresholdSecs, stopped) => {
+      const items = reconcileCatalog(sessions.get(machine.id) ?? [], listed, stopped);
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
       // cas-9846: the machine answered; its cached catalog gives way, and the
       // live one is kept for the next reload during an outage.
@@ -3001,11 +2999,18 @@ function paintDraftNote(): void {
 
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
 function rememberDraft(key: string, draft: Draft | undefined): void {
+  // A replacement can already have an empty composer while the old draft's
+  // archive transaction is committing. Do not delete the only durable copy.
+  const pendingDraft = conversationDrafts.get(key);
+  if (!draft?.text.trim() && pendingDraft?.id && savingStoppedDrafts.has(pendingDraft.id)) return;
   if (draft?.text.trim()) {
     const previous = conversationDrafts.get(key);
     // Caret moves and shell captures keep the same identity; new words do not
     // share an archive with an earlier draft, even in a same-name session.
-    draft = { ...draft, id: previous?.text === draft.text && previous.id ? previous.id : crypto.randomUUID() };
+    const sameWords = previous?.text === draft.text;
+    const machineId = key.slice(0, key.indexOf(":")), session = key.slice(key.indexOf(":") + 1);
+    const birth = draft.sessionStartedAt ?? (sameWords ? previous?.sessionStartedAt : undefined) ?? sessions.get(machineId)?.find(item => item.name === session)?.started_at;
+    draft = { ...draft, id: sameWords && previous?.id ? previous.id : crypto.randomUUID(), ...(birth === undefined ? {} : { sessionStartedAt: birth }) };
     conversationDrafts.set(key, draft);
   } else { draft = undefined; conversationDrafts.delete(key); }
   const machineId = key.slice(0, key.indexOf(":"));
@@ -3061,8 +3066,9 @@ function captureMessageDraft(): void {
   rememberComposerDraft();
   const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
   const draft = conversationDrafts.get(key);
-  messageDraft = draft?.text ?? "";
-  messageDraftSelection = draft?.caret ?? 0;
+  const archiving = draft?.id && savingStoppedDrafts.has(draft.id);
+  messageDraft = archiving ? "" : draft?.text ?? "";
+  messageDraftSelection = archiving ? 0 : draft?.caret ?? 0;
 }
 
 function restoreMessageDraft(): void {
@@ -3587,7 +3593,7 @@ function sessionIsUp(machineId: string, session: string): boolean {
 
 function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
   const key = sessionKey(machine.id, session);
-  conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session);
+  conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session, sessions.get(machine.id)?.find(item => item.name === session)?.started_at);
   queueHeldSend(machine, key, clientRef, supervisor, text, replyTo, HELD_SEND_MS);
 }
 
@@ -3786,6 +3792,7 @@ function restoreStoredSends(machine: StoredMachine): void {
   })().catch(() => { showComposerStatus("Browser storage could not restore kept messages. Retry before sending.", "error"); });
   restoredMachines.set(machine.id, restore);
   void restore.then(() => {
+    settleSendsForStoppedSessions(machine, sessions.get(machine.id) ?? []);
     updateConversationViews(); renderConversationList();
     for (const session of sessions.get(machine.id) ?? []) if (sessionIsUp(machine.id, session.name)) void flushHeldSends(machine, session.name);
   });
@@ -3939,23 +3946,33 @@ function settleSendsForPairingLoss(machine: StoredMachine): void {
 /** A responding machine confirmed these destinations stopped. Keep the words,
  * settle definitely unsent messages, and never replay them into a later birth. */
 function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly HubSession[]): void {
-  const running = new Set(listed.filter(sessionRunning).map(item => item.name));
+  const destinations = new Map(listed.map(item => [item.name, item]));
+  const retired = (key: string, birth?: string) => {
+    const destination = destinations.get(key.slice(machine.id.length + 1));
+    return destination !== undefined && (sessionStopped(destination)
+      || (birth !== undefined && destination.started_at !== undefined && birth !== destination.started_at));
+  };
   // Capture the focused composer before the catalog removes its destination;
   // inactive conversations and drafts restored after reload need the same path.
   rememberComposerDraft();
   for (const [key, draft] of conversationDrafts) {
-    if (!key.startsWith(`${machine.id}:`) || running.has(key.slice(machine.id.length + 1)) || !draft.text.trim()) continue;
+    if (!key.startsWith(`${machine.id}:`) || !retired(key, draft.sessionStartedAt) || !draft.text.trim()) continue;
     if (!draft.id) rememberDraft(key, draft);
     void saveStoppedDraft(machine, key, conversationDrafts.get(key)!);
+    const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+    if (composer?.dataset.threadKey === key && composer.value === draft.text) composer.value = "";
   }
   let unsent = 0;
   for (const [key, history] of conversationHistories) {
-    if (!key.startsWith(`${machine.id}:`) || running.has(key.slice(machine.id.length + 1))) continue;
-    for (const held of heldSends.get(key) ?? []) {
-      clearTimeout(held.expiry); heldSince.delete(held.clientRef);
-    }
-    heldSends.delete(key);
+    if (!key.startsWith(`${machine.id}:`)) continue;
+    let changed = false;
     for (const send of history.pendingSends()) {
+      if (!retired(key, send.sessionStartedAt)) continue;
+      changed = true;
+      const queue = heldSends.get(key);
+      const held = queue?.find(item => item.clientRef === send.id);
+      if (held) { clearTimeout(held.expiry); heldSince.delete(held.clientRef); queue!.splice(queue!.indexOf(held), 1); }
+      if (!queue?.length) heldSends.delete(key);
       if (send.state === "held" && history.reject(send.id, "This session stopped. This message was not sent.")) {
         unsent++;
         void addAttention(machine, undefined, "stopped_message", {
@@ -3966,6 +3983,7 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
         });
       }
     }
+    if (!changed) continue;
     history.unconfirmInFlight(Date.now());
     if (messageDelivery?.session === key) messageDelivery = undefined;
     if (messageStatus?.session === key) messageStatus = undefined;
@@ -3992,7 +4010,10 @@ async function saveStoppedDraft(machine: StoredMachine, key: string, draft: Draf
   attention = [item, ...attention.filter(existing => existing.id !== id)];
   try {
     await attentionStore.put(item);
-    if (conversationDrafts.get(key)?.id === draft.id) rememberDraft(key, undefined);
+    if (conversationDrafts.get(key)?.id === draft.id) {
+      savingStoppedDrafts.delete(draft.id);
+      rememberDraft(key, undefined);
+    }
   } catch {
     // Keep the original draft for the next catalog/reload to try again. The
     // in-memory notice still lets the operator copy it before leaving.
@@ -4031,6 +4052,10 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
   await persistPendingSends();
   await flushingHeldSends.run(key, async () => {
     if (!heldSends.get(key)?.length) return;
+    // A live socket cannot identify a same-name replacement. Read its start
+    // identity before replaying; a failed catalog leaves messages held.
+    try { await connections.get(machine.id)?.refreshSessions(); } catch { return; }
+    await persistPendingSends();
     let waiting = false;
     try {
       const history = conversationHistory(key);
@@ -4038,6 +4063,9 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
       await drainHeld(queue, async (held) => {
         const accepted = machines.get(machine.id);
         if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) return false;
+        const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
+        const pending = history.pendingSends().find(send => send.id === held.clientRef);
+        if (!birth || pending?.sessionStartedAt !== birth) return false;
         const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
           () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
         if (result === "waiting") { waiting = true; return false; }
@@ -4100,7 +4128,8 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   }
   const clientRef = retryOf ?? crypto.randomUUID();
   const at = Date.now();
-  const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(replyTo === undefined ? {} : { replyTo }) };
+  const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
+  const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(birth === undefined ? {} : { sessionStartedAt: birth }), ...(replyTo === undefined ? {} : { replyTo }) };
   const result = retryOf
     ? await sendJournal.retry(scope, retryOf, credentialFence(machine), send)
     : await sendJournal.reconcile(scope, [], [send], credentialFence(machine));

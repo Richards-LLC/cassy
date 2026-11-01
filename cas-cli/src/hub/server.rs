@@ -889,6 +889,9 @@ struct SessionsResponse {
     /// Browser catalog expiry shares worker_status's fresh-heartbeat band.
     freshness_threshold_secs: i64,
     sessions: Vec<HubSession>,
+    /// Positive stop evidence is separate from navigation. An omitted name
+    /// may be filtered or unknown, and must never retire a live attachment.
+    stopped_sessions: Vec<HubSession>,
 }
 
 #[derive(Serialize)]
@@ -997,6 +1000,9 @@ async fn sessions<R: SessionReadModel>(
                 schema_version: super::HUB_SCHEMA_VERSION,
                 freshness_threshold_secs:
                     crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
+                stopped_sessions: sessions.iter().filter(|session| {
+                    session.ended.is_some() || session.liveness == super::DaemonLiveness::StaleMetadata
+                }).cloned().collect(),
                 sessions: supervisor_sessions(sessions, query.dormant),
             })
             .into_response(),
@@ -2787,18 +2793,16 @@ struct SessionsQuery {
     dormant: bool,
 }
 
-/// The catalog lists every fresh supervisor-led session, including sessions
-/// whose live supervisor has not spawned workers yet; `dormant=1` adds sessions
-/// whose supervisor is not live but whose daemon is still running. Stopped
+/// The catalog lists every running supervisor-led daemon, including dormant
+/// supervisors and supervisors which have not spawned workers yet. Stopped
 /// sessions are never navigation destinations. A row with no supervisor is never listed:
 /// Commander has no one to talk to there (cas-f285 retired `workers=1`, which
 /// only the removed Terminal view's "Show workers" sent).
-pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: bool) -> Vec<HubSession> {
+pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, _reveal_dormant: bool) -> Vec<HubSession> {
     sessions
         .into_iter()
         .filter(|session| {
             session.ended.is_none() && session.liveness == super::DaemonLiveness::Live
-                && (reveal_dormant || !session.dormant)
         })
         .filter(|session| !session.supervisor.trim().is_empty())
         .collect()

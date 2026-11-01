@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Commander hub
 
+- **Failed hub starts preserve operator routes** — A stopped local service on a
+  previously used Serve port is left untouched unless its exact target is
+  recorded as Cassy's. Proven owned routes still recover after Tailscale outages.
+
 - **Slow boot retries keep their route ownership** — A failed service start
   preserves its previous Serve target even when only a legacy runtime record
   identifies it, so a later start can restore the route after Tailscale returns.

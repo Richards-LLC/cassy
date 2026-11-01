@@ -201,8 +201,7 @@ impl TailscaleServeManager {
                     (previous.https_port == https_port
                         && handlers == vec![("/".to_owned(), previous.local_target.clone())])
                         || self.dead_recorded_mapping(https_port, &handlers).is_some()
-                        || dead_known_target(prior_target.as_ref(), https_port, &handlers)
-                        || dead_receipted_port_target(&previous, https_port, &handlers).is_some(),
+                        || dead_known_target(prior_target.as_ref(), https_port, &handlers),
                     "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
                 );
                 self.run(&[
@@ -385,10 +384,9 @@ impl TailscaleServeManager {
         };
         let before = self.serve_status()?;
         let handlers = handlers_on_port(&before, https_port);
+        // A dead loopback service may belong to the operator. Only an exact
+        // receipt or process target proves this mapping was published by Cassy.
         let recorded = self.dead_recorded_mapping(https_port, &handlers);
-        let legacy_dead_target = owned
-            .as_ref()
-            .and_then(|receipt| dead_receipted_port_target(receipt, https_port, &handlers));
         let mut receipt = match owned.or_else(|| {
             recorded.as_ref().map(|target| TailscaleServeReceipt {
                 schema_version: 1,
@@ -415,7 +413,7 @@ impl TailscaleServeManager {
             return Ok(None);
         }
         if handlers != vec![("/".to_owned(), receipt.local_target.clone())] {
-            if let Some(target) = recorded.or(legacy_dead_target) {
+            if let Some(target) = recorded {
                 receipt.local_target = target;
             }
         }
@@ -705,22 +703,6 @@ fn dead_known_target(
             && handlers == [("/".to_owned(), target.clone())]
             && dead_loopback_target(target)
     })
-}
-
-fn dead_receipted_port_target(
-    receipt: &TailscaleServeReceipt,
-    https_port: u16,
-    handlers: &[(String, String)],
-) -> Option<String> {
-    if receipt.https_port != https_port || handlers.len() != 1 || handlers[0].0 != "/" {
-        return None;
-    }
-    let target = &handlers[0].1;
-    // Older hubs wrote the receipt after Serve publication. A forced kill
-    // could therefore leave the previous hub's receipt beside a newer dead
-    // shim. The private receipt proves Cassy owned this HTTPS port; the sole
-    // dead loopback proxy and unchanged root path identify its successor.
-    (target != &receipt.local_target && dead_loopback_target(target)).then(|| target.clone())
 }
 
 fn classify_stderr(stderr: &[u8]) -> &'static str {

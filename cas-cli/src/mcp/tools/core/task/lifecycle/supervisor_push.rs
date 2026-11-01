@@ -454,7 +454,7 @@ pub(crate) enum ApprovedCloseRetry {
 }
 
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
-/// merged delivery, so it neither waits for a merge reply nor re-closes.
+/// merged delivery, in its next-turn digest without waking it.
 pub(crate) fn queue_cassy_merge_close_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -470,7 +470,8 @@ pub(crate) fn queue_cassy_merge_close_notice(
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                "{}Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id,
                 if task.deliverables.parked_close_reason.is_some() {
                     "with your parked close reason"
@@ -484,7 +485,7 @@ pub(crate) fn queue_cassy_merge_close_notice(
 }
 
 /// cas-e9d6: tell the worker once that a supervisor merge parked its lane
-/// tip and released its lease, so it neither resumes nor re-closes.
+/// tip and released its lease. This is next-turn context, not a worker action.
 pub(crate) fn queue_merged_lane_parked_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -495,7 +496,8 @@ pub(crate) fn queue_merged_lane_parked_notice(
         (
             format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
             format!(
-                "Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                "{}Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id
             ),
             format!("Merged and parked by Cassy: {}", task.id),
@@ -2046,6 +2048,43 @@ mod tests {
                 .notes
                 .contains("Auto-unblock wake queued for worker 'quiet-worker'")
         );
+    }
+
+    #[test]
+    fn merged_worker_notices_wait_for_next_turn_without_a_wake() {
+        use cas_store::HookDrain;
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-merge-notices")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents.register(&agent_in_session(
+            "merge-worker-id", "merge-worker", AgentRole::Worker, "sess-merge-notices",
+        )).unwrap();
+        let mut task = Task::new("cas-merge-notice".into(), "merged delivery".into());
+        task.assignee = Some("merge-worker".into());
+        let parked = queue_merged_lane_parked_notice(temp.path(), &task, "delivery-tip", "merge-tip")
+            .unwrap().unwrap();
+        let closed = queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap().unwrap();
+        assert_eq!(queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap(), Some(closed));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap().is_empty(),
+            "merged/parked facts must never reach worker wake transport");
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::Unseen, 10, 10000).unwrap().rows.is_empty());
+        let digest = queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+        assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
+        for row in &digest {
+            assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),
+                "the next turn must retain task and merge evidence");
+        }
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows.is_empty(), "digest is shown once");
+        let rejected = queue_rejected_merge_reopen_notice(temp.path(), &task, "verdict", "fix the regression")
+            .unwrap().unwrap();
+        assert_eq!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![rejected], "findings still wake the worker");
     }
 
     #[test]

@@ -5528,6 +5528,17 @@ fn supervisor_delivery_kind(
         return Ok(None);
     }
     let has_agents = agents_table_exists(conn)?;
+    // A passive Cassy notice to a live worker rides its next turn's digest.
+    // Other worker instructions (verdict, conflict, unblock) still transport.
+    if has_agents && matches!(origin, Some(QueueOrigin::Daemon)) && split_quiet_marker(prompt).0
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE role='worker' AND factory_session IS ?1
+               AND (name=?2 OR id=?2) AND status IN ('active','idle'))",
+            params![session, target], |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(Some(NOTICE_DIGEST_KIND.into()));
+    }
     let supervisor: Option<String> = if has_agents {
         conn.query_row(
             "SELECT id FROM agents WHERE role='supervisor' AND factory_session IS ?1
@@ -5635,6 +5646,22 @@ fn supervisor_delivery_kind(
     if task.is_empty() || head.len() != 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Ok(None);
     }
+    // Cassy owns verdict/close once this exact delivery has landed. Keep a
+    // late readiness fact, but do not ask the supervisor to merge it again.
+    if conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+        [], |row| row.get::<_, bool>(0))?
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN ('awaiting_merge','closed')
+               AND CASE WHEN json_valid(deliverables) THEN
+                   json_extract(deliverables,'$.factory_branch_anchor') = ?2
+                   AND COALESCE(json_extract(deliverables,'$.green_merge_commit'), '') <> ''
+                   AND COALESCE(json_extract(deliverables,'$.merge_conflicted'), 0) = 0
+               ELSE 0 END)",
+            params![task, head], |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(Some(DIGEST.into()));
+    }
     let episode = format!(
         "merge_ready:{}",
         serde_json::to_string(&(&supervisor, &task, &head))?
@@ -5646,6 +5673,27 @@ fn supervisor_delivery_kind(
         |row| row.get(0),
     )?;
     Ok(Some(if exists { DIGEST.into() } else { episode }))
+}
+
+/// Retire pending readiness atomically with Cassy's successful merge record.
+/// Episode metadata is store-authored and binds owner, task and delivery tip;
+/// a new delivery, explicit interrupt or independent blocker keeps its wake.
+pub(crate) fn digest_merged_readiness(conn: &Connection, task_id: &str) -> Result<()> {
+    if !conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_queue')",
+        [], |row| row.get::<_, bool>(0))?
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE prompt_queue SET kind='supervisor_digest'
+         WHERE processed_at IS NULL AND transport_delivered_at IS NULL AND acked_at IS NULL
+           AND urgent=0 AND kind GLOB 'merge_ready:*'
+           AND json_extract(CASE WHEN json_valid(substr(kind,13)) THEN substr(kind,13) ELSE '[]' END, '$[1]')=?1
+           AND json_extract(CASE WHEN json_valid(substr(kind,13)) THEN substr(kind,13) ELSE '[]' END, '$[2]')=
+               (SELECT json_extract(deliverables,'$.factory_branch_anchor') FROM tasks WHERE id=?1)",
+        [task_id],
+    )?;
+    Ok(())
 }
 
 /// Metadata-only evidence shared by the watchdog read and atomic bounce write.
@@ -21728,6 +21776,51 @@ mod cas_bf890_notice_digest_tests {
     /// One parked tip has one merge wake even when three producers relay it.
     /// A new tip, blocker, operator message and verification verdict keep
     /// independent delivery, and all supplemental evidence stays readable.
+    #[test]
+    fn self_merged_ready_waits_in_digest_before_or_after_enqueue() {
+        use crate::{SqliteTaskStore, TaskStore};
+        for merge_first in [false, true] {
+            let (temp, store) = store();
+            register(&store, "lead-sup", "supervisor", "active", SESSION);
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = cas_types::Task::new("cas-self-merged".into(), "delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            tasks.add(&task).unwrap();
+            let record_merge = || assert!(tasks.record_merge_admission(&task.id, &"c".repeat(40),
+                cas_types::MergeCiAdmission::Green).unwrap());
+            let ready = |head: char| format!(
+                "READY TO MERGE\n\n<cas-director-ready>{{\"task_id\":\"{}\",\"factory_tip\":\"{}\"}}</cas-director-ready>",
+                task.id, head.to_string().repeat(40),
+            );
+            let turn = |mode| store.surface_for_recipient_within_budget(
+                "lead-sup", Some(SESSION), mode, 50, 10000,
+            ).unwrap().rows.iter().map(|row| row.id).collect::<Vec<_>>();
+            if merge_first { record_merge(); }
+            let body = ready('a');
+            let id = store.enqueue_urgent_with_outcome("director", "lead-sup", &body,
+                Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
+            if !merge_first {
+                assert_eq!(selected(&store), vec![id], "an outstanding merge needs action");
+                record_merge();
+            }
+            assert!(selected(&store).is_empty(), "Cassy already merged this delivery; no supervisor wake (merge_first={merge_first})");
+            assert!(turn(HookDrain::Unseen).is_empty());
+            assert_eq!(turn(HookDrain::NoticeDigest), vec![id]);
+            let retained = store.poll_named_for_recipient("lead-sup", Some(SESSION), &[id]).unwrap();
+            // pin: digest routing preserves the complete queued READY envelope for explicit reads.
+            assert_eq!(retained[0].prompt, body, "full READY evidence remains readable");
+            assert!(turn(HookDrain::NoticeDigest).is_empty());
+            let fresh = store.enqueue_urgent_with_outcome("director", "lead-sup", &ready('b'),
+                Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
+            let blocker = store.enqueue_urgent_with_outcome("director", "lead-sup",
+                &format!("<cas-blocker worker=\"w\" task_id=\"{}\">review failed</cas-blocker>", task.id),
+                Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
+            assert_eq!(selected(&store), vec![fresh, blocker], "new deliveries and blockers keep their independent wake");
+        }
+    }
+
     #[test]
     fn supervisor_noise_merge_episode_has_one_wake() {
         use crate::{SqliteTaskStore, TaskStore};

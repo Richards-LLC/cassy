@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory notification wakes
+
+- **Merged delivery facts wait for the next turn** — Was: Merge-close and lane-parked notices woke workers, and queued READY TO MERGE alerts could wake supervisors after Cassy had merged the delivery. → Now: These facts stay readable in the next-turn digest. New deliveries, verifier findings and blockers keep their action wakes.
+
 ### Fixed — Worker assignments
 
 - **One assignment turn at spawn and queue advance** — Startup, the supervisor's brief and the assigned task arrive together. Queued successors survive delivery after automatic start, and worker ready/status messages name any current task.

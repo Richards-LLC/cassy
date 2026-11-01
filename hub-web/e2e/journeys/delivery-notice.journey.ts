@@ -217,7 +217,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     sessions.push({ name: "Accounting-quiet-otter-3", supervisor: "quiet-otter-3", project_dir: "/projects/Ledger", workers: [], liveness: "live" });
     await hub.announceCatalog("atlas");
     await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
-    sessions.pop();
+    sessions[sessions.length - 1]!.liveness = "stale_metadata";
     await expect(badge).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
   });
@@ -252,7 +252,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     expect(await staleCopy!.boundingBox(), "the replaced Copy has no geometry").toBeNull();
     await expect(attentionItems.locator("details")).toHaveAttribute("open", "");
     await expectDetailsCopyRow(attentionItems, "Copy has its own row at1280px too after a catalog redraw");
-    sessions.pop();
+    sessions[sessions.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
     await expectDetailsCopyRow(attentionItems, "Copy keeps its row after the catalog settles");
     await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);

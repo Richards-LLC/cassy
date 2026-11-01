@@ -3595,9 +3595,9 @@ function sessionIsUp(machineId: string, session: string): boolean {
   return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connection?.snapshot().phase === "live" && !connection.holdsMessages();
 }
 
-function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
+function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number, birth?: string): void {
   const key = sessionKey(machine.id, session);
-  conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session, sessions.get(machine.id)?.find(item => item.name === session)?.started_at);
+  conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session, birth);
   queueHeldSend(machine, key, clientRef, supervisor, text, replyTo, HELD_SEND_MS);
 }
 
@@ -4107,7 +4107,7 @@ function supervisorPhrase(machineId: string, session: string): string {
   return project ? `the ${project} supervisor` : "the supervisor";
 }
 
-async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
+async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, destination: { birth?: string; attach?: AttachSnapshot }, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
   await restoredMachines.get(machine.id);
   if (!sessionIsUp(machine.id, session) && !machineWillReconnect(machine.id)) {
     showComposerStatus(connectionStates.get(machine.id)?.authFailure ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);
@@ -4133,8 +4133,8 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   }
   const clientRef = retryOf ?? crypto.randomUUID();
   const at = Date.now();
-  const birth = sessions.get(machine.id)?.find(item => item.name === session)?.started_at;
-  const explicitUnknownAttach = !birth && sessionIsUp(machine.id, session) ? attachStates.get(key) : undefined;
+  const birth = destination.birth;
+  const explicitUnknownAttach = !birth ? destination.attach : undefined;
   const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(birth === undefined ? {} : { sessionStartedAt: birth }), ...(replyTo === undefined ? {} : { replyTo }) };
   const result = retryOf
     ? await sendJournal.retry(scope, retryOf, credentialFence(machine), send)
@@ -4170,7 +4170,8 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   // it would sit under the new Sending… bubble, so it goes.
   if ((retryOf || editOf) && messageStatus?.session === key && messageStatus.text === REFUSED_SEE_ABOVE
     && !history.visibleEvents().some((event) => event.kind === "send" && history.isFailedSend(event.value))) clearComposerStatus();
-  holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
+  holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo, birth);
+  settleSendsForStoppedSessions(machine, sessions.get(machine.id) ?? []);
   updateConversationViews(); renderConversationList();
   if (selectedMachineId === machine.id && selectedSession === session) {
     const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
@@ -4207,6 +4208,12 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (!composer) return;
   if (!quick) { bindSlashCommands(composer); if (slashCommands?.palette.submit()) return; }
   const renderedThread = composer.dataset.threadKey;
+  // Identity belongs to the click, before uploads or journal commits can
+  // yield to a catalog showing a replacement with the same session name.
+  const destination = {
+    birth: selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession)?.started_at : undefined,
+    attach: selectedMachineId && selectedSession && sessionIsUp(selectedMachineId, selectedSession) ? attachStates.get(renderedThread!) : undefined,
+  };
   if (renderedThread) await acceptingUploads.get(renderedThread);
   const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
   if (renderedThread !== selectedThread) {
@@ -4253,7 +4260,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       }
     });
   }
-  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
+  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, destination, replyTo, quick?.retryOf, editOf);
   if (sent && uploads && hasAttachments) {
     uploads.clear();
     if (messageStatus?.session === submissionKey && !messageStatus?.held) clearComposerStatus();
@@ -4649,9 +4656,21 @@ function sessionActivity(machineId: string, session: string): { at?: number; lab
 async function endConversationSession(row: ConversationRow): Promise<void> {
   const connection = connections.get(row.machineId);
   if (!connection) throw new Error("this machine is not connected");
+  const destination = sessions.get(row.machineId)?.find(item => item.name === row.session);
   await connection.endSession(row.session);
   countUsage("session.end");
   endedSessions.add(sessionKey(row.machineId, row.session));
+  // DELETE's successful response is positive stop evidence even if its
+  // following catalog omits the name, or that read fails altogether.
+  const current = sessions.get(row.machineId)?.find(item => item.name === row.session);
+  const machine = machines.get(row.machineId);
+  if (destination && current?.started_at === destination.started_at && machine) {
+    const stopped: HubSession = { ...destination, liveness: "stale_metadata" };
+    connection.setSessionEnded(row.session, true);
+    settleSendsForStoppedSessions(machine, [stopped]);
+    sessions.set(row.machineId, reconcileCatalog(sessions.get(row.machineId) ?? [], [], [stopped]));
+    if (!conversationPersistenceBlocked.has(row.machineId)) catalogCache.save(row.machineId, sessions.get(row.machineId)!);
+  }
   if (selectedMachineId === row.machineId && selectedSession === row.session) commitSelection({ machineId: row.machineId });
   await connection.refreshSessions().catch(() => undefined);
   render();

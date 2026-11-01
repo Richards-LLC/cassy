@@ -295,7 +295,7 @@ const UNPAIRED_LEAD = "Pair a machine to start your first conversation.";
 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
 export function conversationEmptyText(catalogLoaded: boolean, machineCount: number): string {
-  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? `${UNPAIRED_LEAD} Got a pairing link from whoever runs it? Open it on this device.` : "No live supervisors listed. Start one with New session, or show sessions that stopped from Appearance & commands.";
+  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? `${UNPAIRED_LEAD} Got a pairing link from whoever runs it? Open it on this device.` : "No live supervisors listed. Start one with New session.";
 }
 
 /** What the list knows about one paired machine's session catalog. */

@@ -1973,7 +1973,11 @@ unpushed or unverifiable work keeps its target and checkout.
 QA candidate builds first install locked web dependencies and invoke the same
 source-bound production snapshot builder as journeys, in the isolated checkout.
 Only that disposable checkout receives the generated dist before Cargo embeds
-it. A private loopback hub then serves every expected asset under a disposable
+it. After snapshot verification, only its tracked `hub-web/dist` index entries
+are marked assume-unchanged in the disposable checkout, preserving the clean
+source revision without suppressing dirty checks on other tracked inputs.
+Normal checkout builds keep their existing dirty-version behavior.
+A private loopback hub then serves every expected asset under a disposable
 HOME and CAS_ROOT: publication refuses a source/served digest mismatch and
 preserves the previous candidate. RECEIPT.json records `web.source_sha`,
 `web.dist_sha256` and `web.served_dist_sha256`.

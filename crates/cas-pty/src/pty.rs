@@ -1388,10 +1388,12 @@ impl PtyConfig {
     pub fn set_worker_startup_prompt(&mut self, backend: &str, prompt: &str) {
         match backend {
             "codex" => {
-                // Worker constructors always put the startup prompt last.
-                if let Some(initial) = self.args.last_mut() {
-                    *initial = prompt.to_owned();
-                }
+                // Backend adapters append config flags after construction.
+                // Identify the constructor-owned prompt, preserving those flags.
+                let index = self.args.iter().position(|arg| arg.starts_with(CODEX_WORKER_STARTUP_PREFIX))
+                    .expect("Codex worker launch must contain its startup prompt");
+                self.args.remove(index);
+                self.args.push(prompt.to_owned());
             }
             "opencode" => {
                 if let Some(index) = self.args.iter().position(|arg| arg == "--prompt") {

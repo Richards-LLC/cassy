@@ -1067,8 +1067,7 @@ pub(crate) fn worker_spawn_prompt(
 ) -> String {
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
     let mut message = format!(
-        "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
-         you now.\n\
+        "You were spawned for task {task_id} — \"{task_title}\". This is your task to start.\n\
          Start with `{worker_prefix}task action=show id={task_id}`, then \
          `{worker_prefix}task action=start id={task_id}` before you change any code.\n\n\
          {test_policy}",

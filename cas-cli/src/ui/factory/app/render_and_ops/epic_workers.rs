@@ -3155,13 +3155,30 @@ impl FactoryApp {
         // Explicit spec overrides session default so the intro prompt matches the actual harness.
         let effective_cli = effective_spec.cli;
 
+        let queue_head = self.factory_session().and_then(|session| {
+            cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.cas_dir())
+                .and_then(|queues| queues.get(session, &worker_name)).ok()
+                .filter(|queue| queue.revision > 0)
+                .map(|queue| queue.current_task)
+        });
+        let queued_spawn = queue_head.is_some();
+        let task_id = queue_head.unwrap_or(task_id);
         // Bind before launch so the first turn can carry the actual assignment.
         // Store reads stay here; mux/pty only receive the composed text.
         let startup = task_id.as_deref().and_then(|id| {
-            if !assign_task_to_new_worker(self.cas_dir(), id, &worker_name) {
+            // Ordered spawns retain their queue selector's ownership. The
+            // startup instruction authorizes a normal gated start of its head;
+            // registration repair may already have started it by that turn.
+            if !queued_spawn && !assign_task_to_new_worker(self.cas_dir(), id, &worker_name) {
                 return None;
             }
-            let task = open_task_store_cached(self.cas_dir()).ok()?.get(id).ok()?;
+            let store = open_task_store_cached(self.cas_dir()).ok()?;
+            let task = store.get(id).ok()?;
+            if queued_spawn && (task.assignee.as_deref().is_some_and(|owner| owner != worker_name)
+                || (task.status == cas_types::TaskStatus::Open
+                    && !store.list_ready().ok()?.iter().any(|ready| ready.id == id))) {
+                return None;
+            }
             if !matches!(task.status, cas_types::TaskStatus::Open | cas_types::TaskStatus::InProgress) {
                 return None;
             }

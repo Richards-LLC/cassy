@@ -19,6 +19,40 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 /// The injected store delay.
 const SLOW_READ: Duration = Duration::from_millis(500);
 
+#[test]
+fn r1_blocked_idle_does_not_duplicate_the_lifecycle_wake() {
+    use cas_types::{Agent, AgentRole, TaskStatus};
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecycleTransition, emit_verification_dispatch_handoff,
+    };
+    let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    let root = fixture.app.cas_dir().to_path_buf();
+    let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+    crate::store::open_agent_store(&root).unwrap().register(&lead).unwrap();
+    let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let dispatch = cas_store::create_verification_dispatch(&root, "cas-9efb-test", "merge-w", &lead.id, deadline).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = tasks.get("cas-9efb-test").unwrap();
+    task.status = TaskStatus::Blocked;
+    task.notes = format!("[{}] 🚫 BLOCKER {}", chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id));
+    tasks.update(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    emit_verification_dispatch_handoff(&root, queue.as_ref(), &dispatch.id, &task.id, &lead.id,
+        deadline, "merge-w", None, None, None).unwrap();
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    core.push_task_lifecycle(&task.id, &task.title, TaskStatus::InProgress, TaskStatus::Blocked,
+        "merge-w", None, LifecycleTransition::Blocked, &chrono::Utc::now().to_rfc3339()).unwrap();
+    for _ in 0..3 {
+        let idle = crate::ui::factory::director::DirectorEvent::WorkerIdle { worker: "merge-w".into(), active_task: None };
+        let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[idle]);
+        assert!(prompts.is_empty(), "blocked idle must use the lifecycle episode, not a direct prompt: {prompts:?}");
+    }
+    let rows = queue.peek_all(20).unwrap();
+    assert_eq!(rows.iter().filter(|row| !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 1,
+        "the dispatch handoff is the sole wake while verification owns the next step");
+}
+
 #[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};

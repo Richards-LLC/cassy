@@ -39,6 +39,7 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
     std::fs::create_dir_all(&project).unwrap();
     let root = init_cas_dir(&project).unwrap();
     env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &project);
     env.set("CAS_FACTORY_MODE", "1");
     env.set("CAS_FACTORY_SESSION", "factory-nested-review");
     env.set("CAS_HOOK_HARNESS", "codex");
@@ -105,6 +106,34 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
             assert_eq!(kept.pid, parent.pid, "{role}: {event}");
             assert_eq!(kept.status, parent.status, "{role}: {event}");
             assert_eq!(kept.factory_session, parent.factory_session);
+        }
+        // Identity isolation must preserve tool-policy enforcement even when
+        // the caller belongs to a different process (verifier cas-b815).
+        for (tool, tool_input) in [
+            ("mcp__claude_ai_Slack__slack_send_message", serde_json::json!({
+                "channel": "synthetic-proof-channel", "text": "must not be sent"
+            })),
+            ("Write", serde_json::json!({
+                "file_path": env.home().join("outside-worktree.txt"), "content": "denied"
+            })),
+            ("Bash", serde_json::json!({"command": "cargo build"})),
+        ] {
+            if tool == "Bash" && role != AgentRole::Worker {
+                continue;
+            }
+            let output = handle_hook("PreToolUse", HookInput {
+                session_id: "nested-codex-thread".into(),
+                cwd: project.to_string_lossy().into_owned(),
+                hook_event_name: "PreToolUse".into(),
+                tool_name: Some(tool.into()),
+                tool_input: Some(tool_input),
+                ..Default::default()
+            }).unwrap();
+            let wire = serde_json::to_value(output).unwrap();
+            assert_eq!(wire.pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(serde_json::Value::as_str), Some("deny"),
+                "foreign-process {role} must retain {tool} policy denial: {wire}");
+            assert_eq!(agents.get(&id).unwrap().pid, parent.pid);
         }
         agents.heartbeat(&id).unwrap();
     }

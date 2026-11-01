@@ -249,6 +249,7 @@ struct LedgerReport {
     escapes: Vec<EscapeRow>,
     checks: BTreeMap<String, CheckRow>,
     features: BTreeMap<String, FeatureRow>,
+    excluded_unscoped_measurements: usize,
 }
 
 /// `(from, to]` for a release. A release ends at its release event, or at its tag
@@ -339,6 +340,7 @@ fn aggregate(
         escapes: Vec::new(),
         checks: BTreeMap::new(),
         features: BTreeMap::new(),
+        excluded_unscoped_measurements: 0,
     };
     for event in events {
         let project = project_name(event);
@@ -385,6 +387,14 @@ fn aggregate(
                 }
             }
             QualityPayload::FeatureFeedback { feature, verdict, source, injected, opened, used } => {
+                // Old backfills dated lifetime totals as new measured rows.
+                // Their keys were hashed and the rows may already be synced, so
+                // use the missing actor to conservatively exclude unknown scope.
+                // The real SessionEnd emitter always supplies its ending agent.
+                if *source == FeedbackSource::Measured && event.actor.is_none() {
+                    report.excluded_unscoped_measurements += 1;
+                    continue;
+                }
                 let row = report.features.entry(feature.clone()).or_default();
                 let tally = match source {
                     FeedbackSource::Measured => &mut row.measured,
@@ -474,8 +484,14 @@ fn render(report: &LedgerReport) -> String {
     }
 
     let _ = writeln!(out, "\nFeature feedback");
+    if report.excluded_unscoped_measurements > 0 {
+        let _ = writeln!(out,
+            "  Excluded {} unscoped measurement(s); may include lifetime totals.",
+            report.excluded_unscoped_measurements,
+        );
+    }
     if report.features.is_empty() {
-        let _ = writeln!(out, "  none recorded");
+        let _ = writeln!(out, "  none with known scope");
     }
     for (feature, row) in &report.features {
         let mut parts = Vec::new();
@@ -602,7 +618,13 @@ mod tests {
         let mut repeated = legacy.clone();
         repeated.id = "qe-lifetime-day-two".into();
         repeated.occurred_at = at(2, 8);
-        cas_store::import_quality_events(&cas_root, &[other_project, legacy, repeated], "acme/this").unwrap();
+        let mut supervisor = repeated.clone();
+        supervisor.id = "qe-supervisor".into();
+        supervisor.payload = QualityPayload::FeatureFeedback {
+            feature: "handoff".into(), verdict: FeedbackVerdict::Helped,
+            source: FeedbackSource::Supervisor, injected: None, opened: None, used: None,
+        };
+        cas_store::import_quality_events(&cas_root, &[other_project, legacy, repeated, supervisor], "acme/this").unwrap();
 
         let receipt = repo.join("release-latency.receipt");
         std::fs::write(
@@ -623,6 +645,7 @@ mod tests {
         let feature = &report.features["ambient_recall"];
         assert_eq!((feature.injected, feature.opened, feature.used), (283, 1, 0));
         assert_eq!(feature.measured.get("noise"), Some(&1));
+        assert_eq!(report.features["handoff"].supervisors.get("helped"), Some(&1));
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["excluded_unscoped_measurements"], 2);
         let text = render(&report);

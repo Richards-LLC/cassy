@@ -315,12 +315,12 @@ fn measured_feedback(
     event
 }
 
-/// Measured context-injection evidence, summed by ledger feature.
-fn feature_totals(cas_root: &Path, session_id: Option<&str>) -> Vec<(&'static str, (u64, u64, u64))> {
+/// Measured context-injection evidence for one session, summed by ledger feature.
+fn feature_totals(cas_root: &Path, session_id: &str) -> Vec<(&'static str, (u64, u64, u64))> {
     let Ok(store) = cas_store::SqliteRetrievalStore::open(cas_root) else {
         return Vec::new();
     };
-    let families = match store.evidence_funnel_by_family(session_id) {
+    let families = match store.evidence_funnel_by_family(Some(session_id)) {
         Ok(families) => families,
         Err(error) => {
             tracing::warn!(%error, "friction ledger: retrieval evidence unavailable");
@@ -340,7 +340,7 @@ fn feature_totals(cas_root: &Path, session_id: Option<&str>) -> Vec<(&'static st
 
 /// A session ended: report what its injected context measured.
 pub(crate) fn session_ended(cas_root: &Path, session_id: &str, actor: Option<&str>) {
-    for (feature, (injected, opened, used)) in feature_totals(cas_root, Some(session_id)) {
+    for (feature, (injected, opened, used)) in feature_totals(cas_root, session_id) {
         emit(
             cas_root,
             &measured_feedback(
@@ -395,6 +395,8 @@ pub(crate) fn handoff_saved(
 
 /// History already on disk, as events: nobody types seed data. Natural keys match
 /// nothing a live emitter writes twice, and a rerun inserts nothing new.
+/// Lifetime retrieval totals have no recoverable time scope; only session end
+/// emits measured feature feedback, never a current-dated backfill snapshot.
 pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<usize> {
     use crate::store::{open_task_store, open_verification_store};
     let mut inserted = 0usize;
@@ -462,21 +464,6 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
         event.task_id = Some(verification.task_id.clone());
         event.title = title;
         inserted += usize::from(emit(cas_root, &event));
-    }
-    let today = Utc::now().format("%Y-%m-%d");
-    for (feature, (injected, opened, used)) in feature_totals(cas_root, None) {
-        inserted += usize::from(emit(
-            cas_root,
-            &measured_feedback(
-                format!("backfill|measured|{today}|{feature}"),
-                feature,
-                injected,
-                opened,
-                used,
-                Utc::now(),
-                None,
-            ),
-        ));
     }
     Ok(inserted)
 }

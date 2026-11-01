@@ -7105,6 +7105,15 @@ impl FactoryDaemon {
         if class == SupervisorWakeClass::Startup {
             return Self::startup_brief_wake(pane);
         }
+        // Verified human text is terminal input, including while the harness
+        // is working. Its own input queue handles mid-turn submission. Only
+        // an unsubmitted human draft or an unfinished input boundary holds it.
+        if class == SupervisorWakeClass::Operator {
+            if let Some(reason) = pane.pane_typing_veto() {
+                return WakeDecision::deny(reason);
+            }
+            return WakeDecision::allow("verified Commander text enters the supervisor's harness input");
+        }
         if let Some(reason) = pane.veto_for_idle_recipient() {
             return WakeDecision::deny(reason);
         }
@@ -7595,6 +7604,11 @@ impl FactoryDaemon {
             }
         }
         let (messages, replies) = commander_history_turns(queue.as_ref(), rows, &self.session_name, &notices);
+        for message in &messages {
+            if message.state == "acknowledged" {
+                self.queue_jobs.watch_operator_receipt(message.notification_id);
+            }
+        }
         let open_attention = if before.is_none() && !device_id.trim().is_empty() {
             let mut decisions = queue.conversation_open_attention(&self.session_name, device_id)?;
             decisions.retain(|row| !is_operator_notice(row));
@@ -9514,7 +9528,7 @@ impl FactoryDaemon {
             });
             let inline_supervisor_body = (!facts.message_senders.is_empty() || claude_inbox_target)
                 && (target == "supervisor" || target == self.app.supervisor_name())
-                && cas_store::fits_hook_surface(&batch_body)
+                && (wake_sender == WakeSender::Operator || cas_store::fits_hook_surface(&batch_body))
                 && facts.deferred_inbox.is_none()
                 && !self.inbox_deferred_writes.contains_key(&queued.id);
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
@@ -12513,10 +12527,13 @@ pub(super) fn commander_history_send(
         client_ref: delivery.as_ref().and_then(|report| report.client_ref.clone()),
         target: row.target,
         text,
-        // A durable row proves queue acceptance. Cleanup's processed_at is
-        // not transport proof, and a gated row has never reached the supervisor.
-        state: if terminal || delivery
-            .is_some_and(|report| report.delivered_at.is_some()) {
+        // Cleanup or unrelated activity is not receipt evidence. An actual
+        // body read or the recipient's own acknowledgement is stronger than
+        // a transport handoff and must also retire the queue label.
+        state: if terminal || delivery.is_some_and(|report|
+            report.delivered_at.is_some()
+                || report.recipient_receipt.is_some_and(cas_store::SurfacingSource::is_surfaced)
+                || report.confirmation_source.is_recipient_claim()) {
             "delivered".to_string()
         } else {
             "acknowledged".to_string()
@@ -13446,36 +13463,43 @@ mod tests {
         }
         // A recipient can read a queued send before daemon transport. That
         // stronger receipt must clear Queued on both devices and live views.
-        let mut read_send = send;
-        if let super::super::delivery::CommanderControl::SendMessage { client_ref, .. } = &mut read_send {
-            *client_ref = Some("ben-read".into());
-        }
-        let Some(crate::ui::factory::DaemonMessage::MessageQueued { notification_id: read_id, .. }) =
-            daemon.dispatch_commander_control(read_send).await.unwrap()
-        else { panic!("expected read-case receipt"); };
-        daemon.conversation_history_page("watch-read".into(), "phone", None, 20).unwrap();
-        let target = queue.queued_prompt(read_id).unwrap().unwrap().target;
-        queue.poll_unseen_for_recipient(&target, Some("provision-test"), 20).unwrap();
-        assert!(queue.message_delivery_report(read_id).unwrap().unwrap().recipient_receipt
-            .is_some_and(cas_store::SurfacingSource::is_surfaced),
-            "the update must come from the addressed recipient's actual read");
-        assert_eq!(daemon.live_operator_message(read_id).unwrap().unwrap().state, "delivered");
-        let root_for_scan = root.clone();
-        daemon.queue_jobs.submit_mirror_scan(move |state| {
-            let queue = super::super::prompt_queue_jobs::job_thread_prompt_queue(&root_for_scan).unwrap();
-            super::super::commander_mirror::scan_supervisor_replies(
-                &root_for_scan, root_for_scan.parent().unwrap(), "provision-test", queue.as_ref(), &[], state,
-            );
-        });
-        daemon.queue_jobs.apply_completions();
-        let updates = daemon.queue_jobs.take_operator_messages();
-        assert!(updates.iter().any(|message| message.notification_id == read_id && message.state == "delivered"),
-            "a read must publish a live delivery-state update without a reply or page reload");
-        for device in ["phone", "desktop"] {
-            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
-                .conversation_history_page(format!("read-{device}"), device, None, 20).unwrap()
-            else { panic!("expected read history"); };
-            assert_eq!(messages.iter().find(|message| message.notification_id == read_id).unwrap().state, "delivered");
+        for receipt_kind in ["read", "ack"] {
+            let mut read_send = send.clone();
+            if let super::super::delivery::CommanderControl::SendMessage { client_ref, .. } = &mut read_send {
+                *client_ref = Some(format!("ben-{receipt_kind}"));
+            }
+            let Some(crate::ui::factory::DaemonMessage::MessageQueued { notification_id: read_id, .. }) =
+                daemon.dispatch_commander_control(read_send).await.unwrap()
+            else { panic!("expected read-case receipt"); };
+            daemon.conversation_history_page("watch-read".into(), "phone", None, 20).unwrap();
+            let target = queue.queued_prompt(read_id).unwrap().unwrap().target;
+            if receipt_kind == "read" {
+                queue.poll_unseen_for_recipient(&target, Some("provision-test"), 20).unwrap();
+                assert!(queue.message_delivery_report(read_id).unwrap().unwrap().recipient_receipt
+                    .is_some_and(cas_store::SurfacingSource::is_surfaced));
+            } else {
+                queue.ack(read_id).unwrap();
+                assert!(queue.message_delivery_report(read_id).unwrap().unwrap()
+                    .confirmation_source.is_recipient_claim());
+            }
+            assert_eq!(daemon.live_operator_message(read_id).unwrap().unwrap().state, "delivered");
+            let root_for_scan = root.clone();
+            daemon.queue_jobs.submit_mirror_scan(move |state| {
+                let queue = super::super::prompt_queue_jobs::job_thread_prompt_queue(&root_for_scan).unwrap();
+                super::super::commander_mirror::scan_supervisor_replies(
+                    &root_for_scan, root_for_scan.parent().unwrap(), "provision-test", queue.as_ref(), &[], state,
+                );
+            });
+            daemon.queue_jobs.apply_completions();
+            let updates = daemon.queue_jobs.take_operator_messages();
+            assert!(updates.iter().any(|message| message.notification_id == read_id && message.state == "delivered"),
+                "a read must publish a live delivery-state update without a reply or page reload");
+            for device in ["phone", "desktop"] {
+                let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                    .conversation_history_page(format!("read-{device}"), device, None, 20).unwrap()
+                else { panic!("expected read history"); };
+                assert_eq!(messages.iter().find(|message| message.notification_id == read_id).unwrap().state, "delivered");
+            }
         }
     }
 

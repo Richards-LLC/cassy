@@ -23,6 +23,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   session end; reports exclude historical measurements without session
   attribution and disclose their count while retaining scoped feedback.
 
+### Fixed — QA candidates
+
+- **Source-only Commander changes build candidates** — Was: Rebuilt web assets
+  marked the private candidate checkout dirty and failed version verification.
+  → Now: Verified generated assets preserve the clean source revision; changes
+  to other tracked inputs and mismatched served assets still refuse publication.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

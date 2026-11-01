@@ -11,11 +11,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  claude-queued-replacement-reply:
-    title: Consumed queued Claude inputs retain Commander message and paired-device reply binding
-    tasks: [cas-33e6]
-    invariants: [HUB-J5-CLAUDE-QUEUED-ANSWER]
-    journeys: [HUB-J5]
   session-lifecycle-identity:
     title: Unknown catalog state retains running rows and held words never cross a daemon birth
     tasks: [cas-209f]
@@ -84,6 +79,11 @@ bug_families:
     tasks: [cas-1c0e]
     invariants: [HUB-J12-HELD-SEND-LIFETIME]
     journeys: [HUB-J11, HUB-J12]
+  claude-queued-replacement-reply:
+    title: Consumed queued Claude inputs retain Commander message and paired-device reply binding
+    tasks: [cas-33e6]
+    invariants: [HUB-J5-CLAUDE-QUEUED-ANSWER]
+    journeys: [HUB-J5]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

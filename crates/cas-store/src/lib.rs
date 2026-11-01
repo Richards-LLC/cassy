@@ -167,25 +167,26 @@ pub use external_verification_gate::{
 };
 pub use qa_batch_store::{
     QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, defer_qa_batch_evidence, get_qa_batch_receipt,
-    has_qa_batch_deferral, import_qa_batch_receipt, list_qa_batch_receipts,
-    pending_qa_batch_deferrals, qa_batch_receipts_for_task, qa_task_implementation_actors,
+    has_qa_batch_deferral, import_qa_batch_receipt,
+    list_qa_batch_receipts, pending_qa_batch_deferrals, qa_batch_receipts_for_task,
+    qa_task_implementation_actors,
     record_qa_batch_receipt,
 };
 pub use qa_pass_store::{
-    NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
-    claim_qa_pass, import_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes,
-    obsolete_qa_task_passes, open_qa_pass, open_qa_pass_reporting_superseded,
-    qa_task_has_current_round, release_qa_claim_for_reviewer, release_qa_claim_for_task,
+    import_qa_pass, NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
+    claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
+    open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer, release_qa_claim_for_task,
     resolve_qa_pass, satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task, waive_qa_pass,
-    waive_qa_pass_reporting_superseded, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
+    withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task, waive_qa_pass_reporting_superseded,
+    obsolete_qa_task_passes, qa_task_has_current_round,
 };
 pub use quality_event_store::{
     CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
     QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
-    QualityPayload, ensure_quality_event_schema, import_quality_events, normalize_release_version,
-    quality_events_after, quality_events_between, quality_events_for_task,
-    quality_interventions_since, quality_release_events, record_quality_event,
-    sanitize_quality_link, sanitize_quality_title,
+    QualityPayload, ensure_quality_event_schema, import_quality_events,
+    normalize_release_version, quality_events_after, quality_events_between,
+    quality_events_for_task, quality_interventions_since, quality_release_events,
+    record_quality_event, sanitize_quality_link, sanitize_quality_title,
 };
 pub use rule_candidate_store::{
     RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
@@ -292,8 +293,8 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    AdmissionOutcome, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryRetryState,
-    DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, HOOK_SURFACE_BUDGET_CHARS,
+    AdmissionOutcome, RecipientDelivery, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryRetryState, DeliveryStage,
+    EnqueueIdempotentResult, EnqueueOutcome, HOOK_SURFACE_BUDGET_CHARS,
     HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain, InboxHandoffState, MessageDeliveryReport,
     MessageStatus, NOTICE_DIGEST_KIND, OPERATOR_CLOUD_SCHEMA_STATEMENTS,
     OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
@@ -304,7 +305,7 @@ pub use prompt_queue_store::{
     PEER_COPY_KIND, PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, PROMPT_QUEUE_STALE_TTL_SECS,
     PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore, PromptRetentionSweep,
     PromptRetryDisposition, QUIET_MESSAGE_MARKER, QueueOrigin, QueuedPrompt,
-    RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, RecipientDelivery, RelayAlertState, RetriedPrompt,
+    RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, RelayAlertState, RetriedPrompt,
     SqlitePromptQueueStore, SurfacingSource, UndeliveredLifecycleRelay,
     WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt, WorkerPeerMessageEnqueue, fits_hook_surface,
     hook_surface_cost, inbox_signal_file_name, is_routing_id, missing_prompt_queue_columns,

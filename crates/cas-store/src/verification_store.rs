@@ -1479,21 +1479,23 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
         || dispatch.delivery_transaction_id.is_some()
         || dispatch.repository.is_none()
     {
-        return Err(StoreError::Parse(format!(
-            "repository proof invalidation requires the latest task-only repository dispatch (named {} bound head {}; latest {} bound head {})",
-            dispatch.id,
-            dispatch
-                .repository
-                .as_ref()
-                .map(|proof| proof.head_commit.as_str())
-                .unwrap_or("unbound"),
-            latest.id,
-            latest
-                .repository
-                .as_ref()
-                .map(|proof| proof.head_commit.as_str())
-                .unwrap_or("unbound")
-        )));
+        return Err(StoreError::Parse(
+            format!(
+                "repository proof invalidation requires the latest task-only repository dispatch (named {} bound head {}; latest {} bound head {})",
+                dispatch.id,
+                dispatch
+                    .repository
+                    .as_ref()
+                    .map(|proof| proof.head_commit.as_str())
+                    .unwrap_or("unbound"),
+                latest.id,
+                latest
+                    .repository
+                    .as_ref()
+                    .map(|proof| proof.head_commit.as_str())
+                    .unwrap_or("unbound")
+            ),
+        ));
     }
     if dispatch.state == VerificationDispatchState::Invalidated {
         tx.commit()?;
@@ -1746,13 +1748,8 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
             "exact reviewed scope was not invalidated".to_string(),
         ));
     }
-    let prior_notes: String = tx.query_row(
-        "SELECT notes FROM tasks WHERE id = ?1",
-        params![task.id],
-        |row| row.get(0),
-    )?;
-    let safe_notes =
-        crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
     let rows = tx.execute(
         "UPDATE tasks SET status = ?1, notes = ?2, updated_at = ?3
          WHERE id = ?4 AND status = ?5",
@@ -1873,13 +1870,7 @@ pub fn correct_parked_delivery_execution_note(
     reason: &str,
 ) -> Result<ProofScopeCorrectionOutcome> {
     correct_parked_delivery_proof_scope_inner(
-        cas_dir,
-        corrected_task,
-        expected_updated_at,
-        supervisor_agent_id,
-        reason,
-        true,
-        false,
+        cas_dir, corrected_task, expected_updated_at, supervisor_agent_id, reason, true, false,
     )
 }
 
@@ -1930,11 +1921,9 @@ fn correct_parked_delivery_proof_scope_inner(
 
     let observed_work_target_merge = if require_merged_delivery
         && !delivery.as_ref().is_some_and(|(_, state)| {
-            matches!(
-                *state,
-                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
-            )
-        }) {
+            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+        })
+    {
         let target_branch = corrected_task
             .deliverables
             .work_target
@@ -1945,11 +1934,7 @@ fn correct_parked_delivery_proof_scope_inner(
                 "SELECT EXISTS(SELECT 1 FROM observed_delivery_merges
                  WHERE task_id = ?1 AND target_branch = ?2
                    AND (?3 IS NULL OR source_commit_sha = ?3))",
-                params![
-                    corrected_task.id,
-                    branch,
-                    corrected_task.deliverables.factory_branch_anchor
-                ],
+                params![corrected_task.id, branch, corrected_task.deliverables.factory_branch_anchor],
                 |row| row.get::<_, bool>(0),
             )?,
             None => false,
@@ -1960,10 +1945,7 @@ fn correct_parked_delivery_proof_scope_inner(
 
     if require_merged_delivery
         && !delivery.as_ref().is_some_and(|(_, state)| {
-            matches!(
-                *state,
-                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
-            )
+            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
         })
         && !observed_work_target_merge
     {
@@ -1974,10 +1956,7 @@ fn correct_parked_delivery_proof_scope_inner(
 
     if !allow_merged_delivery
         && delivery.as_ref().is_some_and(|(_, state)| {
-            matches!(
-                *state,
-                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
-            )
+            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
         })
     {
         return Err(StoreError::Parse(
@@ -2016,10 +1995,8 @@ fn correct_parked_delivery_proof_scope_inner(
             ));
         }
         if *state != WorkerDeliveryState::Stale
-            && !(matches!(
-                *state,
-                WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady
-            ) && allow_merged_delivery)
+            && !(matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+                && allow_merged_delivery)
         {
             let changed = tx.execute(
                 "UPDATE worker_delivery_transactions
@@ -2055,13 +2032,8 @@ fn correct_parked_delivery_proof_scope_inner(
         }
     }
 
-    let prior_notes: String = tx.query_row(
-        "SELECT notes FROM tasks WHERE id = ?1",
-        params![corrected_task.id],
-        |row| row.get(0),
-    )?;
-    let safe_notes =
-        crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
@@ -2325,11 +2297,7 @@ pub fn request_changes_for_parked_delivery(
             ],
         )?;
     }
-    let prior_notes: String = tx.query_row(
-        "SELECT notes FROM tasks WHERE id = ?1",
-        params![task_id],
-        |row| row.get(0),
-    )?;
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
     let task_changed = tx.execute(
         "UPDATE tasks
@@ -3443,16 +3411,9 @@ mod tests {
         task.proof_targets.push("cas --lib close_ops".into());
         task.updated_at = Utc::now();
 
-        assert!(
-            correct_parked_delivery_proof_targets(
-                dir.path(),
-                &task,
-                expected_updated_at,
-                "supervisor",
-                "widen proof"
-            )
-            .is_err()
-        );
+        assert!(correct_parked_delivery_proof_targets(
+            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
+        ).is_err());
         let receipt = crate::build_worker_completion_receipt(
             &cas_types::WorkerCompletionReceiptInput {
                 task_id: task.id.clone(),
@@ -3471,33 +3432,16 @@ mod tests {
             Utc::now(),
         );
         crate::create_worker_delivery(
-            dir.path(),
-            &receipt,
-            WorkerDeliveryState::AwaitingMerge,
-            "worker",
-        )
-        .unwrap();
+            dir.path(), &receipt, WorkerDeliveryState::AwaitingMerge, "worker"
+        ).unwrap();
         crate::record_observed_delivery_merge(
-            dir.path(),
-            &task.id,
-            "commit:1111111111111111111111111111111111111111",
-            "epic/other",
-            "1111111111111111111111111111111111111111",
-            "2222222222222222222222222222222222222222",
-            "supervisor",
-        )
-        .unwrap();
-        assert!(
-            correct_parked_delivery_proof_targets(
-                dir.path(),
-                &task,
-                expected_updated_at,
-                "supervisor",
-                "widen proof"
-            )
-            .is_err(),
-            "an observation on a different WorkTarget cannot authorize correction"
-        );
+            dir.path(), &task.id, "commit:1111111111111111111111111111111111111111",
+            "epic/other", "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222", "supervisor",
+        ).unwrap();
+        assert!(correct_parked_delivery_proof_targets(
+            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
+        ).is_err(), "an observation on a different WorkTarget cannot authorize correction");
         crate::record_observed_delivery_merge(
             dir.path(),
             &task.id,
@@ -3506,16 +3450,10 @@ mod tests {
             "1111111111111111111111111111111111111111",
             "2222222222222222222222222222222222222222",
             "supervisor",
-        )
-        .unwrap();
+        ).unwrap();
         correct_parked_delivery_proof_targets(
-            dir.path(),
-            &task,
-            expected_updated_at,
-            "supervisor",
-            "widen proof",
-        )
-        .expect("authenticated exact-SHA observation must permit correction");
+            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
+        ).expect("authenticated exact-SHA observation must permit correction");
         assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
     }
 
@@ -4883,13 +4821,6 @@ mod credential_redaction_tests {
 pub const REQUEST_CHANGES_AUDIT_PREFIX: &str = "Decision: changes requested by supervisor. ";
 
 /// Format the replicated decision exactly as the transactional writer does.
-pub fn request_changes_audit_note(
-    at: chrono::DateTime<chrono::Utc>,
-    reason: &str,
-    branch_handling: &str,
-) -> String {
-    format!(
-        "[{}] {REQUEST_CHANGES_AUDIT_PREFIX}{reason}\n\nBranch handling: {branch_handling}",
-        at.format("%Y-%m-%d %H:%M")
-    )
+pub fn request_changes_audit_note(at: chrono::DateTime<chrono::Utc>, reason: &str, branch_handling: &str) -> String {
+    format!("[{}] {REQUEST_CHANGES_AUDIT_PREFIX}{reason}\n\nBranch handling: {branch_handling}", at.format("%Y-%m-%d %H:%M"))
 }

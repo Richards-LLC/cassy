@@ -17,6 +17,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   bad news or a decision, a language-tagged block for commands and a table for
   a comparison, with a worked example and what the terminal pane shows.
 
+### Fixed — Commander diffs
+
+- **A hand-written diff shows its changes in color** — Was: A `diff` fence
+  without an `@@` line, the way a before/after is usually written in a reply,
+  rendered as one color with no Source control. → Now: Its added and removed
+  lines are tinted like any other diff, with no line numbers because none were
+  written, and a fence with no changed line stays plain code.
+
 ### Fixed — Commander tables
 
 - **Reply tables read as tables, not code boxes** — Was: A table in a reply sat

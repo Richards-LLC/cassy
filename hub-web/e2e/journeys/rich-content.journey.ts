@@ -184,6 +184,14 @@ for (const [index, variant] of variants.entries()) {
           const stored = JSON.parse(localStorage.getItem("commander.usage.v1") ?? "null") as { days?: Record<string, Record<string, number>> } | null;
           return Object.values(stored?.days ?? {}).some((actions) => (actions["rich-content.inspect"] ?? 0) >= 2);
         })).toBe(true);
+        // The same stage, written by hand with no @@ line, tints its changes too.
+        hub.supervisorSays(PELICAN, "Delivery got faster.\n\n```diff\n- delivered after 11.5 minutes\n+ delivered in about 1 second\n```");
+        const handwritten = log.locator(".rich-diff").filter({ hasText: "delivered in about 1 second" });
+        const tint = (change: string) => handwritten.locator(`[data-change="${change}"]`).evaluate((node) => getComputedStyle(node).backgroundColor);
+        const [added, removed] = [await tint("add"), await tint("remove")];
+        expect(added).not.toBe(removed);
+        expect([added, removed]).not.toContain("rgba(0, 0, 0, 0)");
+        await handwritten.screenshot({ path: testInfo.outputPath("handwritten-diff.png") });
       });
 
       await journey.stage("Decode an inline image without moving its file caption", async () => {

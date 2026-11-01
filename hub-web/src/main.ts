@@ -3947,7 +3947,7 @@ function settleSendsForStoppedSessions(machine: StoredMachine, listed: readonly 
         void addAttention(machine, undefined, "stopped_message", {
           headline: "Waiting message not sent",
           detail: "The session stopped. Your message is saved in Details; copy it to send to a running supervisor.",
-          severity: "warning", action: "none", payload: { session: key.slice(machine.id.length + 1), message: send.text },
+          severity: "critical", action: "none", payload: { session: key.slice(machine.id.length + 1), message: send.text },
           fingerprint: `${machine.id}:stopped-send:${send.id}`,
         });
       }

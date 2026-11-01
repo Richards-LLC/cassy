@@ -13456,8 +13456,9 @@ mod tests {
         daemon.conversation_history_page("watch-read".into(), "phone", None, 20).unwrap();
         let target = queue.queued_prompt(read_id).unwrap().unwrap().target;
         queue.poll_unseen_for_recipient(&target, Some("provision-test"), 20).unwrap();
-        assert!(queue.message_delivery_report(read_id).unwrap().unwrap().delivered_at.is_none(),
-            "a recipient read must not invent a transport write");
+        assert!(queue.message_delivery_report(read_id).unwrap().unwrap().recipient_receipt
+            .is_some_and(cas_store::SurfacingSource::is_surfaced),
+            "the update must come from the addressed recipient's actual read");
         assert_eq!(daemon.live_operator_message(read_id).unwrap().unwrap().state, "delivered");
         let root_for_scan = root.clone();
         daemon.queue_jobs.submit_mirror_scan(move |state| {

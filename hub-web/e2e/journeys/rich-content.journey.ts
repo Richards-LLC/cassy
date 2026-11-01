@@ -159,7 +159,9 @@ for (const [index, variant] of variants.entries()) {
         await source.focus(); await page.keyboard.press("Enter");
         await expect(frame.locator("pre.markdown-code")).toBeVisible();
         await expect(frame.locator(".rich-diagram")).toBeHidden();
-        // Only the source can overflow, so only the source view offers Expand.
+        // Only the source can overflow or wrap, so only the source view offers Expand and Wrap.
+        const wrap = frame.getByRole("button", { name: "Wrap lines in mermaid" });
+        await expect(wrap).toBeVisible();
         const expand = frame.getByRole("button", { name: /^(?:Expand|Collapse) mermaid$/ });
         await expand.focus(); await page.keyboard.press("Enter");
         await expect(expand).toHaveAttribute("aria-expanded", "true");
@@ -168,6 +170,7 @@ for (const [index, variant] of variants.entries()) {
         await frame.getByRole("button", { name: "Show preview from mermaid" }).focus(); await page.keyboard.press("Enter");
         await expect(frame.locator(".rich-diagram")).toBeVisible();
         await expect(expand).toBeHidden();
+        await expect(wrap).toBeHidden();
         await expect(log.locator('[data-rich-state="fallback"]')).toHaveText("invalid diagram source");
         expect(richRequests.some((url) => url.includes("chunk-rich-diagram"))).toBe(true);
         // The reply guidance's own flowchart shows whole, with no action to reach its end.

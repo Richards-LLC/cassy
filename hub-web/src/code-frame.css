@@ -34,9 +34,10 @@
 .code-frame-content { min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; }
 .code-frame[data-expanded="true"] > .code-frame-content { max-height: none; }
 /* The cap bounds long source. A rendered diagram is read whole, so none of it is
-   cut and there is nothing to expand; its source view keeps the cap and control. */
+   cut and there is nothing to expand or wrap; its source view keeps the cap and
+   both controls. */
 .code-frame-content:has(> .rich-diagram:not([hidden])) { max-height: none; }
-.code-frame:has(> .code-frame-content > .rich-diagram:not([hidden])) [data-action="expand"] { display: none; }
+.code-frame:has(> .code-frame-content > .rich-diagram:not([hidden])) :is([data-action="wrap"], [data-action="expand"]) { display: none; }
 .code-frame-content > [hidden] { display: none; }
 .code-frame .rich-diagram { margin: 0; }
 .code-frame-actions button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }

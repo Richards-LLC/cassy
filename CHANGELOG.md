@@ -41,6 +41,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the end of the flow stayed hidden until the reader found Expand. → Now: A
   rendered diagram shows whole at phone and desktop widths, and Expand appears
   only on its source view, where long text can still overflow.
+- **A diagram has no dead Wrap button** — Was: Wrap on a rendered diagram changed
+  nothing and took header room on a phone. → Now: Wrap appears only on the
+  diagram's source view, where it has lines to wrap.
 
 ### Fixed — Commander status updates
 

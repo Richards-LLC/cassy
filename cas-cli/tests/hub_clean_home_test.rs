@@ -1052,7 +1052,7 @@ fn service_start_retries_tailscale_before_publication() {
     fs::write(home.path().join("mock-route"), &old_target).unwrap();
     let mut child = cas_process_command(home.path(), bin.as_os_str())
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
-            "--tailscale-serve-port", "10047"])
+            "--tailscale-serve", "--tailscale-serve-port", "10047"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     let _cleanup = LegacyHubCleanup(vec![child.id()]);
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
@@ -1078,25 +1078,37 @@ fn service_publication_failure_survives_exit_in_status_and_logs() {
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) echo 'publication denied by fixture' >&2; exit 1 ;;\nesac\n{}",
+    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) echo 'permission denied by fixture' >&2; exit 1 ;;\nesac\n{}",
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
     install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
     fs::write(home.path().join("mock-port"), "10047").unwrap();
-    let output = cas_process_command(home.path(), bin.as_os_str())
+    let mut child = cas_process_command(home.path(), bin.as_os_str())
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve", "--tailscale-serve-port", "10047"])
-        .output().unwrap();
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let _cleanup = LegacyHubCleanup(vec![child.id()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline,
+            "failed publication must exit so the service manager retries");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
     assert!(!output.status.success(), "failed publication must trigger service-manager restart");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("publication denied by fixture"), "{stderr}");
+    assert!(stderr.contains("permission-denied"), "{stderr}");
     let log = fs::read_to_string(home.path().join(".cas/hub/hub.log")).unwrap();
-    assert!(log.contains("publication denied by fixture"), "{log}");
+    assert!(log.contains("permission-denied"), "{log}");
     let status = cas_process_command(home.path(), bin.as_os_str())
         .args(["hub", "status", "--json"]).output().unwrap();
     assert!(!status.status.success());
     let status: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert!(status["tailscale_serve"]["message"].as_str().unwrap()
-        .contains("publication denied by fixture"), "{status}");
+        .contains("permission-denied"), "{status}");
+    let human = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "status"]).output().unwrap();
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("permission-denied"), "{human}");
 }
 
 #[cfg(unix)]

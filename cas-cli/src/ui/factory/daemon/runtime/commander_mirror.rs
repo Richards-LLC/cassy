@@ -398,6 +398,40 @@ struct TranscriptCursor {
     modified: Option<SystemTime>,
 }
 
+/// A native input envelope identifies a durable queue row, not a directory.
+/// Synthetic Codex session ids have no rollout filename match. Bind their
+/// mirror only after observing input actually addressed to this recipient.
+fn codex_rollout_owns_recipient(
+    path: &Path,
+    queue: &dyn PromptQueueStore,
+    session: &str,
+    recipient: &str,
+    startup_id: Option<i64>,
+) -> bool {
+    let Ok(values) = transcript_tail(path) else { return false };
+    values.iter().any(|value| {
+        if value.get("type").and_then(Value::as_str) != Some("response_item")
+            || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+            || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
+            return false;
+        }
+        let Some(text) = text_blocks(value, "/payload/content", "input_text") else { return false };
+        let first = text.lines().next().unwrap_or("").trim();
+        let marker = first.strip_prefix("[cas #").or_else(|| {
+            first.strip_prefix("Message from ")?.split_once(": [cas #").map(|(_, marker)| marker)
+        });
+        let Some(id) = marker.and_then(|marker| marker.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<i64>().ok()) else { return false };
+        // A restart can reuse the name and factory. Older inputs must not
+        // bind the replacement to the previous generation's rollout.
+        if startup_id.is_some_and(|floor| id < floor) { return false; }
+        if startup_id == Some(id) { return true; }
+        queue.queued_prompt(id).ok().flatten().is_some_and(|row| {
+            row.factory_session.as_deref() == Some(session)
+                && (row.target == recipient || row.target == "supervisor")
+        })
+    })
+}
+
 pub(super) fn scan_supervisor_replies(
     root: &Path,
     project_path: &Path,
@@ -493,6 +527,18 @@ pub(super) fn scan_supervisor_replies(
             .filter(|cursor| cursor.path.is_file())
             .map(|cursor| cursor.path.clone())
             .or_else(|| {
+                // cas-4735: eagerly registered factory Codex ids are synthetic.
+                // Never cache a same-cwd guess before this pane's rollout exists.
+                if cli == cas_mux::SupervisorCli::Codex && session_id.starts_with("codex-") {
+                    let startup_id = queue.latest_from_source_to_targets(
+                        super::queue_and_events::SUPERVISOR_STARTUP_SOURCE,
+                        &[&agent.name], Some(session),
+                    ).ok().flatten().filter(|row| matches!(row.origin, Some(cas_store::QueueOrigin::Daemon))).map(|row| row.id);
+                    return crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
+                        project_path.to_str()?, account.as_deref(),
+                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id),
+                    );
+                }
                 crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
                     project_path.to_str(),
                     session_id,
@@ -1139,7 +1185,7 @@ mod tests {
             "commander:Alice@phone", "supervisor", "Boot words", Some(session),
             None, None, false, None, &stamp,
         ).unwrap().id();
-        let old = enqueue("factory-previous");
+        let old = enqueue("factory-1");
         let first = temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
         let meta: Value = serde_json::from_str(std::fs::read_to_string(&first).unwrap().lines().next().unwrap()).unwrap();
         let write = |path: &Path, id, key, answer| {
@@ -1148,6 +1194,11 @@ mod tests {
             std::fs::write(path, values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
         };
         write(&first, old, "previous", "Previous session answer");
+        queue.enqueue_idempotent(
+            super::super::queue_and_events::SUPERVISOR_STARTUP_SOURCE,
+            "supervisor", "Replacement startup", None, None, None,
+            "replacement-startup", Some(&cas_store::QueueOrigin::Daemon),
+        ).unwrap();
         let mut state = MirrorScanState::default();
         let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
             &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state,
@@ -1160,6 +1211,13 @@ mod tests {
         // Another live pane can keep the prior cwd match newest. Freshness
         // alone must not bind either supervisor to the other pane's rollout.
         std::fs::File::open(&first).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
+        let peer = queue.enqueue_operator_message(
+            "commander:Alice@phone", "peer-supervisor", "Peer words", Some("factory-1"),
+            None, None, false, None, &stamp,
+        ).unwrap().id();
+        let third = first.with_file_name("rollout-2026-10-10T12-00-02-peer.jsonl");
+        write(&third, peer, "peer", "Peer session answer");
+        std::fs::File::open(&third).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(3)).unwrap();
         scan(&mut state);
         let replies = operator_replies(&queue);
         assert!(replies.iter().any(|reply| reply.message == "Boot words preserved"),

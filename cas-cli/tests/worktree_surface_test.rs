@@ -301,6 +301,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cwd: None,
         port: None,
         shared: None,
+        revision: None,
         mine: None,
         theirs: None,
         decision: None,

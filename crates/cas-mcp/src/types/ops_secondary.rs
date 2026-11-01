@@ -960,6 +960,13 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
 
+    /// Exact revision for `candidate_request`.
+    #[schemars(
+        description = "candidate_request: full commit SHA reachable from HEAD of your own checkout."
+    )]
+    #[serde(default)]
+    pub revision: Option<String>,
+
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
@@ -1558,6 +1565,13 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
 
+    /// Exact revision for `candidate_request`.
+    #[schemars(
+        description = "candidate_request: full commit SHA reachable from HEAD of your own checkout."
+    )]
+    #[serde(default)]
+    pub revision: Option<String>,
+
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
@@ -1707,6 +1721,7 @@ impl CoordinationRequest {
             cwd: self.cwd.clone(),
             port: self.port,
             shared: self.shared,
+            revision: self.revision.clone(),
             mine: self.mine.clone(),
             theirs: self.theirs.clone(),
             decision: self.decision.clone(),

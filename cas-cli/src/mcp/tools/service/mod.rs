@@ -1696,6 +1696,7 @@ pub(crate) mod agent_search_system;
 #[cfg(feature = "mcp-proxy")]
 mod artifact_post;
 mod coordination_external_work;
+mod candidate_ops;
 mod core;
 mod db_branch_ops;
 mod epic_split_ops;

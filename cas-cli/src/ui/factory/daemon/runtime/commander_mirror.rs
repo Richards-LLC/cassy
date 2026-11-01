@@ -805,11 +805,14 @@ mod tests {
     #[test]
     fn claude_consumed_queued_input_binds_the_replacement_answer() {
         let mut env = crate::test_support::TestEnvGuard::new();
-        for (blocks, target, factory, bound) in [
-            (false, "supervisor", "factory-1", true),
-            (true, "supervisor", "factory-1", true),
-            (false, "another-supervisor", "factory-1", false),
-            (false, "supervisor", "another-factory", false),
+        for (shape, target, factory, bound) in [
+            ("text", "supervisor", "factory-1", true),
+            ("blocks", "supervisor", "factory-1", true),
+            ("hook", "supervisor", "factory-1", true),
+            ("hook", "another-supervisor", "factory-1", false),
+            ("hook", "supervisor", "another-factory", false),
+            ("text", "another-supervisor", "factory-1", false),
+            ("text", "supervisor", "another-factory", false),
         ] {
             let (temp, root, queue) = terminal_session(vec![]);
             let account = temp.path().join("account");
@@ -846,16 +849,24 @@ mod tests {
             let mut state = MirrorScanState::default();
             scan(&mut state);
             assert_eq!(operator_replies(&queue)[0].reply_to, None, "queue bookkeeping must not bind an answer");
-            let prompt = if blocks {
+            let prompt = if shape == "blocks" {
                 serde_json::json!([{"type":"image","source":{}},{"type":"text","text":prompt}])
             } else {
                 Value::String(prompt)
             };
+            let attachment = if shape == "hook" {
+                serde_json::json!({"type":"hook_additional_context","hookName":"UserPromptSubmit","hookEvent":"UserPromptSubmit",
+                    "content":[format!("[supervisor reminder]\n[incoming messages]\n{}", prompt.as_str().unwrap())]})
+            } else {
+                serde_json::json!({"type":"queued_command","prompt":prompt,"source_uuid":"queued","delivery_id":"delivery","origin":{"kind":"human"}})
+            };
             let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
             // Claude persists consumption as an attachment, not a user row.
             for record in [
-                serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":{"type":"queued_command","prompt":prompt,"source_uuid":"queued","delivery_id":"delivery","origin":{"kind":"human"}}}),
+                serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":attachment}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated","attachment":{"type":"file","prompt":"unrelated file content"}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Ordinary hook context"]}}),
+                serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"stop-hook","attachment":{"type":"hook_additional_context","hookEvent":"Stop","content":["[cas #999 operator Alice@phone verified 0s first] A stop reminder is not consumed input"]}}),
                 serde_json::json!({"timestamp":at(5),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement answer"}],"stop_reason":"end_turn"}}),
             ] {
                 writeln!(file, "{record}").unwrap();

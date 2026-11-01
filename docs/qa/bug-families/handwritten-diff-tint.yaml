@@ -1,0 +1,4 @@
+title: A diff fence written by hand without an @@ line must still show its added and removed lines in distinct colors
+tasks: [cas-f5ee]
+invariants: [HUB-J22-GOAL]
+journeys: [HUB-J22]

@@ -405,6 +405,28 @@ async fn start_lists_close_requirements_and_park_reports_every_failure() {
     assert_eq!(f.task().status, TaskStatus::InProgress);
 }
 
+/// A claim refusal waits for the park gates, so it must also stop a close that
+/// never parks because the delivery is already on its target.
+#[tokio::test]
+async fn deferred_claim_refusal_stops_a_merged_delivery_close() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--no-ff", "-m", "merge the lane", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "the CI run passed",
+    })).await;
+    assert!(refused.starts_with("PROOF CLAIM RECEIPT REQUIRED"), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+
+    let retried = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "gear turns",
+    })).await;
+    assert!(!retried.contains("PROOF CLAIM RECEIPT REQUIRED"), "{retried}");
+}
+
 #[tokio::test]
 async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();

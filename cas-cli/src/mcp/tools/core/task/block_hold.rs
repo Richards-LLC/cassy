@@ -151,22 +151,20 @@ pub(crate) fn alert_episode(
 ) -> Result<(chrono::DateTime<chrono::Utc>, String), String> {
     let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
     let hold = read(tasks.as_ref(), &task.id)?;
-    let events = crate::store::open_event_store(cas_dir).map_err(|e| e.to_string())?;
-    let transition = events
-        .list_for_entity(cas_types::EventEntityType::Task, &task.id, 256)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|event| event.event_type == cas_types::EventType::TaskBlocked)
-        .map(|event| event.created_at);
-    let start = hold
-        .map(|hold| hold.when)
-        .into_iter()
-        .chain(transition)
-        .max()
-        .unwrap_or(task.created_at);
     let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, &task.id)
         .map_err(|e| e.to_string())?
         .filter(|dispatch| blocked_only_by_verification_wait(cas_dir, &task.id, &dispatch.id));
+    let start = if let Some(hold) = hold {
+        hold.when
+    } else if let Some(dispatch) = &dispatch {
+        dispatch.requested_at
+    } else {
+        let events = crate::store::open_event_store(cas_dir).map_err(|e| e.to_string())?;
+        events.list_for_entity(cas_types::EventEntityType::Task, &task.id, 256)
+            .map_err(|e| e.to_string())?.into_iter()
+            .find(|event| event.event_type == cas_types::EventType::TaskBlocked)
+            .map(|event| event.created_at).unwrap_or(task.created_at)
+    };
     let key = serde_json::json!([
         task.assignee,
         start.to_rfc3339(),

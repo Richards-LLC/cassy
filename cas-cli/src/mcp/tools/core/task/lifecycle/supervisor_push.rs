@@ -1078,6 +1078,14 @@ fn emit_task_lifecycle_transition_in_project(
     } else {
         transition_key(task_id, old_status, new_status, factory_session.as_deref(), kind, occurrence_id)
     };
+    // Quiet refreshes only read completed episodes; they must not take a
+    // SQLite writer transaction every two seconds for an unchanged wait.
+    if kind == LifecycleTransition::Blocked && cas_dir.is_some()
+        && let Some(row) = supervisor_queue.get_by_transition_key(&key).map_err(|e| e.to_string())?
+        && row.prompt_delivered_at.is_some()
+    {
+        return Ok(LifecyclePushResult::AlreadyComplete { notification_id: row.id });
+    }
     let now = Utc::now();
     let payload = json!({
         "task_id": task_id,
@@ -1127,7 +1135,7 @@ fn emit_task_lifecycle_transition_in_project(
 
     // Episode retries can arrive with newer activity timestamps. Recover the
     // original payload rather than changing the envelope under its durable key.
-    if already_existed {
+    if already_existed && kind == LifecycleTransition::Blocked && cas_dir.is_some() {
         let notification = supervisor_queue.get(notification_id).map_err(|e| e.to_string())?
             .ok_or_else(|| format!("missing lifecycle outbox row {notification_id}"))?;
         let pq = prompt_queue.ok_or_else(|| "prompt_queue unavailable; lifecycle outbox remains pending".to_string())?;

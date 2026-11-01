@@ -428,8 +428,9 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
         task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
     };
-    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
-    assert_eq!(prompts.len(), 1);
+    let (events, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(events.len(), 1);
+    assert!(prompts.is_empty());
     let answered_again = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
         "action": "message", "target": "merge-w", "task_id": task.id,
         "kind": "answer", "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
@@ -1438,9 +1439,9 @@ fn idle_worker_with_task(
         worker: "idle-w".into(),
         active_task: Some(cas_factory::ActiveLeaseSummary {
             task_id: "cas-1d1e".into(),
-            task_title: "parked".into(),
-            task_status: cas_types::TaskStatus::Blocked,
-            close_rejected_reason: Some("blocked on review".into()),
+            task_title: "running".into(),
+            task_status: cas_types::TaskStatus::InProgress,
+            close_rejected_reason: Some("proof required".into()),
             pending_qa: None,
         }),
     }

@@ -260,7 +260,7 @@ export class ProjectNavigation {
       const newest = sorted.reduce<ConversationRow | undefined>((best, row) => rank(row) > (best ? rank(best) : -Infinity) ? row : best, undefined);
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
-      const nested = sorted.map((row) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
+      const nested = sorted.map((row) => ({ ...row, supervisorState: row.ended ? "offline" as const : needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
       card.rows.render(card.body, nested, open, end, (row) => this.dismissEnded(row));
       ordered.push(card.node);
     }

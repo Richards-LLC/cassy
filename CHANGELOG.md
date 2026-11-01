@@ -49,6 +49,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   nothing and took header room on a phone. → Now: Wrap appears only on the
   diagram's source view, where it has lines to wrap.
 
+### Fixed — Commander session dots
+
+- **A stopped session no longer looks alive** — Was: A stopped session on a
+  machine that was still online showed the same green idle dot as a live one,
+  or the needs-you dot if it had unanswered attention. → Now: It shows the gray
+  disconnected dot, and a live idle session stays green.
+
 ### Fixed — Commander status updates
 
 - **A short status shows its formatting** — Was: A status of 140 characters or

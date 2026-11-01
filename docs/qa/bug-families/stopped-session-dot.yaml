@@ -1,0 +1,4 @@
+title: A stopped session must show the gray disconnected dot, never the idle or needs-you dot of a live session
+tasks: [cas-1437]
+invariants: [HUB-J14-GOAL]
+journeys: [HUB-J14]

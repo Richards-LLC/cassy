@@ -277,12 +277,19 @@ test(
         const before = welcomes.length;
         const stopped = await command("daemon-stop");
         await expect(header).toContainText("Reconnecting");
-        // Observe the old daemon's end receipt before starting its replacement.
-        // Otherwise a fast restart can hide the ended-to-live catalog gap.
-        await expect(page.locator('#message-status[data-session-ended="true"]')).toBeVisible();
+        // cas-8801: a confirmed stop removes the conversation from navigation.
+        // Observe that gap before starting the replacement; a rapid restart
+        // must not hide an ended row lingering in the running-only list.
+        const runningRows = page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row");
+        await expect(runningRows).toHaveCount(0);
+        await expect(page.getByText("No live supervisors listed. Start one with New session.", { exact: true })).toBeVisible();
         const replacement = await command("daemon-start");
         expect(replacement.daemonPid).not.toBe(stopped.daemonPid);
         fixture!.daemonPid = replacement.daemonPid;
+        // A new birth is a new conversation. Open it without reloading the
+        // phone, then prove its real Welcome and completed attachment pass.
+        await expect(runningRows).toHaveCount(1);
+        await runningRows.click();
         await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
         await expect(header).toContainText("Live");
         await countAttached(welcomes.at(-1)!);

@@ -31,7 +31,6 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
         let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { continue };
         let Ok((repo, target)) = crate::qa_batch::task_context(root, &task) else { continue };
         if crate::qa_batch::integration_state(&repo, anchor, &target) != Some(true)
-            || !review_tier::release_verdict_owns(root, &task, &repo)
             || core.guard_direct_update_close_merge_state(tasks.as_ref(), &task, None).is_err()
         {
             continue;
@@ -39,22 +38,33 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
         // An adverse or unanswered decision is substantive review work, not
         // a missing receipt. Unreadable verification metadata fails closed.
         let latest = verifications.get_latest_for_task(&task.id)?;
-        if latest.is_some_and(|v| !matches!(v.status, VerificationStatus::Approved | VerificationStatus::Pending)) {
+        if latest.as_ref().is_some_and(|v| matches!(v.status, VerificationStatus::Rejected | VerificationStatus::SupervisorCall | VerificationStatus::Skipped)) {
             continue;
         }
         let dispatch = cas_store::get_latest_verification_dispatch(root, &task.id)?;
-        if dispatch.is_some_and(|d| {
-            d.receipt_id.is_some() || d.delivery_transaction_id.is_some()
-                || (matches!(d.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
-                    && d.deadline_at > chrono::Utc::now())
+        if dispatch.as_ref().is_some_and(|d| {
+            matches!(d.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                && d.deadline_at > chrono::Utc::now()
         }) {
             continue;
         }
-        rows.push(format!("- {}: anchor {} is in {}; task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
+        let review = match review_tier::tier_for_delivery(&task, &repo).map(|decision| decision.tier) {
+            Some(review_tier::VerificationTier::Mechanical) => "mechanical close gates",
+            Some(review_tier::VerificationTier::Adversarial) => "dedicated verifier and adversarial probe required",
+            _ if review_tier::release_verdict_owns(root, &task, &repo) => "release verdict or receipt required",
+            _ => "dedicated verifier required",
+        };
+        let hold = match dispatch.as_ref().map(|dispatch| dispatch.state) {
+            Some(cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut) => "expired verification request",
+            _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Error) => "verification error",
+            _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Approved) => "recorded approval; close gates need rechecking",
+            _ => "close gates pending",
+        };
+        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; {review}; next: task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
     }
     if rows.is_empty() { return Ok(String::new()) }
     Ok(format!(
-        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Run each close action; if it requests a release verdict, include the named anchors in one independently authored release review. Close rechecks all gates.\n{}",
+        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Adopt each row and run its close action to recheck the current hold. Supply the exact verdict/receipt or dedicated review requested by close; Tier 2 still needs its own verifier and adversarial probe.\n{}",
         rows.len(), rows.concat()
     ))
 }

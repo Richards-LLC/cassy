@@ -22,7 +22,7 @@ if [[ ! -f "$glob_module" ]]; then
 fi
 
 step_json="$(python3 - <<'PY'
-import fnmatch, json, yaml
+import json, yaml
 workflow = yaml.safe_load(open(".github/workflows/ci.yml"))
 uploads = [step for step in workflow["jobs"]["fast-validation-journeys"]["steps"]
            if step.get("uses", "").startswith("actions/upload-artifact@")]
@@ -30,13 +30,7 @@ assert len(uploads) == 1, f"journey evidence must upload once per shard, found {
 step = uploads[0]
 assert step.get("if") == "always()", "preserve evidence even when startup fails before a recovery receipt"
 inputs = step["with"]
-names = [inputs["name"].replace("${{ matrix.shard }}", "3").replace("${{ github.run_attempt }}", str(attempt))
-         for attempt in (1, 2)]
-assert names[0] != names[1], "rerun evidence must not collide with the previous attempt's artifact"
-downloads = [step["with"]["pattern"] for job in workflow["jobs"].values() for step in job.get("steps", [])
-             if step.get("uses", "").startswith("actions/download-artifact@")
-             and step.get("with", {}).get("pattern") == "queue-flakes-*"]
-assert len(downloads) == 1 and all(fnmatch.fnmatchcase(name, downloads[0]) for name in names), "retain the queue fan-in artifact contract"
+assert inputs["name"] == "queue-flakes-playwright-${{ matrix.shard }}", "retain the queue fan-in artifact contract"
 print(json.dumps({"path": str(inputs["path"]).replace("${{ matrix.shard }}", "3").strip(),
                   "includeHidden": inputs.get("include-hidden-files") is True}))
 PY

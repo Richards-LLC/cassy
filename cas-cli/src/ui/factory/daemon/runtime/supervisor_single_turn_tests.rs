@@ -887,6 +887,8 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 let name = daemon.app.supervisor_name().to_string();
                 let agents = crate::store::open_agent_store(&cas).unwrap();
                 let mut supervisor = agents.get("single-sup").unwrap();
+                // Native observation selects live Active/Stale registrations.
+                supervisor.status = cas_types::AgentStatus::Active;
                 let account = root.path().join("codex-account");
                 supervisor.metadata.insert("worker_cli".into(), "codex".into());
                 supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
@@ -959,6 +961,9 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 settle_injected_writes(&mut daemon).await;
                 let expected = sender == "operator" || (!busy && matches!(sender, "worker" | "director" | "supervisor" | "daemon"));
                 let context = format!("{sender}/busy={busy}/oversized={oversized}");
+                let inputs = daemon.queue_jobs.prompt_preparation.recipient(&name).unwrap();
+                assert!(inputs.has_transcript, "{context}: dispatch must read the native rollout");
+                assert_eq!(inputs.tool_call == super::queue_and_events::ToolCallEvidence::InFlight, busy, "{context}");
                 if expected {
                     typed_once(&root, &mut daemon, &body).await;
                     assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_some(), "{context}");

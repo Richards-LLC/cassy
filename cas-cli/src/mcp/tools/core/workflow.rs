@@ -3,6 +3,7 @@ pub(crate) mod shadow_review;
 pub(crate) mod verification_tools;
 mod worktree_ops;
 pub(crate) use worktree_ops::check_runs_still_running;
+pub(crate) use worktree_ops::retry_ci_status;
 pub(crate) use worktree_ops::delivery_ci_pending;
 pub(crate) use worktree_ops::delivery_tip_ci_conclusion;
 pub(crate) use worktree_ops::epic_tip_ci_proof;

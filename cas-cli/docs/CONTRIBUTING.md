@@ -1859,6 +1859,32 @@ parser checks structure, counts, labels, defect ownership and readable PASS
 captures; it does not judge what a capture proves. Close applies its diagnostics
 before either verification dispatch path mutates state.
 
+### Hosted queue precheck and pending-CI merge retry
+
+`cas release precheck <sha>` pushes the resolved commit to `precheck/<full-sha>`
+and dispatches `ci.yml` on that ref. The binary includes its dispatcher: the
+checkout needs Git, authenticated `gh` and Python, with no Node, Playwright or
+Rust setup. HEAD and the live hub stay untouched. The receipt in the Git common
+directory records the full SHA and hosted run URL. `--receipt <path>` selects a
+portable receipt location; `--json` prints the complete machine-readable receipt.
+
+`cas release precheck <sha> --status` reads that run without a second dispatch,
+records the job results and elapsed minutes, and compares them with October's
+48- and 53-minute dispatches. A completed red run exits nonzero. Precheck refs
+use the queue's required jobs on hosted runners, excluding advisory builds and
+queue-only receipt publication. A historical SHA runs its own workflow version.
+This command replaces the local assembly-proof precheck.
+
+When an authenticated supervisor's merge of a parked delivery is refused only
+for pending code CI, Cassy persists the original options, source SHA, CI SHA,
+repository, target and supervisor session. The daemon retries on its next CI
+watch pass after that exact CI evidence turns green. Normal merge, ownership,
+QA, verification and target checks still apply. A red result, a moved lane or
+a new admission refusal sends one durable supervisor notice and consumes that
+intent. Missing CI and transport failures retain it without merging; daemon
+restarts resume the persisted intent. In-progress and unparked tasks never arm
+an automatic retry.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

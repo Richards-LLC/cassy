@@ -3768,7 +3768,15 @@ impl FactoryDaemon {
                             watched_branches.insert(branch);
                         }
                     }
+                    let retry_runtime = tokio::runtime::Handle::current();
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        // Durable merge intents are independent of reminders and
+                        // model turns. Run normal admission on the blocking pool.
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::factory_ci_retry::retry_pending(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "CI merge retry scan failed");
+                        }
                         let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
                         let supervisor_prs =
                             super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);

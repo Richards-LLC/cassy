@@ -1546,25 +1546,69 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
         .success()
 }
 
-/// A real pending-CI refusal must durably arm an exact-SHA retry.
+/// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
 #[tokio::test]
 async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
-    let home = TempDir::new().unwrap();
-    let fake_bin = TempDir::new().unwrap();
-    let gh = fake_bin.path().join("gh");
-    cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
+    for outcome in ["green", "red", "moved"] {
+        let home = TempDir::new().unwrap();
+        let fake_bin = TempDir::new().unwrap();
+        let gh = fake_bin.path().join("gh");
+        let response = fake_bin.path().join("ci.json");
+        std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
+        cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
 if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
-cat <<'JSON'
-{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}
-JSON
+cat "$CAS_CI_RETRY_TEST_RESPONSE"
 "#);
-    let mut env = TestEnvGuard::new();
-    env.set("HOME", home.path());
-    env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
-    let fixture = arm_delivery("pendingretry", "pending-ci-retry", &mut env).await;
-    let refusal = run_merge(&fixture).await;
-    assert!(refusal.contains("CI PENDING"), "{refusal}");
-    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
-    let request = fixture.cas_root.join("merge-ci-retries").join(format!("{}.json", fixture.task_id));
-    assert!(request.exists(), "pending CI refusal must survive a daemon restart: {refusal}");
+        let mut env = TestEnvGuard::new();
+        env.set("HOME", home.path());
+        env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+        env.set("CAS_CI_RETRY_TEST_RESPONSE", &response);
+        let slug = format!("pendingretry{outcome}");
+        let fixture = arm_delivery(&slug, &slug, &mut env).await;
+        let remote = home.path().join("origin.git");
+        run_git(&["init", "--bare", remote.to_str().unwrap()], &fixture.repo.root);
+        run_git(&["config", &format!("url.{}.insteadOf", remote.display()),
+            &format!("git@github.com:org/{slug}.git")], &fixture.repo.root);
+        run_git(&["push", "origin", "--all"], &fixture.repo.root);
+        let refusal = run_merge(&fixture).await;
+        assert!(refusal.contains("CI PENDING"), "{outcome}: {refusal}");
+        assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+        let request = fixture.cas_root.join("merge-ci-retries").join(format!("{}.json", fixture.task_id));
+        assert!(request.exists(), "pending CI refusal must survive a daemon restart: {refusal}");
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&request).unwrap()).unwrap();
+        assert_eq!(saved["sha"],fixture.receipt.commit_sha);
+        assert_eq!(saved["ci_sha"],fixture.receipt.commit_sha);
+        let session = format!("{slug}-factory");
+        // A different factory cannot consume the intent. Pending CI and an
+        // unavailable check response retain it without a supervisor notice.
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, "other-factory").await.unwrap();
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        assert!(request.exists());
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+        std::fs::write(&response, "{}").unwrap();
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        assert!(request.exists());
+        std::fs::write(&response, format!(r#"{{"check_runs":[{{"name":"Fast Validation","status":"completed","conclusion":"{}"}}]}}"#,
+            if outcome == "red" { "failure" } else { "success" })).unwrap();
+        if outcome == "moved" {
+            let worker = fixture.cas_root.join("worktrees").join(&slug);
+            std::fs::write(worker.join("new-work.txt"), "unreviewed work").unwrap();
+            run_git(&["add", "new-work.txt"], &worker);
+            run_git(&["commit", "-m", "new worker tip"], &worker);
+            run_git(&["push", "origin", &fixture.receipt.source_branch], &worker);
+        }
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        assert!(!request.exists(), "{outcome}: settled intent is consumed once");
+        let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
+            .peek_all(100).unwrap().into_iter().filter(|p| p.prompt.contains("Automatic merge stopped")).collect();
+        if outcome == "green" {
+            assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"));
+            assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
+        } else {
+            assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+            assert_eq!(notices.len(), 1, "{outcome}: red and moved lanes each send one notice");
+            assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
+        }
+    }
 }

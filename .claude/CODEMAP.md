@@ -44,6 +44,7 @@
 - `cas-cli/src/agent_model.rs` - role-scoped pane model/effort observations shared by native hooks, Commander model selection, catalog and status.
 
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, module composition and command dispatch.
+- `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA queue prechecks and run receipts.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs` - initialization, recovery and provisioning.
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - recommendation policy, exclusions and thresholds.
 - `cas-cli/src/account_registry.rs`, `cas-cli/src/account_registry/resolve.rs` - non-secret identity/alias discovery and native usage snapshots.
@@ -80,6 +81,7 @@
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - a worker's typed candidate request, its checks, the daemon's build queue and the daemon-managed builder checkout.
+- `cas-cli/src/factory_ci_retry.rs` - persisted supervisor-authorized merge retries after exact-SHA CI settles.
 - `cas-cli/src/worker_task_queue.rs` - ordered worker backlog policy, start authorization, delivery handoff and durable daemon reconciliation.
 
 ## MCP and delivery gates

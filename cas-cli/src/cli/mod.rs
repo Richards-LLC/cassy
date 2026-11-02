@@ -40,6 +40,7 @@ pub(crate) mod qa_post_release;
 pub(crate) mod qa_rapid_response;
 mod provider_default;
 mod release_report;
+mod release_precheck;
 pub mod deliverable;
 mod sweep;
 mod worktree;
@@ -458,6 +459,8 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ReleaseCommands {
+    /// Validate any commit with the merge queue job set on hosted CI
+    Precheck(release_precheck::ReleasePrecheckArgs),
     /// Assemble a Markdown, standalone HTML, and optional PDF release report
     Report(ReleaseReportArgs),
 }
@@ -1008,6 +1011,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Whoami => auth::execute(&AuthCommands::Whoami, cli),
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
+        Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
         Commands::Ledger(args) => ledger::execute(args, cli, require_cas_root(cas_root)?),

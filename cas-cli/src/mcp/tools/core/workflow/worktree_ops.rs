@@ -147,6 +147,17 @@ impl BranchCiState {
     }
 }
 
+/// Reuse admission's exact commit/check classifier, never infer green from a
+/// workflow completing, an empty response or an unavailable forge.
+pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
+    use crate::factory_ci_retry::CiStatus;
+    match lookup_branch_ci(sha, target, cwd).state {
+        BranchCiState::Green { sha, .. } if sha == ci_sha => CiStatus::Green,
+        BranchCiState::Red { sha, .. } if sha == ci_sha => CiStatus::Red,
+        _ => CiStatus::Pending,
+    }
+}
+
 fn ci_override_note(
     supervisor_id: &str,
     branch: &str,
@@ -4175,6 +4186,20 @@ impl CasCore {
         supervisor_override: bool,
         reason: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        self.worktree_merge_checked(id, force, task_id, allow_trunk, cleanup, supervisor_override, reason, None).await
+    }
+
+    pub(crate) async fn worktree_merge_checked(
+        &self,
+        id: &str,
+        force: bool,
+        task_id: Option<&str>,
+        allow_trunk: bool,
+        cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
@@ -4925,6 +4950,18 @@ impl CasCore {
             .or_else(|| scoped_task.as_deref()
                 .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
             .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
+        if let Some(expected) = expected_delivery
+            && (parked_source_tip.as_deref() != Some(expected.sha.as_str())
+                || worktree.branch != expected.branch
+                || worktree.parent_branch != expected.target
+                || cwd != expected.repo)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("CI RETRY SOURCE MOVED: parked delivery changed after authorization; no merge was attempted."),
+                data: None,
+            });
+        }
         let ci_source = remote_source.as_ref()
             .map(|source| source.anchor.as_str())
             .or(parked_source_tip.as_deref())
@@ -4990,9 +5027,31 @@ impl CasCore {
                         data: None,
                     })?;
                 }
+                let mut retry_notice = String::new();
+                if matches!(branch_ci_state, BranchCiState::CodePending { .. })
+                    && let Some(task) = scoped_task.as_deref()
+                    && task.status == cas_types::TaskStatus::AwaitingMerge
+                    && let Some(source_sha) = parked_source_tip.as_deref()
+                    && let Ok(supervisor) = self.resolve_live_supervisor_authority()
+                    && self.has_server_internal_identity(&supervisor.id)
+                    && let Some(session) = supervisor.factory_session.as_deref()
+                {
+                    let request = crate::factory_ci_retry::Retry {
+                        task: task.id.clone(), worktree: id.to_string(),
+                        branch: worktree.branch.clone(), sha: source_sha.to_string(),
+                        ci_sha: branch_ci_state.sha().to_string(),
+                        target: worktree.parent_branch.clone(), repo: cwd.clone(),
+                        supervisor: supervisor.id.clone(), session: session.to_string(),
+                        force, allow_trunk, cleanup,
+                    };
+                    match crate::factory_ci_retry::arm(&cas_root, &request) {
+                        Ok(()) => retry_notice = format!("\nAutomatic retry armed for {source_sha}; green CI retries this merge, red CI or a moved lane sends one notice."),
+                        Err(error) => retry_notice = format!("\nAutomatic retry could not be saved: {error}. Retry this merge manually."),
+                    }
+                }
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("{ci_prefix}{message}")),
+                    message: Cow::from(format!("{ci_prefix}{message}{retry_notice}")),
                     data: None,
                 });
             }

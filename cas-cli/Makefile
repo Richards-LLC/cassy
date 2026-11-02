@@ -219,6 +219,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-journey-bundles.py
 	cd .. && node --test scripts/test-opencode-slack-policy.mjs
 	cd .. && python3 scripts/test-release-budget-breach.py
+	cd .. && python3 scripts/test-release-precheck.py
 	cd .. && python3 scripts/test-release-report-post.py
 	cd .. && python3 scripts/test-release-report.py
 	cd .. && node scripts/test-verified-web-runners.mjs

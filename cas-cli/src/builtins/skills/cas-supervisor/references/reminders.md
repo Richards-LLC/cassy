@@ -10,7 +10,8 @@ authoritative task/worker state once before acting.
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
 | Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, run the verifier on Cassy's dispatch (its verdict closes or returns the task; no worker message), then cancel any phase reminder |
-| GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
+| Parked merge refused only for pending CI | Let the exact-SHA retry Cassy armed finish | No — green retries automatically; red or a moved lane sends one notice | Act only on that notice |
+| Other GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
 | Long release, publication, or other detached job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
 | Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |
 | Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |

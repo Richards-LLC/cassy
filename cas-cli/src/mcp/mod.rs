@@ -52,6 +52,7 @@ pub mod tools;
 pub(crate) mod viktor_watch;
 
 pub use server::CasCore;
+pub(crate) use server::AgentIdentitySource;
 pub use server::run_server;
 #[cfg(feature = "mcp-proxy")]
 pub use server::{

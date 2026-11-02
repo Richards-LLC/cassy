@@ -920,7 +920,7 @@ mod tests {
                 agent.factory_session = Some("factory-1".into());
                 let account = temp.path().join("account");
                 let prefix = if role == AgentRole::Supervisor { "supervisor" } else { "worker" };
-                agent.metadata.insert(format!("{prefix}_cli"), cli.to_string());
+                agent.metadata.insert(format!("{prefix}_cli"), cli.backend().name().into());
                 agent.metadata.insert(format!("{prefix}_account_dir"), account.to_string_lossy().into_owned());
                 let id = queue.enqueue_urgent_with_outcome(
                     "director", &agent.name, "Review the task", Some("factory-1"),

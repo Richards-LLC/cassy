@@ -1678,6 +1678,49 @@ mod tests {
         );
     }
 
+    /// cas-7f57a: the worker sees its own prompt occupancy, not cumulative billing.
+    #[tokio::test]
+    async fn codex_worker_response_reports_measured_context_cas_7f57a() {
+        use crate::{mcp::{CasCore, CasService}, test_support::TestEnvGuard};
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_NAME", "context-worker");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.remove(crate::internal_llm::INTERNAL_LLM_ENV);
+        let root = env.home().join("project/.cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.register_agent("context-session".into(), "context-worker".into(), None).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let account = env.home().join("codex-account");
+        let sessions = account.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout-context-session.jsonl");
+        let store = service.inner.open_agent_store().unwrap();
+        let mut worker = store.get("context-session").unwrap();
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("worker_account_dir".into(), account.display().to_string());
+        store.update(&worker).unwrap();
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.factory.get_or_insert_with(Default::default).context_recycle_threshold_percent = 50;
+        config.save(&root).unwrap();
+        for (input, window, expected) in [(226000, Some(475000), None),
+            (268000, Some(475000), Some("context used: 56%")),
+            (28000, Some(475000), None), (268000, None, Some("context used: unknown"))] {
+            let row = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count",
+                "info":{"total_token_usage":{"input_tokens":9000000},
+                "last_token_usage":{"input_tokens":input}, "model_context_window":window}}});
+            std::fs::write(&rollout, format!("{row}\n")).unwrap();
+            let output = service.append_factory_context(Ok(CasCore::success("original result"))).await.unwrap();
+            let text = serde_json::to_string(&output).unwrap();
+            assert!(text.contains("original result"));
+            if let Some(expected) = expected {
+                assert!(text.contains(expected), "{text}");
+            } else {
+                assert!(!text.contains("context used:"), "{text}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn response_fallback_preserves_result_and_surfaces_mail_once() {
         use crate::mcp::server::CasCore;

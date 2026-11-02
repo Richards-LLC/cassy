@@ -1985,6 +1985,18 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
+        // cas-7f57a: a successor must not enter the preceding conversation.
+        assert_eq!(f.task("cas-8488b").status, TaskStatus::Open,
+            "queued successor started before a fresh harness generation");
+        let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+        let resets = spawns.peek(100).unwrap();
+        assert_eq!(resets.iter().filter(|r| r.action == cas_store::SpawnAction::Recycle).count(), 1);
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        assert_eq!(spawns.peek(100).unwrap().len(), resets.len(), "retry duplicated recycle");
+        let mut fresh = agents.get("nocode-worker-session").unwrap();
+        fresh.cc_session_id = Some("fresh-successor-conversation".into());
+        agents.update(&fresh).unwrap();
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         let next = f.task("cas-8488b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));

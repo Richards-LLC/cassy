@@ -904,6 +904,79 @@ mod tests {
     use cas_store::{AgentStore, OperatorStamp, SqliteAgentStore, SqlitePromptQueueStore};
     use cas_types::{Agent, AgentRole};
 
+    #[test]
+    fn completed_factory_turns_write_quality_events_without_commander_mirroring() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            for role in [AgentRole::Supervisor, AgentRole::Worker] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join(".cas");
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::write(root.join("config.toml"), "[factory]\ncommander_mirror_enabled = false\n").unwrap();
+                let queue = SqlitePromptQueueStore::open(&root).unwrap();
+                queue.init().unwrap();
+                let mut agent = Agent::new_with_role("turn-agent".into(), "turn-worker".into(), role);
+                agent.cc_session_id = Some("native-ledger-session".into());
+                agent.factory_session = Some("factory-1".into());
+                let account = temp.path().join("account");
+                let prefix = if role == AgentRole::Supervisor { "supervisor" } else { "worker" };
+                agent.metadata.insert(format!("{prefix}_cli"), cli.to_string());
+                agent.metadata.insert(format!("{prefix}_account_dir"), account.to_string_lossy().into_owned());
+                let id = queue.enqueue_urgent_with_outcome(
+                    "director", &agent.name, "Review the task", Some("factory-1"),
+                    None, None, false, Some(&cas_store::QueueOrigin::Daemon),
+                ).unwrap().id();
+                let prompt = format!("Message from director: [cas #{id} agent-authored 0s first]\nReview the task");
+                let at = |second| format!("2026-11-02T12:00:{second:02}Z");
+                let call = serde_json::json!({"action":"update", "id":"cas-turn-test", "notes":"recorded decision"});
+                let lines = if cli == cas_mux::SupervisorCli::Claude {
+                    vec![
+                        serde_json::json!({"type":"user","uuid":"turn-1","timestamp":at(0),"message":{"content":prompt}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(1),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"tool_use","id":"call-1","name":"mcp__cs__task","input":call}]}}),
+                        serde_json::json!({"type":"user","timestamp":at(2),"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false,"content":"updated"}]}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(3),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"text","text":"Updated."}],"stop_reason":"end_turn"}}),
+                        serde_json::json!({"type":"system","timestamp":at(3),"subtype":"turn_duration"}),
+                    ]
+                } else {
+                    vec![
+                        serde_json::json!({"type":"session_meta","payload":{"id":"native-ledger-session","cwd":temp.path(),"source":"cli"}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(0),"payload":{"type":"task_started","turn_id":"turn-1"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(0),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(1),"payload":{"type":"function_call","call_id":"call-1","name":"mcp__cs__task","arguments":call.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(2),"payload":{"type":"function_call_output","call_id":"call-1","output":"updated"}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":5}}}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"task_complete","turn_id":"turn-1"}}),
+                    ]
+                };
+                let path = if cli == cas_mux::SupervisorCli::Claude {
+                    account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-")).join("native-ledger-session.jsonl")
+                } else {
+                    account.join("sessions/2026/11/02/rollout-native-ledger-session.jsonl")
+                };
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+                let agents = vec![agent];
+                let mut state = MirrorScanState::default();
+                for _ in 0..2 {
+                    scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                }
+                // Replaying after a daemon restart must not duplicate the fact.
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut MirrorScanState::default());
+                let turns: Vec<_> = cas_store::quality_events_after(&root, 0, 20).unwrap().into_iter()
+                    .filter(|event| event.payload.kind() == "turn").collect();
+                assert_eq!(turns.len(), 1, "completed {cli:?} {role:?} turn must be recorded once");
+                let payload = serde_json::to_value(&turns[0].payload).unwrap();
+                // pin: ledger wire fields preserve the authenticated director channel and measured usage.
+                assert_eq!(payload["woken_by"], "director");
+                assert_eq!(payload["no_op"], false);
+                assert!(payload["actions"].as_array().is_some_and(|actions| !actions.is_empty()));
+                assert_eq!(payload["input_tokens"], 30);
+                assert_eq!(payload["output_tokens"], 5);
+                assert_eq!(payload["minutes"], 0.05);
+            }
+        }
+    }
+
     fn codex_turn(prompt: &str) -> Vec<Value> {
         vec![
             serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),

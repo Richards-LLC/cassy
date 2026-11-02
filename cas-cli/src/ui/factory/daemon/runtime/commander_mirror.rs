@@ -1209,6 +1209,23 @@ mod tests {
         assert_eq!(payload["input_tokens"], 30);
         assert_eq!(payload["output_tokens"], 5);
         assert_eq!(payload["minutes"], 0.05);
+        // Streaming internal restatements, including a long chunk, must not
+        // create Answer actions on Grok's native completion path either.
+        use std::io::Write;
+        let extra = [
+            update(1793617210, serde_json::json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":format!("CAS wake: message {id} from director is in your inbox")}})),
+            update(1793617211, serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The owner remains unchanged and there is no new decision. ".repeat(20)}})),
+            update(1793617212, serde_json::json!({"sessionUpdate":"turn_completed","prompt_id":"prompt-2","elapsed_ms":2000})),
+        ];
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for row in extra { writeln!(file, "{row}").unwrap(); }
+        scan(&mut state);
+        let events = cas_store::quality_events_after(&root, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        let payload = serde_json::to_value(&events[1].payload).unwrap();
+        assert_eq!(payload["woken_by"], "director");
+        assert_eq!(payload["no_op"], true);
+        assert_eq!(payload["actions"], serde_json::json!([]));
     }
 
     fn codex_turn(prompt: &str) -> Vec<Value> {

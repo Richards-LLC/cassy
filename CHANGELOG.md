@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory turn records
+
+- **Keep wake and no-op counts honest** — Claude Teams messages and pointer wakes retain their queue source; Codex launch context no longer hides the first real wake. Routine internal prose stays a no-op unless a typed action occurred, while authenticated operator answers and questions still count. Appends consumed during a scan no longer trigger a full replay, and a new native turn replaces an unfinished prior turn without inheriting its duration.
+
 ### Fixed — Worker context
 
 - **Start queued work with fresh context** — Workers restart in place between queued tasks, keeping their name, checkout and launch recipe. MCP results surface actual harness context use at the configured threshold, so checkpoints use measured occupancy instead of cumulative token totals or tool-output size.

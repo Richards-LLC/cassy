@@ -69,7 +69,15 @@ fn commander_marker(text: &str) -> Option<i64> {
 
 fn commander_markers(text: &str) -> Vec<i64> {
     let mut seen = HashSet::new();
-    text.lines().filter_map(|line| {
+    text.lines().enumerate().filter_map(|(index, line)| {
+        // Codex's PTY channel frames the first line with sender attribution.
+        // Only unwrap that outer line; quoted/relayed wrappers in the body
+        // cannot turn older markers into fresh reply bindings.
+        let line = if index == 0 {
+            line.strip_prefix("Message from ")
+                .and_then(|framed| framed.split_once(": ").map(|(_, body)| body))
+                .unwrap_or(line)
+        } else { line };
         let marker = line.strip_prefix("[cas #")?;
         let digits: String = marker.chars().take_while(char::is_ascii_digit).collect();
         marker[digits.len()..].starts_with(" operator ")

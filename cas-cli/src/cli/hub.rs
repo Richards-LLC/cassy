@@ -3506,7 +3506,7 @@ fn unavailable_update_transport(warning: &str) -> HubUpdateVerification {
         transport_warning: Some(format!(
             "Tailscale Serve inactive: {warning}; hub remains loopback-only"
         )),
-        remedy: Some("Check `tailscale status`, then run `cas hub restart`.".to_owned()),
+        remedy: Some("Publication retries automatically; no restart is needed.".to_owned()),
     }
 }
 

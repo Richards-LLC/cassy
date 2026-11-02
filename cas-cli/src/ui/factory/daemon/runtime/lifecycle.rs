@@ -5247,6 +5247,7 @@ fn log_dropped_stale_prompt(prompt: &crate::ui::factory::director::Prompt) {
 mod stall_nudge_routing_rework_tests {
     use super::*;
 
+    // pin: persisted director source and authenticated-origin wake authority are wire contracts.
     #[tokio::test]
     async fn director_supervisor_wakes_are_queued_attributed_and_draft_gated() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for, typed_once};

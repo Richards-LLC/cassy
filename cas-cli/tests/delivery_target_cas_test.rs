@@ -585,7 +585,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         // so pin the project identity the fixture means.
         std::fs::write(
             cas_root.join("config.toml"),
-            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n"),
+            // Per-task QA: these rows follow one delivery's own dispatch and verdict.
+            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n[qa]\nmode = \"per_task\"\n"),
         )
         .expect("write config");
         let worker = slug.clone();

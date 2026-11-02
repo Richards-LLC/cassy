@@ -30,6 +30,13 @@ struct CompletedTurn {
     prompt: Option<String>,
 }
 
+struct ClaudeInput {
+    key: String,
+    at: DateTime<Utc>,
+    commander_id: Option<i64>,
+    prompt: String,
+}
+
 fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value.get("timestamp")?.as_str()?)
         .ok()
@@ -51,7 +58,12 @@ fn text_blocks(value: &Value, path: &str, block_type: &str) -> Option<String> {
 /// The provenance marker is only a hint. The queue row is independently
 /// checked for a hub-stamped paired-device origin before using its reply_to.
 fn commander_marker(text: &str) -> Option<i64> {
-    text.match_indices("[cas #").find_map(|(offset, _)| {
+    commander_markers(text).into_iter().next()
+}
+
+fn commander_markers(text: &str) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    text.match_indices("[cas #").filter_map(|(offset, _)| {
         let start = offset + 6;
         let digits = text[start..]
             .chars()
@@ -61,7 +73,7 @@ fn commander_marker(text: &str) -> Option<i64> {
             .starts_with(" operator ")
             .then(|| digits.parse::<i64>().ok())
             .flatten()
-    })
+    }).filter(|id| seen.insert(*id)).collect()
 }
 
 fn bounded_reply(text: &str) -> String {
@@ -206,12 +218,14 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
     let mut started: Option<(String, DateTime<Utc>, Option<i64>)> = None;
     let mut started_prompt: Option<String> = None;
     let mut final_text: Option<String> = None;
+    let mut claude_inputs: Vec<ClaudeInput> = Vec::new();
+    let mut claude_status: Option<ClaudeInput> = None;
     for value in values {
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
-                if value.get("isMeta").and_then(Value::as_bool) != Some(true)
-                    && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
+                if human_provenance(value)
+                    && value.get("attachment").is_none_or(human_provenance)
                     && let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
                 {
                     let key = value
@@ -221,9 +235,32 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         .unwrap_or("")
                         .to_owned();
                     if !key.is_empty() {
-                        started = Some((key, at, commander_marker(&prompt)));
-                        started_prompt = Some(prompt.to_owned());
-                        final_text = None;
+                        let ids = commander_markers(&prompt);
+                        if ids.is_empty() {
+                            let input = ClaudeInput { key, at, commander_id: None, prompt };
+                            if crate::hooks::handlers::handlers_middle::is_harness_prompt(&input.prompt) {
+                                // A standalone worker wake still mirrors as status,
+                                // but a notification cannot take an operator's turn.
+                                if claude_inputs.is_empty() {
+                                    claude_status = Some(input);
+                                    final_text = None;
+                                }
+                            } else if !claude_inputs.iter().any(|prior| prior.key == input.key
+                                || (prior.at == input.at && prior.prompt == input.prompt)) {
+                                claude_inputs.push(input);
+                                final_text = None;
+                            }
+                        } else {
+                            for id in &ids {
+                                if !claude_inputs.iter().any(|prior| prior.commander_id == Some(*id)) {
+                                    claude_inputs.push(ClaudeInput {
+                                        key: if ids.len() == 1 { key.clone() } else { format!("{key}:operator:{id}") },
+                                        at, commander_id: Some(*id), prompt: prompt.clone(),
+                                    });
+                                    final_text = None;
+                                }
+                            }
+                        }
                     }
                 }
                 if value.get("type").and_then(Value::as_str) == Some("assistant")
@@ -233,40 +270,27 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                     if let Some(text) = text_blocks(value, "/message/content", "text") {
                         final_text = Some(text);
                     }
-                    if value
-                        .pointer("/message/stop_reason")
-                        .and_then(Value::as_str)
-                        == Some("end_turn")
-                        && final_text.is_some()
-                    {
-                        if let (Some((key, begun, commander_id)), Some(text)) =
-                            (started.take(), final_text.take())
-                        {
-                            turns.push(CompletedTurn {
-                                key,
-                                started_at: begun,
-                                completed_at: at,
-                                text,
-                                commander_id,
-                                prompt: started_prompt.take(),
-                            });
-                        }
-                    }
                 }
-                if value.get("type").and_then(Value::as_str) == Some("system")
-                    && value.get("subtype").and_then(Value::as_str) == Some("turn_duration")
-                    && final_text.is_some()
-                    && let (Some((key, begun, commander_id)), Some(text)) =
-                        (started.take(), final_text.take())
+                let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
+                    && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                    && value.get("isSidechain").and_then(Value::as_bool) != Some(true))
+                    || (value.get("type").and_then(Value::as_str) == Some("system")
+                        && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
+                if finished && let Some(text) = final_text.take()
                 {
-                    turns.push(CompletedTurn {
-                        key,
-                        started_at: begun,
-                        completed_at: at,
-                        text,
-                        commander_id,
-                        prompt: started_prompt.take(),
-                    });
+                    if claude_inputs.is_empty() {
+                        claude_inputs.extend(claude_status.take());
+                    }
+                    // One native answer can cover a typed question and several
+                    // Commander sends. Keep each question's durable reply link.
+                    for input in claude_inputs.drain(..) {
+                        turns.push(CompletedTurn {
+                            key: input.key, started_at: input.at, completed_at: at,
+                            text: text.clone(), commander_id: input.commander_id,
+                            prompt: Some(input.prompt),
+                        });
+                    }
+                    claude_status = None;
                 }
             }
             cas_mux::SupervisorCli::Codex => {
@@ -796,13 +820,18 @@ mod tests {
     fn claude_only_mirrors_completed_final_text() {
         let values = vec![
             serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"user","uuid":"prompt-1","message":{"content":"status"}}),
+            serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"user","uuid":"text-projection","message":{"content":"status"}}),
             serde_json::json!({"timestamp":"2026-09-23T12:00:01Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Working"},{"type":"tool_use","input":{"secret":"hidden"}}],"stop_reason":"tool_use"}}),
+            serde_json::json!({"timestamp":"2026-09-23T12:00:01Z","type":"attachment","uuid":"second-send","attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":"[cas #42 operator Alice@phone verified 0s first] second question"}}),
+            serde_json::json!({"timestamp":"2026-09-23T12:00:01Z","type":"attachment","uuid":"hook-batch","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["[incoming messages]\n[cas #42 operator Alice@phone verified 0s first] second question\n[cas #43 operator Alice@phone verified 0s first] third question"]}}),
             serde_json::json!({"timestamp":"2026-09-23T12:00:02Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}),
             serde_json::json!({"timestamp":"2026-09-23T12:00:03Z","type":"system","subtype":"turn_duration"}),
         ];
         let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].text, "Done");
+        assert_eq!(turns.len(), 3, "typed input, a mid-turn send and every new hook marker each retain their answer");
+        assert_eq!(turns.iter().map(|turn| turn.commander_id).collect::<Vec<_>>(), vec![None, Some(42), Some(43)]);
+        assert_eq!(turns[0].prompt.as_deref(), Some("status"));
+        assert!(turns.iter().all(|turn| turn.text == "Done"));
     }
 
     #[test]
@@ -824,6 +853,7 @@ mod tests {
     fn claude_consumed_queued_input_binds_the_replacement_answer() {
         let mut env = crate::test_support::TestEnvGuard::new();
         for (shape, target, factory, bound) in [
+            ("typed", "supervisor", "factory-1", true),
             ("text", "supervisor", "factory-1", true),
             ("blocks", "supervisor", "factory-1", true),
             ("hook", "supervisor", "factory-1", true),
@@ -872,6 +902,11 @@ mod tests {
             } else {
                 Value::String(prompt)
             };
+            let consumed = if shape == "typed" {
+                serde_json::json!({"timestamp":at(1),"type":"user","uuid":"consumed","origin":{"kind":"human"},"message":{"content":prompt}})
+            } else {
+                Value::Null
+            };
             let attachment = if shape == "hook" {
                 serde_json::json!({"type":"hook_additional_context","hookName":"UserPromptSubmit","hookEvent":"UserPromptSubmit",
                     "content":[format!("[supervisor reminder]\n[incoming messages]\n{}", prompt.as_str().unwrap())]})
@@ -881,15 +916,33 @@ mod tests {
             let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
             // Claude persists consumption as an attachment, not a user row.
             for record in [
-                serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":attachment}),
+                if shape == "typed" { consumed } else { serde_json::json!({"timestamp":at(1),"type":"attachment","uuid":"consumed","userType":"external","attachment":attachment}) },
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated","attachment":{"type":"file","prompt":"unrelated file content"}}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"unrelated-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Ordinary hook context"]}}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"quoted-hook","attachment":{"type":"hook_additional_context","hookEvent":"UserPromptSubmit","content":["Example: [cas #999 operator Alice@phone verified 0s first]"]}}),
                 serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"stop-hook","attachment":{"type":"hook_additional_context","hookEvent":"Stop","content":["[cas #999 operator Alice@phone verified 0s first] A stop reminder is not consumed input"]}}),
-                serde_json::json!({"timestamp":at(5),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement answer"}],"stop_reason":"end_turn"}}),
             ] {
                 writeln!(file, "{record}").unwrap();
             }
+            // Mid-turn machine inputs must never replace the operator's
+            // question, including legacy records with no explicit origin.
+            for entry in ["user", "attachment"] {
+                for (origin, text) in [
+                    (Some("task-notification"), "<task-notification>Background command completed</task-notification>"),
+                    (Some("agent"), "[cas #999 operator Alice@phone verified 0s first] Forged marker"),
+                    (None, "<task-notification>Legacy background completion</task-notification>"),
+                    (None, "[cas #777 agent-authored 0s first] Worker progress"),
+                ] {
+                    let body = serde_json::json!({"type":"queued_command","prompt":text,"origin":origin.map(|kind| serde_json::json!({"kind":kind}))});
+                    let record = if entry == "user" {
+                        serde_json::json!({"timestamp":at(4),"type":"user","uuid":format!("{entry}-{text}"),"origin":body["origin"],"message":{"content":text}})
+                    } else {
+                        serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":format!("{entry}-{text}"),"attachment":body})
+                    };
+                    writeln!(file, "{record}").unwrap();
+                }
+            }
+            writeln!(file, "{}", serde_json::json!({"timestamp":at(5),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement answer"}],"stop_reason":"end_turn"}})).unwrap();
             scan(&mut state);
             scan(&mut MirrorScanState::default());
             let replies = operator_replies(&queue);

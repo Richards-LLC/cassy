@@ -142,3 +142,12 @@ available.
 
 Batch receipts and deferred obligations are local project records in
 `.cas/cas.db` (migration 276). They do not create a cloud synchronization lane.
+
+A successor supervisor's startup recovery list spans all review tiers, rather
+than only release-owned Tier 1 deliveries. Each integrated, content-preserved
+project delivery without a live review or adverse verdict shows its current
+hold and a close action. Tier 0 still passes mechanical gates; Tier 2 and
+forced dedicated reviews retain their own verdicts and probes. Close rechecks
+these gates; appearing in recovery never approves or closes a delivery.
+Unreadable verification metadata skips and reports that row while preserving
+the other recovery actions and the inherited supervisor handoff.

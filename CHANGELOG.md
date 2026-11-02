@@ -25,6 +25,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Delivery recovery
 
+- **Recover every review tier** — Successor startup includes merged Tier 0 and Tier 2 work with its current hold and next action. One unreadable verification row is reported without hiding other deliveries or the inherited handoff. Dedicated review and adversarial probes still apply.
+
 - **Carry merged work across supervisor sessions** — Startup lists every project delivery eligible for receipt recovery with a close action. A later exact release verdict clears expired Tier 1 dispatches and deferred batch debt, while live or newer reviews, rejected verdicts, Tier 2 probes and lost-content guards still hold the delivery.
 
 ### Fixed — Friction ledger

@@ -425,7 +425,11 @@ impl CasCore {
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
             queue.dispatch_revision = queue.revision + 1;
-            queue.context_reset_from = predecessor.map(|_| conversation_generation(&worker));
+            queue.context_reset_from = if self.load_config().factory().restart_worker_between_tasks {
+                predecessor.map(|_| conversation_generation(&worker))
+            } else {
+                None
+            };
             queue.context_reset_request = None;
             queues
                 .save(session, &worker.name, &mut queue)
@@ -468,7 +472,7 @@ impl CasCore {
             drop(_lock);
             return Box::pin(self.advance_queue_for_worker(worker, predecessor)).await;
         }
-        // Task boundaries are conversation boundaries. Persist the old
+        // Opted-in task boundaries are conversation boundaries. Persist the old
         // generation before requesting the existing daemon recycle lifecycle;
         // never enqueue B's assignment or switch its branch in A's context.
         if queue.context_reset_from.as_deref() == Some(conversation_generation(&worker).as_str()) {

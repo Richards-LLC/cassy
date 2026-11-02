@@ -188,6 +188,13 @@ impl CloudSyncer {
                 .set("Content-Type", "application/json")
                 .set("Content-Encoding", "gzip")
                 .send_bytes(&body);
+            // An older endpoint may reject the new kind at the envelope level.
+            // Preserve the whole batch and use capability pacing, not a hot retry.
+            if matches!(&response, Err(ureq::Error::Status(400 | 422, _)))
+                && events.iter().any(|event| event.payload.kind() == "turn") {
+                summary.refused += events.len();
+                return Ok(true);
+            }
             let answer = match quality_http(response, "push")? {
                 Http::Absent => return Ok(true),
                 Http::TooLarge => {
@@ -204,14 +211,21 @@ impl CloudSyncer {
                 Http::Ok(answer) => answer,
             };
             let answer: PushAnswer = serde_json::from_value(answer).unwrap_or_default();
-            // A row-level refusal is permanent: holding the cursor for it would
-            // stall every later event, and nothing here can make it acceptable.
+            // Unknown Turn capability is recoverable. Hold before its first
+            // refusal so a future endpoint can ingest it, retaining every row.
+            let rejected_turn = events.iter().find(|event| event.payload.kind() == "turn"
+                && answer.rejected.iter().any(|row| row.get("id").and_then(serde_json::Value::as_str) == Some(event.id.as_str())));
+            // Other legacy row-level refusals preserve their prior behavior.
             if !answer.rejected.is_empty() {
                 tracing::warn!(rejected = ?answer.rejected, "cloud refused quality events");
             }
             summary.refused += answer.rejected.len();
             summary.pushed += wire.len().saturating_sub(answer.rejected.len());
-            self.queue().set_metadata(PUSH_CURSOR_KEY, &last_seq.to_string())?;
+            let accepted_through = rejected_turn.map_or(last_seq, |turn| {
+                events.iter().take_while(|event| event.seq < turn.seq).last().map_or(cursor, |event| event.seq)
+            });
+            self.queue().set_metadata(PUSH_CURSOR_KEY, &accepted_through.to_string())?;
+            if rejected_turn.is_some() { return Ok(true); }
             if events.len() < limit {
                 return Ok(false);
             }

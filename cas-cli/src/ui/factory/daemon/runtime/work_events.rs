@@ -771,7 +771,7 @@ fn codex_reasoning(payload: &Value) -> String {
         .join("\n\n")
 }
 
-fn codex_call(payload: &Value) -> (String, Value) {
+pub(super) fn codex_call(payload: &Value) -> (String, Value) {
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -788,7 +788,7 @@ fn codex_call(payload: &Value) -> (String, Value) {
 }
 
 /// Only structured runner metadata; do not guess exit status from tool prose.
-fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
+pub(super) fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
     if depth > 8 {
         return (None, None);
     }
@@ -839,7 +839,7 @@ fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
 }
 
 /// apply_patch has a published success header; arbitrary output is not proof of an edit.
-fn published_success(value: &Value, depth: usize) -> bool {
+pub(super) fn published_success(value: &Value, depth: usize) -> bool {
     if depth > 8 {
         return false;
     }

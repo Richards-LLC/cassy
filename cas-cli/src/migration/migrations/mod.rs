@@ -265,6 +265,7 @@ mod m288_worker_task_queues;
 mod m289_drop_recording_index;
 mod m290_quality_events;
 mod m291_verification_status_detail;
+mod m292_quality_turns;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -567,6 +568,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m289_drop_recording_index::MIGRATION,
     m290_quality_events::MIGRATION,
     m291_verification_status_detail::MIGRATION,
+    m292_quality_turns::MIGRATION,
 ];
 
 #[cfg(test)]

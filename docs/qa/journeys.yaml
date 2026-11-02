@@ -16,6 +16,21 @@ bug_families:
     tasks: [cas-aa152]
     invariants: [HUB-J5-SENDER-TURN-GATE]
     journeys: [HUB-J5]
+  catalog-independent-live-conversations:
+    title: Live sends and transport recovery survive catalog failures; drafts preserve unknown births and failed archives
+    tasks: [cas-bbad5]
+    invariants: [HUB-J14-RUNNING-ONLY, HUB-J14-STOPPED-DRAFT-REACHABLE, HUB-J12-DURABLE-SEND-REF]
+    journeys: [HUB-J11, HUB-J12, HUB-J14]
+  stopped-session-drafts:
+    title: Focused and inactive unsent drafts stay reachable when their sessions stop
+    tasks: [cas-45b8]
+    invariants: [HUB-J14-STOPPED-DRAFT-REACHABLE]
+    journeys: [HUB-J3, HUB-J14]
+  held-send-lifetime:
+    title: Offline auto-send discloses its two-minute wait and requires Retry after expiry
+    tasks: [cas-1c0e]
+    invariants: [HUB-J12-HELD-SEND-LIFETIME]
+    journeys: [HUB-J11, HUB-J12]
   peer-answer-and-timer-wakes:
     title: Actionable peer replies wake the asking supervisor and deadlines and work retries remain valid timers
     tasks: [cas-e4c7]
@@ -26,16 +41,16 @@ bug_families:
     tasks: [cas-d8a9, cas-185e, cas-0f78]
     invariants: [HUB-J26-BACKGROUND-BOUND]
     journeys: [HUB-J26]
-  restore-survives-dismissing-browser:
-    title: A restore on one paired browser is not undone by the browser that dismissed
-    tasks: [cas-07c3]
-    invariants: [HUB-J14-RESTORE-EVERY-DEVICE]
-    journeys: [HUB-J14]
   phone-warning-header:
     title: Warning badges preserve every phone conversation header action
     tasks: [cas-a929]
     invariants: [HUB-J15-WARNING-HEADER-FITS]
     journeys: [HUB-J15]
+  session-lifecycle-identity:
+    title: Unknown catalog state retains running rows and held words never cross a daemon birth
+    tasks: [cas-209f]
+    invariants: [HUB-J14-POSITIVE-STOP-AND-BIRTH]
+    journeys: [HUB-J14, HUB-J11, HUB-J12]
   hub-serve-route-ownership:
     title: Failed starts and resumed publication preserve stopped foreign Serve targets; exact recorded targets still recover after outages
     tasks: [cas-bf4e]
@@ -46,6 +61,11 @@ bug_families:
     tasks: [cas-fecd]
     invariants: [HUB-J5-DIALOG-HOLD, HUB-J26-READONLY-OWNER, HUB-J12-LOCAL-HUB, HUB-J5-LONG-CODEX-ROLLOUT, HUB-J5-QUIET-RECEIPT-POLL]
     journeys: [HUB-J5, HUB-J26, HUB-J12]
+  stopped-session-retries:
+    title: Stopped conversations disappear while machine outages recover once per machine
+    tasks: [cas-f8ab]
+    invariants: [HUB-J14-RUNNING-ONLY]
+    journeys: [HUB-J14, HUB-J11, HUB-J12]
   live-idle-status-dot:
     title: Live idle supervisors and waiting workers never share the offline treatment
     tasks: [cas-7389]
@@ -133,6 +153,14 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J14-POSITIVE-STOP-AND-BIRTH:
+    statement: Missing, failed and stale catalogs preserve last-known running sessions; only positive stop evidence retires them. Held sends and drafts belong to a session start identity, and restored messages apply already known stop evidence before replay.
+    check: Reproduce dormant omission, catalog failure beyond freshness, same-name replacement during outage, and catalog-before-journal restoration on a disposable real hub. Compare true resume with replacement, and run HUB-J11, HUB-J12 and HUB-J14.
+    bug: {task: cas-209f}
+  HUB-J14-STOPPED-DRAFT-REACHABLE:
+    statement: Focused and inactive unsent drafts from stopped sessions remain readable and copyable through Saved messages after reload; stopped rows stay absent and a same-name replacement starts empty.
+    check: Extend the HUB-J3 supervisor exit case with two drafts and two stopped sessions at desktop and phone widths; read both through Details after reload. Walk the real candidate in light and dark, read Copy and persisted payloads, and check the existing held-message route without sending to a stopped session.
+    bug: {task: cas-45b8}
   HUB-J12-SERVE-OWNERSHIP:
     statement: Failed starts preserve foreign Serve routes, including stopped targets; only an exact recorded owned target can be reclaimed.
     check: Run hub::tailscale::tests::failed_start_preserves_stopped_foreign_route and hub_clean_home_test::service_start_retries_tailscale_before_publication; inspect the disposable Serve route before and after failure and recovery.
@@ -154,6 +182,10 @@ invariants:
   HUB-J26-READONLY-OWNER:
     statement: Read-only identity lookup cannot cache a live parent identity for a nested harness or authorize later mutable tools.
     check: Run mcp::daemon::tests::nested_harness_cannot_take_over_live_factory_identity_cas_b815 for supervisor and worker identities; confirm read-only and mutable calls refuse and parent registration stays unchanged.
+  HUB-J14-RUNNING-ONLY:
+    statement: Commander lists running sessions only; pending messages never resurrect stopped destinations, and machine outages do not multiply retry labels.
+    check: Run the real stopped-session part of HUB-J14 and the catalog reconciliation regression; verify crashed/ended absence, no attach frames for two minutes, pending settlement, running replacement and HUB-J11/HUB-J12 recovery.
+    bug: {task: cas-f8ab}
   HUB-J17-UNDO-SHELL-FOCUS:
     statement: A visible focused Undo remains the keyboard target after Raw output closes and a new session rebuilds the phone shell.
     check: Run the HUB-J17 phone Raw output success cases in fleet-ops.journey.ts; add a session while Undo is focused, read back the updated catalog, and assert Undo retains focus.
@@ -336,6 +368,10 @@ invariants:
       task: cas-9e46
     statement: An open phone reconnects to the replacement daemon and is counted by its next completed loop pass
     check: 'Use the real HUB-J11 daemon-replacement and hub-restart stages; require a fresh Welcome and commander_clients >= 1 in the first published post-Welcome completed-pass snapshot for the current daemon PID; retain loop passes and timestamps.'
+  HUB-J12-HELD-SEND-LIFETIME:
+    statement: While offline, both held-message and composer copy disclose the finite two-minute automatic-send window; expired words remain available with Edit and Retry and never send on a later reconnect without a new click.
+    check: Run the original-deadline reheld-send case in network-switch.journey.ts, then hold a real native-hub message through the wall-clock timeout on desktop and phone; read heldAt and error state back from the journal and verify no expired text enters prompt_queue when the hub returns.
+    bug: {task: cas-1c0e}
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -393,21 +429,17 @@ invariants:
       history page, the catalog''s last activity and the hub''s End session are doubled; that ending a session stops
       its daemon is proven on a real machine at epic assembly'
   HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD:
-    statement: A live supervisor with no workers has no worker count; the connected machine and live session retain live status beside ended receipts, with a muted green idle dot, green only when working and gray only when disconnected; ended rows say Ended with their time and can be dismissed individually or cleared per project without removing history or offering controls for live sessions. Dismissal is stored on the hub by session birth and remains hidden through catalog updates, reloads and other paired browsers; a later birth with the same supervisor name still appears. A dismissed session, even in a project whose only session ended, stays reachable by search and by Show dismissed sessions, where it can be restored for every paired browser.
-    check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip, the live idle row's dot computed as --state-idle muted green (green-dominant, not --state-ok) and the ended row's dot as --state-off, pill-radius chip, plain Ended preview and visible end time, row and project dismissal, live-row exclusion, persistence across reload and retained protocol history. Dismiss at 390px, change ended.at through three catalog updates, and reload an independent 1280px browser; the dismissed rows remain hidden and a replacement birth appears. Verify an ended-only project's dismissed row found by search, revealed by Show dismissed sessions and restored across reload, with the hub tombstone removed. Run project-navigation.test.ts to cover interrupted dismissal sync and migration replay.
+    statement: A live supervisor with no workers has no worker count. Only running sessions form project cards; ended and crashed sessions disappear automatically, and a project with none disappears. History and saved words remain reachable. A machine outage keeps its last-known running rows with gray dots until recovery; connected idle is muted green and working is green.
+    check: Run the single-supervisor/no-worker fixture in HUB-J14; verify the hidden worker summary, connected machine chip, pill-radius chip and running active row. Ended and crashed sessions never appear, including with dormant recovery enabled or a pending message. Empty project cards disappear; a running replacement reappears without reload. Verify desktop and 390px viewports, retained protocol history and zero attaches to stopped destinations for two minutes on the real hub. A machine outage stays at machine level while last-known running rows remain and recover (HUB-J11/HUB-J12).
     bug: {task: cas-51f6}
   HUB-J14-PROJECT-DISPLAY-NAME:
     statement: A project card reads the project's display name, else its folder name, and never its canonical id; the canonical id still groups the project's sessions across machines and remains available as the name's title.
     check: Run the cross-machine project fixture in HUB-J14 with a canonical id and a display name; verify the card name shows the display name, its title is the canonical id, and both machines' sessions share the card.
     bug: {task: cas-6f79}
   HUB-J14-IDLE-OFFLINE-DOT:
-    statement: A live idle supervisor has a hollow green dot; offline alone has the neutral dot. Working is solid green. State dots have accessible state names and remain distinguishable in light, dark and forced colors, with ended receipts retaining their neutral circle.
-    check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses the online green and verify accessible state names. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
+    statement: A connected idle supervisor has a solid muted green dot; working is solid green and a machine outage is solid gray. State dots have accessible state names and remain distinguishable in light, dark and forced colors. Stopped sessions are absent from navigation.
+    check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses muted green and verify accessible state names. Stopped sessions are absent; compare offline treatment using a running session during a machine outage. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
     bug: {task: cas-7389}
-  HUB-J14-RESTORE-EVERY-DEVICE:
-    statement: A browser's local dismissal is only an unsynced marker, dropped once the hub confirms it. A restore on any paired browser stays restored, and the browser that dismissed shows the row and never posts the dismissal again.
-    check: Run the "A restore on another browser survives the browser that dismissed" stage in HUB-J14 with two browser contexts; read back the hub's tombstone after the dismissing browser's next catalog reads and its reload. Run the project-navigation dismissal test and the connection-lifecycle overlapping-read case.
-    bug: {task: cas-07c3}
   HUB-J15-WARNING-HEADER-FITS:
     statement: At 390px a delivery-warning badge, identity and every header action fit inside the viewport in light and dark; Raw output retains its accessible name and uses its icon while the badge is visible.
     check: Extend the existing HUB-J15 phone attention stage; verify every header action and identity bounding box stays inside 390px, then open the unchanged Attention sheet. Prove strict real-build polish in both themes.
@@ -811,6 +843,8 @@ journeys:
   - HUB-J3-GOAL
   - HUB-J3-LIST-SCROLL-BOUNDS
   - HUB-J3-SESSION-ENDED
+  - HUB-J14-STOPPED-DRAFT-REACHABLE
+  - HUB-J14-POSITIVE-STOP-AND-BIRTH
   - HUB-J3-DELIBERATE-EXIT-QUIET
   - HUB-J3-STABLE-ORDER
   - HUB-J3-MACHINE-VERSIONS
@@ -1324,7 +1358,7 @@ journeys:
   - Open the conversation — the thread is live
   - The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting,
     and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection
-    — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts
+    — auto-sends for up to 2 minutes; after that, choose Retry.") and not sent; the attention rail raises no transport alarm of its own, and its counts
     agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
   - It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces
     the return), the held message goes out exactly once and is delivered, and no transport alarm is left
@@ -1513,6 +1547,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J12-GOAL
+  - HUB-J12-HELD-SEND-LIFETIME
   - HUB-J12-SERVE-OWNERSHIP
   - HUB-J12-LOCAL-HUB
   - HUB-J12-DURABLE-SEND-REF
@@ -1719,9 +1754,10 @@ journeys:
   invariants:
   - HUB-J14-GOAL
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
+  - HUB-J14-RUNNING-ONLY
+  - HUB-J14-STOPPED-DRAFT-REACHABLE
   - HUB-J14-PROJECT-DISPLAY-NAME
   - HUB-J14-IDLE-OFFLINE-DOT
-  - HUB-J14-RESTORE-EVERY-DEVICE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

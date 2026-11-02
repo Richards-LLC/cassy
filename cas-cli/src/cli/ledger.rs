@@ -19,7 +19,7 @@ pub struct LedgerArgs {
 
 #[derive(Subcommand)]
 enum LedgerCommand {
-    /// Print interventions, speed, escapes and feature verdicts for a release
+    /// Print wakes, usage, interventions, speed, escapes and feature verdicts for a release
     Report {
         /// Release tag, vX.Y.Z. Omit for work since the last release.
         #[arg(long)]
@@ -233,6 +233,30 @@ struct CheckRow {
     error: u32,
 }
 
+/// Sums of measured usage, with explicit counts for missing measurements.
+#[derive(Debug, Default, Serialize)]
+struct TurnTotals {
+    wakes: u64,
+    no_op_wakes: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    minutes: f64,
+    missing_tokens: u64,
+    missing_minutes: u64,
+}
+
+impl TurnTotals {
+    fn add(&mut self, no_op: bool, input: Option<u64>, output: Option<u64>, minutes: Option<f64>) {
+        self.wakes += 1;
+        self.no_op_wakes += u64::from(no_op);
+        self.input_tokens = self.input_tokens.saturating_add(input.unwrap_or(0));
+        self.output_tokens = self.output_tokens.saturating_add(output.unwrap_or(0));
+        self.minutes += minutes.unwrap_or(0.0);
+        self.missing_tokens += u64::from(input.is_none() || output.is_none());
+        self.missing_minutes += u64::from(minutes.is_none());
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct LedgerReport {
     release: String,
@@ -241,6 +265,8 @@ struct LedgerReport {
     to: Option<DateTime<Utc>>,
     events: usize,
     projects: Vec<String>,
+    turns: TurnTotals,
+    turns_by_channel: BTreeMap<&'static str, TurnTotals>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
     commit_to_main_minutes: Option<f64>,
@@ -332,6 +358,8 @@ fn aggregate(
         to,
         events: events.len(),
         projects: Vec::new(),
+        turns: TurnTotals::default(),
+        turns_by_channel: BTreeMap::new(),
         interventions_total: 0,
         interventions: BTreeMap::new(),
         commit_to_main_minutes: None,
@@ -348,6 +376,11 @@ fn aggregate(
             report.projects.push(project.clone());
         }
         match &event.payload {
+            QualityPayload::Turn { woken_by, no_op, input_tokens, output_tokens, minutes, .. } => {
+                report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
+                report.turns_by_channel.entry(woken_by.as_str()).or_default()
+                    .add(*no_op, *input_tokens, *output_tokens, *minutes);
+            }
             QualityPayload::Intervention { intervention, .. } => {
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
@@ -453,6 +486,19 @@ fn render(report: &LedgerReport) -> String {
         report.events,
         report.projects.len()
     );
+
+    let _ = writeln!(out, "\nModel turns: {} wakes, {} no-op wakes", report.turns.wakes, report.turns.no_op_wakes);
+    let _ = writeln!(out, "  measured usage: {} input tokens, {} output tokens, {:.2} minutes",
+        report.turns.input_tokens, report.turns.output_tokens, report.turns.minutes);
+    let _ = writeln!(out, "  missing usage: {} turn(s) without tokens, {} without minutes",
+        report.turns.missing_tokens, report.turns.missing_minutes);
+    for (channel, row) in &report.turns_by_channel {
+        let _ = writeln!(out, "  {channel}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
+        let _ = writeln!(out, "    {} input, {} output tokens; {:.2} minutes", row.input_tokens, row.output_tokens, row.minutes);
+        if row.missing_tokens > 0 || row.missing_minutes > 0 {
+            let _ = writeln!(out, "    missing tokens: {}; missing minutes: {}", row.missing_tokens, row.missing_minutes);
+        }
+    }
 
     let _ = writeln!(out, "\nInterventions: {}", report.interventions_total);
     for (kind, count) in &report.interventions {
@@ -584,6 +630,19 @@ mod tests {
         intervention("before the window", at(1, 6));
         intervention("in the window", at(2, 6));
         intervention("after the window", at(3, 6));
+        for (key, occurred_at, channel, no_op, usage) in [
+            ("old turn", at(1, 6), cas_store::WakeChannel::Director, false, Some(900)),
+            ("acted turn", at(2, 6), cas_store::WakeChannel::Director, false, Some(30)),
+            ("no-op turn", at(2, 7), cas_store::WakeChannel::Worker, true, None),
+            ("future turn", at(3, 6), cas_store::WakeChannel::Director, false, Some(900)),
+        ] {
+            let mut event = NewQualityEvent::new(key, QualityPayload::Turn {
+                woken_by: channel, actions: if no_op { vec![] } else { vec![cas_store::TurnAction::TaskMutation] },
+                no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
+            });
+            event.occurred_at = occurred_at;
+            crate::quality_ledger::emit(&cas_root, &event);
+        }
         // Found two days after the release, it still counts against that release.
         let mut escape = NewQualityEvent::new(
             "late escape",
@@ -684,10 +743,20 @@ mod tests {
         assert_eq!(report.features["handoff"].supervisors.get("helped"), Some(&1));
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["excluded_unscoped_measurements"], 2);
+        assert_eq!(json["turns"]["wakes"], 2);
+        assert_eq!(json["turns"]["no_op_wakes"], 1);
+        assert_eq!(json["turns"]["input_tokens"], 30);
+        assert_eq!(json["turns"]["output_tokens"], 5);
+        assert_eq!(json["turns"]["minutes"], 0.5);
+        assert_eq!(json["turns"]["missing_tokens"], 1);
+        assert_eq!(json["turns_by_channel"]["director"]["wakes"], 1);
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",
             "Interventions: 1",
+            "Model turns: 2 wakes, 1 no-op wakes",
+            "measured usage: 30 input tokens, 5 output tokens, 0.50 minutes",
+            "missing usage: 1 turn(s) without tokens, 1 without minutes",
             "main to publish 9 min",
             "ambient_recall: measured noise 1 (283 injected, 1 opened, 0 used)",
             "Excluded 2 unscoped measurement(s); may include lifetime totals.",

@@ -15,6 +15,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Recover queue ejection costs** — Backfill now reads consumed merge-queue relay history and counts each failed run once. Release reports include recovered ejections even when their original release receipt recorded zero, with the failing job title and run link retained.
 
+### Added — Friction ledger
+
+- **Measure factory turn costs** — Each completed Claude, Codex and Grok supervisor or worker turn records its verified wake channel, successful observed actions, no-op flag and measured tokens/minutes. `cas ledger report --release vX.Y.Z --offline` totals those rows by channel and discloses missing usage. Older Cloud endpoints retain unsupported Turn rows locally and retry after a cooldown.
+- **Known limitation** — OpenCode turns are not recorded yet.
+
+### Changed — Browser QA
+
+- **Refresh Playwright agent guidance** — Document 1.64 VP9 recording, frame-rate controls and action styles, default coding agents to the browser CLI, constrain healer trials to reviewed locator fixes, and flag Playwright more than one minor behind during release prep.
+
 ### Fixed — Supervisor input
 
 - **Keep ordinary messages out of running Codex turns** — Standard, unattributed and other nonoperator messages now obey the supervisor wake gate before PTY delivery, including oversized bodies. Verified Commander input can still steer a running turn; gated messages remain available through the inbox.
@@ -30,6 +39,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Commander
 
 - **Find workers needing attention in Team** — Blocked tasks and stalled workers lead the team with named attention shortcuts and a stronger count. Task titles distinguish workers sharing the same state; merge waits follow behind reported trouble.
+
+## [3.98.1] - 2026-11-02
+
+### Fixed — Commander
+
+- **Offline messages show their send deadline** — Waiting messages and the composer explain the two-minute automatic-send window, after which the words stay available for Edit or Retry.
+
+- **Running sessions survive catalog failures** — Running dormant daemons and last-known sessions stay listed until the hub positively confirms a stop. Held messages and drafts keep their original session start identity, and restored messages immediately apply known stop evidence.
+
+- **Unsent drafts stay reachable when a session stops** — Focused and inactive drafts move to Saved messages, survive reload, and can be copied while other conversations stay open. A same-name replacement starts with an empty composer.
+
+- **Stopped conversations leave Commander automatically** — Ended and crashed sessions disappear without dismissal or attach retries. Machine outages keep running conversations available, and waiting messages to stopped sessions are saved as not sent.
+
+- **Live conversations tolerate unavailable session catalogs** — Explicit sends use the current live connection, and reconnects settle while catalog reads retry. Drafts from older clients keep their words; old session sends cannot alter a replacement's delivery status, and failed draft archives preserve the original copy. Stale-session cleanup retains stop evidence for devices that reconnect later.
 
 ## [3.98.0] - 2026-11-02
 

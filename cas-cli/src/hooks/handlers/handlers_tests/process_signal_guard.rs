@@ -101,12 +101,24 @@ fn cas_a290_every_factory_role_refuses_pattern_signals() {
             "bash -lc 'pkill -f cargo'",
             "kill $(pgrep -f cargo)",
             "pgrep -f cargo | xargs kill",
+            "for p in $(pgrep -f x); do kill $p; done",
+            "ps aux | grep nuxt | awk '{print $2}' | xargs kill",
+            "kill $(ps -ef | grep nuxt | awk '{print $2}')",
+            "ps -eo pid,args | grep \"pnpm install\" | awk '{print $1}' | xargs kill -9",
+            "xargs kill < <(pgrep -f x)",
+            "eval \"pkill -f x\"",
+            "P=pkill; $P -f x",
         ] {
             let reason = decision(command, role)
                 .unwrap_or_else(|| panic!("{role} must refuse {command}"));
             assert!(reason.contains("PID") && reason.contains("$!"), "{reason}");
         }
-        assert!(decision("kill 12345", role).is_none(), "owned PID: {role}");
+        for command in [
+            "kill 12345", "kill -0 12345", "kill \"$(cat .pid)\"", "kill $!",
+            "pgrep -f x; kill 123", "cas factory shutdown",
+        ] {
+            assert!(decision(command, role).is_none(), "{role} must allow {command}");
+        }
     }
 }
 

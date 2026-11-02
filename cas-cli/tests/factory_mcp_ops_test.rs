@@ -11037,6 +11037,21 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             "[project]\ncanonical_id = \"rebind-project\"\n",
         )
         .unwrap();
+        // This test exercises delivery recovery, not discovery's one-second
+        // filesystem probe. Bind the known fixture target so host contention
+        // cannot turn a rebind assertion into an unrelated scan timeout.
+        {
+            use cas::store::KnownRepoStore;
+            cas::store::known_repos::ensure_host_schema().unwrap();
+            cas::store::known_repos::open_host_known_repo_store()
+                .unwrap()
+                .bind(
+                    "project:rebind-project",
+                    &project.canonicalize().unwrap(),
+                    &project.join(".git").canonicalize().unwrap(),
+                )
+                .unwrap();
+        }
         let worker_id = register_codex_worker_at(&env, worker, "session-88c1", &path);
         let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
         supervisor.factory_session = Some("session-88c1".into());

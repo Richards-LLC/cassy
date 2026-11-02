@@ -46,6 +46,24 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+Synthetic Codex supervisors bind only to a rollout carrying their own queue
+input, including an ownership envelope older than the 4 MiB reply tail. A first miss
+retries after one second, doubling up to 30 seconds; ownership reads resume at
+the last complete JSONL row rather than rescanning unchanged file bodies.
+A changed harness/account/session or startup envelope invalidates that wait. Finalized sends without delivery proof retain Queued and
+use a 30-second receipt watch; active pending sends keep the one-second watch.
+A later actual receipt still publishes Delivered.
+
+Commander text waits at confirmation/trust dialogs and at non-Claude in-flight
+tool calls. Dialog footers must match a complete native row below the composer;
+assistant prose above it never holds a send. Claude's visible native composer remains eligible during working
+turns. Held text and its submit are delivered together after that boundary clears.
+
+Each completed native turn creates one visible answer, bound to its latest
+verified Commander send; every consumed send still receives its delivery receipt.
+Standalone machine notifications create status replies when no operator input is
+pending. Only operator envelopes beginning a line can supply reply bindings.
+
 Pending Commander replies retry after one second, doubling to a sixty-second
 cap while a paired-device receipt is missing. A valid receipt, a new daemon
 WebSocket connection, or a device's first history-page request resets that retry
@@ -76,6 +94,21 @@ an answer preserves the choices; after answering it preserves the selected
 label and the durable reply reference.
 
 ## Supervisor succession and committed-work recovery
+
+Factory registrations belong to their live harness process. A nested review
+that inherits `CAS_SESSION_ID`, name and role cannot re-register that identity
+from a different process, publish a socket mapping for it, or apply lifecycle
+hooks to its owner. Read-only guidance and receipt identity lookups apply the
+same owner check before caching an identity or authorizing later tools.
+Replacement MCP servers under the same fingerprinted harness
+remain valid. The authenticated cached owner repairs an exited PID left by older
+nested registrations before its next heartbeat, preserving its durable session.
+Tool permission hooks always retain their policy checks, even for a nested
+caller. A live fingerprinted MCP child can prove its current parent when an
+older registration lacks a parent fingerprint; an exited registration remains
+replaceable after the host's name changes. A matching live owner authenticates
+before the hostname comparison, so its hooks and reconnecting MCP can refresh
+the stored hostname.
 
 Worker liveness uses concrete turn and process evidence. While a recycled
 worker's transcript is unresolved, its own recent activity or outbound message
@@ -1973,7 +2006,11 @@ unpushed or unverifiable work keeps its target and checkout.
 QA candidate builds first install locked web dependencies and invoke the same
 source-bound production snapshot builder as journeys, in the isolated checkout.
 Only that disposable checkout receives the generated dist before Cargo embeds
-it. A private loopback hub then serves every expected asset under a disposable
+it. After snapshot verification, only its tracked `hub-web/dist` index entries
+are marked assume-unchanged in the disposable checkout, preserving the clean
+source revision without suppressing dirty checks on other tracked inputs.
+Normal checkout builds keep their existing dirty-version behavior.
+A private loopback hub then serves every expected asset under a disposable
 HOME and CAS_ROOT: publication refuses a source/served digest mismatch and
 preserves the previous candidate. RECEIPT.json records `web.source_sha`,
 `web.dist_sha256` and `web.served_dist_sha256`.

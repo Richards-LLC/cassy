@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map of Cassy's Rust workspace and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map reconciled for the 3.96 release tree. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -23,7 +23,6 @@
 - `cas-cli/` - Rust binary `cas` and composed application library.
 - `crates/cas-types/` - task, agent, delivery, provenance, event and wire types.
 - `crates/cas-store/` - SQLite stores, task/QA queues, verification, knowledge and vectors.
-- `crates/cas-store/src/hash_id.rs` - shared counter-mixed ID generation and format policies for task, skill, spec and code stores.
 - `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
 - `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
 - `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.
@@ -42,7 +41,6 @@
 ## CLI, hooks and application services
 
 - `cas-cli/src/agent_model.rs` - role-scoped pane model/effort observations shared by native hooks, Commander model selection, catalog and status.
-
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, module composition and command dispatch.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs` - initialization, recovery and provisioning.
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - recommendation policy, exclusions and thresholds.
@@ -55,7 +53,6 @@
 - `cas-cli/src/cli/project_files/` - managed-file reconciliation and locking.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy, including QA/capture/upkeep settings.
 - `cas-cli/src/factory_preflight.rs`, `cas-cli/src/capability.rs` - account/root validation, cached probes and readiness.
-- `cas-cli/src/claude_credentials.rs` - shared Keychain service identity; native capacity does not read its secrets.
 - `cas-cli/src/cli/hook.rs`, `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/` - hooks, native dispatch, generation and policy.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/hooks/handlers/handlers_events/codemap.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
 - `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync/presence, binding intake and ownership.
@@ -71,6 +68,8 @@
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup, events, probes, relays and rendering schedule; `fixtures/claude-2.1.312-usage.txt` records the native Claude Usage screen.
+- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - Claude/Codex transcript ownership, answer mirroring and bounded historical reply watches.
+- `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - native prompt readiness, queued input and live recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
 - `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminders and task-wait defaults.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` - Slack intake and ordered wake recovery.
@@ -97,13 +96,14 @@
 
 ## QA, storage and Commander
 
+- `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub lifecycle, service definitions and exact-target Serve ownership/publication recovery.
+
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry/sidecar validation and diff-scoped journey selection.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
 - `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/quality_ledger.rs`, `cas-cli/src/cli/ledger.rs`, `cas-cli/src/cloud/syncer/quality_events.rs` - friction ledger: append-only events and scope-A rules, emitters, `cas ledger`, batched team sync.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_pass/sync.rs`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs` - independent reviews, cross-host sync, batch receipts and the operator-only QA author override.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_post_release.rs` - bundle proof and post-release observations.
 - `cas-cli/src/rapid_response.rs`, `cas-cli/src/cli/qa_rapid_response.rs` - operator-only, time-boxed per-epic rapid-response windows, scaled-down gates and the back-fill ledger.
-- `cas-cli/src/qa_traffic.rs`, `cas-cli/src/hub/usage.rs` - local action counts and per-journey traffic shares.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence and successor claims.
 - `crates/cas-store/src/worker_task_queue_store.rs` - persistent per-session worker queues and spawn payload binding.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and indexed QA maintenance.

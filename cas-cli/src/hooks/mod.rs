@@ -130,6 +130,28 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     // CAS_ROOT env var priority for factory mode compatibility.
     let cas_root: Option<PathBuf> = find_cas_root().ok();
 
+    // A headless review can inherit every factory identity variable. Reject
+    // its lifecycle before normalizing the native thread ID or writing any
+    // parent activity, registration, model observation or SessionEnd cleanup.
+    // Permission hooks must always run their normal policy handlers, including
+    // for a nested process. An empty output here would silently allow tools.
+    if !matches!(event_name, "PreToolUse" | "PermissionRequest")
+        && cas_core::env_overlay::var("CAS_FACTORY_MODE").as_deref() == Ok("1")
+        && let Ok(id) = cas_core::env_overlay::var("CAS_SESSION_ID")
+        && !id.trim().is_empty()
+        && let Some(root) = cas_root.as_deref()
+        && let Ok(store) = crate::store::open_agent_store(root)
+        && let Err(error) = crate::mcp::daemon::ensure_factory_process_owner(
+            store.as_ref(),
+            &id,
+            Some(crate::agent_id::get_cc_pid_for_hook()),
+            None,
+        )
+    {
+        tracing::warn!(%error, "ignoring nested harness hook for another factory process");
+        return Ok(HookOutput::empty());
+    }
+
     normalize_codex_factory_session(&mut input);
 
     // The harness submits a raw prompt string. The delivery authority records

@@ -1739,10 +1739,7 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
         events,
     )
     .with_machine_metadata(MachineMetadata {
-        transport: MachineTransport {
-            kind: "tailscale_serve".into(),
-            public_url: Some("https://target.tail.ts.net/".into()),
-        },
+        transport: MachineTransport::default(),
         cloud_devices: vec![CloudDeviceSuggestion {
             id: "device-hint".into(),
             name: "Laptop".into(),
@@ -1751,7 +1748,10 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
             ssh_host: None,
         }],
     });
-    let response = router(state)
+    let app = router(state.clone());
+    // Recover after the listener's router has already cloned the state.
+    state.publish_tailscale_transport("https://target.tail.ts.net/");
+    let response = app
         .oneshot(
             Request::get("/v1/machine")
                 .header("origin", "https://controller.example")

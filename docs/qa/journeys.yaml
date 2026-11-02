@@ -12,8 +12,8 @@ seeded_from:
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
   native-background-wait-bound:
-    title: Silent native background jobs stop reporting busy after the configured stall window
-    tasks: [cas-d8a9]
+    title: Native background jobs remain busy while CPU activity proves work after the stall window
+    tasks: [cas-d8a9, cas-185e]
     invariants: [HUB-J26-BACKGROUND-BOUND]
     journeys: [HUB-J26]
   phone-warning-header:
@@ -484,9 +484,9 @@ invariants:
     check: Run HUB-J26 at desktop/light and phone/dark, then its lifecycle transition and forced-colors stages; compare Waiting and Offline computed pill and dot treatments.
     bug: {task: cas-7389}
   HUB-J26-BACKGROUND-BOUND:
-    statement: A native background launch keeps its worker busy only within the configured stall window; a missing completion becomes Stalled, while a matching completion returns the worker to Waiting.
+    statement: A native background launch keeps its worker busy within the configured stall window and afterward while the process tree is CPU busy; a missing completion becomes Stalled only without CPU activity, while a matching completion returns the worker to Waiting.
     check: Run worker_liveness::tests::claude_background_job_keeps_a_completed_turn_busy_until_its_notification with injected time, matching and unrelated completion notices; compare Team worker liveness to the native worker_status result on the release candidate.
-    bug: {task: cas-d8a9}
+    bug: {task: cas-185e}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.

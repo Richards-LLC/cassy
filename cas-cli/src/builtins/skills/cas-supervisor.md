@@ -7,8 +7,6 @@ metadata:
 
 # Factory Supervisor
 
-Plan EPICs; workers implement.
-
 Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
 
 ## Hard Rules
@@ -55,8 +53,6 @@ routing updates or waiting on a wake, read
 [message delivery](references/reference.md#message-delivery-and-wake-authority).
 
 Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. After the closure pass, dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update` (not `transfer`), then end the turn.
-
-Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 
 ## Phase references
 

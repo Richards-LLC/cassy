@@ -386,6 +386,7 @@ fn only_the_runner_owner_can_publish_sandbox_availability() {
     assert!(sandbox_refusal(root).is_none(), "the new owner clears the old refusal");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn sandbox_probe_has_a_heartbeat_and_an_execution_deadline() {
     let temp = TempDir::new().unwrap();

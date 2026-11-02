@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory liveness and recovery
+
+- **Keep healthy background work busy** — CPU-active process trees remain Executing after a background job passes the stall window; only quiet, unconfirmed jobs become Stalled. The candidate runner alone publishes its sandbox marker, starts its heartbeat before a five-second probe, and bounds probe cleanup. Old verification waits retain one deadline alert, recent expiries survive missing local task rows, and shorter supervisor guidance preserves the existing session-start budget.
+
 ### Added — Hosted queue precheck
 
 - **One command validates a commit on hosted CI** — Was: Queue prechecks needed local build and browser setup. → Now: `cas release precheck <sha>` pushes an exact-SHA ref, dispatches the queue job set and records its hosted run; `--status` reports results and elapsed time.

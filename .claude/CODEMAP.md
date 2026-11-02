@@ -80,7 +80,7 @@
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - semantic allowlist, native mappings and outcome evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged work evidence, transcript indexing and scoped native phase lifecycle.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs` - supervisor/task ownership and delivery binding.
-- `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - a worker's typed candidate request, its checks, the daemon's build queue and the daemon-managed builder checkout.
+- `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - a worker's typed candidate request, its checks, the daemon's build queue, owner-held sandbox marker, bounded startup probe and daemon-managed builder checkout.
 - `cas-cli/src/factory_ci_retry.rs` - persisted supervisor-authorized merge retries after exact-SHA CI settles.
 - `cas-cli/src/worker_task_queue.rs` - ordered worker backlog policy, start authorization, delivery handoff and durable daemon reconciliation.
 
@@ -91,8 +91,8 @@
 - `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - service dispatch, bounded futures and request schemas.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates and merged-delivery closure; `recall_terms.rs` filters content terms for task-create context and epic scope comparison.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - delivery anchors, close audit tracking and guarded note-preserving park.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - durable lifecycle alerts, dispatch-owned expiry and the five-minute approved-close grace period.
-- `cas-cli/src/mcp/tools/service/worker_liveness.rs` - bounded transcript/process evidence; native background launch timestamps expire at the configured stall window.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - durable lifecycle alerts, dispatch-owned expiry, old-wait deadline fallback and the five-minute approved-close grace period.
+- `cas-cli/src/mcp/tools/service/worker_liveness.rs` - bounded transcript/process evidence; native background launch evidence expires at the stall window unless live CPU activity still proves execution.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - worktree-keyed receipts and introducing-merge boundaries.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep; `gate_preflight.rs` defines start-time close requirements and snapshots park checks before mutation.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.

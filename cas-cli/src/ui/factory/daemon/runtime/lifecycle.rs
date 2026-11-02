@@ -121,10 +121,6 @@ fn page_operator_for_idle_supervisor(
     }
 }
 
-/// How far back an expired verification dispatch is still escalated, so an
-/// upgrade does not page for old history.
-const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
-
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
@@ -142,7 +138,9 @@ pub(super) fn escalate_expired_verification_dispatches(
     /// New relays written per sweep; the sweep runs every 60 s.
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
-    let since = now - chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS);
+    let since = now - chrono::Duration::hours(
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS,
+    );
     let mut expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
         Ok(expired) => expired,
         Err(error) => {
@@ -153,8 +151,8 @@ pub(super) fn escalate_expired_verification_dispatches(
     // A close retry may already have persisted TimedOut. That dispatch still
     // owns its one expiry relay, but a finished task no longer needs recovery.
     let tasks = crate::store::open_task_store_local(cas_dir).ok();
-    expired.retain(|dispatch| tasks.as_ref().is_some_and(|tasks| {
-        tasks.get(&dispatch.task_id).is_ok_and(|task| !task.is_terminal())
+    expired.retain(|dispatch| !tasks.as_ref().is_some_and(|tasks| {
+        tasks.get(&dispatch.task_id).is_ok_and(|task| task.is_terminal())
     }));
     let session = std::env::var("CAS_FACTORY_SESSION").ok();
     let supervisor_queue = crate::store::open_supervisor_queue_store(cas_dir).ok();
@@ -4491,8 +4489,8 @@ impl FactoryDaemon {
             tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
 
-        // cas-c5ab: a shutdown ends every hold, so re-arm held workers'
-        // reminders before their agents are unregistered.
+        // A shutdown ends every hold; cancel worker reminders before their
+        // agents are unregistered.
         self.app.cancel_worker_reminders_at_shutdown(&self.session_name);
 
         // Unregister all factory agents (supervisor + workers)

@@ -14055,6 +14055,39 @@ mod spawn_lifecycle_tests {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn no_session_recycle_refuses_dead_foreign_workers_cas_35f6() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let mut worker = worker_named("foreign-recovery", "foreign-recovery-id");
+        worker.factory_session = Some("other-factory".into());
+        worker.pid = Some(i32::MAX as u32);
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+        agents.register(&worker).unwrap();
+        let mut task = cas_types::Task::new("cas-foreign-recovery".into(), "Keep foreign bindings".into());
+        task.assignee = Some(worker.name.clone());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
+            worker.status = status;
+            agents.update(&worker).unwrap();
+            let req = serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":worker.name})).unwrap();
+            assert!(service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::default(), req)
+                .await.is_err(), "a no-session caller queued foreign dead-worker recovery: {status:?}");
+            assert!(queue.peek(10).unwrap().is_empty());
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker.name.as_str()));
+        }
+    }
+
     /// cas-e9fc AC3: a confirmed clear_context records the new session on the
     /// row as it is now (keeping a SessionStart rebind), and a worker whose row
     /// vanished is re-registered under its name, never left a silent orphan.

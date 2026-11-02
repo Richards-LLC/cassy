@@ -1229,6 +1229,55 @@ async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0
     assert_eq!(held.assignee.as_deref(), Some(name), "recycle retains the replacement's work");
 }
 
+/// A dead-worker recovery request must not stop a same-name successor that
+/// has a live pane but has not registered its new identity yet.
+#[tokio::test(flavor = "current_thread")]
+async fn dead_recycle_refuses_unregistered_live_replacement_cas_35f6() {
+    const TEST: &str = "dead_recycle_refuses_unregistered_live_replacement_cas_35f6";
+    if run_hermetic_recycle_child(TEST) { return; }
+    use crate::mcp::{CasCore, tools::CasService};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas = crate::store::init_cas_dir(dir.path()).unwrap();
+    let name = "replacement-before-register";
+    let mut daemon = daemon(&cas);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    register_idle_worker(&cas, name);
+    let agents = open_agent_store(&cas).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    old.status = cas_types::AgentStatus::Shutdown;
+    old.pid = Some(i32::MAX as u32);
+    old.metadata.insert("worker_cli".into(), "codex".into());
+    old.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+    agents.update(&old).unwrap();
+    let tasks = crate::store::open_task_store_local(&cas).unwrap();
+    let mut task = cas_types::Task::new("cas-live-replacement".into(), "Keep replacement's work".into());
+    task.assignee = Some(name.into());
+    task.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let core = CasCore::with_daemon(cas.clone(), None, None);
+    #[cfg(feature = "mcp-proxy")]
+    let service = CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = CasService::new(core);
+    service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::operator(SESSION),
+        serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap())
+        .await.unwrap();
+    let request = open_spawn_queue_store(&cas).unwrap().peek(10).unwrap().remove(0).id;
+    // The successor is running before the queued dead-path recycle is applied.
+    let pane = idle_worker_pane(name, cas_mux::SupervisorCli::Codex);
+    let pid = pane.process_group_id().unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+    let same_pane = daemon.app.mux.pane_process_group_id(name) == Some(pid) && alive(pid);
+    if daemon.app.mux.get(name).is_some() { daemon.app.mux.kill_worker(name, true).await.unwrap(); }
+    assert!(same_pane, "dead-path recycle stopped an unregistered live replacement");
+    assert_eq!(shutdown_row_state(&cas, request).0.as_deref(), Some("failed"));
+    assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(name));
+}
+
 /// cas-35f6: both supervisor recovery routes keep the dead worker's checkout.
 #[tokio::test(flavor = "current_thread")]
 async fn same_name_spawn_recovers_dead_pane_cas_35f6() {

@@ -143,13 +143,19 @@ pub(super) fn escalate_expired_verification_dispatches(
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
     let since = now - chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS);
-    let expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
+    let mut expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
         Ok(expired) => expired,
         Err(error) => {
             tracing::warn!(%error, "cas-7456: expired verification dispatches unavailable");
             return 0;
         }
     };
+    // A close retry may already have persisted TimedOut. That dispatch still
+    // owns its one expiry relay, but a finished task no longer needs recovery.
+    let tasks = crate::store::open_task_store_local(cas_dir).ok();
+    expired.retain(|dispatch| tasks.as_ref().is_some_and(|tasks| {
+        tasks.get(&dispatch.task_id).is_ok_and(|task| !task.is_terminal())
+    }));
     let session = std::env::var("CAS_FACTORY_SESSION").ok();
     let supervisor_queue = crate::store::open_supervisor_queue_store(cas_dir).ok();
     let woken = |dispatch: &&cas_types::VerificationDispatch| {
@@ -1845,7 +1851,7 @@ mod worker_attention_tests {
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "dispatch-expiry-test");
         let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
-        for id in ["cas-b4d8", "cas-ancient", "cas-due-later"] {
+        for id in ["cas-b4d8", "cas-ancient", "cas-due-later", "cas-finished"] {
             tasks.add(&cas_types::Task::new(id.into(), id.into())).unwrap();
         }
         let now = chrono::Utc::now();
@@ -1856,6 +1862,11 @@ mod worker_attention_tests {
         let expired = dispatch("cas-b4d8", now - chrono::Duration::minutes(5));
         dispatch("cas-ancient", now - chrono::Duration::hours(30));
         dispatch("cas-due-later", now + chrono::Duration::minutes(10));
+        dispatch("cas-finished", now - chrono::Duration::minutes(1));
+        cas_store::timeout_verification_dispatch(&cas_dir, "cas-finished", now).unwrap();
+        let mut finished = tasks.get("cas-finished").unwrap();
+        finished.status = cas_types::TaskStatus::Closed;
+        tasks.update(&finished).unwrap();
 
         assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 1);
         escalate_expired_verification_dispatches(&cas_dir, now);

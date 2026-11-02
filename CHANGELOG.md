@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory wait deadlines
+
+- **Bounded verification and background waits** — Was: an approved verdict could leave a task blocked forever, a close retry after the expiry relay could wake the supervisor twice, and a missing background completion kept a worker busy indefinitely. → Now: an unretried approval escalates once after five minutes, pending and timed-out dispatches share one expiry relay, and silent native background jobs become stalled after the configured stall window.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

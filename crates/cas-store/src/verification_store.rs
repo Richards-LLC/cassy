@@ -1266,9 +1266,10 @@ pub fn resolve_verification_dispatch_with_conn(
     get_verification_dispatch_with_conn(conn, dispatch_id).map(Some)
 }
 
-/// cas-7456 (GH #1302 B): open dispatches (pending or claimed) whose deadline
-/// passed in `since..=now`, oldest deadline first, at most `limit`. Read-only:
-/// timing a dispatch out stays with the close and verification paths.
+/// Current dispatches awaiting expiry recovery (pending, claimed or timed out)
+/// whose deadline passed in `since..=now`, oldest deadline first, at most
+/// `limit`. A close-persisted timeout still needs the same idempotent expiry
+/// relay. Read-only: timing out stays with the close and verification paths.
 pub fn expired_verification_dispatches(
     cas_dir: &Path,
     since: DateTime<Utc>,
@@ -1279,10 +1280,13 @@ pub fn expired_verification_dispatches(
     let conn = crate::shared_db::lock_connection(&store.conn)?;
     let ids = {
         let mut statement = conn.prepare(
-            "SELECT id FROM verification_dispatches
-             WHERE state IN ('pending', 'claimed')
-                   AND deadline_at > ?1 AND deadline_at <= ?2
-             ORDER BY deadline_at ASC, id ASC
+            "SELECT d.id FROM verification_dispatches d
+             WHERE d.state IN ('pending', 'claimed', 'timed_out')
+                   AND d.deadline_at > ?1 AND d.deadline_at <= ?2
+                   AND d.id = (SELECT latest.id FROM verification_dispatches latest
+                               WHERE latest.task_id = d.task_id
+                               ORDER BY latest.requested_at DESC, latest.id DESC LIMIT 1)
+             ORDER BY d.deadline_at ASC, d.id ASC
              LIMIT ?3",
         )?;
         statement
@@ -4682,6 +4686,13 @@ mod tests {
                 .state,
             VerificationDispatchState::Pending
         );
+        create_verification_dispatch_bound(
+            dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
+            &VerificationProofBoundary::default(), future, true,
+        ).expect("supervisor recovery starts a fresh cycle");
+        assert!(expired_verification_dispatches(
+            dir.path(), past - Duration::seconds(1), Utc::now(), 10,
+        ).unwrap().is_empty(), "a superseded timeout must not page for the new cycle");
     }
 
     #[test]

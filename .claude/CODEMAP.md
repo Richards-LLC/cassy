@@ -88,6 +88,8 @@
 - `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - service dispatch, bounded futures and request schemas.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates and merged-delivery closure; `recall_terms.rs` filters content terms for task-create context and epic scope comparison.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - delivery anchors, close audit tracking and guarded note-preserving park.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - durable lifecycle alerts, dispatch-owned expiry and the five-minute approved-close grace period.
+- `cas-cli/src/mcp/tools/service/worker_liveness.rs` - bounded transcript/process evidence; native background launch timestamps expire at the configured stall window.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - worktree-keyed receipts and introducing-merge boundaries.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, `gate_preflight.rs` start-time close requirements, queue proof, reviewed corrections and upkeep modules.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.

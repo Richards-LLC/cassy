@@ -221,7 +221,7 @@ async fn r1_verification_wait_wakes(release: &str) {
 #[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};
-    for cause in ["owned", "foreign", "expired", "independent", "successor"] {
+    for cause in ["owned", "foreign", "expired", "timed-out", "independent", "successor"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         let supervisor = Agent::new_with_role(
@@ -252,9 +252,12 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
                 "lead-id"
             },
             chrono::Utc::now()
-                + chrono::Duration::minutes(if cause == "expired" { -1 } else { 10 }),
+                + chrono::Duration::minutes(if matches!(cause, "expired" | "timed-out") { -1 } else { 10 }),
         )
         .unwrap();
+        if cause == "timed-out" {
+            cas_store::timeout_verification_dispatch(&cas_dir, "cas-9efb-test", chrono::Utc::now()).unwrap();
+        }
         let store = crate::store::open_task_store_local(&cas_dir).unwrap();
         let mut task = store.get("cas-9efb-test").unwrap();
         task.status = TaskStatus::Blocked;
@@ -296,7 +299,7 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
-        let owned = matches!(cause, "owned" | "expired");
+        let owned = matches!(cause, "owned" | "expired" | "timed-out");
         // pin: owned dispatches use their handoff/expiry relay instead of a generic blocker wake.
         assert_eq!(
             is_lifecycle_wake_source(&rows[0].source),

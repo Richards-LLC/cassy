@@ -26,7 +26,7 @@ async fn r1_approved_verdict_leaves_close_retry_with_worker() {
 
 #[tokio::test]
 async fn r1_expired_dispatch_wakes_supervisor_once() {
-    for release in ["deadline", "close-timeout"] {
+    for release in ["deadline", "close-timeout", "sweep-before-close-timeout"] {
         r1_verification_wait_wakes(release).await;
     }
 }
@@ -171,7 +171,12 @@ async fn r1_verification_wait_wakes(release: &str) {
     } else {
         chrono::Utc::now()
     };
-    if release == "close-timeout" {
+    if release == "sweep-before-close-timeout" {
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+            &root, released_at,
+        );
+    }
+    if release.contains("close-timeout") {
         // The close retry persists this transition before the daemon sees it.
         let timed_out = cas_store::timeout_verification_dispatch(&root, &task.id, released_at)
             .unwrap().unwrap();

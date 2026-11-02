@@ -4663,6 +4663,11 @@ mod tests {
             .expect("timeout")
             .expect("due dispatch");
         assert_eq!(timed_out.state, VerificationDispatchState::TimedOut);
+        let expired = expired_verification_dispatches(
+            dir.path(), past - Duration::seconds(1), Utc::now(), 10,
+        ).expect("due dispatches include a close-persisted timeout");
+        assert_eq!(expired.iter().map(|dispatch| dispatch.id.as_str()).collect::<Vec<_>>(),
+            vec![timed_out.id.as_str()], "a close retry must not hide the dispatch from its expiry relay");
         assert!(!has_active_verification_dispatch(dir.path(), "cas-timeout-a").unwrap());
         assert!(has_active_verification_dispatch(dir.path(), "cas-timeout-b").unwrap());
         assert!(

@@ -31,7 +31,7 @@ async fn r1_expired_dispatch_wakes_supervisor_once() {
 
 async fn r1_verification_wait_wakes(release: &str) {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-    LifecycleTransition, emit_verification_dispatch_handoff,
+        LifecycleTransition, emit_verification_dispatch_handoff,
     };
     use cas_types::{Agent, AgentRole, TaskStatus};
     let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
@@ -162,7 +162,7 @@ async fn r1_verification_wait_wakes(release: &str) {
     };
     for _ in 0..3 {
         reconcile_blocked_task_alert(&root, &task.id, released_at).unwrap();
-        super::lifecycle::escalate_expired_verification_dispatches(&root, released_at);
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(&root, released_at);
     }
     let rows = queue.peek_all(20).unwrap();
     assert_eq!(

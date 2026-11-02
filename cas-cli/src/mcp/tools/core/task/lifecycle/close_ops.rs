@@ -9433,8 +9433,9 @@ impl CasCore {
                         None => msg,
                     };
 
+                    let artifacts_root = self.load_config().factory().artifacts_root;
                     let msg = gate_text::upkeep_receipt(&self.cas_root,
-                        configured_artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
+                        artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
                     return Ok(Self::tool_error(msg));
                 }
             }

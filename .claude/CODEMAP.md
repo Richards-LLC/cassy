@@ -13,6 +13,7 @@
 - `.cargo/`, `.config/` - Cargo settings and nextest profiles.
 - `.claude/`, `.codex/` - instructions, harness projections and working context.
 - `.githooks/`, `.github/` - Git policy hooks, CI workflows and issue templates.
+- `scripts/resolve-ci-base.sh`, `scripts/test-resolve-ci-base.py` - trusted factory delivery-fork comparisons and real Git classifier regressions.
 - `.github/actions/run-script-suite-tests/` - path-scoped script and visual QA dependencies/execution shared by PR, slim-lane and assembly jobs.
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, tooling and toolchain roots.
 - `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policy.

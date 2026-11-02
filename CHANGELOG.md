@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory CI
+
+- **Keep delivery code covered after docs pushes** — Compare every factory push with its shared delivery fork, so cancelling an earlier code run cannot let a docs followup skip the code checks.
+
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

@@ -3741,16 +3741,17 @@ search discovery and cleanup use the scoped namespace. No automatic file move
 or ownership guess is made for legacy directories.
 
 
-### First factory push scope and reference admission
+### Factory delivery scope and reference admission
 
-The shared CI classifier resolves a first factory push against the unique
+The shared CI classifier resolves every factory push against the unique
 maximal merge base among fetched `origin/epic/*` refs, preserving the task fork
 when sibling merges advance the epic. It falls back to the configured default
 remote branch when no epic parent is available. Local refs,
 unknown bases and incomparable epic parents cannot authorize a Rust skip.
-Subsequent repair pushes compare against the previous push, so unrelated epic
-changes do not widen a test-only repair. All scoped consumers use that resolved
-base; the merge queue still proves the complete integration delta.
+A code push followed by a docs-only push still validates the delivery code, even
+when concurrency cancels the earlier run. Direct branch pushes, PRs and merge
+groups retain their event deltas. All scoped consumers use the resolved base;
+the merge queue still proves the complete integration delta.
 
 The Violet/fixture repository reference scan runs in the existing `ci-diff`
 admission job on factory and epic pushes and PRs, including direct release

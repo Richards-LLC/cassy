@@ -241,6 +241,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  FACTORY-DELIVERY-CI-RANGE:
+    statement: A docs-only followup push retains Rust, Commander and bridge validation for earlier code in the same delivery.
+    check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
+    bug: {task: cas-fc10}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
     check: 'Run hub::server::upstream_unavailable_tests and the HUB-J5 message-only/Send again journey parts;

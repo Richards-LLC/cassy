@@ -73,10 +73,10 @@ class LaneBaseTests(unittest.TestCase):
         self.assertEqual(out['changed-files'], '1')
 
     def test_docs_followup_push_preserves_delivery_code_coverage(self):
-        for path, text, output, expected_class in [
-            ('cas-cli/src/lib.rs', '// worker Rust change\n', 'rust-unaffected', 'rust-touched'),
-            ('hub-web/src/conversation-view.ts', 'export const fixed = true;\n', 'web-check-needed', 'hub-web-only'),
-            ('slack-bridge/src/index.ts', 'export const fixed = true;\n', 'bridge-check-needed', 'slack-bridge-only'),
+        for path, text, output in [
+            ('cas-cli/src/lib.rs', '// worker Rust change\n', 'rust-unaffected'),
+            ('hub-web/src/conversation-view.ts', 'export const fixed = true;\n', 'web-check-needed'),
+            ('slack-bridge/src/index.ts', 'export const fixed = true;\n', 'bridge-check-needed'),
         ]:
             with self.subTest(path=path):
                 self.git('reset', '--hard', self.epic)
@@ -87,7 +87,7 @@ class LaneBaseTests(unittest.TestCase):
                 self.commit('docs followup push')
                 out = self.classify(previous)
                 self.assertEqual(out['comparison-base'], self.epic)
-                self.assertEqual(out['class'], expected_class)
+                self.assertEqual(out['class'], 'rust-touched')
                 self.assertEqual(out[output], 'false' if output == 'rust-unaffected' else 'true')
                 self.assertEqual(out['changed-files'], '2')
                 # Non-factory pushes still validate only their event delta.

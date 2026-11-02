@@ -42,6 +42,7 @@ runs:
     - id: classify
       shell: bash
       env:
+        FULL_VALIDATION: ${{ startsWith(github.ref, 'refs/heads/precheck/') }}
         BASE_SHA: ${{ inputs.base-sha }}
         ZERO_BASE_REF: ${{ inputs.zero-base-ref }}
       run: |
@@ -49,7 +50,11 @@ runs:
         # including an ancestry-only merge with no content changes.
         class=rust-touched
         merge_base=''
-        if ! merge_base="$(scripts/resolve-ci-base.sh "$BASE_SHA" "$ZERO_BASE_REF")"; then
+        if [[ "${FULL_VALIDATION:-false}" == true ]]; then
+          # A hosted queue precheck proves the full job set at any SHA.
+          # An empty comparison deliberately retains conservative coverage below.
+          merge_base=''
+        elif ! merge_base="$(scripts/resolve-ci-base.sh "$BASE_SHA" "$ZERO_BASE_REF")"; then
           echo "::warning title=CI diff base::Unknown or untrusted task parent; running Rust tier"
           merge_base=''
         elif ! class="$(scripts/classify-ci-diff.sh "$merge_base" HEAD)"; then

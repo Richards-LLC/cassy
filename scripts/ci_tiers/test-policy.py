@@ -42,6 +42,37 @@ class PolicyTests(unittest.TestCase):
     def ci(self):
         return copy.deepcopy(policy.load(self.root / '.github/workflows/ci.yml'))
 
+    def test_hosted_precheck_selects_queue_jobs_without_advisory_builds(self):
+        jobs = self.ci()['jobs']
+        common = {'needs.ci-diff.outputs.class':'rust-touched',
+                  'needs.ci-diff.outputs.web-check-needed':'true',
+                  'needs.ci-diff.outputs.bridge-check-needed':'true',
+                  'needs.ci-diff.outputs.script-tests-needed':'true',
+                  'needs.ci-diff.result':'success',
+                  'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'true',
+                  'needs.fast-validation-runner-route.outputs.mode':'hosted',
+                  'github.repository':'Richards-LLC/cassy',
+                  'github.event.repository.default_branch':'main'}
+        def selected(event, ref):
+            context = dict(common, **{'github.event_name':event, 'github.ref':ref})
+            return {name for name, job in jobs.items() if self.gh_expr(job.get('if','true'),context)}
+        queue = selected('merge_group','refs/heads/gh-readonly-queue/main/pr-1')
+        precheck = selected('workflow_dispatch','refs/heads/precheck/'+'a'*40)
+        # Publication writes queue-only flake evidence; precheck runs every producer.
+        self.assertEqual(precheck,queue-{'queue-flake-publication'})
+        self.assertIn('fast-validation-suite-shards',precheck)
+        self.assertIn('fast-validation-journeys',precheck)
+        action = policy.load(policy.ROOT/'.github/actions/classify-required-diff/action.yml')
+        body = action['runs']['steps'][0]['run']
+        output = self.root/'classification'
+        result = self.run_body(body, {'FULL_VALIDATION':'true','BASE_SHA':'HEAD',
+                                     'ZERO_BASE_REF':'origin/main','GITHUB_OUTPUT':str(output)})
+        self.assertEqual(result.returncode,0,result.stderr)
+        values = dict(line.split('=',1) for line in output.read_text().splitlines())
+        self.assertEqual(values['rust-unaffected'],'false')
+        self.assertEqual(values['web-check-needed'],'true')
+        self.assertEqual(values['bridge-check-needed'],'true')
+
     def test_current_policy_and_all_registered_prose_pass(self):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
 

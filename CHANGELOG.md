@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Hosted queue precheck
+
+- **One command validates a commit on hosted CI** — Was: Queue prechecks needed local build and browser setup. → Now: `cas release precheck <sha>` pushes an exact-SHA ref, dispatches the queue job set and records its hosted run; `--status` reports results and elapsed time.
+
+### Fixed — Pending CI merges
+
+- **Parked merges resume when CI turns green** — Was: A supervisor retried each merge after pending CI completed. → Now: Cassy persists the authorized merge and retries it for the same source SHA, repository and target; red CI or a moved lane sends one supervisor notice.
+
 ### Fixed — Factory CI
 
 - **Keep delivery code covered after docs pushes** — Compare every factory push with its shared delivery fork, so cancelling an earlier code run cannot let a docs followup skip the code checks.

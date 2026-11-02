@@ -1766,11 +1766,13 @@ jobs:
   clippy:
     name: Clippy (advisory, compiles only — no test suite)
     if: >-
+      !startsWith(github.ref, 'refs/heads/precheck/') && (
       needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || github.ref == 'refs/heads/staging')))
+      )
     needs: ci-diff
     # Keep each heavy lane separate, but collapse superseded commits on the
     # same integration ref. Event type keeps scheduled/manual runs independent
@@ -2029,11 +2031,13 @@ jobs:
   test-compile-guard:
     name: Test Compile Guard (compile-only, executes nothing)
     if: >-
+      !startsWith(github.ref, 'refs/heads/precheck/') && (
       needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || github.ref == 'refs/heads/staging')))
+      )
     needs: ci-diff
     # See clippy: a newer integration commit cancels only this lane's stale
     # work, while scheduled/manual work uses an event-distinct group.
@@ -2099,7 +2103,9 @@ jobs:
   panic-isolation-release:
     name: Panic Isolation — release profile (named subset, not the suite)
     if: >-
+      !startsWith(github.ref, 'refs/heads/precheck/') && (
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      )
     concurrency:
       group: heavy-tier-panic-isolation-release-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -2136,7 +2142,9 @@ jobs:
   panic-isolation-release-fast:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
     if: >-
+      !startsWith(github.ref, 'refs/heads/precheck/') && (
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      )
     concurrency:
       group: heavy-tier-panic-isolation-release-fast-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -2181,7 +2189,9 @@ jobs:
   build-benchmark:
     name: Build Benchmark & Timings (measurement only, no test suite)
     if: >-
+      !startsWith(github.ref, 'refs/heads/precheck/') && (
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      )
     concurrency:
       group: heavy-tier-build-benchmark-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true

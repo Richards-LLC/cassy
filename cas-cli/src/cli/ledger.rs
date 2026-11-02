@@ -711,20 +711,20 @@ mod tests {
         // cas-df19: v3.94-3.98 already emitted this fact under its queue-exit
         // alias. The append-only ledger retains that row across the upgrade.
         let mut old_ejection = NewQualityEvent::new(
-            "merge_queue|cas-release|1446|queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444",
+            "merge_queue|cas-legacy|1447|queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444",
             QualityPayload::CheckRun { check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
                 stage: cas_store::CheckStage::Queue, outcome: CheckOutcome::Fail,
                 sha: None, minutes: None },
         );
-        old_ejection.task_id = Some("cas-release".into());
+        old_ejection.task_id = Some("cas-legacy".into());
         old_ejection.occurred_at = at(2, 5);
-        old_ejection.title = Some("Rust tests shard 1".into());
-        old_ejection.link = Some("https://github.com/example/project/actions/runs/41246801444".into());
+        // The old emitter stored no run link; identity must use its hashed key.
         assert!(crate::quality_ledger::emit(&cas_root, &old_ejection));
         let queue = crate::store::open_supervisor_queue_store(&cas_root).unwrap();
+        for (task, pr) in [("cas-release", 1446), ("cas-legacy", 1447)] {
         for occurrence in ["queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444", "merge-group-run:41246801444"] {
         let relay = queue.notify("old-supervisor", "merge_queue_ejected", &serde_json::json!({
-            "task_id":"cas-release", "pr_number":1446, "failed_run_id":41246801444_u64,
+            "task_id":task, "pr_number":pr, "failed_run_id":41246801444_u64,
             "occurrence":occurrence, "failing_job":"Rust tests shard 1"
         }).to_string(), cas_store::NotificationPriority::High).unwrap();
         queue.mark_prompt_delivered(relay).unwrap();
@@ -733,8 +733,9 @@ mod tests {
             "UPDATE supervisor_queue SET created_at=?1 WHERE id=?2",
             rusqlite::params![at(2, 5).to_rfc3339(), relay]).unwrap();
         }
+        }
         crate::quality_ledger::backfill(&cas_root, at(1, 12)).unwrap();
-        assert_eq!(build_report(&cas_root, repo, Some("v1.1.0")).unwrap().ejections, 1,
+        assert_eq!(build_report(&cas_root, repo, Some("v1.1.0")).unwrap().ejections, 2,
             "historical queue ejection must survive a zero release snapshot");
         assert_eq!(crate::quality_ledger::backfill(&cas_root, at(1, 12)).unwrap(), 0,
             "replaying consumed relay history must not add another ejection");
@@ -743,6 +744,9 @@ mod tests {
         assert_eq!(recovered[0].occurred_at, at(2, 5));
         assert_eq!(recovered[0].title.as_deref(), Some("Rust tests shard 1"));
         assert_eq!(recovered[0].link.as_deref(), Some("https://github.com/example/project/actions/runs/41246801444"));
+        let legacy = cas_store::quality_events_for_task(&cas_root, "cas-legacy").unwrap();
+        assert_eq!(legacy.len(), 1, "backfill must preserve the old emitter's fact without adding another");
+        assert!(legacy[0].link.is_none(), "append-only history must not be rewritten");
 
         let report = build_report(&cas_root, repo, Some("v1.1.0")).unwrap();
         assert_eq!(report.interventions.get("rebind"), Some(&1), "{report:?}");
@@ -797,7 +801,7 @@ mod tests {
         record_release(&cas_root, repo, &receipt).unwrap();
         let release = cas_store::quality_release_events(&cas_root).unwrap().into_iter()
             .find(|event| event.release_version.as_deref() == Some("v1.1.1")).unwrap();
-        assert!(matches!(release.payload, QualityPayload::Release { ejections: 1, .. }),
+        assert!(matches!(release.payload, QualityPayload::Release { ejections: 2, .. }),
             "release snapshot double-counted the old emitter and recovered alias: {release:?}");
     }
 }

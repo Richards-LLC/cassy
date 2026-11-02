@@ -1112,7 +1112,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_c
     let mut deliveries = vec![(first, "src/one.rs")];
     for path in ["src/two.rs", ".github/workflows/guard.yml"] {
         let created = worker
-            .cas_task_create(Parameters(simple_task_req("Another delivery in the release")))
+            .cas_task_create(Parameters(simple_task_req(path)))
             .await
             .unwrap();
         deliveries.push((extract_task_id(&extract_text(created)).unwrap().to_string(), path));

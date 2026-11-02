@@ -2953,6 +2953,19 @@ impl FactoryApp {
         });
     }
 
+    /// Crash handling drops the live roster entry but retains the pane's last
+    /// output. Once cleanup has released the name, discard only that exited
+    /// worker pane before launching its replacement. Live/non-worker panes
+    /// keep the mux's duplicate-name refusal.
+    fn remove_exited_worker_pane(&mut self, name: &str) -> anyhow::Result<()> {
+        if self.mux.get(name).is_some_and(|pane| {
+            *pane.kind() == cas_mux::PaneKind::Worker && pane.has_exited()
+        }) {
+            self.mux.remove_worker(name)?;
+        }
+        Ok(())
+    }
+
     /// Add a new worker at runtime (synchronous - blocks during worktree creation).
     ///
     /// Creates a worktree (if isolate is true and worktrees enabled) and spawns a Claude instance.
@@ -3190,6 +3203,7 @@ impl FactoryApp {
             }
             Some(prompt)
         });
+        self.remove_exited_worker_pane(&worker_name)?;
         self.mux.set_worker_startup_prompt(&worker_name, startup.clone());
 
         if let Err(e) = self.mux.add_worker(
@@ -4026,6 +4040,7 @@ impl FactoryApp {
         let cwd = self.worker_respawn_cwd(name)?;
 
         // Add pane to mux (spawns new Claude process)
+        self.remove_exited_worker_pane(name)?;
         if let Err(e) = self.mux.add_worker(
             name,
             cwd,

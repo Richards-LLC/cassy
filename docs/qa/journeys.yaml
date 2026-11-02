@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  dead-worker-same-name-recovery:
+    title: Same-name spawn and recycle replace dead workers while retaining their checkout and unpublished work
+    tasks: [cas-35f6]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   private-worker-startup-briefs:
     title: Worker briefs stay private and readable inside the worktree on initial launch and continuation
     tasks: [cas-2453]

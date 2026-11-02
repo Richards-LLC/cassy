@@ -11174,6 +11174,10 @@ impl FactoryDaemon {
                         .worker_spec
                         .as_deref()
                         .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok());
+                    let dead_worker_recovery = request.worker_spec.as_deref()
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                        .and_then(|value| value.get("dead_worker_recovery").and_then(|value| value.as_bool()))
+                        .unwrap_or(false);
                     // Refuse persisted pre-upgrade automatic switches before they
                     // can reach shutdown or respawn. Even null/malformed metadata
                     // belongs to the retired limit-switch path.
@@ -11193,6 +11197,7 @@ impl FactoryDaemon {
                             request_id: request.id,
                             name,
                             spec: spec.clone(),
+                            dead_worker_recovery,
                             stopped: false,
                         });
                     }
@@ -12166,6 +12171,7 @@ impl FactoryDaemon {
                 request_id,
                 name,
                 spec,
+                dead_worker_recovery,
                 stopped,
             } => {
                 // cas-c1a2 (GH #1178): the replacement reuses this pane name,
@@ -12202,6 +12208,19 @@ impl FactoryDaemon {
                             "recipe refused before stopping {name}; the worker keeps running: {error}"
                         )
                     })?;
+                    // The registry can still describe the dead predecessor
+                    // while a same-name successor is running its first turn.
+                    // The daemon owns pane liveness; a dead-path request has
+                    // no authority to stop that successor, even if it has now
+                    // registered. Refuse before touching its pane or probes.
+                    if dead_worker_recovery
+                        && self.app.worker_names().iter().any(|worker| worker == &name)
+                        && self.app.mux.get(&name).is_some_and(|pane| !pane.has_exited())
+                    {
+                        anyhow::bail!(
+                            "Dead-worker recovery refused for {name}: a live replacement pane already exists; no process stopped"
+                        );
+                    }
                     self.app.preflight_worker_recycle(&name, teams_config.as_ref(), &spec)
                         .map_err(|error| anyhow::anyhow!(
                             "launch refused before stopping {name}; the worker keeps running: {error}"
@@ -12212,7 +12231,7 @@ impl FactoryDaemon {
                         self.app.shutdown_worker_for_recycle(&name).await?;
                         if self.app.crash_cleanup_pending(&name) {
                             self.pending_spawns.push_back(PendingSpawn::Recycle {
-                                request_id, name: name.clone(), spec: Some(spec), stopped: true,
+                                request_id, name: name.clone(), spec: Some(spec), dead_worker_recovery, stopped: true,
                             });
                             return Ok(None);
                         }

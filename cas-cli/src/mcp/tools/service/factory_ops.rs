@@ -4026,17 +4026,26 @@ impl CasService {
                 )
             })?
             .into_iter()
-            .find(|agent| {
+            .filter(|agent| {
                 agent.role == AgentRole::Worker
-                    && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
                     && agent.name == worker_name
                     && agent.visible_to_factory_session(factory_session.as_deref())
+                    // Legacy unscoped requests may be consumed by any daemon.
+                    // Only an explicit owner session may recover dead rows.
+                    && (factory_session.is_some()
+                        || matches!(agent.status, AgentStatus::Active | AgentStatus::Idle))
+            })
+            .max_by_key(|agent| {
+                (
+                    super::agent_liveness::evaluate_supervision_liveness(agent).is_live(),
+                    agent.registered_at,
+                )
             })
             .ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Worker '{worker_name}' is not a live worker in this factory session; recycle refused"
+                        "Worker '{worker_name}' is not a worker in this factory session; recycle refused"
                     ),
                 )
             })?;
@@ -4065,9 +4074,15 @@ impl CasService {
         );
         // cas-a622: a recycle keeps the worktree and every task binding (the
         // daemon respawns the same name and re-delivers the in-progress
-        // brief), so holding work is no reason to refuse. Only work that
-        // exists nowhere but this checkout is, and no flag overrides that.
-        if snapshot.unsafe_worktree {
+        // brief), so holding work is no reason to refuse. For a live harness,
+        // work that exists only in this checkout still requires a checkpoint.
+        // A dead harness cannot checkpoint its unpublished work. Recovery
+        // retains the checkout and task bindings, so it must be able to resume
+        // that work. A stale heartbeat alone never grants this exception:
+        // process liveness still protects a running harness's unsaved work.
+        let recovering_dead_worker = factory_session.is_some()
+            && !super::agent_liveness::evaluate_supervision_liveness(&worker).is_live();
+        if snapshot.unsafe_worktree && !recovering_dead_worker {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -4133,12 +4148,17 @@ impl CasService {
                 ),
             ));
         }
-        let spec_json = serde_json::to_string(&spec).map_err(|error| {
+        let mut spec_payload = serde_json::to_value(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to serialize worker recipe: {error}"),
             )
         })?;
+        // Keep the recovery-only intent through queueing. A replacement may
+        // acquire a live pane before it registers, or even before dequeue.
+        // WorkerSpec consumers ignore this compatible metadata field.
+        spec_payload["dead_worker_recovery"] = serde_json::Value::Bool(recovering_dead_worker);
+        let spec_json = spec_payload.to_string();
         let request_id = queue
             .enqueue_recycle(worker_name, Some(&spec_json), factory_session.as_deref())
             .map_err(|error| {
@@ -14043,6 +14063,39 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_session_recycle_refuses_dead_foreign_workers_cas_35f6() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let mut worker = worker_named("foreign-recovery", "foreign-recovery-id");
+        worker.factory_session = Some("other-factory".into());
+        worker.pid = Some(i32::MAX as u32);
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+        agents.register(&worker).unwrap();
+        let mut task = cas_types::Task::new("cas-foreign-recovery".into(), "Keep foreign bindings".into());
+        task.assignee = Some(worker.name.clone());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
+            worker.status = status;
+            agents.update(&worker).unwrap();
+            let req = serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":worker.name})).unwrap();
+            assert!(service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::default(), req)
+                .await.is_err(), "a no-session caller queued foreign dead-worker recovery: {status:?}");
+            assert!(queue.peek(10).unwrap().is_empty());
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker.name.as_str()));
+        }
+    }
 
     /// cas-e9fc AC3: a confirmed clear_context records the new session on the
     /// row as it is now (keeping a SessionStart rebind), and a worker whose row

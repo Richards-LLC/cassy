@@ -1659,7 +1659,10 @@ fn service_port() -> u16 {
         std::env::var(LAUNCHD_TEST_PORT_ENV)
             .ok()
             .and_then(|port| port.parse().ok())
-            .filter(|port| *port != 0)
+            // Linux fixture services allocate when they bind, avoiding a
+            // sampled port's close/rebind race. launchd still requires a fixed
+            // non-default port, enforced by validate_launchd_test_label.
+            .filter(|port| cfg!(target_os = "linux") || *port != 0)
             .unwrap_or(DEFAULT_HUB_PORT)
     } else {
         DEFAULT_HUB_PORT

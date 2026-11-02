@@ -12,9 +12,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Measure factory turn costs** — Each completed Claude, Codex and Grok supervisor or worker turn records its verified wake channel, successful observed actions, no-op flag and measured tokens/minutes. `cas ledger report --release vX.Y.Z --offline` totals those rows by channel and discloses missing usage. Older Cloud endpoints retain unsupported Turn rows locally and retry after a cooldown.
 - **Known limitation** — OpenCode turns are not recorded yet.
 
+### Fixed — Supervisor input
+
+- **Keep ordinary messages out of running Codex turns** — Standard, unattributed and other nonoperator messages now obey the supervisor wake gate before PTY delivery, including oversized bodies. Verified Commander input can still steer a running turn; gated messages remain available through the inbox.
+
 ### Added — Factory communication
 
 - **Count director wakes** — Supervisor director prompts now use the durable message queue with a director source label. They wait behind busy panes and protected drafts, and withdraw stale worker or delivery alerts before waking the supervisor.
+
+### Fixed — Hub test isolation
+
+- **Allocate service test ports at startup** — The Linux post-swap service fixture now binds port zero itself, removing the gap where a parallel test could claim a sampled free port and fail the release checks.
+
+### Fixed — Commander
+
+- **Find workers needing attention in Team** — Blocked tasks and stalled workers lead the team with named attention shortcuts and a stronger count. Task titles distinguish workers sharing the same state; merge waits follow behind reported trouble.
 
 ## [3.98.0] - 2026-11-02
 

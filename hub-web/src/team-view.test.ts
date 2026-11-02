@@ -60,3 +60,32 @@ it("leads with what the session reports and names what it cannot read", () => {
   expect(teamFinding(["Executing", "Stalled", "Parked for merge"], 1)).toBe("1 working, 1 parked, 1 stalled. 1\u00a0needs\u00a0you.");
   expect(teamFinding(["Executing", "Unknown"], 2)).toBe("1 working, 1 not reported. 2\u00a0need\u00a0you.");
 });
+
+it("puts reported trouble ahead of same-state peers and names the worker in attention navigation", () => {
+  const root = document.createElement("section"); document.body.append(root);
+  const progress = vi.fn();
+  const snapshot: TeamSnapshot = {
+    roster: ["lark", "owl", "wren"], supervisor: "lead", supervisors: ["lead"], focused: "release", asks: 0,
+    agents: ["lark", "owl", "wren"].map(name => ({ name, current_task: name, liveness: "waiting_for_input" })),
+    tasks: [
+      { id: "lark", title: "Write release notes", status: "InProgress", epic_id: "release" },
+      { id: "owl", title: "Fix login", status: "Blocked", epic_id: "release" },
+      { id: "wren", title: "Review receipts", status: "InProgress", epic_id: "release" },
+    ],
+    epics: [{ id: "release", title: "Release", status: "InProgress" }],
+  };
+  renderTeam(root, snapshot, vi.fn(), progress);
+  expect([...root.querySelectorAll<HTMLElement>(".team-lane")].map(node => node.dataset.worker)).toEqual(["owl", "lark", "wren"]);
+  expect([...root.querySelectorAll(".team-state")].map(node => node.textContent)).toEqual(["Blocked", "Waiting", "Waiting"]);
+  expect(root.querySelector('.team-lane[data-worker="owl"]')?.textContent).toContain("Blocked");
+  const shortcut = [...root.querySelectorAll("button")].find(button => button.textContent === "owl · Blocked")!;
+  expect(shortcut).toBeDefined(); shortcut.click();
+  expect((document.activeElement as HTMLElement).dataset.worker).toBe("owl");
+  renderTeam(root, { ...snapshot, agents: snapshot.agents.map(agent => agent.name === "wren" ? { ...agent, liveness: "stalled" } : agent) }, vi.fn(), progress);
+  expect(root.querySelector("h2")?.textContent).toContain("2\u00a0need\u00a0you");
+  expect([...root.querySelectorAll("button")].map(button => button.textContent)).toContain("wren · Stalled");
+  renderTeam(root, { ...snapshot, tasks: snapshot.tasks.map(task => ({ ...task, status: "InProgress" })) }, vi.fn(), progress);
+  expect([...root.querySelectorAll<HTMLElement>(".team-lane")].map(node => node.dataset.worker)).toEqual(snapshot.roster);
+  expect(root.textContent).toContain("Nothing needs you.");
+  root.remove();
+});

@@ -5517,11 +5517,13 @@ function renderStatus(status?: Record<string, unknown>): void {
   const groups = taskGroups(tasks, epics, workers.map(worker => worker.name), showAll, supervisorNames, focusedEpic);
   for (const group of groups) {
     if (!group.tasks.length) continue;
-    container.append(sectionLabel(group.label, group.tasks.length));
+    container.append(sectionLabel(group.label === "In progress" ? "Tasks in progress" : group.label, group.tasks.length));
     for (const task of group.tasks) {
       const row = document.createElement("article"); row.className = "status-row status-task";
       const line = document.createElement("div"); line.className = "status-line";
-      line.append(identifier(task.id), chip(task.delivery_state === "merged" ? "Merged, closing" : task.status));
+      const taskChip = chip(task.delivery_state === "merged" ? "Merged, closing" : task.status);
+      if (statusLabel(task.status) === "In progress" && task.delivery_state !== "merged") taskChip.textContent = "Task in progress";
+      line.append(identifier(task.id), taskChip);
       const title = document.createElement("p"); title.className = "status-task-title"; title.textContent = String(task.title ?? "");
       row.append(line, title);
       const controls = task.delivery_state === "merged" ? undefined : ops ? taskControls(document, ops, task) : undefined;

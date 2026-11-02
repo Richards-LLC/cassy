@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  supervisor-pty-sender-gate:
+    title: Only verified operator input bypasses the busy supervisor turn gate
+    tasks: [cas-aa152]
+    invariants: [HUB-J5-SENDER-TURN-GATE]
+    journeys: [HUB-J5]
   peer-answer-and-timer-wakes:
     title: Actionable peer replies wake the asking supervisor and deadlines and work retries remain valid timers
     tasks: [cas-e4c7]
@@ -141,8 +146,11 @@ invariants:
     statement: Cleanup without transport proof keeps Queued honest without polling finalized sends every second; a later real receipt still updates the conversation.
     check: Run commander_mirror::tests::finalized_receipts_back_off_without_losing_later_delivery with the injected clock and verify the durable transport receipt produces Delivered.
   HUB-J5-DIALOG-HOLD:
-    statement: Commander sends no body or submit into native confirmation footers or pending non-Claude tool calls; assistant dialog prose above the composer does not hold input and retained words submit once after readiness returns.
+    statement: Commander sends no body or submit into native confirmation footers; assistant dialog prose above the composer does not hold input and retained words submit once after readiness returns.
     check: Run supervisor_single_turn_tests::non_claude_commander_send_waits_through_dialogs and cas_bf20_verified_commander_send_wakes_an_idle_supervisor through the real queue and private PTY.
+  HUB-J5-SENDER-TURN-GATE:
+    statement: Only verified paired-device operator input bypasses a busy Codex supervisor turn gate; ordinary origins retain wake eligibility during tools and idle states, independent of body size, and gated messages remain explicitly readable.
+    check: Run supervisor_single_turn_tests::cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle through real queue dispatch and PTY capture with unresolved native tool calls and completed turns. Walk paired Commander sends and unverified ingress during a running native tool on the epic candidate.
   HUB-J26-READONLY-OWNER:
     statement: Read-only identity lookup cannot cache a live parent identity for a nested harness or authorize later mutable tools.
     check: Run mcp::daemon::tests::nested_harness_cannot_take_over_live_factory_identity_cas_b815 for supervisor and worker identities; confirm read-only and mutable calls refuse and parent registration stays unchanged.
@@ -501,6 +509,10 @@ invariants:
     statement: A native background launch keeps its worker busy within the configured stall window and afterward while user-work descendants are CPU busy; a missing completion becomes Stalled when those jobs are quiet even if harness timers use CPU, while a matching completion returns the worker to Waiting.
     check: Run worker_liveness::tests (including process_evidence_busy_background_child_and_grandchild_keep_executing and process_evidence_silent_background_child_ignores_harness_cpu); compare Team worker liveness to native worker_status for busy children/grandchildren and quiet children under a ticking harness past the stall window on the release candidate.
     bug: {task: cas-185e}
+  HUB-J26-SAME-STATE:
+    statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead with named attention shortcuts; the count includes worker trouble once, and task titles distinguish the remaining lanes.
+    check: Run HUB-J26 same-state and lifecycle stages at desktop/light and phone/dark; compare a real-hub same-state capture with the task and worker readbacks, then obtain an independent distinctiveness, fit and hierarchy score of at least four.
+    bug: {task: cas-a147}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -993,6 +1005,7 @@ journeys:
   - HUB-J5-GOAL
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-DIALOG-HOLD
+  - HUB-J5-SENDER-TURN-GATE
   - HUB-J5-LONG-CODEX-ROLLOUT
   - HUB-J5-QUIET-RECEIPT-POLL
   - HUB-J12-SERVE-OWNERSHIP

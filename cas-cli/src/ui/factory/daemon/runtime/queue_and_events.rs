@@ -7556,8 +7556,8 @@ impl FactoryDaemon {
     }
 
     /// Setup and approval pages can outlive the startup grace. Claude's chooser
-    /// is not a composer: require its ruled input. Other harnesses retain their
-    /// tool-call veto and confirmation boundary. Inspect the current viewport,
+    /// is not a composer: require its ruled input. Codex can queue operator
+    /// text mid-tool; other harnesses retain their tool-call veto. Inspect the current viewport,
     /// never scrollback; a safe working composer still accepts operator text.
     fn commander_native_input_ready(&self, pane_id: &str) -> bool {
         let cli = self.app.harness_for(pane_id);
@@ -7566,9 +7566,11 @@ impl FactoryDaemon {
             .map(|row| pane.dump_row(row).unwrap_or_default())
             .collect();
         if cli != cas_mux::SupervisorCli::Claude {
-            // These harnesses have no proven mid-tool composer contract. A
-            // submit must not answer an approval, even on a silent pane.
-            if self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
+            // cas-aa152: verified operator input can steer a running Codex
+            // turn. Native confirmation footers below still protect approvals;
+            // harnesses without that mid-tool input contract keep the veto.
+            if cli != cas_mux::SupervisorCli::Codex
+                && self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
                 return false;
             }
             // Native dialog footers are complete rows below the composer.
@@ -9600,6 +9602,13 @@ impl FactoryDaemon {
                 && (wake_sender == WakeSender::Operator || cas_store::fits_hook_surface(&batch_body))
                 && facts.deferred_inbox.is_none()
                 && !self.inbox_deferred_writes.contains_key(&queued.id);
+            // cas-aa152: a PTY body starts/submits harness input even when it
+            // has no registered sender or exceeds the inline budget. Both
+            // quiet-row and busy-turn gates must protect that delivery too.
+            let supervisor_pty_delivery = pane_target == self.app.supervisor_name()
+                && super::delivery::choose_channel(
+                    self.app.harness_for(pane_target), self.teams.is_some(),
+                ) == super::delivery::DeliveryChannel::Pty;
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
             let durable_deferred_inbox = claude_inbox_target && facts.deferred_inbox.is_some();
             let deferred_inbox_recorded =
@@ -10079,7 +10088,7 @@ impl FactoryDaemon {
                     .insert(queued.source.clone(), now);
             }
 
-            if inline_supervisor_body && !queued.urgent
+            if (inline_supervisor_body || supervisor_pty_delivery) && !queued.urgent
                 && !Self::row_is_supervisor_wake(
                     &wake_sender, self.app.supervisor_name(), &queued.source, &queued.prompt,
                 )
@@ -10511,12 +10520,20 @@ impl FactoryDaemon {
                     let worker_is_idle = wake_decision.allowed;
                     Some((is_supervisor_target, pane_state, wake_decision, worker_is_idle))
                 } else { None };
-                if inline_supervisor_body && let Some((_, _, wake_decision, false)) = normal_wake {
+                if (inline_supervisor_body || supervisor_pty_delivery)
+                    && let Some((_, pane_state, wake_decision, false)) = normal_wake {
+                    // Keep the actionable draft explanation that PTY transport
+                    // deferral used before this gate moved ahead of admission.
+                    let pending_detail = if pane_state.composer_dirty {
+                        "composer protected: operator draft is unsubmitted".to_string()
+                    } else {
+                        wake_decision.status_detail()
+                    };
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
-                            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: wake_decision.status_detail(),
+                            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: pending_detail.clone(),
                                 recheck_at: chrono::Utc::now()+chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap() });
                         self.queue_jobs.inline_parked.insert(member.id,(member.clone(),chrono::Utc::now()));
                     }
@@ -10528,7 +10545,7 @@ impl FactoryDaemon {
                         super::prompt_queue_jobs::QueueStamp::WakeDecline { detail: wake_decision.status_detail() });
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::ParkBusy {
-                            detail: wake_decision.status_detail(),
+                            detail: pending_detail,
                             recheck_at: chrono::Utc::now() + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
                         });
                     self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));

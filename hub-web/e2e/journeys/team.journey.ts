@@ -71,7 +71,19 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();
         expect(hub.frames.filter(frame => ["ScrollbackRequest", "WorkEventsRequest", "WorkEventDetailRequest"].includes(frame.kind))).toEqual([]);
       });
+      await journey.stage("Same-state workers expose the blocked task before healthy peers", async () => {
+        for (const agent of fleet.agents) agent.liveness = "waiting_for_input";
+        fleet.tasks[2].status = "blocked";
+        await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
+        const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
+        await expect(panel.locator(".team-lane").first()).toHaveAttribute("data-worker", "brisk-wren-9");
+        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-state')).toHaveText("Blocked");
+        await panel.getByRole("button", { name: "brisk-wren-9 · Blocked", exact: true }).click();
+        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"]')).toBeFocused();
+        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 blocked, 2 waiting, 1 parked. 2 need you.");
+      });
       await journey.stage("A lifecycle event updates staffing without reloading", async () => {
+        fleet.tasks[2].status = "in_progress";
         fleet.agents[0].liveness = "stalled";
         fleet.agents[3].liveness = "offline";
         const started = performance.now();

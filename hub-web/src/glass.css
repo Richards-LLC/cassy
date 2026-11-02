@@ -516,15 +516,24 @@ html[data-scheme="dark"] {
 :root .team-lane,
 :root .conversation-group.project-card { border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-surface); background: var(--bg-raised); }
 :root .status-row { gap: var(--card-gap); margin-block-start: var(--card-gap); padding: var(--card-padding); }
-/* One lane, three rows: who and state; task and time; delivery trail. */
+/* Task first: the work distinguishes same-provider, same-state workers. */
 :root .team-lane { grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px var(--space-3); align-items: center; margin-block-end: var(--card-gap); padding: var(--space-2) var(--card-padding); }
 :root .team-lane > .provider-avatar { grid-row: 1 / span 3; align-self: start; }
-:root .team-lane > .team-task { grid-column: 2; }
-:root .team-lane > .team-elapsed { grid-column: 3; justify-self: end; }
-:root .team-lane > .team-state { justify-self: end; }
-:root .team-lane > .team-trail { grid-column: 2 / -1; }
+:root .team-lane > .team-task { grid-column: 2; grid-row: 1; font-weight: var(--weight-semibold); font-size: var(--fs-base); }
+:root .team-lane > .team-identity { grid-column: 2; grid-row: 2; }
+:root .team-lane > .team-elapsed { grid-column: 3; grid-row: 2; justify-self: end; }
+:root .team-lane > .team-state { grid-column: 3; grid-row: 1; justify-self: end; }
+:root .team-lane > .team-trail { grid-column: 2 / -1; grid-row: 3; }
+:root .team-lane[data-urgency] { border-inline-start: var(--space-1) solid var(--state-warn); }
+:root .team-lane[data-urgency="critical"] { border-inline-start-color: var(--state-crit); }
+:root .team-lane[data-urgency="critical"] .team-state { color: var(--state-crit); background: var(--bg-panel); font-weight: var(--weight-semibold); }
+.team-attention-count { color: var(--state-crit); font-weight: inherit; border-bottom: var(--space-1) solid currentColor; }
+.team-needs[data-active="true"] { border-block-color: var(--state-warn); background: var(--tint-warn); padding-inline: var(--space-2); border-radius: var(--radius-control); }
+.team-needs button[data-urgency="critical"] { border-color: var(--state-crit); color: var(--state-crit); background: var(--bg-raised); }
+:root .team-lane:focus { outline: none; }
+:root .team-lane:focus-visible { outline: var(--line-width) dotted var(--ink); outline-offset: calc(-1 * var(--space-2)); }
 @media (max-width: 500px) {
-  :root .team-lane { row-gap: 2px; }
+  :root .team-lane { row-gap: 2px; padding-block: var(--space-1); margin-block-end: var(--space-2); }
   :root .team-lane > .provider-avatar { grid-row: 1 / span 2; }
   :root .team-lane > .team-trail { grid-column: 1 / -1; margin-block-start: var(--space-1); }
 }

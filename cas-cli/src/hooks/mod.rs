@@ -26,7 +26,7 @@
 mod context;
 pub(crate) mod delivery_provenance;
 pub(crate) mod handlers;
-pub(crate) pub(crate) mod operation_lessons;
+pub(crate) mod operation_lessons;
 pub mod scorer;
 pub mod transcript;
 pub(crate) mod session_start_fallback;

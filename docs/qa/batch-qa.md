@@ -45,6 +45,11 @@ there, and still byte-checks a ledger that is published locally. The
 independent-author check runs against the closing machine's own record of who
 implemented each task.
 
+A release verdict uses the same action with `verification_type=release`: one
+review of the assembled tip, whose published report names every delivery. It rides
+task sync on a reserved `RELEASE_VERDICT_PROOF:` line and never counts as QA
+evidence, so Tier 1 deliveries need both it and any QA receipt they owe.
+
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same
 implementation lineage: a QA reviewer, a verifier, or a worker on this or

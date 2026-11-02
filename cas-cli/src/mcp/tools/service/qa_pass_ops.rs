@@ -21,12 +21,20 @@ impl CasService {
         if config.qa().mode != crate::config::QaMode::Batch {
             return Err(reject("requires qa.mode=batch".into()));
         }
+        // cas-ce5e: `verification_type=release` records the one code-review verdict
+        // for the assembled tip, in the shape of a QA receipt but never as one.
+        let (schema, check_id, stage, label) = match req.verification_type.as_deref() {
+            None => (cas_store::QA_BATCH_RECEIPT_SCHEMA, "qa_batch", cas_store::CheckStage::Qa, "Batch QA receipt"),
+            Some("release") => (cas_store::RELEASE_VERDICT_SCHEMA, "release_verdict", cas_store::CheckStage::Verifier, "Release verdict"),
+            Some(other) => return Err(reject(format!("verification_type {other:?}: batch_receipt takes only 'release'"))),
+        };
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
             required(req.ledger_author.as_deref(), "ledger_author")?,
             req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
             required(req.staging_sha.as_deref(), "staging_sha")?,
             required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
-            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?))
+            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?),
+            schema)
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
@@ -35,9 +43,9 @@ impl CasService {
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;
         for (task_id, head) in &receipt.task_heads {
             crate::quality_ledger::check_run(&self.inner.cas_root, crate::quality_ledger::Check {
-                natural_key: format!("qa_batch|{}|{task_id}", receipt.id),
-                check_id: "qa_batch",
-                stage: cas_store::CheckStage::Qa,
+                natural_key: format!("{check_id}|{}|{task_id}", receipt.id),
+                check_id,
+                stage,
                 outcome: cas_store::CheckOutcome::Pass,
                 task_id: Some(task_id),
                 sha: Some(head),
@@ -46,7 +54,7 @@ impl CasService {
                 actor: None,
             });
         }
-        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={} author={} ({})",
+        let note = format!("[{}] {label} {}: staging={} ledger={} recorder={} author={} ({})",
             receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
             receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
         for task_id in receipt.task_heads.keys() {
@@ -58,7 +66,7 @@ impl CasService {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }
         }
-        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+        Ok(Self::success(format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
             receipt.ledger_artifact_id, receipt.ledger_path)))
     }

@@ -36,11 +36,11 @@ impl CasCore {
             return Ok(());
         }
         // cas-5207: a Tier 0 delivery gets no dispatch here either. The close that
-        // follows records the tier.
+        // follows records the tier. cas-ce5e: nor does one the release verdict owns.
         if latest_dispatch.is_none()
-            && super::super::review_tier::tier_for_delivery(task, repo).is_some_and(|decision| {
+            && (super::super::review_tier::tier_for_delivery(task, repo).is_some_and(|decision| {
                 decision.tier == super::super::review_tier::VerificationTier::Mechanical
-            })
+            }) || super::super::review_tier::release_verdict_owns(&self.cas_root, task, repo))
         {
             return Ok(());
         }

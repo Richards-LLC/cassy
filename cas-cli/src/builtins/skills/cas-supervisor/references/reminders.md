@@ -9,7 +9,7 @@ authoritative task/worker state once before acting.
 
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
-| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, run the verifier on Cassy's dispatch (its verdict closes or returns the task; no worker message), then cancel any phase reminder |
+| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge; if Cassy opened a dispatch, run the verifier on it (its verdict closes or returns the task; no worker message); a Tier 1 delivery in `qa.mode=batch` waits for the release verdict. Then cancel any phase reminder |
 | GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
 | Long release, publication, or other detached job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
 | Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |

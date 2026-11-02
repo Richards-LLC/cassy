@@ -9575,7 +9575,18 @@ impl CasCore {
                     ..
                 }))
         );
-        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip;
+        // cas-ce5e: with no per-task dispatch to protect it, a merged delivery whose
+        // worker has gone must not lose its release review to the orphan convenience.
+        // The explicit supervisor bypass and non-delivery dispositions are unaffected.
+        let orphan_skip_of_release_verdict = matches!(
+            skip_reason,
+            VerificationSkipReason::NoAssignee
+                | VerificationSkipReason::AssigneeInactive { .. }
+                | VerificationSkipReason::AssigneeUnknown
+        ) && !depth_light
+            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
+        let skip_verification =
+            skip_reason.is_skip() && exact_dispatch_allows_skip && !orphan_skip_of_release_verdict;
 
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
@@ -9640,11 +9651,46 @@ impl CasCore {
         {
             close_notes.record(&mut task, &decision.note());
         }
+        // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
+        // one verdict of the assembled tip names it. A dispatch or verdict already on
+        // record keeps its authority below, and Tier 2 never takes this path.
+        let release_verdict_covers = !rapid_unsampled
+            && no_verification_on_record
+            && verification_tier.is_some()
+            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
+        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers) {
+            match crate::qa_batch::satisfying_release_verdict(
+                &self.cas_root,
+                &task,
+                &close_project_root,
+                &resolved_parent_branch,
+                &decision.tip,
+            ) {
+                Ok(Some(verdict)) => close_notes.record(
+                    &mut task,
+                    &format!("Release verdict {} covers this delivery at {}.", verdict.id, decision.tip),
+                ),
+                Ok(None) => {
+                    return Ok(Self::tool_error(gate_text::waiting_for_release_verdict(
+                        &req.id,
+                        &decision.tip,
+                        crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    )));
+                }
+                Err(error) => {
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable release verdict state: {error}. Cassy refuses to infer close authority.",
+                        req.id
+                    )));
+                }
+            }
+        }
         if verification_enabled
             && !skip_verification
             && !depth_light
             && !rapid_unsampled
             && !tier_skips_verifier
+            && !release_verdict_covers
         {
             let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 

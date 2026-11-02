@@ -1132,6 +1132,10 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_c
                 .expect("start delivery");
         }
         let tip = merge_delivery_of(temp.path(), lane.path(), &cas_dir, id, path, branch);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut parked = tasks.get(id).unwrap();
+        parked.status = TaskStatus::AwaitingMerge;
+        tasks.update(&parked).unwrap();
         let waiting = close(id, &tip).await;
         tips.push(tip);
         if path.starts_with("src/") {

@@ -747,6 +747,34 @@ async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() 
     assert!(close.contains("no `qa-bundle:` note"), "{close}");
 }
 
+/// cas-ce5e: with no dispatch to protect it, a merged delivery whose worker has
+/// gone still needs the verdict; a QA receipt does not stand in for it.
+#[tokio::test]
+async fn orphaned_delivery_still_waits_for_the_release_verdict_cas_ce5e() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.record().await;
+    std::fs::write(
+        fx.repo.join(".cas/config.toml"),
+        "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n",
+    )
+    .unwrap();
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+        assignee: "test-agent".into(),
+        branch: "factory/test-agent".into(),
+        base_sha: git(&fx.repo, &["rev-parse", &format!("{anchor}^")]),
+    });
+    tasks.update(&task).unwrap();
+
+    let close = fx.close("cas-bq01").await;
+    assert!(close.contains("WAITING FOR RELEASE VERDICT"), "{close}");
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+}
+
 impl Fx {
     fn unmerge(&self) {
         let tasks = open_task_store(&self.repo.join(".cas")).unwrap();

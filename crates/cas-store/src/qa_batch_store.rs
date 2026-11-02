@@ -16,6 +16,13 @@ pub const QA_BATCH_SCHEMA_STATEMENTS: &[&str] = &[
         task_id TEXT PRIMARY KEY, delivered_head TEXT NOT NULL, deferred_at TEXT NOT NULL)",
 ];
 
+/// The schema of a QA walk's receipt.
+pub const QA_BATCH_RECEIPT_SCHEMA: u32 = 1;
+/// A release verdict has a QA receipt's shape but attests one code review of the
+/// assembled tip, never a QA walk. Binaries that know only schema 1 skip it as QA
+/// evidence, so the two cannot be mistaken across an upgrade.
+pub const RELEASE_VERDICT_SCHEMA: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QaBatchReceipt {
     pub schema_version: u32,
@@ -58,7 +65,7 @@ fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::C
 }
 
 fn check_receipt(receipt: &QaBatchReceipt) -> Result<String> {
-    if receipt.schema_version != 1
+    if !matches!(receipt.schema_version, QA_BATCH_RECEIPT_SCHEMA | RELEASE_VERDICT_SCHEMA)
         || receipt.id.is_empty()
         || receipt.project_id.is_empty()
         || receipt.task_heads.is_empty()
@@ -191,9 +198,28 @@ pub fn qa_batch_receipts_for_task(
     project: &str,
     task: &str,
 ) -> Result<Vec<QaBatchReceipt>> {
+    receipts_for_task(root, project, task, QA_BATCH_RECEIPT_SCHEMA)
+}
+
+/// The release verdicts naming `task`. They are kept apart from QA receipts: a
+/// review never pays a QA walk's debt, and a QA walk never replaces the review.
+pub fn release_verdicts_for_task(
+    root: &Path,
+    project: &str,
+    task: &str,
+) -> Result<Vec<QaBatchReceipt>> {
+    receipts_for_task(root, project, task, RELEASE_VERDICT_SCHEMA)
+}
+
+fn receipts_for_task(
+    root: &Path,
+    project: &str,
+    task: &str,
+    schema: u32,
+) -> Result<Vec<QaBatchReceipt>> {
     Ok(list_qa_batch_receipts(root, project)?
         .into_iter()
-        .filter(|receipt| receipt.task_heads.contains_key(task))
+        .filter(|receipt| receipt.schema_version == schema && receipt.task_heads.contains_key(task))
         .collect())
 }
 

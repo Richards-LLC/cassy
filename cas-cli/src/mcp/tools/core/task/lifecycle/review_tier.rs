@@ -7,6 +7,8 @@
 //! adversarially. The highest tier any path reaches applies to the delivery.
 //! Anything unmeasurable stays at today's path, one verifier. Verification and QA
 //! share this classifier, so a delivery has one tier however it is reviewed.
+//! In `qa.mode=batch` Tier 1 shares one verifier per release: a single verdict of the
+//! assembled tip names every delivery. Tier 2 and unmeasurable deliveries keep their own.
 use cas_types::{Task, TaskType};
 
 /// A supervisor's label that keeps a verifier on an otherwise Tier 0 delivery.
@@ -131,6 +133,16 @@ pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<T
         reason = format!("A supervisor set the {FORCE_VERIFIER_LABEL} label.");
     }
     Some(TierDecision { tier, reason, tip: tip.to_string() })
+}
+
+/// Whether this delivery closes on the release verdict and opens no verifier of its
+/// own. A rapid-response fix ships alone, and `force-verifier` asks for a dedicated
+/// review, so both keep their own. Unreadable config stays on the per-task path.
+pub(crate) fn release_verdict_owns(cas_root: &std::path::Path, task: &Task, repo: &std::path::Path) -> bool {
+    crate::config::Config::load(cas_root).is_ok_and(|config| config.qa().mode == crate::config::QaMode::Batch)
+        && !task.labels.iter().any(|label| label == FORCE_VERIFIER_LABEL)
+        && crate::rapid_response::active_for_task_at(cas_root, task, None).is_none()
+        && tier_for_delivery(task, repo).is_some_and(|decision| decision.tier == VerificationTier::Standard)
 }
 
 #[cfg(test)]

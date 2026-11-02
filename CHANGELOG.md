@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — One verifier per release
+
+- **Tier 1 deliveries close on one release verdict** — Was: with `qa.mode=batch`, each merged delivery opened its own verifier (9 on 3.96, 1.57M fresh tokens). Now: Tier 1 merges open no dispatch, and one review of the assembled tip closes them all once `verification action=batch_receipt verification_type=release` records a report naming every delivery. Tier 2 guard, CI and release code, unmeasurable diffs, `force-verifier` and `qa.mode=per_task` keep their own verifier, and a verdict never counts as QA evidence.
+
 ### Fixed — Factory notification wakes
 
 - **Merged delivery facts wait for the next turn** — Was: Merge-close and lane-parked notices woke workers, and queued READY TO MERGE alerts could wake supervisors after Cassy had merged the delivery. → Now: These facts stay readable in the next-turn digest. New deliveries, verifier findings and blockers keep their action wakes.

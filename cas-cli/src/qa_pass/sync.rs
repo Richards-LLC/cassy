@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 const MARKER: &str = "QA_PASS_PROOF: ";
 /// cas-6048: a batch receipt rides the same transport on each listed task.
 const BATCH_MARKER: &str = "QA_BATCH_RECEIPT_PROOF: ";
+/// A release verdict rides the same way under its own marker. A peer that predates
+/// verdicts keeps the line as an ordinary note instead of refusing the task's sync.
+const RELEASE_MARKER: &str = "RELEASE_VERDICT_PROOF: ";
+
+fn receipt_marker(receipt: &QaBatchReceipt) -> &'static str {
+    if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA { RELEASE_MARKER } else { BATCH_MARKER }
+}
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Snapshot {
@@ -52,7 +59,7 @@ pub(crate) fn record(cas_root: &Path, task_id: &str) -> anyhow::Result<()> {
 /// machine's close gate can accept it after task sync (cas-6048).
 pub(crate) fn record_batch(cas_root: &Path, receipt: &QaBatchReceipt) -> anyhow::Result<()> {
     let store = crate::store::open_task_store(cas_root)?;
-    let line = format!("{BATCH_MARKER}{}", serde_json::to_string(receipt)?);
+    let line = format!("{}{}", receipt_marker(receipt), serde_json::to_string(receipt)?);
     for task_id in receipt.task_heads.keys() {
         store.append_trusted_note(task_id, &line)?;
     }
@@ -62,7 +69,7 @@ pub(crate) fn record_batch(cas_root: &Path, receipt: &QaBatchReceipt) -> anyhow:
 fn batch_receipts(notes: &str, task_id: &str) -> Vec<QaBatchReceipt> {
     notes
         .lines()
-        .filter_map(|line| line.strip_prefix(BATCH_MARKER))
+        .filter_map(|line| line.strip_prefix(BATCH_MARKER).or_else(|| line.strip_prefix(RELEASE_MARKER)))
         .filter_map(|json| serde_json::from_str::<QaBatchReceipt>(json).ok())
         .filter(|receipt| receipt.task_heads.contains_key(task_id))
         .collect()
@@ -91,13 +98,17 @@ pub fn take(notes: &mut String, task_id: &str) -> Vec<String> {
                     imported: false,
                     ..receipt
                 })
-                .filter_map(|receipt| serde_json::to_string(&receipt).ok())
-                .map(|json| format!("{BATCH_MARKER}{json}")),
+                .filter_map(|receipt| {
+                    let json = serde_json::to_string(&receipt).ok()?;
+                    Some(format!("{}{json}", receipt_marker(&receipt)))
+                }),
         )
         .collect();
     *notes = notes
         .lines()
-        .filter(|line| !line.starts_with(MARKER) && !line.starts_with(BATCH_MARKER))
+        .filter(|line| {
+            !line.starts_with(MARKER) && !line.starts_with(BATCH_MARKER) && !line.starts_with(RELEASE_MARKER)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     receipts

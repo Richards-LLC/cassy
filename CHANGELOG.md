@@ -11,9 +11,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep wake and no-op counts honest** — Claude Teams messages and pointer wakes retain their queue source; Codex launch context no longer hides the first real wake. Routine internal prose stays a no-op unless a typed action occurred, while authenticated operator answers and questions still count. Appends consumed during a scan no longer trigger a full replay, and a new native turn replaces an unfinished prior turn without inheriting its duration.
 
+### Fixed — Cloud sync
+
+- **Keep other ledger events moving** — A rejected Turn now waits on its own cursor and capability cooldown while other quality events continue pushing and pulling. Unrelated validation errors remain visible, and pending Turns retry without losing local rows.
+
 ### Fixed — Worker context
 
-- **Start queued work with fresh context** — Workers restart in place between queued tasks, keeping their name, checkout and launch recipe. MCP results surface actual harness context use at the configured threshold, so checkpoints use measured occupancy instead of cumulative token totals or tool-output size.
+- **Opt in to fresh context between queued tasks** — Set `factory.restart_worker_between_tasks=true` to restart workers between queued tasks, keeping their name, checkout and launch recipe. By default, the successor uses the current context. MCP results surface actual harness context use at the configured threshold, so checkpoints use measured occupancy instead of cumulative token totals or tool-output size.
+
+### Known limitations — Factory
+
+- **Sibling-worker termination incident** — The incident tracked in cas-a290 was traced to a supervisor subagent's `pkill -f`, rather than recycle itself. Per-task restarts currently require explicit opt-in; measured context notices stay enabled.
+
+### Fixed — QA evidence
+
+- **Keep Playwright 1.63 evidence valid** — Rendered evidence retains the `^1.63` floor. The 1.64 recording and agent features are optional, so projects on 1.63 can still submit their captures.
 
 ### Fixed — Delivery recovery
 

@@ -123,7 +123,10 @@ fails, report that error rather than repeating schema lookup.
   using Cassy's `context used: N%` notice from harness accounting. Never infer
   occupancy from cumulative billing tokens, tool-output size or a guessed
   model window; `context used: unknown` is not evidence of exhaustion.
-  Queued tasks get fresh conversations automatically; do not request an early
+  Queued tasks keep their context by default. Only an explicit
+  `factory.restart_worker_between_tasks=true` opts in to fresh conversations
+  between tasks; automatic task-boundary restarts default off. Context-used
+  notices work either way. Do not request an early
   recycle just because a prior task was long. Then
   write `HANDOFF.md` in the task artifact directory: done work with SHAs,
   remaining steps, the next command and open questions. Cite it in a progress

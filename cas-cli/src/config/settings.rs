@@ -826,6 +826,14 @@ impl BuildGuardConfig {
     }
 }
 
+/// Release policy for automatic task-boundary restarts. Serde, defaults and
+/// registry metadata derive from this one value.
+pub(crate) const DEFAULT_RESTART_WORKER_BETWEEN_TASKS: bool = false;
+
+fn default_restart_worker_between_tasks() -> bool {
+    DEFAULT_RESTART_WORKER_BETWEEN_TASKS
+}
+
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
@@ -1026,6 +1034,10 @@ pub struct FactoryConfig {
     /// "a few minutes" per the bug report).
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
+
+    /// Whether to recycle between queued tasks. Independent of context notices.
+    #[serde(default = "default_restart_worker_between_tasks")]
+    pub restart_worker_between_tasks: bool,
 
     /// Context occupancy threshold for worker MCP notices and idle status
     /// recycle recommendations. Only harness-reported windows yield a percent;
@@ -1311,6 +1323,7 @@ impl Default for FactoryConfig {
             prompt_transcript_retention_days: default_prompt_transcript_retention_days(),
             supervisor_queue_retention_days: default_supervisor_queue_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
+            restart_worker_between_tasks: default_restart_worker_between_tasks(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
@@ -2263,11 +2276,15 @@ mod tests {
 
     #[test]
     fn factory_config_context_recycle_threshold_is_configurable() {
-        let toml_str = "[factory]\ncontext_recycle_threshold_percent = 90\n";
+        let toml_str = "[factory]\ncontext_recycle_threshold_percent = 90\nrestart_worker_between_tasks = true\n";
         let parsed: std::collections::HashMap<String, FactoryConfig> =
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
         assert_eq!(fc.context_recycle_threshold_percent, 90);
+        assert!(fc.restart_worker_between_tasks);
+        assert!(!FactoryConfig::default().restart_worker_between_tasks);
+        let legacy: FactoryConfig = toml::from_str("").unwrap();
+        assert!(!legacy.restart_worker_between_tasks);
         assert_eq!(
             FactoryConfig::default().context_recycle_threshold_percent,
             80

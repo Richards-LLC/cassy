@@ -143,8 +143,8 @@ fn machine_lock_is_free() -> Result<bool> {
     Ok(lock.try_lock_exclusive().is_ok())
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+fn git(program: &Path, repo: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -162,9 +162,9 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// A hung remote must not stop the queue; the last fetched tip still builds.
-fn fetch_bounded(repo: &Path, branch: &str) -> Result<()> {
+fn fetch_bounded(program: &Path, repo: &Path, branch: &str) -> Result<()> {
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-    let mut child = Command::new("git")
+    let mut child = Command::new(program)
         .arg("-C")
         .arg(repo)
         .args(["fetch", "--quiet", "origin", refspec.as_str()])
@@ -190,31 +190,31 @@ fn fetch_bounded(repo: &Path, branch: &str) -> Result<()> {
 }
 
 /// Bring the daemon's own checkout to the default branch tip, and return it.
-fn refresh_builder_checkout(cas_root: &Path) -> Result<PathBuf> {
+fn refresh_builder_checkout(cas_root: &Path, program: &Path) -> Result<PathBuf> {
     let project = cas_root
         .parent()
         .context("the Cassy root has no project directory")?;
-    let branch = git(project, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    let branch = git(program, project, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .ok()
         .and_then(|name| name.strip_prefix("origin/").map(str::to_owned))
         .unwrap_or_else(|| "main".to_owned());
-    if let Err(error) = fetch_bounded(project, &branch) {
+    if let Err(error) = fetch_bounded(program, project, &branch) {
         tracing::warn!(%error, "candidate builder uses the last fetched source tip");
     }
     let remote = format!("refs/remotes/origin/{branch}^{{commit}}");
     let local = format!("refs/heads/{branch}^{{commit}}");
     let tip = [remote.as_str(), local.as_str(), "HEAD^{commit}"]
         .iter()
-        .find_map(|name| git(project, &["rev-parse", "--verify", "--quiet", name]).ok())
+        .find_map(|name| git(program, project, &["rev-parse", "--verify", "--quiet", name]).ok())
         .context("no source tip to build the candidate builder from")?;
     let checkout = cas_root.join(BUILDER_CHECKOUT);
     if checkout.join(".git").exists() {
-        git(&checkout, &["checkout", "--quiet", "--detach", "--force", &tip])?;
-        git(&checkout, &["clean", "-fdq"])?;
+        git(program, &checkout, &["checkout", "--quiet", "--detach", "--force", &tip])?;
+        git(program, &checkout, &["clean", "-fdq"])?;
     } else {
         // --force reclaims a registration whose directory was deleted.
         let path = checkout.display().to_string();
-        git(project, &["worktree", "add", "--quiet", "--detach", "--force", &path, &tip])?;
+        git(program, project, &["worktree", "add", "--quiet", "--detach", "--force", &path, &tip])?;
     }
     Ok(checkout)
 }
@@ -229,6 +229,7 @@ pub(crate) struct Runner {
     pub admit: fn(&Path) -> BuilderAdmission,
     build_elapsed: fn(Instant) -> Duration,
     heartbeat_interval: Duration,
+    git_program: PathBuf,
 }
 
 /// The fields of `cas qa candidate build --json`.
@@ -388,7 +389,7 @@ impl Runner {
     }
 
     fn run_builder(&self, request: &CandidateRequest, log: &Path) -> Result<BuildOutcome> {
-        let checkout = refresh_builder_checkout(&self.cas_root)?;
+        let checkout = refresh_builder_checkout(&self.cas_root, &self.git_program)?;
         let stdout_path = log.with_extension("json");
         let mut command = Command::new(&self.program);
         command
@@ -481,6 +482,7 @@ pub(crate) fn spawn_runner(
         admit: crate::factory_worker_check::admit_daemon_build,
         build_elapsed: |started| started.elapsed(),
         heartbeat_interval: HEARTBEAT_INTERVAL,
+        git_program: PathBuf::from("git"),
     };
     std::thread::Builder::new()
         .name("cas-candidate-queue".to_string())

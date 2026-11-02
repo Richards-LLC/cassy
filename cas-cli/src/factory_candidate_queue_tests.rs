@@ -141,6 +141,7 @@ impl Fixture {
             admit: |root| open_lock(&root.join("test-slot")).map_err(|error| error.to_string()),
             build_elapsed: |started| started.elapsed(),
             heartbeat_interval: HEARTBEAT_INTERVAL,
+            git_program: PathBuf::from("git"),
         }
     }
 
@@ -384,8 +385,8 @@ os.execv({git:?}, [{git:?}] + sys.argv[1:])
 "#, heartbeat=queue_dir(&fixture.cas_root).join(RUNNER_HEARTBEAT).to_str().unwrap(),
         missed=fixture.temp.path().join("missed-heartbeat").to_str().unwrap(), git=real_git.trim())).unwrap();
     std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    fixture._env.set("PATH", format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()));
     let mut runner = fixture.runner(BUILT);
+    runner.git_program = wrapper;
     runner.heartbeat_interval = Duration::ZERO;
     runner.run_next().unwrap();
     assert!(!fixture.temp.path().join("missed-heartbeat").exists(), "fetch received no heartbeat");

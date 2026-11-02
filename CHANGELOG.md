@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Hosted prechecks and merge retries
+
+- **Bounded retries report the actual outcome** — Was: missing CI evidence could wait forever and a landed merge with a held close could report stopped. → Now: terminal CI states and two-hour waits send one notice; a landed merge keeps its close gate as a follow-up.
+- **Isolated, recoverable hosted prechecks** — Was: checkout Python modules could run with inherited credentials, dispatch discovery could lose a run, failures omitted JSON and temporary refs accumulated. → Now: Python runs isolated with its exit status preserved, uncertain dispatches recover without another dispatch, errors produce JSON and completed precheck refs are removed only at the expected SHA.
+
 ### Added — Hosted queue precheck
 
 - **One command validates a commit on hosted CI** — Was: Queue prechecks needed local build and browser setup. → Now: `cas release precheck <sha>` pushes an exact-SHA ref, dispatches the queue job set and records its hosted run; `--status` reports results and elapsed time.

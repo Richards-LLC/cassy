@@ -3437,3 +3437,15 @@ fn release_precheck_isolates_checkout_python_modules() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(report["error"].as_str().is_some(), "{report}");
 }
+
+#[test]
+fn release_precheck_preserves_child_exit_status() {
+    let root = TempDir::new().unwrap();
+    let python = root.path().join("python3");
+    cas::test_paths::warm_stub(&python, "#!/bin/sh\nexit 7\n");
+    cas_cmd(root.path()).current_dir(root.path())
+        .env("PATH", root.path())
+        .args(["release", "precheck", "missing-sha"])
+        .assert().code(7)
+        .stderr(predicate::str::is_empty());
+}

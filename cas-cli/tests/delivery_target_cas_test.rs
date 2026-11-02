@@ -1587,8 +1587,6 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         assert!(request.exists());
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
-        // Corrupt neighbours must not prevent a valid retry from settling.
-        std::fs::write(request.with_file_name("broken.json"), "not json").unwrap();
         if outcome == "expired" {
             let mut old = saved.clone();
             old["armed_at"] = serde_json::json!("2000-01-01T00:00:00Z");

@@ -1011,7 +1011,7 @@ mod supervisor_handoff_tests {
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "delivery"]);
         let anchor = git(&["rev-parse", "HEAD"]);
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff-project'\n[qa]\nmode='batch'\n").unwrap();
-        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-foreign", "cas-unmerged"] {
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-foreign", "cas-unmerged", "cas-override", "cas-dedicated", "cas-live-review"] {
             let mut task = Task::new(id.into(), "Merged delivery".into());
             task.origin_project = Some(if id == "cas-foreign" { "another-project" } else { "handoff-project" }.into());
             task.status = TaskStatus::AwaitingMerge;
@@ -1025,8 +1025,26 @@ mod supervisor_handoff_tests {
                 git(&["branch", "unmerged-target", &base]);
                 task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "unmerged-target".into() });
             }
+            if id == "cas-override" {
+                task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+            }
+            if id == "cas-dedicated" {
+                task.labels.push("force-verifier".into());
+            }
             tasks.add(&task).unwrap();
+            if id == "cas-live-review" {
+                cas_store::create_verification_dispatch(&root, id, "reviewer", "reviewer", chrono::Utc::now() + chrono::Duration::hours(1)).unwrap();
+            }
         }
+        std::fs::write(temp.path().join("src/dropped.rs"), "lost delivery\n").unwrap();
+        git(&["add", "src/dropped.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "cas-dropped: deliver"]);
+        let mut dropped = tasks.get("cas-recover-one").unwrap();
+        dropped.id = "cas-dropped".into();
+        dropped.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+        tasks.add(&dropped).unwrap();
+        git(&["rm", "-q", "src/dropped.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "remove delivered content"]);
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
         let ask = queue.enqueue_with_session("ending", "operator", "Previously delivered open ask: select branch", "old-session").unwrap();
@@ -1119,6 +1137,9 @@ mod supervisor_handoff_tests {
         }
         assert!(!context.contains("task action=close id=cas-foreign"), "foreign projects stay outside recovery: {context}");
         assert!(!context.contains("task action=close id=cas-unmerged"), "unmerged work stays outside recovery: {context}");
+        for id in ["cas-override", "cas-dedicated", "cas-live-review", "cas-dropped"] {
+            assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
+        }
         assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
         assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();

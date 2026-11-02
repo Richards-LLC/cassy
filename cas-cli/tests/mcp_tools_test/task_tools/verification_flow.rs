@@ -1112,7 +1112,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     )
     .unwrap();
     let mut deliveries = vec![(first, "src/one.rs")];
-    for path in ["src/two.rs", ".github/workflows/guard.yml"] {
+    for path in ["src/two.rs", "src/live.rs", "src/rejected.rs", ".github/workflows/guard.yml"] {
         let created = worker
             .cas_task_create(Parameters(simple_task_req(path)))
             .await
@@ -1158,13 +1158,18 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
 
     // cas-d8b2 / cas-5249: old dispatches and deferred batch evidence must
     // not strand merged Tier 1 work after a later, exact release verdict.
-    for (index, (id, _)) in deliveries.iter().take(2).enumerate() {
+    for (index, (id, _)) in deliveries.iter().take(4).enumerate() {
         cas_store::defer_qa_batch_evidence(&cas_dir, id, &tips[index]).unwrap();
+        if index == 3 {
+            let mut rejected = Verification::new("ver-rejected".into(), id.clone());
+            rejected.status = VerificationStatus::Rejected;
+            add_exact_supervisor_fixture_verdict(&cas_dir, rejected, None);
+        }
         cas_store::create_verification_dispatch(
             &cas_dir, id, "ended-supervisor", "ended-supervisor",
-            chrono::Utc::now() - chrono::Duration::minutes(1),
+            chrono::Utc::now() + chrono::Duration::minutes(if index == 2 { 10 } else { -1 }),
         ).unwrap();
-        if index == 0 {
+        if index == 0 || index == 3 {
             cas_store::timeout_verification_dispatch(&cas_dir, id, chrono::Utc::now()).unwrap();
         }
     }
@@ -1195,11 +1200,13 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
     assert!(recorded.contains("Release verdict"), "{recorded}");
     assert!(recorded.contains("Closed 2: "), "{recorded}");
-    assert!(recorded.contains(&format!("Keeps its own review: {}", named[2])), "{recorded}");
+    assert!(recorded.contains(&format!("Keeps its own review: {}", named[4])), "{recorded}");
+    assert!(recorded.contains("Still held (2):"), "{recorded}");
 
     for (index, (id, path)) in deliveries.iter().enumerate() {
         if path.starts_with("src/") {
-            assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed, "{recorded}");
+            let expected = if index < 2 { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, expected, "{recorded}");
             // The superseded dispatch remains immutable audit history.
             assert!(dispatched(id), "{recorded}");
             continue;
@@ -1224,6 +1231,18 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
         assert!(dispatched(id), "{probed}");
         assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
     }
+
+    // A fresh cycle started after this release receipt keeps its authority,
+    // even if that new cycle subsequently expires.
+    let current = &deliveries[2].0;
+    cas_store::timeout_verification_dispatch(&cas_dir, current, chrono::Utc::now() + chrono::Duration::hours(1)).unwrap();
+    cas_store::create_verification_dispatch_bound(
+        &cas_dir, current, "new-supervisor", "new-supervisor",
+        &cas::types::VerificationProofBoundary::task(),
+        chrono::Utc::now() - chrono::Duration::minutes(1), true,
+    ).unwrap();
+    let held = close(current, &tips[2]).await;
+    assert!(held.contains("VERIFICATION TIMED OUT"), "a later cycle cannot reuse the old release verdict: {held}");
 }
 
 /// cas-5200 negative: a receipt that is NOT on the target keeps today's

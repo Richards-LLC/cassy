@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Delivery recovery
+
+- **Carry merged work across supervisor sessions** — Startup lists every project delivery eligible for receipt recovery with a close action. A later exact release verdict clears expired Tier 1 dispatches and deferred batch debt, while live or newer reviews, rejected verdicts, Tier 2 probes and lost-content guards still hold the delivery.
+
 ### Added — Factory communication
 
 - **Count director wakes** — Supervisor director prompts now use the durable message queue with a director source label. They wait behind busy panes and protected drafts, and withdraw stale worker or delivery alerts before waking the supervisor.

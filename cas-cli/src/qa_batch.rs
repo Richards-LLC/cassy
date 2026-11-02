@@ -391,6 +391,8 @@ pub(crate) fn release_supersedes_stale_dispatch(
         || (dispatch.state != TimedOut && dispatch.deadline_at > chrono::Utc::now())
         || dispatch.receipt_id.is_some()
         || dispatch.delivery_transaction_id.is_some()
+        || task.deliverables.factory_branch_start.is_none()
+        || task.deliverables.factory_branch_anchor.is_none()
     {
         return Ok(None);
     }

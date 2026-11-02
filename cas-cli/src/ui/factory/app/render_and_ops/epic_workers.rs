@@ -3204,9 +3204,16 @@ impl FactoryApp {
                 "factory_worker_spawn_result",
                 vec![("success", "false"), ("reason", "mux_add_worker_failed")],
             );
+            // No process took this assignment: a later launch of this name
+            // must not inherit the prompt, and the task must not stay held.
+            self.mux.set_worker_startup_prompt(&worker_name, None);
+            if let (false, Some(id)) = (queued_spawn, task_id.as_deref()) {
+                release_preassign_if_bound(self.cas_dir(), id, &worker_name);
+            }
             return Err(e.into());
         }
         self.track_worker_process_group(&worker_name);
+        self.release_predecessor_assignment_keys(&worker_name);
 
         // STEP 3 (cas-5232): Post-spawn branch assertion — now the SECOND belt.
         // The cas-30c6 gate above already refused a misbound spawn before the
@@ -3275,6 +3282,13 @@ impl FactoryApp {
 
         tracing::info!("spawn_worker completed: {}", worker_name);
         Ok(worker_name)
+    }
+
+    fn release_predecessor_assignment_keys(&self, worker: &str) {
+        let Some(session) = self.factory_session() else { return };
+        if let Err(error) = crate::task_assignment::release_received_assignment_keys(self.cas_dir(), session, worker) {
+            tracing::warn!(%error, worker, "a same-name predecessor's assignment row may swallow this worker's assignment");
+        }
     }
 
     /// Shutdown a worker by name
@@ -4027,6 +4041,7 @@ impl FactoryApp {
             return Err(e.into());
         }
         self.track_worker_process_group(name);
+        self.release_predecessor_assignment_keys(name);
 
         // Track the worker name
         self.worker_names.push(name.to_string());

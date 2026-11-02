@@ -172,6 +172,17 @@ pub(crate) fn assignment_key(session: &str, worker: &str, task: &str) -> String 
     format!("task-assignment:{session}:{worker}:{task}")
 }
 
+/// A launched process is a new recipient even under a reused name. Rows its
+/// predecessor received must not swallow this process's assignment, so the
+/// shared key is scoped to one launch. Call once per launch, after it starts.
+pub(crate) fn release_received_assignment_keys(
+    cas_dir: &Path, session: &str, worker: &str,
+) -> crate::Result<usize> {
+    Ok(crate::store::open_prompt_queue_store(cas_dir)?.release_received_dedupe_keys(
+        worker, session, &format!("task-assignment:{session}:{worker}:"),
+    )?)
+}
+
 pub(crate) fn enqueue_spawn_message(
     cas_dir: &Path, session: &str, worker: &str, task: &str, message: &str,
 ) -> crate::Result<i64> {

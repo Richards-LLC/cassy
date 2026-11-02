@@ -1400,9 +1400,12 @@ impl PtyConfig {
                     self.args[index + 1] = prompt.to_owned();
                 }
             }
-            // Both CLIs accept an initial positional prompt. Claude's canonical
-            // worker contract is included by the CAS message composer.
-            "claude" | "grok" => self.args.push(prompt.to_owned()),
+            // Both CLIs accept an initial positional prompt. End the options
+            // first: Claude's --mcp-config and --disallowedTools are variadic
+            // and would consume it, and both CLIs would parse a leading dash
+            // as a flag. Claude's canonical worker contract is included by the
+            // CAS message composer.
+            "claude" | "grok" => self.args.extend(["--".to_owned(), prompt.to_owned()]),
             _ => unreachable!("unsupported worker harness"),
         }
     }

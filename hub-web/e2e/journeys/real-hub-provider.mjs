@@ -17,13 +17,18 @@ def hook(event):
  payload=json.dumps(dict(session_id=sid,cwd=os.getcwd(),hook_event_name=event,transcript_path=transcript))
  subprocess.run([${JSON.stringify(cli)},'hook',event],input=payload,text=True,stdout=subprocess.DEVNULL,check=True)
 hook('SessionStart')
+def composer():
+ # Match Claude's native composer, which the daemon checks before accepting
+ # Commander input. A bare prompt is sufficient only for startup injection.
+ print('────────────\\n❯ \\n────────────',flush=True)
 def reply(message):
  with open(transcript,'a') as f: f.write(json.dumps(dict(type='system',subtype='turn_duration',sessionId=sid,timestamp=datetime.now(timezone.utc).isoformat()))+'\\n')
  payload=json.dumps(dict(schema_version=2,reply_to=None,message=message,summary=message,device_id='*',kind='status',attachments=[]))
  subprocess.run([${JSON.stringify(cli)},'--json','factory','message','--session',os.environ['CAS_FACTORY_SESSION'],'--project-dir',os.getcwd(),'--target','operator','--from','supervisor','--no-wrap','--message',payload],stdout=subprocess.DEVNULL,check=True)
  hook('Stop')
- print('❯ ',flush=True)
-print('Claude Code disposable test supervisor\\n❯ ',flush=True)
+ composer()
+print('Claude Code disposable test supervisor',flush=True)
+composer()
 def prompts():
  pending=b'';message=bytearray();pasting=False
  markers=(b'\\x1b[200~',b'\\x1b[201~')

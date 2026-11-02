@@ -227,6 +227,8 @@ pub(crate) struct Runner {
     pub program: PathBuf,
     pub shutdown: Arc<AtomicBool>,
     pub admit: fn(&Path) -> BuilderAdmission,
+    build_elapsed: fn(Instant) -> Duration,
+    heartbeat_interval: Duration,
 }
 
 /// The fields of `cas qa candidate build --json`.
@@ -477,6 +479,8 @@ pub(crate) fn spawn_runner(
         program,
         shutdown,
         admit: crate::factory_worker_check::admit_daemon_build,
+        build_elapsed: |started| started.elapsed(),
+        heartbeat_interval: HEARTBEAT_INTERVAL,
     };
     std::thread::Builder::new()
         .name("cas-candidate-queue".to_string())

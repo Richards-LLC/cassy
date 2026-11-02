@@ -139,6 +139,8 @@ impl Fixture {
             program,
             shutdown: Arc::new(AtomicBool::new(false)),
             admit: |root| open_lock(&root.join("test-slot")).map_err(|error| error.to_string()),
+            build_elapsed: |started| started.elapsed(),
+            heartbeat_interval: HEARTBEAT_INTERVAL,
         }
     }
 
@@ -165,25 +167,34 @@ const BUILT: &str = r#"echo "{\"candidate_dir\":\"/art/$7\",\"receipt_file\":\"/
 
 #[tokio::test]
 async fn worker_request_builds_in_the_daemon_and_tells_only_the_worker() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    fixture._env.set("CAS_AGENT_ROLE", "supervisor");
+    fixture._env.set("NEON_API_KEY", "fixture-secret");
+    let store = fixture.temp.path().join("operator-store");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::write(store.join("auth.json"), "fixture credential").unwrap();
+    fixture._env.set("VERCEL_CONFIG_DIR", &store);
     let reply = fixture.request(OWN_TASK, &fixture.head).await;
     assert!(reply.contains("Queued"), "{reply}");
     assert!(fixture.calls().is_empty(), "the request path never builds");
 
-    let runner = fixture.runner(BUILT);
+    let runner = fixture.runner(&format!(
+        "test -z \"$NEON_API_KEY\" || exit 41\ntest ! -s '{}/auth.json' || exit 42\n{BUILT}",
+        store.display(),
+    ));
     assert!(runner.run_next().unwrap());
 
     let calls = fixture.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     let builder = fixture.cas_root.join(BUILDER_CHECKOUT);
     let expected = format!(
-        "qa candidate build --task {OWN_TASK} --rev {} --json | {} | {} | supervisor | {}",
+        "qa candidate build --task {OWN_TASK} --rev {} --json | {} | {} |  | {}",
         fixture.head,
         builder.canonicalize().unwrap().display(),
         fixture.source_tip,
         fixture.cas_root.display(),
     );
-    assert_eq!(calls[0], expected, "fixed builder, supervisor authority");
+    assert_eq!(calls[0], expected, "fixed builder, no supervisor authority");
 
     let messages = fixture.messages();
     assert_eq!(messages.len(), 1, "no supervisor turn: {messages:?}");
@@ -268,6 +279,16 @@ async fn busy_machine_or_refused_admission_keeps_the_request_queued() {
     drop(holder);
     assert!(fixture.messages().is_empty());
 
+    // A new MCP request arrives after the runner's read, during admission.
+    runner.admit = |root| {
+        let mut newer = read_request(&queued_path(root, OWN_TASK)).unwrap();
+        newer.revision = git(&root.join("worktrees/robin"), &["rev-parse", "HEAD^"]);
+        newer.requested_at += chrono::Duration::seconds(1);
+        enqueue(root, &newer).unwrap();
+        Err("disk below the watermark".to_owned())
+    };
+    assert!(!runner.run_next().unwrap());
+    assert_eq!(read_request(&queued_path(&fixture.cas_root, OWN_TASK)).unwrap().revision, fixture.parent);
     runner.admit = |_| Err("disk below the watermark".to_owned());
     assert!(!runner.run_next().unwrap());
     assert!(!runner.run_next().unwrap());
@@ -279,6 +300,96 @@ async fn busy_machine_or_refused_admission_keeps_the_request_queued() {
     let runner = fixture.runner(BUILT);
     assert!(runner.run_next().unwrap(), "starts on its own once admitted");
     assert_eq!(fixture.calls().len(), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn hung_build_kills_detached_children_releases_locks_and_reports_timeout() {
+    let mut fixture = Fixture::new();
+    let pids = fixture.temp.path().join("hung-pids");
+    fixture._env.set("CANDIDATE_TEST_PIDS", &pids);
+    fixture.request(OWN_TASK, &fixture.head).await;
+    let mut runner = fixture.runner(r#"exec python3 - <<'PY'
+import fcntl, os, signal, subprocess
+from pathlib import Path
+lock = open(Path(os.environ['HOME'])/'.cas/candidate-build.lock', 'w')
+fcntl.flock(lock, fcntl.LOCK_EX)
+child = subprocess.Popen(['python3','-c','import signal; signal.pause()'], start_new_session=True)
+# Host PIDs remain observable via /proc even inside the build PID namespace.
+def host_pid(pid):
+    return int(Path(f'/proc/{pid}/status').read_text().split('NSpid:')[1].split()[0])
+Path(os.environ['CANDIDATE_TEST_PIDS']).write_text(f'{host_pid(os.getpid())} {host_pid(child.pid)}')
+signal.pause()
+PY"#);
+    // Advance the deadline only once the complete hung process tree exists.
+    runner.build_elapsed = |_| {
+        if Path::new(&std::env::var_os("CANDIDATE_TEST_PIDS").unwrap()).exists() {
+            Duration::MAX
+        } else { Duration::ZERO }
+    };
+    // Bound a broken runner as well: the red control must not leave a build behind.
+    let (done, cancelled) = std::sync::mpsc::channel();
+    let shutdown = runner.shutdown.clone();
+    let watchdog = std::thread::spawn(move || {
+        if cancelled.recv_timeout(Duration::from_secs(5)).is_err() {
+            shutdown.store(true, Ordering::Relaxed);
+        }
+    });
+    runner.run_next().unwrap();
+    let _ = done.send(());
+    watchdog.join().unwrap();
+    let mut survivors = Vec::new();
+    for pid in std::fs::read_to_string(&pids).unwrap().split_whitespace() {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        if !status.is_empty() && !status.lines().any(|line| line.starts_with("State:") && line.contains('Z')) {
+            survivors.push(pid.to_owned());
+            unsafe { libc::kill(pid.parse().unwrap(), libc::SIGKILL); }
+        }
+    }
+    assert!(survivors.is_empty(), "surviving build PIDs: {survivors:?}");
+    assert!(machine_lock_is_free().unwrap());
+    let slot = open_lock(&fixture.cas_root.join("test-slot")).unwrap();
+    assert!(slot.try_lock_exclusive().is_ok());
+    assert!(!building_path(&fixture.cas_root, OWN_TASK).exists());
+    let messages = fixture.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, WORKER);
+    assert!(messages[0].1.contains("timed out"), "{messages:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn runner_heartbeats_while_fetch_is_waiting() {
+    let mut fixture = Fixture::new();
+    fixture.request(OWN_TASK, &fixture.head).await;
+    let tools = fixture.temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let wrapper = tools.join("git");
+    std::fs::write(&wrapper, format!(r#"#!/usr/bin/env python3
+import ctypes, os, select, sys
+from pathlib import Path
+if 'fetch' in sys.argv:
+    heartbeat = Path({heartbeat:?})
+    libc = ctypes.CDLL(None)
+    fd = libc.inotify_init1(os.O_CLOEXEC)
+    assert fd >= 0
+    assert libc.inotify_add_watch(fd, os.fsencode(heartbeat), 2) >= 0
+    os.utime(heartbeat, (1, 1))
+    if not select.select([fd], [], [], 5)[0]:
+        Path({missed:?}).touch()
+        sys.exit(1)
+    os.close(fd)
+os.execv({git:?}, [{git:?}] + sys.argv[1:])
+"#, heartbeat=queue_dir(&fixture.cas_root).join(RUNNER_HEARTBEAT).to_str().unwrap(),
+        missed=fixture.temp.path().join("missed-heartbeat").to_str().unwrap(), git=real_git.trim())).unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fixture._env.set("PATH", format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()));
+    let mut runner = fixture.runner(BUILT);
+    runner.heartbeat_interval = Duration::ZERO;
+    runner.run_next().unwrap();
+    assert!(!fixture.temp.path().join("missed-heartbeat").exists(), "fetch received no heartbeat");
+    assert!(runner_is_live(&fixture.cas_root));
 }
 
 #[tokio::test]

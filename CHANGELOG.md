@@ -41,6 +41,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Session dots follow three states** — Was: a live idle session showed an open green ring and a stopped one could read as alive. → Now: Green means the session is working, muted green means it is live and idle, and gray means it is disconnected or ended. A live session never shows a gray dot.
 - **Dismissed sessions stay reachable** — Was: a dismissed session in a project whose only session had ended could not be reached from the list. → Now: Search finds a dismissed ended session, and a "Show dismissed sessions" action at the end of the list reveals them with Restore, including a project whose only session has ended. Restore applies on every paired device.
+- **Restore holds on the browser that dismissed** — Was: after a restore on another device, the browser that dismissed the session kept hiding it and dismissed it again for every device on its next catalog read. → Now: A browser keeps its local dismissal only until the hub confirms it, so a restore on any paired device stays restored and the row returns everywhere.
 
 ### Changed — One verifier per release
 

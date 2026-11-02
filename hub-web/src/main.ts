@@ -2028,7 +2028,6 @@ function sessionOnlyDrop(machineId: string, session: string): boolean {
   return attachStates.get(sessionKey(machineId, session))?.sessionOnly === true && connectionStates.get(machineId)?.phase === "live";
 }
 
-/** A conversation as the operator knows it: its project, else its session name. */
 function endedSessionTarget(row: ConversationRow): { connection: HubConnectionSupervisor; startedAt: string } {
   const startedAt = sessions.get(row.machineId)?.find((item) => item.name === row.session)?.started_at;
   const connection = connections.get(row.machineId);
@@ -2036,6 +2035,7 @@ function endedSessionTarget(row: ConversationRow): { connection: HubConnectionSu
   return { connection, startedAt };
 }
 
+/** A conversation as the operator knows it: its project, else its session name. */
 function conversationLabel(machineId: string, session: string): string {
   return projectTitle(sessions.get(machineId)?.find((item) => item.name === session)?.project_dir) || session;
 }

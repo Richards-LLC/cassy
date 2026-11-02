@@ -806,7 +806,67 @@ async fn cas_bf20_verified_commander_send_wakes_an_idle_supervisor() {
     };
     let supervisor = daemon.app.supervisor_name().to_string();
     daemon.enqueue_attributed_message(&supervisor, body, None, false, None, None, &attribution).unwrap();
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let id = queue.peek_all(10).unwrap().into_iter().find(|row| row.prompt == body).unwrap().id;
+    // Replay the real startup screens, including a chooser with a misleading
+    // ❯. Output plus the elapsed grace must never count as accepting text.
+    for setup in [
+        "Welcome to Claude Code\r\nSecurity notes:\r\nPress Enter to continue…",
+        "────────────────────\r\nWARNING: Bypass Permissions mode\r\n❯ No, exit\r\n  Yes, I accept\r\nEnter to confirm · Esc to cancel",
+        "Choose the text style\r\n❯ Dark mode\r\n  Light mode",
+        "Sign in to Claude\r\nBrowser didn't open? Use the URL above",
+        "Do you trust the files in this folder?\r\n❯ Yes, I trust this folder",
+        "Connecting…",
+    ] {
+        daemon.app.mux.get_mut(&supervisor).unwrap().feed(format!("\x1b[2J\x1b[H{setup}").as_bytes()).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        let row = queue.queued_prompt(id).unwrap().unwrap();
+        assert!(row.processed_at.is_none(), "startup must retain original words: {setup}");
+        assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_none(),
+            "setup cannot acknowledge delivery: {setup}");
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(),
+            "setup must receive neither words nor a submit");
+        assert!(teams_messages(&daemon).is_empty(), "no duplicate inbox copy while held");
+    }
+    // A working turn keeps its native composer: human input must still enter
+    // it even while the harness is printing/using tools.
+    daemon.app.mux.get_mut(&supervisor).unwrap().feed(
+        "\x1b[2J\x1b[H✻ Working… (esc to interrupt)\r\n────────────────────\r\n❯ \r\n────────────────────".as_bytes()
+    ).unwrap();
+    daemon.pane_silent_since.insert(supervisor, Instant::now());
     typed_once(&root, &mut daemon, body).await;
+    for _ in 0..3 { daemon.process_prompt_queue().await.unwrap(); }
+    settle_injected_writes(&mut daemon).await;
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap().matches(body).count(), 1);
+}
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_claude_commander_send_waits_through_dialogs() {
+    if !fixture_child("non_claude_commander_send_waits_through_dialogs") { return; }
+    for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Grok] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture_for(cli).await;
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let body = "Keep these original words";
+        let id = enqueue(&daemon, "operator", body,
+            cas_store::QueueOrigin::PairedDevice { device_id: "paired".into() });
+        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        for screen in [
+            "Do you trust the contents of this directory?\r\nEnter to confirm · Esc to cancel",
+            "Would you like to run the following command?\r\n› 1. Yes\r\n  2. No\r\nPress enter to confirm or esc to cancel",
+        ] {
+            daemon.app.mux.get_mut(&supervisor).unwrap().feed(format!("\x1b[2J\x1b[H{screen}").as_bytes()).unwrap();
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "{cli:?}: {screen}");
+            assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "dialog must receive no body or submit");
+        }
+        daemon.app.mux.get_mut(&supervisor).unwrap().feed(b"\x1b[2J\x1b[HThe instructions say enter to confirm or esc to cancel.\r\nDo you trust this example?\r\n\r\n> ").unwrap();
+        typed_once(&root, &mut daemon, body).await;
+        assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap().matches(body).count(), 1);
+    }
 }
 
 

@@ -315,12 +315,12 @@ fn measured_feedback(
     event
 }
 
-/// Measured context-injection evidence, summed by ledger feature.
-fn feature_totals(cas_root: &Path, session_id: Option<&str>) -> Vec<(&'static str, (u64, u64, u64))> {
+/// Measured context-injection evidence for one session, summed by ledger feature.
+fn feature_totals(cas_root: &Path, session_id: &str) -> Vec<(&'static str, (u64, u64, u64))> {
     let Ok(store) = cas_store::SqliteRetrievalStore::open(cas_root) else {
         return Vec::new();
     };
-    let families = match store.evidence_funnel_by_family(session_id) {
+    let families = match store.evidence_funnel_by_family(Some(session_id)) {
         Ok(families) => families,
         Err(error) => {
             tracing::warn!(%error, "friction ledger: retrieval evidence unavailable");
@@ -340,7 +340,7 @@ fn feature_totals(cas_root: &Path, session_id: Option<&str>) -> Vec<(&'static st
 
 /// A session ended: report what its injected context measured.
 pub(crate) fn session_ended(cas_root: &Path, session_id: &str, actor: Option<&str>) {
-    for (feature, (injected, opened, used)) in feature_totals(cas_root, Some(session_id)) {
+    for (feature, (injected, opened, used)) in feature_totals(cas_root, session_id) {
         emit(
             cas_root,
             &measured_feedback(
@@ -395,6 +395,8 @@ pub(crate) fn handoff_saved(
 
 /// History already on disk, as events: nobody types seed data. Natural keys match
 /// nothing a live emitter writes twice, and a rerun inserts nothing new.
+/// Lifetime retrieval totals have no recoverable time scope; only session end
+/// emits measured feature feedback, never a current-dated backfill snapshot.
 pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<usize> {
     use crate::store::{open_task_store, open_verification_store};
     let mut inserted = 0usize;
@@ -462,21 +464,6 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
         event.task_id = Some(verification.task_id.clone());
         event.title = title;
         inserted += usize::from(emit(cas_root, &event));
-    }
-    let today = Utc::now().format("%Y-%m-%d");
-    for (feature, (injected, opened, used)) in feature_totals(cas_root, None) {
-        inserted += usize::from(emit(
-            cas_root,
-            &measured_feedback(
-                format!("backfill|measured|{today}|{feature}"),
-                feature,
-                injected,
-                opened,
-                used,
-                Utc::now(),
-                None,
-            ),
-        ));
     }
     Ok(inserted)
 }
@@ -562,6 +549,7 @@ mod tests {
 
     #[test]
     fn backfill_does_not_count_dispatch_markers_as_failed_checks() {
+        use cas_store::{RetrievalHitIdentity, RetrievalStore};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = env.home().join("ledger-project");
         std::fs::create_dir_all(&project).unwrap();
@@ -580,8 +568,20 @@ mod tests {
         error.summary = "Verifier tool failed to open the evidence".into();
         crate::store::open_verification_store(&root).unwrap().add(&error).unwrap();
 
+        // Lifetime retrieval evidence is real, but its time scope cannot be
+        // recovered from the totals. Backfill must not date it as a new sample.
+        let retrieval = cas_store::SqliteRetrievalStore::open(&root).unwrap();
+        retrieval.record_query(
+            "prior-query", "query", "ambient_transition", "current-default-v1",
+            Some("prior-session"),
+            &[RetrievalHitIdentity { result_id: "mem-1".into(), document_type: "entry".into(), rank: 0 }],
+        ).unwrap();
+
         backfill(&root, Utc::now() - Duration::minutes(1)).unwrap();
+        assert_eq!(backfill(&root, Utc::now() - Duration::days(2)).unwrap(), 0);
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        assert!(events.iter().all(|event| !matches!(event.payload, QualityPayload::FeatureFeedback { .. })),
+            "backfill invented a release-window measurement from lifetime evidence: {events:?}");
         let checks: Vec<_> = events.iter().filter_map(|event| match &event.payload {
             QualityPayload::CheckRun { check_id, outcome, .. } => Some((check_id.as_str(), *outcome)),
             _ => None,

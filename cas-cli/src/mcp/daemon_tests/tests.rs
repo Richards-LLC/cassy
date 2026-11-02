@@ -11,6 +11,265 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
+    use crate::hooks::{HookInput, handle_hook};
+    use crate::mcp::server::CasCore;
+    use std::process::{Command, Stdio};
+
+    struct Owner(std::process::Child);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // A disposable, independently live process owns the fixture. EOF ends it;
+    // no sleeps, host PIDs, real factory rows or timing assumptions are needed.
+    let owner = Owner(
+        Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut env = TestEnvGuard::temp_home();
+    let project = env.home().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &project);
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_FACTORY_SESSION", "factory-nested-review");
+    env.set("CAS_HOOK_HARNESS", "codex");
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    for role in [AgentRole::Supervisor, AgentRole::Worker] {
+        let id = format!("parent-{role}");
+        env.set("CAS_SESSION_ID", &id);
+        env.set("CAS_AGENT_NAME", "parent");
+        env.set("CAS_AGENT_ROLE", role.to_string());
+        let mut parent = Agent::new(id.clone(), "parent".into());
+        parent.role = role;
+        parent.factory_session = Some("factory-nested-review".into());
+        parent.pid = Some(owner.0.id());
+        stamp_pid_fingerprint(&mut parent, owner.0.id());
+        agents.register(&parent).unwrap();
+
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        assert!(
+            core.register_agent(id.clone(), "parent".into(), None)
+                .is_err(),
+            "an inherited CAS_SESSION_ID must not bind another live {role}'s MCP identity"
+        );
+        assert!(core.get_registered_agent_id_read_only().is_err(),
+            "read-only guidance must not cache another live {role}'s identity");
+        assert!(core.get_agent_id().is_err(),
+            "a refused read-only lookup must not authorize later tools");
+        let nested_pid = std::process::id();
+        for event in [
+            DaemonEvent::SessionStart {
+                session_id: id.clone(),
+                agent_name: Some("parent".into()),
+                agent_role: Some(role.to_string()),
+                cc_pid: nested_pid,
+                clone_path: None,
+            },
+            DaemonEvent::SessionEnd {
+                session_id: id.clone(),
+                cc_pid: Some(nested_pid),
+            },
+        ] {
+            assert!(matches!(
+                daemon.handle_socket_event(event).await,
+                DaemonResponse::Error { .. }
+            ));
+        }
+        assert!(
+            matches!(
+                daemon
+                    .handle_socket_event(DaemonEvent::GetSession { cc_pid: nested_pid })
+                    .await,
+                DaemonResponse::NoSession
+            ),
+            "rejected registration must not publish the parent's identity in the socket map"
+        );
+        for event in ["SessionStart", "Stop", "SessionEnd"] {
+            handle_hook(
+                event,
+                HookInput {
+                    session_id: "nested-codex-thread".into(),
+                    cwd: project.to_string_lossy().into_owned(),
+                    hook_event_name: event.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let kept = agents
+                .get(&id)
+                .expect("nested lifecycle cannot retire its parent");
+            assert_eq!(kept.pid, parent.pid, "{role}: {event}");
+            assert_eq!(kept.status, parent.status, "{role}: {event}");
+            assert_eq!(kept.factory_session, parent.factory_session);
+        }
+        // Identity isolation must preserve tool-policy enforcement even when
+        // the caller belongs to a different process (verifier cas-b815).
+        for (tool, tool_input) in [
+            (
+                "mcp__claude_ai_Slack__slack_send_message",
+                serde_json::json!({
+                    "channel": "synthetic-proof-channel", "text": "must not be sent"
+                }),
+            ),
+            (
+                "Write",
+                serde_json::json!({
+                    "file_path": env.home().join("outside-worktree.txt"), "content": "denied"
+                }),
+            ),
+            ("Bash", serde_json::json!({"command": "cargo build"})),
+        ] {
+            if tool == "Bash" && role != AgentRole::Worker {
+                continue;
+            }
+            let output = handle_hook(
+                "PreToolUse",
+                HookInput {
+                    session_id: "nested-codex-thread".into(),
+                    cwd: project.to_string_lossy().into_owned(),
+                    hook_event_name: "PreToolUse".into(),
+                    tool_name: Some(tool.into()),
+                    tool_input: Some(tool_input),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let wire = serde_json::to_value(output).unwrap();
+            assert_eq!(
+                wire.pointer("/hookSpecificOutput/permissionDecision")
+                    .and_then(serde_json::Value::as_str),
+                Some("deny"),
+                "foreign-process {role} must retain {tool} policy denial: {wire}"
+            );
+            assert_eq!(agents.get(&id).unwrap().pid, parent.pid);
+        }
+        agents.heartbeat(&id).unwrap();
+    }
+    assert_eq!(
+        agents.list(None).unwrap().len(),
+        2,
+        "no nested ghost identities"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_factory_owner_accepts_its_actual_unstamped_parent_cas_b815() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "legacy-parent-factory");
+    let project = env.home().join("project");
+    let root = init_cas_dir(&project).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let parent_pid = std::os::unix::process::parent_id();
+    for role in [AgentRole::Supervisor, AgentRole::Worker] {
+        let id = format!("legacy-{role}");
+        let mut owner = Agent::new(id.clone(), id.clone());
+        owner.role = role;
+        owner.factory_session = Some("legacy-parent-factory".into());
+        owner.pid = Some(std::process::id());
+        stamp_pid_fingerprint(&mut owner, std::process::id());
+        // OpenCode-style legacy rows have a real MCP parent but no parent
+        // fingerprint because its name was not recognised as a harness.
+        owner.ppid = Some(parent_pid);
+        owner.metadata.remove(PPID_STARTTIME_KEY);
+        agents.register(&owner).unwrap();
+        let (refreshed, _) = register_session_start_agent(
+            &root,
+            agents.as_ref(),
+            &id,
+            Some(&id),
+            Some(&role.to_string()),
+            parent_pid,
+            None,
+        )
+        .expect("the live fingerprinted MCP child proves its actual parent owns this identity");
+        assert_eq!(refreshed.id, id);
+        assert_eq!(agents.get(&id).unwrap().pid, Some(parent_pid));
+    }
+}
+
+#[test]
+fn factory_owner_from_old_hostname_can_reregister_cas_b815() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "renamed-host-factory");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let project = env.home().join("project");
+    let root = init_cas_dir(&project).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    for live in [true, false] {
+        let id = format!("renamed-host-owner-{live}");
+        let mut previous = Agent::new(id.clone(), id.clone());
+        previous.role = AgentRole::Supervisor;
+        previous.status = if live {
+            AgentStatus::Active
+        } else {
+            AgentStatus::Stale
+        };
+        previous.factory_session = Some("renamed-host-factory".into());
+        previous.machine_id = Some("older-hostname.invalid".into());
+        previous.pid = Some(if live {
+            std::process::id()
+        } else {
+            i32::MAX as u32
+        });
+        if live {
+            stamp_pid_fingerprint(&mut previous, std::process::id());
+        }
+        agents.register(&previous).unwrap();
+        if live {
+            assert!(
+                ensure_factory_process_owner(agents.as_ref(), &id, Some(i32::MAX as u32), None,)
+                    .is_err(),
+                "a foreign process still cannot claim the renamed live owner"
+            );
+        }
+        let (current, _) = register_session_start_agent(
+            &root,
+            agents.as_ref(),
+            &id,
+            Some(&id),
+            Some("supervisor"),
+            std::process::id(),
+            None,
+        )
+        .expect("the matching live owner or an exited predecessor can refresh its hostname");
+        assert_eq!(current.id, id);
+        assert_eq!(current.pid, Some(std::process::id()));
+        assert_eq!(
+            current.machine_id,
+            Some(Agent::get_or_generate_machine_id())
+        );
+
+        // A reconnecting MCP must authenticate the same owner before treating
+        // its old hostname as another machine, and refresh the persisted name.
+        let mut renamed_again = agents.get(&id).unwrap();
+        renamed_again.machine_id = previous.machine_id;
+        agents.update(&renamed_again).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        core.register_agent(id.clone(), id.clone(), None)
+            .expect("MCP reconnect under the live owner survives a hostname change");
+        assert_eq!(
+            agents.get(&id).unwrap().machine_id,
+            Some(Agent::get_or_generate_machine_id())
+        );
+    }
+}
+
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
 /// around queue writes and HTTP. A hub sweep already in flight must win;
 /// after it releases, the daemon must sync and keep competing holders out.
@@ -280,10 +539,22 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
 /// socket reports a different session id for the same Claude Code PID.
 #[test]
 fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
+    let _env = TestEnvGuard::temp_home();
     let temp = TempDir::new().expect("temp project");
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
     let cc_pid = std::process::id();
+    struct Bootstrap(std::process::Child);
+    impl Drop for Bootstrap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // Hold an owned child on stdin, so PID liveness cannot depend on the
+    // host assigning cc_pid + 1 to an unrelated short-lived process.
+    let bootstrap = Bootstrap(std::process::Command::new("sh")
+        .args(["-c", "read line"]).stdin(std::process::Stdio::piped()).spawn().unwrap());
 
     let mut original = Agent::new(
         "worker-established-session".to_string(),
@@ -294,8 +565,12 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     // Eager MCP bootstrap runs in a child process: it records its own PID
     // and the Claude Code process as `ppid`. The follow-up socket event
     // carries that Claude Code PID directly.
-    original.pid = Some(cc_pid.checked_add(1).expect("non-max test pid"));
+    original.pid = Some(bootstrap.0.id());
     original.ppid = Some(cc_pid);
+    // Real MCP bootstrap fingerprints its process. That evidence lets the
+    // ownership check validate this child's actual parent, even when the
+    // parent is a test binary rather than a named harness.
+    stamp_pid_fingerprint(&mut original, bootstrap.0.id());
     agent_store
         .register(&original)
         .expect("register original worker");

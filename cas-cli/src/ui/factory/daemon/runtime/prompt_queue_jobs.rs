@@ -936,6 +936,7 @@ pub(crate) struct QueueJobs {
     /// The generation of the mirror scan in flight; an older result is stale.
     mirror_generation: u64,
     mirror_state: Option<Box<super::MirrorScanState>>,
+    operator_receipt_watches: HashSet<i64>,
     config: ConfigCache,
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
     /// Rows with a settling stamp not yet landed, by row: the count of such
@@ -1027,6 +1028,7 @@ impl QueueJobs {
             mirror_in_flight: false,
             mirror_generation: 0,
             mirror_state: Some(Box::default()),
+            operator_receipt_watches: HashSet::new(),
             config: ConfigCache::default(),
             store: None,
             prunes_done: 0,
@@ -1397,6 +1399,10 @@ impl QueueJobs {
         });
     }
 
+    pub(crate) fn watch_operator_receipt(&mut self, id: i64) {
+        self.operator_receipt_watches.insert(id);
+    }
+
     /// Run the Commander mirror scan as a job unless one is running.
     pub(crate) fn submit_mirror_scan(
         &mut self,
@@ -1408,6 +1414,9 @@ impl QueueJobs {
         let Some(mut state) = self.mirror_state.take() else {
             return;
         };
+        // Keep the original watches until the current generation reports
+        // completion: a dropped job must not lose receipt subscriptions.
+        state.pending_operator_receipts.extend(self.operator_receipt_watches.iter().copied());
         let generation = self.generation();
         let spec = JobSpec {
             kind: "MirrorWrite",
@@ -1529,6 +1538,7 @@ impl QueueJobs {
                 QueueJobOutcome::Stamped(done) => {
                     self.stamp_landed(&done);
                     if let Some(message) = done.operator_message {
+                        self.operator_receipt_watches.remove(&message.notification_id);
                         self.operator_messages.push(message);
                     }
                     if let Some(error) = &done.error {
@@ -1610,6 +1620,9 @@ impl QueueJobs {
                     // back; a scan whose drop was already reported is stale.
                     if self.mirror_in_flight && result.generation == self.mirror_generation {
                         self.mirror_in_flight = false;
+                        for id in state.finished_operator_receipts.drain(..) {
+                            self.operator_receipt_watches.remove(&id);
+                        }
                         self.operator_messages.append(&mut state.operator_messages);
                         self.mirror_state = Some(state);
                     }

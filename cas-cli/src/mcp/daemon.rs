@@ -176,6 +176,65 @@ fn apply_agent_role(agent: &mut Agent, role: AgentRole) {
     }
 }
 
+/// Inherited factory environment identifies a pane, not a nested harness.
+/// Only that pane's registered process or its MCP child may refresh a live
+/// identity. A replacement MCP under the same fingerprinted harness is valid;
+/// a disposable `codex exec` review under a different parent is not.
+pub(crate) fn ensure_factory_process_owner(
+    store: &dyn crate::store::AgentStore,
+    id: &str,
+    incoming_pid: Option<u32>,
+    incoming_ppid: Option<u32>,
+) -> crate::store::Result<()> {
+    let prior = match store.get(id) {
+        Ok(prior) => prior,
+        Err(crate::store::StoreError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if prior.role == AgentRole::Standard || prior.status == AgentStatus::Shutdown {
+        return Ok(());
+    }
+    let liveness = evaluate_liveness(&prior, pid_alive, pid_matches_fingerprint);
+    let process_alive = matches!(&liveness, LivenessOutcome::Alive { .. });
+    let parent = prior.ppid.filter(|&pid| pid > 1).filter(|&pid| {
+        prior
+            .metadata
+            .get(PPID_STARTTIME_KEY)
+            .and_then(|value| value.parse().ok())
+            .is_some_and(|starttime| pid_matches_fingerprint(pid, starttime))
+            // Legacy/unknown harness names (including OpenCode) may have no
+            // parent stamp. The live fingerprinted MCP child can still prove
+            // its exact current parent, without trusting a bare/recycled PPID.
+            || (matches!(&liveness, LivenessOutcome::Alive { fingerprint_checked: true, .. })
+                && prior.pid.and_then(crate::agent_id::get_parent_of_pid) == Some(pid))
+    });
+    let owner_pid = prior.pid.filter(|_| process_alive);
+    if owner_pid.is_none() && parent.is_none() {
+        return Ok(()); // A dead predecessor can be replaced.
+    }
+    if [incoming_pid, incoming_ppid]
+        .into_iter()
+        .flatten()
+        .any(|pid| owner_pid == Some(pid) || parent == Some(pid))
+    {
+        return Ok(());
+    }
+    // A matching process above owns this identity even after a hostname
+    // change. Only a non-matching caller can be refused as another machine.
+    if prior
+        .machine_id
+        .as_deref()
+        .is_some_and(|machine| machine != Agent::get_or_generate_machine_id())
+    {
+        return Err(crate::store::StoreError::Other(format!(
+            "Factory identity {id} belongs to another machine"
+        )));
+    }
+    Err(crate::store::StoreError::Other(format!(
+        "Factory identity {id} belongs to another live harness; nested harnesses must use their own session identity"
+    )))
+}
+
 /// Register while preserving the store's general anti-forgery contract, then
 /// explicitly reconcile a role that came from the harness environment or a
 /// typed server-internal caller. `AgentStore::register` deliberately preserves
@@ -186,6 +245,7 @@ pub(crate) fn register_with_role_reconciliation(
     agent: &Agent,
     configured_role: Option<AgentRole>,
 ) -> crate::store::Result<Agent> {
+    ensure_factory_process_owner(store, &agent.id, agent.pid, agent.ppid)?;
     let mut agent = agent.clone();
     if let Ok(prior) = store.get(&agent.id)
         && prior.role == agent.role
@@ -1892,6 +1952,23 @@ impl EmbeddedDaemon {
 
     /// Handle events from hooks via Unix socket
     async fn handle_socket_event(&self, event: DaemonEvent) -> DaemonResponse {
+        let process_identity = match &event {
+            DaemonEvent::SessionStart {
+                session_id, cc_pid, ..
+            } => Some((session_id, *cc_pid)),
+            DaemonEvent::SessionEnd {
+                session_id, cc_pid: Some(pid),
+            } => Some((session_id, *pid)),
+            _ => None,
+        };
+        if let Some((id, pid)) = process_identity
+            && let Ok(store) = open_agent_store(&self.config.cas_root)
+            && let Err(error) = ensure_factory_process_owner(store.as_ref(), id, Some(pid), None)
+        {
+            return DaemonResponse::Error {
+                message: error.to_string(),
+            };
+        }
         match event {
             DaemonEvent::SessionStart {
                 session_id,
@@ -2079,9 +2156,11 @@ impl EmbeddedDaemon {
         // Only adopt as our own agent if the PID matches our Claude Code parent.
         // Other agents' daemons will discover their agent via PID-based adoption
         // in the heartbeat loop.
-        if is_our_agent {
+        if is_our_agent
+            && let Some(registered_id) = registered_id
+        {
             let mut guard = self.agent_id.write().await;
-            *guard = Some(registered_id.unwrap_or(session_id));
+            *guard = Some(registered_id);
         }
     }
 

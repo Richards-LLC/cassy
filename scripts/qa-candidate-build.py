@@ -201,6 +201,15 @@ def build(repo, revision, candidate_dir):
                             '--repo',checkout,'--artifacts',web_artifacts],stdout=sys.stderr,stderr=sys.stderr)
                 snapshot = json.loads((web_artifacts/'journey-build.json').read_text())
                 journey_dist.verify_build(checkout,snapshot,revision)
+                # The verified generated assets are the only intentional delta
+                # from HEAD. Mask just their tracked entries in this disposable
+                # worktree's index so build.rs keeps the source revision clean.
+                # All other tracked changes still produce -dirty and are refused;
+                # verify_web below independently checks the embedded asset bytes.
+                tracked_dist = subprocess.check_output(
+                    ['git', '-C', str(checkout), 'ls-files', '-z', '--', 'hub-web/dist'])
+                run(scope, ['git', '-C', checkout, 'update-index', '--assume-unchanged',
+                            '--', *os.fsdecode(tracked_dist).split('\0')[:-1]])
                 shutil.rmtree(checkout/'hub-web/dist',ignore_errors=True)
                 shutil.copytree(snapshot['dist_path'],checkout/'hub-web/dist')
                 zig = release_env.resolve_zig(checkout, link=True)

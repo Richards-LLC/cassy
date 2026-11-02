@@ -12018,6 +12018,23 @@ pub(crate) fn resolve_worker_transcript_path_for_account(
     ))
 }
 
+/// Find the Codex rollout proven to contain this mirror recipient's input.
+/// A cwd match alone can belong to a different pane or a prior generation.
+/// Keep the ordinary worker/status resolver's fallback policy unchanged.
+pub(crate) fn resolve_codex_mirror_transcript(
+    clone_path: &str,
+    account_dir: Option<&str>,
+    accepts: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let roots = transcript_roots_for_worker(cas_mux::SupervisorCli::Codex, account_dir);
+    collect_codex_rollouts(roots.first()?).into_iter().find(|path| {
+        let metadata = codex_rollout_metadata(path);
+        metadata.cwd.as_deref() == Some(clone_path)
+            && metadata.kind() != CodexRolloutKind::Exec
+            && accepts(path)
+    })
+}
+
 /// Resolve the activity/context path for `worker_status`.
 ///
 /// Codex is the cas-fa69 fix: use the existing cli-aware resolver so a real

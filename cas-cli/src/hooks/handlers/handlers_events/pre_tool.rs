@@ -579,18 +579,26 @@ fn handle_pre_tool_use_inner(
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
+    // Native subagents inherit their parent's role. Pattern signals must be
+    // refused for every factory role before Bash auto-approval, including a
+    // supervisor's subagent: full argv can contain another worker's task text.
+    if is_factory_agent && tool_name == "Bash"
+        && input.tool_input.as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .is_some_and(worker_command_pattern_kill)
+    {
+        return Ok(HookOutput::with_pre_tool_permission(
+            "deny",
+            "FACTORY PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals.",
+        ));
+    }
     if is_factory_agent && crate::harness_policy::is_worker(input) && tool_name == "Bash" {
         let command = input
             .tool_input
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str());
-        if command.is_some_and(worker_command_pattern_kill) {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                "WORKER PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals.",
-            ));
-        }
         if command.is_some_and(worker_command_runs_dangerous_formatter) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",

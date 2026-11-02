@@ -89,10 +89,24 @@ fn cas_51c7_worker_owned_pid_signals_stay_allowed() {
 }
 
 #[test]
-fn cas_51c7_supervisor_signals_are_out_of_scope() {
+fn cas_a290_every_factory_role_refuses_pattern_signals() {
     let _env = TestEnvGuard::temp_home();
-    for command in ["pkill -f cargo", "killall cargo", "kill $(pgrep -f cargo)", "pgrep -f cargo | xargs kill"] {
-        assert!(decision(command, "supervisor").is_none(), "{command}");
+    // Native subagents inherit the supervisor role. The incident command was
+    // auto-approved there even though the identical worker command was denied.
+    for role in ["worker", "supervisor", "reviewer", "qa"] {
+        for command in [
+            "pkill -f \"nuxt prepare\" ; pkill -f \"pnpm install\"",
+            "/usr/bin/pkill -TERM -f cargo",
+            "killall cargo",
+            "bash -lc 'pkill -f cargo'",
+            "kill $(pgrep -f cargo)",
+            "pgrep -f cargo | xargs kill",
+        ] {
+            let reason = decision(command, role)
+                .unwrap_or_else(|| panic!("{role} must refuse {command}"));
+            assert!(reason.contains("PID") && reason.contains("$!"), "{reason}");
+        }
+        assert!(decision("kill 12345", role).is_none(), "owned PID: {role}");
     }
 }
 

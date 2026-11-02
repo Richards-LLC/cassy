@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Journey checks start only the servers they use** — Journey-only runs start the source-bound production server; fixture-only runs start Vite. CI uses its pinned full Chromium without downloading the unused headless shell, retains startup reports and hidden traces in one artifact per shard, and skips Rust compiler-cache startup for JavaScript snapshots.
 
+### Fixed — Factory process safety
+
+- **Supervisor subagents cannot signal workers by name** — Pattern-based shell kills are refused for every factory role, including native subagents that inherit the supervisor role. Agents must signal the PID they started, preventing dependency cleanup commands from terminating sibling workers whose startup instructions match the pattern.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

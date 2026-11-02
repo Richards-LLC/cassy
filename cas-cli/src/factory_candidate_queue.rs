@@ -25,6 +25,47 @@ const QUEUE_DIR: &str = "candidate-queue";
 const BUILDER_CHECKOUT: &str = "candidate-builder";
 const RUNNER_LOCK: &str = "runner.lock";
 const RUNNER_HEARTBEAT: &str = "runner.heartbeat";
+/// Written by a daemon whose own context cannot run the build sandbox.
+const RUNNER_UNAVAILABLE: &str = "runner.unavailable";
+/// A supervisor's direct build uses no sandbox, so it works where this queue cannot.
+pub(crate) const SUPERVISOR_FALLBACK: &str = "Ask the supervisor to run `cas qa candidate build` for this revision; a direct build needs no sandbox.";
+const BUILD_ENVIRONMENT: [&str; 35] = [
+    "HOME",
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CC",
+    "CXX",
+    "AR",
+    "LD",
+    "ZIG",
+    "PKG_CONFIG_PATH",
+    "LIBCLANG_PATH",
+    "LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OPENSSL_DIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_FRESH: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -251,10 +292,35 @@ fn stop_child(child: &mut std::process::Child) -> Result<()> {
 /// Uses the worker's credential-store policy, with a private PID namespace so
 /// every build descendant, including a new session, dies with the sandbox.
 fn sandboxed_builder_command(program: &Path) -> Result<Command> {
+    sandboxed_command("bwrap", program)
+}
+
+/// bwrap execs the program itself, so `/proc/self/exe` would name bwrap there.
+/// The sandbox's private /proc also hides the daemon's own PID, so a path is the
+/// only way in. After `cas update` replaced the daemon's binary, that path holds
+/// the update, which builds a candidate just the same.
+fn sandbox_visible_program(program: &Path) -> Result<PathBuf> {
+    if !program.starts_with("/proc") {
+        return Ok(program.to_path_buf());
+    }
+    let target = std::fs::read_link(program)
+        .with_context(|| format!("resolve the builder at {}", program.display()))?;
+    let target = crate::ui::factory::strip_deleted_suffix(target);
+    if !target.is_file() {
+        bail!(
+            "the daemon's binary is gone from {}; restart the factory daemon",
+            target.display()
+        );
+    }
+    Ok(target)
+}
+
+fn sandboxed_command(bwrap: &str, program: &Path) -> Result<Command> {
     if !cfg!(target_os = "linux") {
         bail!("queued candidate builds require Linux bubblewrap credential and process isolation");
     }
-    let mut command = Command::new("bwrap");
+    let program = sandbox_visible_program(program)?;
+    let mut command = Command::new(bwrap);
     command.args([
         "--dev-bind",
         "/",
@@ -290,20 +356,70 @@ fn sandboxed_builder_command(program: &Path) -> Result<Command> {
             Err(error) => return Err(error).context("inspect a candidate credential-store mask"),
         }
     }
-    command.arg("--").arg(program);
+    command.arg("--").arg(&program);
     Ok(command)
 }
 
-/// Red-test seam, replaced by the implementation in the next commit.
-#[cfg(test)]
-fn sandbox_problem(_os: &str, _bwrap: &str, _program: &Path) -> Option<String> {
-    None
+/// Compilation needs tools, caches and locale, never daemon identity, API
+/// tokens, SSH agents or arbitrary inherited provider variables.
+fn allow_build_environment(command: &mut Command) {
+    command.env_clear();
+    for name in BUILD_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
 }
 
-/// Red-test seam, replaced by the implementation in the next commit.
-#[cfg(test)]
-fn record_sandbox_state(_cas_root: &Path, _problem: Option<&str>) -> Result<()> {
+/// Why this process cannot run a queued build, tried with the build's own argv
+/// and environment. Only the daemon's answer counts: a worker's `cas serve` is
+/// usually confined in ways the daemon is not.
+fn sandbox_problem(os: &str, bwrap: &str, program: &Path) -> Option<String> {
+    if os != "linux" {
+        return Some(format!(
+            "queued candidate builds need Linux bubblewrap isolation, which {os} does not have"
+        ));
+    }
+    let mut probe = match sandboxed_command(bwrap, program) {
+        Ok(probe) => probe,
+        Err(error) => return Some(format!("{error:#}")),
+    };
+    allow_build_environment(&mut probe);
+    let output = probe
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!(
+            "the factory daemon cannot start its build sandbox: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some("bubblewrap (`bwrap`) is not installed on this host".to_owned())
+        }
+        Err(error) => Some(format!("could not run bubblewrap: {error}")),
+    }
+}
+
+fn record_sandbox_state(cas_root: &Path, problem: Option<&str>) -> Result<()> {
+    std::fs::create_dir_all(queue_dir(cas_root))?;
+    let marker = queue_dir(cas_root).join(RUNNER_UNAVAILABLE);
+    match problem {
+        Some(problem) => std::fs::write(marker, problem)?,
+        None => match std::fs::remove_file(marker) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        },
+    }
     Ok(())
+}
+
+/// What the running daemon recorded about its own sandbox, if it cannot build.
+pub(crate) fn sandbox_refusal(cas_root: &Path) -> Option<String> {
+    std::fs::read_to_string(queue_dir(cas_root).join(RUNNER_UNAVAILABLE)).ok()
 }
 
 /// Preparation can block in fetch or worktree setup. Its heartbeat must not
@@ -586,50 +702,7 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(std::fs::File::create(&stdout_path)?)
             .stderr(std::fs::File::create(log)?);
-        // Compilation needs tools, caches and locale, never daemon identity,
-        // API tokens, SSH agents or arbitrary inherited provider variables.
-        command.env_clear();
-        for name in [
-            "HOME",
-            "PATH",
-            "USER",
-            "LOGNAME",
-            "LANG",
-            "LC_ALL",
-            "TERM",
-            "TMPDIR",
-            "TMP",
-            "TEMP",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_CACHE_HOME",
-            "CARGO_HOME",
-            "RUSTUP_HOME",
-            "RUSTUP_TOOLCHAIN",
-            "RUSTC",
-            "RUSTC_WRAPPER",
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CC",
-            "CXX",
-            "AR",
-            "LD",
-            "ZIG",
-            "PKG_CONFIG_PATH",
-            "LIBCLANG_PATH",
-            "LIBRARY_PATH",
-            "LD_LIBRARY_PATH",
-            "CPATH",
-            "C_INCLUDE_PATH",
-            "CPLUS_INCLUDE_PATH",
-            "OPENSSL_DIR",
-            "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-        ] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
+        allow_build_environment(&mut command);
         command.env("CAS_ROOT", &self.cas_root);
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -726,6 +799,13 @@ pub(crate) fn spawn_runner(
     std::thread::Builder::new()
         .name("cas-candidate-queue".to_string())
         .spawn(move || {
+            let problem = sandbox_problem(std::env::consts::OS, "bwrap", &runner.program);
+            if let Some(problem) = &problem {
+                tracing::warn!(%problem, "queued candidate builds are refused on this daemon");
+            }
+            if let Err(error) = record_sandbox_state(&runner.cas_root, problem.as_deref()) {
+                tracing::warn!(%error, "could not record the candidate sandbox state");
+            }
             let mut beat: Option<Instant> = None;
             while !runner.shutdown.load(Ordering::Relaxed) {
                 if beat.is_none_or(|beat| beat.elapsed() >= HEARTBEAT_INTERVAL) {

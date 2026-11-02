@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Queued candidate builds
+
+- **Queued builds run again** — Was: Every queued candidate build failed within seconds with "bwrap: No permissions to create a new namespace", because the sandbox was told to run `/proc/self/exe`, which names bubblewrap once it is inside. → Now: The sandbox runs the daemon's real binary path.
+- **Refused at the request** — Was: A worker on macOS, on a host without `bwrap`, or under a daemon that cannot start the sandbox got "Queued" and a failure later. → Now: The daemon tests its own sandbox when it starts, and the request is refused at once, with the reason and the supervisor's direct build named as the fallback.
+- **Killed builds no longer leak disk** — Was: A build killed by a timeout or a daemon restart left its checkout and up to 20 GiB of target behind, and the retry started a new one. → Now: The next build removes what a killed build left, and leaves a running build alone.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

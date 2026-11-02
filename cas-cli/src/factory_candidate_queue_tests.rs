@@ -370,8 +370,7 @@ fn sandbox_probe_runs_the_real_sandbox_from_this_process() {
         sandbox_problem("linux", "bwrap", Path::new("true")).is_none(),
         namespaces_available()
     );
-    let missing =
-        sandbox_problem("linux", "cas-test-no-such-bwrap", Path::new("true")).unwrap();
+    let missing = sandbox_problem("linux", "cas-test-no-such-bwrap", Path::new("true")).unwrap();
     assert!(missing.contains("not installed"), "{missing}");
 }
 

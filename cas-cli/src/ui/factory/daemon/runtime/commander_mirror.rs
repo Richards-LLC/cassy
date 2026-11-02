@@ -929,10 +929,14 @@ mod tests {
                     "director", &agent.name, "Review the task", Some("factory-1"),
                     None, None, false, Some(&cas_store::QueueOrigin::Daemon),
                 ).unwrap().id();
-                let prompt = format!("Message from director: [cas #{id} agent-authored 0s first]\nReview the task");
+                let prompt = if cli == cas_mux::SupervisorCli::Claude {
+                    if role == AgentRole::Supervisor {
+                        format!("<teammate-message teammate_id=\"director\">\n[cas #{id} agent-authored 0s first]\nReview the task\n</teammate-message>")
+                    } else { format!("CAS wake: message {id} from director is in your inbox") }
+                } else { format!("Message from director: [cas #{id} agent-authored 0s first]\nReview the task") };
                 let at = |second| format!("2026-11-02T12:00:{second:02}Z");
                 let call = serde_json::json!({"action":"update", "id":"cas-turn-test", "notes":"recorded decision"});
-                let lines = if cli == cas_mux::SupervisorCli::Claude {
+                let mut lines = if cli == cas_mux::SupervisorCli::Claude {
                     vec![
                         serde_json::json!({"type":"user","uuid":"turn-1","timestamp":at(0),"message":{"content":prompt}}),
                         serde_json::json!({"type":"assistant","timestamp":at(1),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"tool_use","id":"call-1","name":"mcp__cs__task","input":call}]}}),
@@ -951,6 +955,11 @@ mod tests {
                         serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"task_complete","turn_id":"turn-1"}}),
                     ]
                 };
+                if cli == cas_mux::SupervisorCli::Codex {
+                    for prompt in ["<environment_context>\n<shell>bash</shell>\n</environment_context>", "# AGENTS.md instructions for /repo\n<INSTRUCTIONS>rules</INSTRUCTIONS>"] {
+                        lines.insert(2, serde_json::json!({"type":"response_item","timestamp":at(0),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}));
+                    }
+                }
                 let path = if cli == cas_mux::SupervisorCli::Claude {
                     account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-")).join("native-ledger-session.jsonl")
                 } else {
@@ -1034,6 +1043,127 @@ mod tests {
                 scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
                 assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 2);
             }
+        }
+    }
+
+    struct TurnFixture {
+        temp: tempfile::TempDir,
+        root: PathBuf,
+        queue: SqlitePromptQueueStore,
+        agents: Vec<Agent>,
+        path: PathBuf,
+        cli: cas_mux::SupervisorCli,
+        state: MirrorScanState,
+    }
+
+    impl TurnFixture {
+        fn new(cli: cas_mux::SupervisorCli) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("config.toml"), "[factory]\ncommander_mirror_enabled = false\n").unwrap();
+            let queue = SqlitePromptQueueStore::open(&root).unwrap(); queue.init().unwrap();
+            let account = temp.path().join("account");
+            let mut agent = Agent::new_with_role("turn-agent".into(), "turn-worker".into(), AgentRole::Worker);
+            agent.cc_session_id = Some("native-ledger-session".into());
+            agent.factory_session = Some("factory-1".into());
+            agent.metadata.insert("worker_cli".into(), cli.backend().name().into());
+            agent.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into_owned());
+            let path = if cli == cas_mux::SupervisorCli::Claude {
+                account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-")).join("native-ledger-session.jsonl")
+            } else { account.join("sessions/2026/11/02/rollout-native-ledger-session.jsonl") };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+            Self { temp, root, queue, agents: vec![agent], path, cli, state: MirrorScanState::default() }
+        }
+        fn append(&self, rows: &[Value]) {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&self.path).unwrap();
+            for row in rows { writeln!(f, "{row}").unwrap(); }
+        }
+        fn scan(&mut self) {
+            scan_supervisor_replies(&self.root, self.temp.path(), "factory-1", &self.queue, &self.agents, &mut self.state);
+        }
+        fn rows(&self) -> Vec<Value> {
+            cas_store::quality_events_after(&self.root, 0, 100).unwrap().into_iter()
+                .map(|row| serde_json::to_value(row.payload).unwrap()).collect()
+        }
+        fn input(&self, id: &str, prompt: &str, second: u32) -> Vec<Value> {
+            let at = format!("2026-11-02T12:00:{second:02}Z");
+            if self.cli == cas_mux::SupervisorCli::Claude {
+                vec![serde_json::json!({"type":"user","promptId":id,"uuid":id,"timestamp":at,"message":{"content":prompt}})]
+            } else {
+                vec![serde_json::json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_started","turn_id":id}}),
+                    serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}})]
+            }
+        }
+        fn end(&self, id: &str, reply: &str, second: u32) -> Vec<Value> {
+            let at = format!("2026-11-02T12:00:{second:02}Z");
+            if self.cli == cas_mux::SupervisorCli::Claude {
+                vec![serde_json::json!({"type":"assistant","timestamp":at,"message":{"content":[{"type":"text","text":reply}],"stop_reason":"end_turn"}})]
+            } else {
+                vec![serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":reply}]}}),
+                    serde_json::json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete","turn_id":id}})]
+            }
+        }
+    }
+
+    #[test]
+    fn turn_prose_only_counts_for_operator_or_verified_question() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            let mut sender = Agent::new_with_role("sender".into(), "sender".into(), AgentRole::Supervisor);
+            sender.factory_session = None; f.agents.push(sender);
+            for (index, origin, message, expected_noop) in [
+                (0, cas_store::QueueOrigin::Daemon, "The worker is waiting", true),
+                (1, cas_store::QueueOrigin::PairedDevice { device_id:"device".into() }, "Explain this status", false),
+                (2, cas_store::QueueOrigin::RegisteredAgent { agent_id:"sender".into() }, "Which task should I take?", false),
+                (3, cas_store::QueueOrigin::Unattributed, "Which task should I take?", true),
+            ] {
+                let queue_id = f.queue.enqueue_urgent_with_outcome("sender", "turn-worker", message, Some("factory-1"), None, None, false, Some(&origin)).unwrap().id();
+                let id = format!("prose-{index}");
+                let prompt = format!("[cas #{queue_id} agent-authored 0s first] {message}");
+                f.append(&f.input(&id, &prompt, index * 10));
+                f.append(&f.end(&id, "There is no new decision; the owner is still waiting.", index * 10 + 1));
+                f.scan();
+                let rows = f.rows();
+                assert_eq!(rows.last().unwrap()["no_op"], expected_noop, "{cli:?} row {index}: {rows:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn turn_scan_does_not_replay_append_read_after_an_older_metadata_snapshot() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut f = TurnFixture::new(cas_mux::SupervisorCli::Claude);
+        f.append(&f.input("first", "first", 0)); f.append(&f.end("first", "Finished.", 1));
+        let tail = f.input("appended", "later", 10).into_iter().chain(f.end("appended", "Finished.", 11))
+            .map(|row| format!("{row}\n")).collect::<String>();
+        std::fs::File::open(&f.path).unwrap().set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(100))).unwrap();
+        f.state.turns.before_read = Some(Box::new(move |path| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(tail.as_bytes()).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(200))).unwrap();
+        }));
+        f.scan(); assert_eq!(f.rows().len(), 2);
+        let bytes = f.state.turns.bytes_read(); assert!(bytes > 0);
+        f.scan();
+        assert_eq!(f.state.turns.bytes_read(), bytes, "an append read in the first pass must not trigger a full replay");
+    }
+
+    #[test]
+    fn a_new_native_turn_discards_an_unfinished_pending_turn() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            f.append(&f.input("abandoned", "old input", 0)); f.scan();
+            assert!(f.rows().is_empty());
+            f.append(&f.input("replacement", "new input", 10));
+            f.append(&f.end("replacement", "Finished.", 11)); f.scan();
+            let rows = f.rows(); assert_eq!(rows.len(), 1, "{cli:?} replacement turn must finish");
+            assert_eq!(rows[0]["minutes"], 1.0 / 60.0, "{cli:?} duration must exclude abandoned input");
         }
     }
 

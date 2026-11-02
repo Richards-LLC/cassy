@@ -26,6 +26,8 @@ pub(super) struct Scanner {
     cursors: HashMap<String, Cursor>,
     misses: HashMap<String, (SupervisorSource, Instant)>,
     ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
+    #[cfg(test)]
+    pub(super) before_read: Option<Box<dyn FnOnce(&Path) + Send>>,
 }
 
 struct Cursor {
@@ -38,6 +40,10 @@ struct Cursor {
     usage: (u64, u64),
     outbox: VecDeque<NewQualityEvent>,
     retry_at: Option<Instant>,
+    #[cfg(test)]
+    before_read: Option<Box<dyn FnOnce(&Path) + Send>>,
+    #[cfg(test)]
+    bytes_read: u64,
 }
 
 struct Pending {
@@ -296,6 +302,10 @@ impl Cursor {
             usage: (0, 0),
             outbox: VecDeque::new(),
             retry_at: None,
+            #[cfg(test)]
+            before_read: None,
+            #[cfg(test)]
+            bytes_read: 0,
         }
     }
 
@@ -658,6 +668,8 @@ impl Cursor {
             self.pending = None;
             self.usage = (0, 0);
         }
+        #[cfg(test)]
+        if let Some(hook) = self.before_read.take() { hook(&self.path); }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
@@ -672,6 +684,7 @@ impl Cursor {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 self.line(&value, root, agent, session, queue, agents);
             }
+            #[cfg(test)] { self.bytes_read += count as u64; }
             self.offset += count as u64;
             read += count;
         }
@@ -682,6 +695,10 @@ impl Cursor {
 }
 
 impl Scanner {
+    #[cfg(test)]
+    pub(super) fn bytes_read(&self) -> u64 {
+        self.cursors.values().map(|cursor| cursor.bytes_read).sum()
+    }
     pub(super) fn scan(
         &mut self,
         root: &Path,
@@ -788,10 +805,11 @@ impl Scanner {
                 self.cursors
                     .insert(source.agent_id.clone(), Cursor::new(source.clone(), path));
             }
-            if let Some(cursor) = self.cursors.get_mut(&source.agent_id)
-                && let Err(error) = cursor.refresh(root, agent, session, queue, agents)
-            {
-                tracing::debug!(%error, "turn ledger transcript read deferred");
+            if let Some(cursor) = self.cursors.get_mut(&source.agent_id) {
+                #[cfg(test)] { cursor.before_read = self.before_read.take(); }
+                if let Err(error) = cursor.refresh(root, agent, session, queue, agents) {
+                    tracing::debug!(%error, "turn ledger transcript read deferred");
+                }
             }
         }
     }

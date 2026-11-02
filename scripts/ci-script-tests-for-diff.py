@@ -97,11 +97,12 @@ PROVISIONED_INPUTS = {
     "scripts/test_factory_model_history.py": ("scripts/factory-model-history.py",),
     **{f"scripts/visual-qa{suffix}.test.mjs": VISUAL_INPUTS + fixtures for suffix, fixtures in {
         "": ("scripts/visual-qa-fixtures/*",
+             "hub-web/visual-qa-allowlist.json",
              "cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars/*"),
         "-enter-transition": ("scripts/visual-qa-fixtures/enter-transition.html",),
         "-entrypoint": ("scripts/visual-qa-fixtures/clean.html", "hub-web/scripts/visual-qa.mjs"),
         "-readiness": ("scripts/visual-qa-fixtures/loading-only.html", "scripts/visual-qa-fixtures/ranking.after.png"),
-        "-secrets": (),
+        "-secrets": ("scripts/visual-qa-fixtures/clean.html",),
     }.items()},
 }
 WEB_TESTS = {"scripts/test-verified-web-runners.mjs"} | {

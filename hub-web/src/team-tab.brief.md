@@ -55,3 +55,7 @@ Scored on 2026-10-30 from real captures with four live workers. The worker's sco
 | Accessibility | 4 / 2 | 3 / 3 | 3 / 4 | Text and the release track pass, but the lane connector is 2.24:1 light and 2.64:1 dark. |
 
 Two independent reads of round three's surface disagree: 4/3/3 on real-hub captures, and 4/4/4 on fixture screenshots with mixed worker states (batch QA round 12). The factory supervisor ruled the floor met on the second. The first read's concern stands as an open question: when real workers share a state the lanes look alike, so how does a worker that needs attention stand out without reading every lane?
+
+## Same-state attention follow-up
+
+Task titles now lead the lanes, so workers sharing a harness and liveness differ by their work. Reported stalls, budget stops and blocked tasks come first with a critical edge; merge waits follow with a warning edge. The finding gives the attention count a strong underline, and Needs you names the worker and reason with a keyboard-reachable shortcut. Waiting remains Waiting when the task is Blocked: task trouble does not rewrite shared liveness. Unreported receipts stay open marks. This addresses the open real-hub concern above; independent capture scoring is recorded on the follow-up task.

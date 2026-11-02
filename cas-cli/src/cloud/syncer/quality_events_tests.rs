@@ -22,6 +22,7 @@ struct CloudState {
     /// Any POST over this many events answers 413.
     max_batch: Option<usize>,
     reject_turns: bool,
+    turn_error: Option<(u16, serde_json::Value)>,
 }
 
 #[derive(Clone, Default)]
@@ -67,6 +68,11 @@ impl Respond for MockCloud {
             return ResponseTemplate::new(413);
         }
         state.posts.push(events.len());
+        if events.iter().any(|event| event["kind"] == "turn") {
+            if let Some((status, body)) = &state.turn_error {
+                return ResponseTemplate::new(*status).set_body_json(body);
+            }
+        }
         let (mut accepted, mut duplicates) = (0, 0);
         let mut rejected = Vec::new();
         for event in events {
@@ -226,36 +232,100 @@ async fn route_not_live_holds_the_cursor_and_413_splits_the_batch() {
             assert_eq!(cloud.posts, [1, 1, 1], "halved from 3 events to 1, then held there");
             assert_eq!(cloud.rows.len(), 3);
         }
-        let held = syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().unwrap();
-        let turn = NewQualityEvent::new("native turn", QualityPayload::Turn {
-            woken_by: cas_store::WakeChannel::Director, actions: vec![], no_op: true,
-            input_tokens: Some(30), output_tokens: Some(5), minutes: Some(0.05),
-        });
-        cas_store::record_quality_event(&root, &turn).unwrap();
-        emit(&root, "after turn");
-        state.0.lock().unwrap().max_batch = None;
-        for status in [400, 422] {
-            state.0.lock().unwrap().forced = vec![status];
-            assert!(syncer.sync_quality_events(true).unwrap().capability_absent);
-            assert_eq!(syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().as_deref(), Some(held.as_str()));
-        }
-        state.0.lock().unwrap().reject_turns = true;
-        assert!(syncer.sync_quality_events(true).unwrap().capability_absent);
-        assert_eq!(syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().as_deref(), Some(held.as_str()));
-        let tail = cas_store::quality_events_after(&root, held.parse().unwrap(), 10).unwrap();
-        assert_eq!(tail.len(), 2, "refused Turn and following rows remain queued locally");
-        state.0.lock().unwrap().forced = vec![500];
-        assert!(syncer.sync_quality_events(false).unwrap().capability_absent);
-        assert_eq!(state.0.lock().unwrap().forced, [500], "cooldown makes no request");
-        {
-            let mut cloud = state.0.lock().unwrap();
-            cloud.forced.clear(); cloud.reject_turns = false;
-        }
-        let retry = syncer.sync_quality_events(true).unwrap();
-        assert!(!retry.capability_absent);
-        assert_eq!(state.0.lock().unwrap().rows.len(), 5);
-        assert_eq!(syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().as_deref(), Some(tail.last().unwrap().seq.to_string().as_str()));
     })
     .await
     .unwrap();
+}
+
+/// A newer kind cannot poison the shared ledger; pending Turns can be replayed
+/// when Cloud supports them, independently of normal rows and pull progress.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
+    for status in [None, Some(400), Some(422)] {
+        let server = MockServer::start().await;
+        let cloud = MockCloud::default();
+        Mock::given(TeamRoute).respond_with(cloud.clone()).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let peer = remote.path().to_path_buf();
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let syncer = machine(&root, &endpoint, "acme/this");
+            emit(&peer, "from teammate");
+            let mut incoming = cas_store::quality_events_after(&peer, 0, 1).unwrap()[0].to_wire();
+            incoming.project_id = Some("acme/other".into());
+            {
+                let mut state = cloud.0.lock().unwrap();
+                state.rows.push(serde_json::to_value(incoming).unwrap());
+                state.reject_turns = true;
+                state.turn_error = status.map(|status| (status, serde_json::json!({
+                    "error": "unsupported event kind: turn"
+                })));
+            }
+            emit(&root, "before turn");
+            let turn = NewQualityEvent::new("native turn", QualityPayload::Turn {
+                woken_by: cas_store::WakeChannel::Director, actions: vec![], no_op: true,
+                input_tokens: Some(30), output_tokens: Some(5), minutes: Some(0.05),
+            });
+            cas_store::record_quality_event(&root, &turn).unwrap();
+            emit(&root, "after turn");
+
+            let summary = syncer.sync_quality_events(true).unwrap();
+            assert_eq!(summary.pulled, 1, "pull must run despite Turn rejection {status:?}");
+            assert!(!summary.capability_absent, "the ordinary route is available");
+            assert_eq!(summary.pushed, 2, "both non-Turn rows must push");
+            assert_eq!(cloud.0.lock().unwrap().rows.len(), 3);
+            let pending = cas_store::quality_events_after(&root, 0, 10).unwrap();
+            assert_eq!(pending.len(), 3, "the local outbox loses no events");
+            assert_eq!(pending.iter().filter(|event| event.payload.kind() == "turn").count(), 1);
+            assert!(cas_store::quality_events_between(&root, None, None).unwrap()
+                .iter().any(|event| event.from_cloud && event.project_id == "acme/other"));
+
+            emit(&root, "later intervention");
+            // Deferring the unsupported kind must not activate the route's
+            // six-hour cooldown. Advance only the ordinary 15-minute pacing.
+            syncer.queue().delete_metadata(super::LAST_ROUND_KEY).unwrap();
+            let later = syncer.sync_quality_events(false).unwrap();
+            assert_eq!(later.pushed, 1, "later kinds progress while Turn is pending");
+            assert_eq!(cloud.0.lock().unwrap().gets, 2);
+            {
+                let mut state = cloud.0.lock().unwrap();
+                state.reject_turns = false;
+                state.turn_error = None;
+            }
+            let recovered = syncer.sync_quality_events(true).unwrap();
+            assert_eq!(recovered.pushed, 1, "the held Turn retries after support arrives");
+            assert_eq!(cloud.0.lock().unwrap().rows.len(), 5);
+            assert_eq!(syncer.sync_quality_events(true).unwrap().pushed, 0);
+        }).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unrelated_turn_batch_errors_surface_after_pull() {
+    for status in [400, 422] {
+        let server = MockServer::start().await;
+        let cloud = MockCloud::default();
+        Mock::given(TeamRoute).respond_with(cloud.clone()).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let syncer = machine(&root, &endpoint, "acme/this");
+            let turn = NewQualityEvent::new("native turn", QualityPayload::Turn {
+                woken_by: cas_store::WakeChannel::Director, actions: vec![], no_op: true,
+                input_tokens: None, output_tokens: None, minutes: None,
+            });
+            cas_store::record_quality_event(&root, &turn).unwrap();
+            cloud.0.lock().unwrap().turn_error = Some((status, serde_json::json!({
+                "error": "invalid project_canonical_id"
+            })));
+            let error = syncer.sync_quality_events(true).expect_err("validation is not missing capability");
+            assert!(error.to_string().contains(&status.to_string()), "{error}");
+            assert!(error.to_string().contains("invalid project_canonical_id"), "{error}");
+            assert_eq!(cloud.0.lock().unwrap().gets, 1, "pull runs even when push errors");
+            assert_eq!(cas_store::quality_events_after(&root, 0, 10).unwrap().len(), 1);
+        }).await.unwrap();
+    }
 }

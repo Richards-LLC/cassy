@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander CI
+
+- **Journey checks start only the servers they use** — Journey-only runs start the source-bound production server; fixture-only runs start Vite. CI uses its pinned full Chromium without downloading the unused headless shell, retains startup reports and hidden traces in one artifact per shard, and skips Rust compiler-cache startup for JavaScript snapshots.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

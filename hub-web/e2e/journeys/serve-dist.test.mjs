@@ -19,8 +19,9 @@ test('standalone journey server builds current source without changing tracked d
   await writeFile(join(repo, 'hub-web/src/app.txt'), 'current source');
   await writeFile(join(repo, 'hub-web/dist/index.html'), 'stale committed bundle');
   await writeFile(join(repo, 'tools/npm'), `#!/usr/bin/env python3
-import sys
+import os,sys
 from pathlib import Path
+assert not os.environ.get('RUSTC_WRAPPER') and not os.environ.get('CARGO_BUILD_RUSTC_WRAPPER'), 'JavaScript snapshot must not start a Rust compiler-cache server'
 out = Path(sys.argv[sys.argv.index('--outDir') + 1])
 out.mkdir(parents=True)
 (out / 'index.html').write_text(Path('src/app.txt').read_text())
@@ -35,7 +36,8 @@ out.mkdir(parents=True)
   await new Promise((resolve) => reservation.close(resolve));
   const children = [];
   const start = (manifest) => {
-    const env = { ...process.env, PATH: `${join(repo, 'tools')}:${process.env.PATH}` };
+    const env = { ...process.env, PATH: `${join(repo, 'tools')}:${process.env.PATH}`,
+      RUSTC_WRAPPER: 'sccache', CARGO_BUILD_RUSTC_WRAPPER: 'sccache' };
     delete env.JOURNEY_BUILD_MANIFEST;
     if (manifest) env.JOURNEY_BUILD_MANIFEST = manifest;
     const child = spawn(process.execPath, [join(repo, 'hub-web/e2e/journeys/serve-dist.mjs'), String(port)], {

@@ -1,4 +1,4 @@
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig, devices, type PlaywrightTestConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { checkoutPorts } from "./e2e/checkout-ports.mjs";
 import { JOURNEY_TIMEZONE } from "./e2e/journeys/clock";
@@ -26,6 +26,38 @@ const origin = `http://127.0.0.1:${port}`;
 const journeyPort = Number(process.env.HUB_JOURNEY_PORT ?? defaults.journeys);
 const journeyOrigin = `http://127.0.0.1:${journeyPort}`;
 const listeningOn = (url: string) => new RegExp(url.replaceAll(".", "\\."));
+
+export const fixtureWebServer = {
+  name: "Commander fixtures",
+  command: `npx vite fixtures --base / --port ${port} --strictPort --host 127.0.0.1`,
+  wait: { stdout: listeningOn(`Local:\\s+${origin}/`) },
+  reuseExistingServer: false,
+  stdout: "pipe",
+} satisfies NonNullable<PlaywrightTestConfig["webServer"]>;
+
+export const journeyWebServer = {
+  name: "Commander journeys",
+  command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
+  wait: { stdout: listeningOn(`at ${journeyOrigin}/commander/`) },
+  reuseExistingServer: false,
+  stdout: "pipe",
+} satisfies NonNullable<PlaywrightTestConfig["webServer"]>;
+
+// Playwright owns webServer at config level, even when --project filters tests.
+// Match its case-insensitive project globs and variadic/repeated CLI option so
+// a selected project starts only its own server. An unfiltered run needs both.
+const projectFilters: string[] = [];
+let projectOption = false;
+for (const arg of process.argv.slice(2)) {
+  if (arg === "--project") projectOption = true;
+  else if (arg.startsWith("--project=")) {
+    projectFilters.push(arg.slice("--project=".length));
+    projectOption = true;
+  } else if (arg.startsWith("-")) projectOption = false;
+  else if (projectOption) projectFilters.push(arg);
+}
+const usesProject = (name: string) => projectFilters.length === 0 || projectFilters.some(pattern =>
+  new RegExp(`^${pattern.split("*").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i").test(name));
 
 export default defineConfig({
   testDir: "./e2e",
@@ -73,15 +105,7 @@ export default defineConfig({
     },
   ],
   webServer: [
-    {
-      command: `npx vite fixtures --base / --port ${port} --strictPort --host 127.0.0.1`,
-      wait: { stdout: listeningOn(`Local:\\s+${origin}/`) },
-      reuseExistingServer: false,
-    },
-    {
-      command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
-      wait: { stdout: listeningOn(`at ${journeyOrigin}/commander/`) },
-      reuseExistingServer: false,
-    },
+    ...(usesProject("chromium") ? [fixtureWebServer] : []),
+    ...(usesProject("journeys") ? [journeyWebServer] : []),
   ],
 });

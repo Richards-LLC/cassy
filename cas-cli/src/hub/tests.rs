@@ -5519,11 +5519,13 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     let path = "/v1/sessions/ended-a/restore";
     assert_eq!(f.call("POST", path, Some(other_birth)).await.0, StatusCode::CONFLICT);
     let (_, rows) = f.call("GET", "/v1/sessions", None).await;
-    assert_eq!(rows["sessions"][0]["dismissed"], true);
+    assert_eq!(rows["sessions"], serde_json::json!([]));
+    assert!(markers[0].path().is_file(), "a stale restore keeps the legacy tombstone");
     for _repeat in 0..2 {
         assert_eq!(f.call("POST", path, Some(restore.clone())).await.0, StatusCode::NO_CONTENT);
         let (_, rows) = f.call("GET", "/v1/sessions", None).await;
-        assert_eq!(rows["sessions"][0]["dismissed"], false);
+        assert_eq!(rows["sessions"], serde_json::json!([]), "restoring a legacy dismissal cannot list an ended session");
+        assert!(!markers[0].path().exists(), "restore removes the hub tombstone idempotently");
     }
 }
 

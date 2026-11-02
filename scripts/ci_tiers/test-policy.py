@@ -337,11 +337,22 @@ fi
             run = subprocess.run(['bash', '-c', assertion['run']], env={**os.environ, 'SHARDS': result})
             self.assertEqual(run.returncode == 0, result == 'success', result)
 
+    def test_green_queue_receipt_cannot_skip_clippy(self):
+        job = self.ci()['jobs']['clippy']
+        context = {'github.event_name': 'push', 'github.ref': 'refs/heads/main',
+                   'needs.ci-diff.outputs.class': 'rust-touched',
+                   'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'merge-queue',
+                   'steps.tree-dedupe.outputs.run-heavy': 'false'}
+        self.assertTrue(self.gh_expr(job['if'], context))
+        for step in job['steps']:
+            self.assertTrue(self.gh_expr(step.get('if', 'true'), context), step.get('name', step.get('uses')))
+
     def test_macos_check_only_warms_missing_main_cache_after_queue_proof(self):
         job = self.ci()['jobs']['macos-check']
         cache = next(step for step in job['steps'] if step.get('id') == 'cargo-cache')
         decision = next(step for step in job['steps'] if step.get('id') == 'cache-work')
         compile_step = next(step for step in job['steps'] if step.get('name') == 'Check workspace')
+        seed = next(step for step in job['steps'] if step.get('id') == 'seed-cache')
         cases = [
             ('push', 'refs/heads/main', 'merge-queue', 'true', False),
             ('push', 'refs/heads/main', 'merge-queue', 'false', True),
@@ -371,11 +382,16 @@ fi
                 if not expected:
                     self.assertIn('https://example.test/queue/123', result.stdout)
                 context['steps.cache-work.outputs.run-check'] = str(expected).lower()
+                self.assertEqual(self.gh_expr(seed['if'], context), reuse == 'merge-queue' and expected)
+                # Both cache actions must address the same job/profile key.
+                self.assertEqual(seed['uses'], cache['uses'])
+                for key in ('key', 'shared-key', 'prefix-key', 'workspaces'):
+                    self.assertEqual(seed.get('with', {}).get(key), cache['with'].get(key))
+                self.assertEqual(self.gh_expr(cache['with']['save-if'], context), ref == 'refs/heads/main' and reuse != 'merge-queue')
                 self.assertEqual(self.gh_expr(compile_step['if'], context), expected)
                 for name in ('Install Zig', 'Setup sccache', 'Probe sccache backend'):
                     step = next(s for s in job['steps'] if s.get('name') == name)
                     self.assertEqual(self.gh_expr(step['if'], context), expected)
-                self.assertEqual(self.gh_expr(cache['with']['save-if'], context), ref == 'refs/heads/main')
         self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
             'github.ref': 'refs/heads/factory/x'}))
         self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',

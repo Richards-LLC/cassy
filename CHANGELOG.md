@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.96.0] - 2026-11-02
+
 ### Fixed — Commander messages and replies
 
 - **Messages reach the conversation like terminal input** — Was: Fresh background

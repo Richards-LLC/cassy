@@ -958,15 +958,18 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     let install = command(&["hub", "service", "install", "--tailscale-serve-port", "10046"]);
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if paths.read_process_record().is_ok_and(|record| record.public_url.is_some())
-            && ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
-                .timeout(Duration::from_millis(100)).call().is_ok() { break; }
-        assert!(Instant::now() < deadline, "isolated launchd hub did not become ready");
-        thread::sleep(Duration::from_millis(20));
-    }
-    let initial_pid = paths.read_process_record().unwrap().pid;
+    let wait_for_publication = || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(record) = paths.read_process_record()
+                && record.public_url.is_some()
+                && ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
+                    .timeout(Duration::from_millis(100)).call().is_ok() { return record; }
+            assert!(Instant::now() < deadline, "isolated launchd hub did not publish its route");
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let initial_pid = wait_for_publication().pid;
     let keep = command(&["hub", "start", "--port", &port.to_string()]);
     assert!(keep.status.success(), "{}", String::from_utf8_lossy(&keep.stderr));
     assert_eq!(paths.read_process_record().unwrap().pid, initial_pid);
@@ -978,7 +981,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     assert!(!home.path().join("mock-route").exists());
     let publish = command(&["hub", "start"]);
     assert!(publish.status.success(), "{}", String::from_utf8_lossy(&publish.stderr));
-    let first_pid = paths.read_process_record().unwrap().pid;
+    let first_pid = wait_for_publication().pid;
     assert_eq!(paths.read_process_record().unwrap().launched_by.as_deref(), Some("service"));
     assert!(paths.read_process_record().unwrap().public_url.is_some());
     socket.set(None);
@@ -1000,7 +1003,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     let restart = command(&["hub", "restart"]);
     assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
     assert!(restarted_at.elapsed() < Duration::from_secs(15));
-    let record = paths.read_process_record().unwrap();
+    let record = wait_for_publication();
     assert_ne!(record.pid, first_pid);
     assert_eq!(record.public_url.as_deref(), Some("https://launchd-proof.invalid:10046/"));
     let selected_socket = home.path().join("updated.socket");
@@ -1025,7 +1028,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     assert!(updated_at.elapsed() < Duration::from_secs(15));
     let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
     assert_eq!(receipt["hub_restart"]["verified"], true);
-    assert_eq!(paths.read_process_record().unwrap().public_url.as_deref(),
+    assert_eq!(wait_for_publication().public_url.as_deref(),
         Some("https://launchd-proof.invalid:10046/"));
 }
 

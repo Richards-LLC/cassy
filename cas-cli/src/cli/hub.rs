@@ -3870,7 +3870,8 @@ pub(crate) fn hub_transport_report(
 ) -> HubTransportReport {
     let manager = TailscaleServeManager::new(paths.root());
     let live = record.is_some_and(|record| record_is_ready(paths, record));
-    if live && let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
+    if live && !publication_required()
+        && let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
         return HubTransportReport::ok(format!(
             "hub is loopback-only; Tailscale Serve publication unavailable: {warning}; publication retries automatically"
         ));

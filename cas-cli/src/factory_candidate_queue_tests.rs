@@ -240,8 +240,12 @@ fn namespaces_available() -> bool {
     match probe {
         Ok(output) if output.status.success() => true,
         outcome => {
+            let reason = match outcome {
+                Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                Err(error) => error.to_string(),
+            };
             eprintln!(
-                "SKIP candidate sandbox/detached-session coverage: namespaces unavailable ({outcome:?}); run on the supervisor host"
+                "SKIP candidate sandbox/detached-session coverage: namespaces unavailable ({reason}); run on the supervisor host"
             );
             false
         }
@@ -250,54 +254,63 @@ fn namespaces_available() -> bool {
 
 #[tokio::test]
 async fn worker_request_builds_in_the_daemon_and_tells_only_the_worker() {
-    if !namespaces_available() {
-        return;
+    let namespaces = namespaces_available();
+    for sandboxed in [false, true] {
+        if sandboxed && !namespaces {
+            continue;
+        }
+        let mut fixture = Fixture::new();
+        fixture._env.set("CAS_AGENT_ROLE", "supervisor");
+        fixture._env.set("NEON_API_KEY", "fixture-secret");
+        let store = fixture.temp.path().join("operator-store");
+        std::fs::create_dir(&store).unwrap();
+        std::fs::write(store.join("auth.json"), "fixture credential").unwrap();
+        fixture._env.set("VERCEL_CONFIG_DIR", &store);
+        let reply = fixture.request(OWN_TASK, &fixture.head).await;
+        assert!(reply.contains("Queued"), "{reply}");
+        assert!(fixture.calls().is_empty(), "the request path never builds");
+
+        let mask_assertion = if sandboxed {
+            format!("test ! -s '{}/auth.json' || exit 42\n", store.display())
+        } else {
+            String::new()
+        };
+        let mut runner = fixture.runner(&format!(
+            "test -z \"$NEON_API_KEY\" || exit 41\n{mask_assertion}{BUILT}"
+        ));
+        if sandboxed {
+            runner.build_command = sandboxed_builder_command;
+        }
+        assert!(runner.run_next().unwrap());
+
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let builder = fixture.cas_root.join(BUILDER_CHECKOUT);
+        let expected = format!(
+            "qa candidate build --task {OWN_TASK} --rev {} --json | {} | {} |  | {}",
+            fixture.head,
+            builder.canonicalize().unwrap().display(),
+            fixture.source_tip,
+            fixture.cas_root.display(),
+        );
+        assert_eq!(calls[0], expected, "fixed builder, no supervisor authority");
+
+        let messages = fixture.messages();
+        assert_eq!(messages.len(), 1, "no supervisor turn: {messages:?}");
+        assert_eq!(messages[0].0, WORKER);
+        for part in [
+            format!("/art/{}/cas", fixture.head),
+            "cas 9.9.9".to_owned(),
+            fixture.head.clone(),
+            format!("hash-of-{}", fixture.head),
+            format!("/art/{}/RECEIPT.json", fixture.head),
+            format!("candidate-build-{}.log", &fixture.head[..12]),
+        ] {
+            assert!(messages[0].1.contains(&part), "{part} in {}", messages[0].1);
+        }
+        assert!(!runner.run_next().unwrap(), "the queue is drained");
+        assert_eq!(fixture.calls().len(), 1);
     }
-    let mut fixture = Fixture::new();
-    fixture._env.set("CAS_AGENT_ROLE", "supervisor");
-    fixture._env.set("NEON_API_KEY", "fixture-secret");
-    let store = fixture.temp.path().join("operator-store");
-    std::fs::create_dir(&store).unwrap();
-    std::fs::write(store.join("auth.json"), "fixture credential").unwrap();
-    fixture._env.set("VERCEL_CONFIG_DIR", &store);
-    let reply = fixture.request(OWN_TASK, &fixture.head).await;
-    assert!(reply.contains("Queued"), "{reply}");
-    assert!(fixture.calls().is_empty(), "the request path never builds");
-
-    let mut runner = fixture.runner(&format!(
-        "test -z \"$NEON_API_KEY\" || exit 41\ntest ! -s '{}/auth.json' || exit 42\n{BUILT}",
-        store.display(),
-    ));
-    runner.build_command = sandboxed_builder_command;
-    assert!(runner.run_next().unwrap());
-
-    let calls = fixture.calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    let builder = fixture.cas_root.join(BUILDER_CHECKOUT);
-    let expected = format!(
-        "qa candidate build --task {OWN_TASK} --rev {} --json | {} | {} |  | {}",
-        fixture.head,
-        builder.canonicalize().unwrap().display(),
-        fixture.source_tip,
-        fixture.cas_root.display(),
-    );
-    assert_eq!(calls[0], expected, "fixed builder, no supervisor authority");
-
-    let messages = fixture.messages();
-    assert_eq!(messages.len(), 1, "no supervisor turn: {messages:?}");
-    assert_eq!(messages[0].0, WORKER);
-    for part in [
-        format!("/art/{}/cas", fixture.head),
-        "cas 9.9.9".to_owned(),
-        fixture.head.clone(),
-        format!("hash-of-{}", fixture.head),
-        format!("/art/{}/RECEIPT.json", fixture.head),
-        format!("candidate-build-{}.log", &fixture.head[..12]),
-    ] {
-        assert!(messages[0].1.contains(&part), "{part} in {}", messages[0].1);
-    }
-    assert!(!runner.run_next().unwrap(), "the queue is drained");
-    assert_eq!(fixture.calls().len(), 1);
 }
 
 #[tokio::test]

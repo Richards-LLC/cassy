@@ -92,6 +92,12 @@ impl CasService {
                  it may predate the queue, so ask the supervisor for this candidate",
             ));
         }
+        if let Some(problem) = queue::sandbox_refusal(cas_root) {
+            return Err(refuse(format!(
+                "{problem}. Nothing was queued. {}",
+                queue::SUPERVISOR_FALLBACK
+            )));
+        }
         let request = CandidateRequest {
             task: task.to_owned(),
             revision: revision.to_owned(),

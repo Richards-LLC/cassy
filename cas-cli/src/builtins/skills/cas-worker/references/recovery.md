@@ -59,8 +59,9 @@ which is scarcest late in a lane.
 
 - Check ancestry (`git merge-base --is-ancestor <tip> <target>`) once per
   supervisor message you receive, never in a self-reminder loop.
-- Set a reminder for that check only while the supervisor has not acknowledged
-  your merge request, and never sooner than 300 seconds.
+- While the supervisor has not acknowledged your merge request, use one
+  `branch_contained_in` reminder for the delivered SHA and target; never a delay
+  reminder that rechecks merge status.
 - When the supervisor says it owns the merge or the close, or asks you to stop
   polling, cancel those reminders (`coordination action=remind_cancel`) and
   stay idle until it messages you.

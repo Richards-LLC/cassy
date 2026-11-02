@@ -545,10 +545,24 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
       await expect(idle).toHaveAttribute("title", "Idle");
       const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
-      // A live idle dot uses the live green, never the old gray idle token.
+      const idleLook = await look(idle);
       if (mode !== "forced-colors") {
-        expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
+        const idleFill = await idle.evaluate(node => {
+          const probe = document.body.appendChild(document.createElement("span"));
+          probe.style.background = "var(--state-idle)";
+          const fill = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return fill;
+        });
+        expect(idleLook[0]).toBe(idleFill);
       }
+      // Gray belongs to an unreachable machine's last-known running row.
+      await hub.down("atlas", { sockets: "close" });
+      const offline = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Offline", exact: true });
+      await expect(offline).toHaveAttribute("title", "Offline");
+      expect(await look(offline)).not.toEqual(idleLook);
+      await hub.up("atlas");
+      await expect(idle).toHaveAttribute("title", "Idle");
     });
   }
   await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });

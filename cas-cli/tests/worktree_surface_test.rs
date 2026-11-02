@@ -6246,6 +6246,13 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         "the new task proof cycle must be authoritative before merge"
     );
 
+    // A real remote distinguishes a held close from a publication failure.
+    let origin = home.path().join("origin.git");
+    run_git(&["init", "--bare", origin.to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", origin.display()),
+        "git@github.com:org/delivery.git"], &repo.root);
+    run_git(&["push", "origin", "--all"], &repo.root);
+
     // The production merge must persist CloseReady before cleanup removes
     // the source. The newer close gate then simulates interruption after
     // cleanup but before Delivered.
@@ -6265,6 +6272,8 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         .await
         .expect("public cleanup-before-close-gate merge");
     let gate_text = get_text(&result);
+    assert!(!result.is_error.unwrap_or(false), "Git landed; only close is held: {gate_text}");
+    assert!(gate_text.contains("Merge landed; close held"), "{gate_text}");
     assert!(
         gate_text.contains("VERIFICATION") && gate_text.contains(&post_merge_dispatch.id),
         "worktree_merge must return the exact actionable close gate, got:\n{gate_text}"
@@ -6341,11 +6350,6 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     if !system_a {
         // Legacy park metadata survives cleanup; the immutable receipt owns resume.
         gate_cleared_task.deliverables.parked_branch = Some(receipt.source_branch.clone());
-        let cleaned_origin = home.path().join("cleaned-origin.git");
-        run_git(&["init", "--bare", cleaned_origin.to_str().unwrap()], &repo.root);
-        run_git(&["config", &format!("url.{}.insteadOf", cleaned_origin.display()),
-            "git@github.com:org/delivery.git"], &repo.root);
-        run_git(&["push", "origin", "main"], &repo.root);
     }
     task_store
         .update(&gate_cleared_task)

@@ -585,7 +585,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         // so pin the project identity the fixture means.
         std::fs::write(
             cas_root.join("config.toml"),
-            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n"),
+            // Per-task QA: these rows follow one delivery's own dispatch and verdict.
+            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n[qa]\nmode = \"per_task\"\n"),
         )
         .expect("write config");
         let worker = slug.clone();
@@ -988,6 +989,124 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
         "{notes}"
     );
     assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Delivered);
+}
+
+/// cas-6a57: in a debug build the poll frame of an `async fn` holds a slot for
+/// every child future it constructs, so a merge that closes its delivery
+/// nested 1.79 MB of frames, overflowed tokio's 2 MiB worker and aborted
+/// `cas serve` after the merge had landed. Measure the real path's high-water
+/// mark on a worker with room to spare, so a regression reports its size
+/// instead of aborting the test binary.
+#[cfg(target_os = "linux")]
+#[test]
+fn supervisor_merge_through_close_stays_under_stack_budget_cas_6a57() {
+    /// Half of tokio's default worker stack. Measured on this fixture in a
+    /// dev-profile build: 2028440 bytes before the frames moved to the heap,
+    /// 782200 after. The headroom covers frames that vary with the operator's
+    /// config and environment.
+    const STACK_BUDGET: usize = 1024 * 1024;
+    const WORKER_STACK: usize = 8 * 1024 * 1024;
+    const PAINTED: usize = 7 * 1024 * 1024;
+    const PAINT: u64 = 0x5afe_57ac_6a57_5afe;
+
+    /// Fill the unused stack below this frame; returns its bounds.
+    #[inline(never)]
+    fn paint_stack() -> (usize, usize) {
+        let marker = 0u8;
+        let top = std::hint::black_box(&marker) as *const u8 as usize & !7;
+        let low = top - PAINTED;
+        for at in (low..top - 64 * 1024).step_by(8) {
+            // SAFETY: the range lies inside this thread's 8 MiB mapping, below
+            // every live frame, and only the paint below reads it back.
+            unsafe { (at as *mut u64).write_volatile(PAINT) };
+        }
+        (low, top)
+    }
+
+    /// Bytes below `top` that any frame has written since `paint_stack`.
+    fn stack_high_water((low, top): (usize, usize)) -> usize {
+        let mut at = low;
+        // SAFETY: as in `paint_stack`; `at` stays below the caller's frames.
+        while at < top && unsafe { (at as *const u64).read_volatile() } == PAINT {
+            at += 8;
+        }
+        top - at
+    }
+
+    let mut env = TestEnvGuard::temp_home();
+    let repo = GitRepo::new();
+    let slug = "stack-budget";
+    let remote = format!("git@github.com:org/{slug}.git");
+    run_git(&["remote", "add", "origin", &remote], &repo.root);
+    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", origin.path().display()), &remote], &repo.root);
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::ci_concluded(&cas_root, "success"));
+    std::fs::write(
+        cas_root.join("config.toml"),
+        format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n[verification]\nenabled = true\n"),
+    )
+    .expect("write config");
+    let worker_id = format!("{slug}-worker-session");
+    let supervisor_id = format!("{slug}-supervisor-session");
+    let session = format!("{slug}-factory");
+    register_delivery_agent(&cas_root, &worker_id, slug, AgentRole::Worker, &session);
+    register_delivery_agent(&cas_root, &supervisor_id, &format!("{slug}-supervisor"), AgentRole::Supervisor, &session);
+    let worker_path = cas_root.join("worktrees").join(slug);
+    repo.add_worktree(&worker_path, &format!("factory/{slug}"));
+    std::fs::write(worker_path.join("delivered.txt"), "parked delivery\n").unwrap();
+    run_git(&["add", "delivered.txt"], &worker_path);
+    run_git(&["commit", "-m", "parked delivery"], &worker_path);
+    let task_store = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("cas-stack-budget".to_string(), "Parked delivery".to_string());
+    task.task_type = TaskType::Task;
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Deep;
+    task.assignee = Some(slug.to_string());
+    task.risk = vec![cas::types::TaskRisk::None];
+    task_store.add(&task).unwrap();
+
+    // One worker keeps every poll of the merge on the painted stack.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(WORKER_STACK)
+        .enable_all()
+        .build()
+        .unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    runtime
+        .block_on(delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "PASS: delivered.txt",
+        })))))
+        .expect("worker close");
+    assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = delivery_service(&cas_root, &supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some(format!("factory/{slug}"));
+    merge.task_id = Some(task.id.clone());
+    merge.allow_trunk = Some(true);
+    merge.cleanup = Some(false);
+    let (reply, high_water) = runtime
+        .block_on(runtime.spawn(async move {
+            let painted = paint_stack();
+            let reply = supervisor.factory(Parameters(merge)).await;
+            (reply, stack_high_water(painted))
+        }))
+        .unwrap();
+
+    let reply = get_text(&reply.expect("merge replies"));
+    assert!(
+        cas_git_is_ancestor(&repo.root, &format!("factory/{slug}"), "main"),
+        "the delivery landed: {reply}"
+    );
+    assert!(reply.contains(&format!("Cassy close of {}", task.id)), "the reply names the gate: {reply}");
+    assert!(
+        high_water < STACK_BUDGET,
+        "merge through close used {high_water} stack bytes, budget {STACK_BUDGET}"
+    );
 }
 
 /// cas-96ba: transactional delivery must accept the task binding consumed by
@@ -1544,4 +1663,110 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
         .status()
         .expect("git merge-base")
         .success()
+}
+
+/// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
+#[tokio::test]
+async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
+    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "gh-failure", "green-bad-neighbor", "missing-supervisor", "unknown", "unvalidated", "missing-commit"] {
+        let home = TempDir::new().unwrap();
+        let fake_bin = TempDir::new().unwrap();
+        let gh = fake_bin.path().join("gh");
+        let response = fake_bin.path().join("ci.json");
+        std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
+        cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
+if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
+if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-failure ]; then exit 1; fi
+if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = missing-commit ]; then echo 'HTTP 422: no commit found' >&2; exit 1; fi
+cat "$CAS_CI_RETRY_TEST_RESPONSE"
+"#);
+        let mut env = TestEnvGuard::new();
+        env.set("HOME", home.path());
+        env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+        env.set("CAS_CI_RETRY_TEST_RESPONSE", &response);
+        let slug = format!("pendingretry{outcome}");
+        let fixture = arm_delivery_with_selector(&slug, &slug, &mut env,
+            &format!("project:github.com/org/{slug}")).await;
+        let remote = home.path().join("origin.git");
+        run_git(&["init", "--bare", remote.to_str().unwrap()], &fixture.repo.root);
+        run_git(&["config", &format!("url.{}.insteadOf", remote.display()),
+            &format!("git@github.com:org/{slug}.git")], &fixture.repo.root);
+        run_git(&["push", "origin", "--all"], &fixture.repo.root);
+        let refusal = run_merge(&fixture).await;
+        assert!(refusal.contains("CI PENDING"), "{outcome}: {refusal}");
+        assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+        let request = fixture.cas_root.join("merge-ci-retries").join(format!("{}.json", fixture.task_id));
+        assert!(request.exists(), "pending CI refusal must survive a daemon restart: {refusal}");
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&request).unwrap()).unwrap();
+        assert_eq!(saved["sha"],fixture.receipt.commit_sha);
+        assert_eq!(saved["ci_sha"],fixture.receipt.commit_sha);
+        let session = format!("{slug}-factory");
+        // A different factory cannot consume the intent; genuinely pending
+        // CI retains it without a supervisor notice.
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, "other-factory").await.unwrap();
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        assert!(request.exists());
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+        if outcome == "expired" {
+            let mut old = saved.clone();
+            old["armed_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+            std::fs::write(&request, serde_json::to_vec(&old).unwrap()).unwrap();
+        }
+        if outcome == "missing-supervisor" {
+            let mut orphan = saved.clone();
+            orphan["supervisor"] = serde_json::json!("deleted-supervisor");
+            std::fs::write(&request, serde_json::to_vec(&orphan).unwrap()).unwrap();
+        }
+        if outcome == "green-bad-neighbor" {
+            std::fs::write(request.with_file_name("broken.json"), "not json").unwrap();
+        }
+        if outcome == "green-held" {
+            cas_store::create_verification_dispatch_bound(
+                &fixture.cas_root, &fixture.task_id, &fixture.supervisor_id,
+                &fixture.supervisor_id, &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap();
+        }
+        std::fs::write(&response, format!(r#"{{"check_runs":[{{"name":"Fast Validation","status":"completed","conclusion":"{}"}}]}}"#,
+            if outcome == "red" { "failure" } else { "success" })).unwrap();
+        if outcome == "no-checks" { std::fs::write(&response, r#"{"check_runs":[]}"#).unwrap(); }
+        if outcome == "unknown" { std::fs::write(&response, "{}").unwrap(); }
+        if outcome == "unvalidated" {
+            std::fs::write(&response, r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"}]}"#).unwrap();
+        }
+        if outcome == "missing-commit" { std::fs::write(&response, "missing-commit").unwrap(); }
+        if outcome == "gh-failure" { std::fs::write(&response, "gh-failure").unwrap(); }
+        if outcome == "cancelled" {
+            std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"cancelled"}]}"#).unwrap();
+        }
+        if outcome == "expired" {
+            std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
+        }
+        if outcome == "moved" {
+            let worker = fixture.cas_root.join("worktrees").join(&slug);
+            std::fs::write(worker.join("new-work.txt"), "unreviewed work").unwrap();
+            run_git(&["add", "new-work.txt"], &worker);
+            run_git(&["commit", "-m", "new worker tip"], &worker);
+            run_git(&["push", "origin", &fixture.receipt.source_branch], &worker);
+        }
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+        assert!(!request.exists(), "{outcome}: settled intent is consumed once");
+        // pin: retry notices share the CI watcher's durable lifecycle wake namespace.
+        let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
+            .peek_all(100).unwrap().into_iter().filter(|p| p.source.starts_with("lifecycle-wake:ci-red-run:") || p.source.starts_with("lifecycle-wake:merge-ci-retry:")).collect();
+        if outcome.starts_with("green") {
+            assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"));
+            assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
+            if outcome == "green-held" {
+                let task = open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap();
+                assert_ne!(task.status, TaskStatus::Closed);
+                assert!(task.notes.contains("close held"), "{}", task.notes);
+            }
+        } else {
+            assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+            assert_eq!(notices.len(), 1, "{outcome}: red and moved lanes each send one notice");
+            assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
+        }
+    }
 }

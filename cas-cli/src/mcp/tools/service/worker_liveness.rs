@@ -67,7 +67,7 @@ struct TurnEvent {
 #[derive(Default)]
 struct BackgroundJobs {
     tools: std::collections::HashSet<String>,
-    running: std::collections::HashSet<String>,
+    running: std::collections::HashMap<String, DateTime<Utc>>,
 }
 impl BackgroundJobs {
     fn record(&mut self, value: &Value) {
@@ -111,7 +111,9 @@ impl BackgroundJobs {
                             .split_once(marker)
                             .and_then(|(_, rest)| rest.split_whitespace().next())
                         {
-                            self.running.insert(id.trim_end_matches('.').into());
+                            if let Some(at) = record_timestamp(value) {
+                                self.running.insert(id.trim_end_matches('.').into(), at);
+                            }
                         }
                     }
                 }
@@ -177,12 +179,16 @@ pub(crate) fn read_jsonl_tail(path: &Path, window: u64) -> Option<(u64, String)>
     Some((start, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {
+fn record_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     let at = value
         .get("timestamp")
         .or_else(|| value.get("ts"))?
         .as_str()?;
-    let at = DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc);
+    Some(DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc))
+}
+
+fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {
+    let at = record_timestamp(value)?;
     let kind = value.get("type")?.as_str()?;
     let (state, kind) = match cli {
         SupervisorCli::Codex => {
@@ -366,18 +372,30 @@ pub(crate) fn observe(
     // rather than reading a booting TUI's CPU as `executing`.
     let claude_without_transcript =
         cli == SupervisorCli::Claude && path.is_none_or(|path| !path.exists());
+    // A launch result alone proves activity for the stall window. After that,
+    // live CPU activity can still prove the background job is executing.
+    let active_background = background.running.values()
+        .filter(|at| (now - **at).num_seconds() < stall_secs.max(0))
+        .count();
+    let expired_background = background.running.len() - active_background;
     let state = if process.alive == Some(false) {
         Liveness::Dead
     } else if fatal.is_some() {
         Liveness::Stalled
     } else if last.is_none() && claude_without_transcript {
         Liveness::AwaitingFirstPrompt
-    } else if !background.running.is_empty()
+    } else if active_background > 0
         && last.as_ref().is_some_and(|event| matches!(event.state, Liveness::Executing | Liveness::WaitingForInput))
     {
         Liveness::Executing
     } else if let Some(event) = &last {
-        if event.state == Liveness::Executing
+        if event.state == Liveness::WaitingForInput && expired_background > 0 {
+            if process.cpu_busy == Some(true) {
+                Liveness::Executing
+            } else {
+                Liveness::Stalled
+            }
+        } else if event.state == Liveness::Executing
             && (now - event.at).num_seconds() > stall_secs
             && process.cpu_busy != Some(true)
         {
@@ -393,8 +411,11 @@ pub(crate) fn observe(
     let mut event_detail = last
         .map(|e| format!("{} {}s ago", e.kind, (now - e.at).num_seconds().max(0)))
         .unwrap_or_else(|| "turn evidence unavailable in bounded tail".into());
-    if !background.running.is_empty() {
-        event_detail = format!("{} native background job(s) running; {event_detail}", background.running.len());
+    if active_background > 0 {
+        event_detail = format!("{active_background} native background job(s) running; {event_detail}");
+    }
+    if expired_background > 0 {
+        event_detail = format!("{expired_background} native background job(s) have no completion after the stall window; {event_detail}");
     }
     if let Some(message) = fatal {
         event_detail = format!("fatal provider error: {message}; {event_detail}");
@@ -602,14 +623,21 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
         .map(|(_, tail)| tail.split_whitespace().collect())
         .unwrap_or_default();
     let state = fields.first().copied().unwrap_or("unknown");
-    let fingerprint = fields.get(19).copied().unwrap_or("").to_string();
-    let ticks = wedged::process_cpu_ticks(pid);
+    let ticks = wedged::worker_cpu_samples(pid);
     static SAMPLES: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<u32, (String, u64)>>,
     > = std::sync::LazyLock::new(Default::default);
     let busy = ticks.and_then(|ticks| {
         let mut samples = SAMPLES.lock().ok()?;
-        record_cpu_sample(&mut samples, pid, &fingerprint, ticks)
+        let mut busy = None;
+        // Aggregate deltas, not lifetime totals: every process keeps its own
+        // start-time identity, including across child exits and PID reuse.
+        for (pid, fingerprint, ticks) in ticks {
+            if let Some(active) = record_cpu_sample(&mut samples, pid, &fingerprint, ticks) {
+                busy = Some(busy.unwrap_or(false) || active);
+            }
+        }
+        busy
     });
     let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"))
         .unwrap_or_else(|_| "unavailable".into());

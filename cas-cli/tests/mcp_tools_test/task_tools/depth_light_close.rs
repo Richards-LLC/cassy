@@ -270,7 +270,9 @@ async fn rapid_response_window_samples_close_verification() {
             )
         }
     };
-    assert!(close(control_id).await.contains("VERIFICATION REQUIRED"), "no window: verification runs");
+    // No window: this Tier 1 delivery in the default batch mode waits for the release verdict.
+    let control = close(control_id).await;
+    assert!(control.contains("WAITING FOR RELEASE VERDICT"), "{control}");
     let window = cas::rapid_response::enable(
         &cas_dir, task_store.as_ref(), &epic_id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
     )

@@ -108,7 +108,7 @@ describe("project-first navigation", () => {
     const ended = row("gone", { ended: { at: "2026-11-01T10:00:00Z", reason: "exit", workers_stopped: [], orphans: [] } });
     list.render(nav, [row("running"), ended], vi.fn());
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(1);
-    expect(nav.textContent).not.toMatch(/Dismiss|Clear ended/);
+    expect(nav.textContent).not.toMatch(/Dismiss|Clear ended|Restore|Show .*dismissed/);
     list.render(nav, [ended], vi.fn());
     expect(nav.querySelectorAll(".project-card")).toHaveLength(0);
     list.render(nav, [row("running")], vi.fn());

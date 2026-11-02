@@ -54,7 +54,8 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
    Otherwise push the delivered branch, then send `merge_request=true` with the
    target and SHA. The merge closes the task: Cassy dispatches verification at
    the merge, a PASS closes it and tells you once, a FAIL reopens it to you with
-   findings. Do not re-close or block on that verification. While it is pending, follow
+   findings. In `qa.mode=batch` a Tier 1 delivery opens no dispatch and waits for
+   the release verdict, which the supervisor records; you have nothing to do. Do not re-close or block on that verification. While it is pending, follow
    [recovery.md](recovery.md#while-the-merge-is-pending): no polling loop.
 4. For a protected target, follow its PR flow. Ask for an epic merge rather than
    `gh pr create --base epic/...`; the supervisor owns the merge venue.

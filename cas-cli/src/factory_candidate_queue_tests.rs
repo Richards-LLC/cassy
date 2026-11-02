@@ -346,9 +346,72 @@ async fn refused_requests_name_why_and_queue_nothing() {
     let reply = fixture.request(OWN_TASK, &fixture.head).await;
     assert!(reply.contains("no factory daemon"), "{reply}");
 
+    // The daemon's own context decides: a worker's `cas serve` is confined
+    // differently from the process that builds.
+    mark_runner_live(&fixture.cas_root).unwrap();
+    record_sandbox_state(
+        &fixture.cas_root,
+        sandbox_problem("macos", "bwrap", Path::new("true")).as_deref(),
+    )
+    .unwrap();
+    let reply = fixture.request(OWN_TASK, &fixture.head).await;
+    for part in ["refused", "macos", "cas qa candidate build"] {
+        assert!(reply.contains(part), "{part} in {reply}");
+    }
+
     let queued = fixture.runner(BUILT).queued();
     assert!(queued.is_empty(), "{queued:?}");
     assert!(fixture.checkout.is_dir());
+}
+
+#[test]
+fn sandbox_probe_runs_the_real_sandbox_from_this_process() {
+    assert_eq!(
+        sandbox_problem("linux", "bwrap", Path::new("true")).is_none(),
+        namespaces_available()
+    );
+    let missing = sandbox_problem("linux", "cas-test-no-such-bwrap", Path::new("true")).unwrap();
+    assert!(missing.contains("not installed"), "{missing}");
+}
+
+#[test]
+fn only_the_runner_owner_can_publish_sandbox_availability() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let owner = initialize_runner(root, || Some("owner sandbox unavailable".into())).unwrap().unwrap();
+    assert!(initialize_runner(root, || panic!("a second daemon must not probe or publish")).unwrap().is_none());
+    assert_eq!(sandbox_refusal(root).as_deref(), Some("owner sandbox unavailable"));
+    drop(owner);
+    let _successor = initialize_runner(root, || None).unwrap().unwrap();
+    assert!(sandbox_refusal(root).is_none(), "the new owner clears the old refusal");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sandbox_probe_has_a_heartbeat_and_an_execution_deadline() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let _owner = initialize_runner(root, || {
+        assert!(runner_is_live(root), "publish a heartbeat before probing");
+        let result = run_sandbox_probe(Command::new("true"), |_| Duration::MAX);
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        Some("sandbox probe timed out".into())
+    }).unwrap().unwrap();
+    assert!(sandbox_refusal(root).unwrap().contains("timed out"));
+}
+
+/// bwrap execs the program itself, so `/proc/self/exe` there names bwrap, which
+/// then re-enters with the build's arguments and fails to nest its namespace.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_sandbox_never_runs_a_proc_self_path() {
+    let command = sandboxed_builder_command(Path::new("/proc/self/exe")).unwrap();
+    let args: Vec<_> = command.get_args().collect();
+    let separator = args.iter().position(|arg| *arg == "--").unwrap();
+    assert_eq!(
+        Path::new(args[separator + 1]),
+        std::env::current_exe().unwrap()
+    );
 }
 
 #[tokio::test]

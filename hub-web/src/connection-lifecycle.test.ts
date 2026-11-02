@@ -454,6 +454,38 @@ describe("Commander live connection lifecycle", () => {
     // The event must obtain a post-change catalog without another heartbeat.
     await waitFor(() => expect(latest).toBe("catalog-2"));
   });
+  it("settles a dismissal only after a catalog read that cannot predate the save", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    let latest: string | undefined;
+    const connection = supervisor(await storedMachine("dismiss-overlap"), () => {}, () => {}, sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(latest).toBe("catalog-1"));
+
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/dismiss")) { hub.catalogRevision(2); return new Response(null, { status: 204 }); }
+      const response = await fetchNow(input, init);
+      if (path === "/v1/sessions" && !held) { held = true; await pending; }
+      return response;
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await waitFor(() => expect(held).toBe(true));
+
+    let settled = false;
+    const dismissal = connection.dismissEndedSession("session-a", "2026-10-31T10:00:00Z").then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    release();
+    await dismissal;
+    expect(latest).toBe("catalog-2");
+  });
   it("refreshes a fleet change even when the overlapping heartbeat's read fails (cas-1966)", async () => {
     const hub = transport();
     hub.catalogRevision(1);

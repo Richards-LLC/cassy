@@ -38,7 +38,7 @@ fn build_hash() -> &'static str {
     option_env!("CAS_GIT_HASH").unwrap_or("unknown")
 }
 
-fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
     path.to_str()
         .and_then(|s| s.strip_suffix(" (deleted)"))
         .map(PathBuf::from)

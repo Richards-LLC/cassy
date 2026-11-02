@@ -985,6 +985,27 @@ export class HubConnectionSupervisor {
     return this.acquireLease(session, force);
   }
 
+  /**
+   * End a session (cas-55a4): the hub stops its daemon the way `cas kill`
+   * does. Needs factory-manage; a refusal throws like any other request.
+   */
+  async dismissEndedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
+    // Settle on a catalog that cannot predate the save: the caller then drops
+    // its local key, and an older read must not show the row again.
+    const signal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS);
+    try {
+      if (this.catalogRequest) await this.refreshSessions(signal).catch(() => {});
+      await this.refreshSessions(signal);
+    } catch { /* The hub already saved it; reconnect refreshes the catalog. */ }
+  }
+
+  /** Lift the hub's dismissal of an ended session for every paired device. */
+  async restoreDismissedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/restore`, { started_at: startedAt });
+    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
+  }
+
   /** Stop the daemon through the hub; requires factory-manage. */
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);

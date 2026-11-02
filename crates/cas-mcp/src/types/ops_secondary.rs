@@ -435,8 +435,8 @@ pub struct VerificationRequest {
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
-    /// Verification type: 'task' (default) or 'epic'
-    #[schemars(description = "Verification type: 'task' (default) or 'epic'")]
+    /// Verification type: 'task' (default) or 'epic'; batch_receipt also takes 'release'.
+    #[schemars(description = "task (default), epic; batch_receipt: release.")]
     #[serde(default)]
     pub verification_type: Option<String>,
 

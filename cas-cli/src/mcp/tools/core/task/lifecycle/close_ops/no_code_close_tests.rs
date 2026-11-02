@@ -1763,6 +1763,12 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
         "action": "close", "id": id, "commit_receipt": receipt,
         "supervisor_override": true, "reason": "Reviewed integrated delivery and upkeep debt",
     })).await;
+    assert!(!response.contains("UPKEEP WARNING") && !response.contains("UPKEEP ESCAPE"), "upkeep belongs in receipt details: {response}");
+    // pin: the immutable close receipt reference is a durable tool-response contract.
+    let path = response.lines().find_map(|line| line.strip_prefix("Details: "))
+        .and_then(|line| line.split(" (SHA-256 ").next()).expect("receipt reference");
+    // pin: upkeep warnings must be recoverable in the immutable receipt instead of the response.
+    assert!(std::fs::read_to_string(path).unwrap().contains("UPKEEP WARNING"));
     let closed = f.task(id);
     assert_eq!(closed.status, TaskStatus::Closed, "{response}");
     let upkeep: Vec<_> = closed.notes.split("\n\n")

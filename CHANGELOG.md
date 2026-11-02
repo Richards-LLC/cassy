@@ -19,6 +19,75 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Live conversations tolerate unavailable session catalogs** — Explicit sends use the current live connection, and reconnects settle while catalog reads retry. Drafts from older clients keep their words; old session sends cannot alter a replacement's delivery status, and failed draft archives preserve the original copy. Stale-session cleanup retains stop evidence for devices that reconnect later.
 
+## [3.98.0] - 2026-11-02
+
+### Fixed — Supervisor merges
+
+- **A merge keeps its reply and its close** — A supervisor's merge no longer overflows the MCP server's worker stack while closing the delivery. Development builds aborted after the merge landed, which lost the reply and the close and took the supervisor's Cassy tools with them. The merge path now uses about 780 KB of the 2 MiB stack instead of about 2 MB.
+
+### Fixed — Factory liveness and recovery
+
+- **Attribute background CPU to the job** — Busy children and grandchildren keep workers Executing after the stall window; a quiet job becomes Stalled even when its harness burns CPU. Harness CPU still proves inference when no user jobs exist.
+
+- **Keep healthy background work busy** — CPU-active process trees remain Executing after a background job passes the stall window; only quiet, unconfirmed jobs become Stalled. The candidate runner alone publishes its sandbox marker, starts its heartbeat before a five-second probe, and bounds probe cleanup. Old verification waits retain one deadline alert, recent expiries survive missing local task rows, and shorter supervisor guidance preserves the existing session-start budget.
+
+### Fixed — Peer answers and reminder timers
+
+- **Peer answers resume the asking supervisor** — Untyped replies to actionable peer messages and explicit answers wake the idle asker; legacy untyped mail remains compatible, explicit receipts stay quiet, and unknown kinds are refused.
+- **Keep legitimate deadlines and retries** — Accept timers such as “Retry capped build check” and “Deadline: check task X before 5 PM” while continuing to refuse status polls.
+
+### Fixed — Hosted prechecks and merge retries
+
+- **Bounded retries report the actual outcome** — Was: missing CI evidence could wait forever and a landed merge with a held close could report stopped. → Now: terminal CI states and two-hour waits send one notice; a landed merge keeps its close gate as a follow-up.
+- **Isolated, recoverable hosted prechecks** — Was: checkout Python modules could run with inherited credentials, dispatch discovery could lose a run, failures omitted JSON and temporary refs accumulated. → Now: Python runs isolated with its exit status preserved, uncertain dispatches recover without another dispatch, errors produce JSON and completed precheck refs are removed only at the expected SHA.
+
+### Added — Hosted queue precheck
+
+- **One command validates a commit on hosted CI** — Was: Queue prechecks needed local build and browser setup. → Now: `cas release precheck <sha>` pushes an exact-SHA ref, dispatches the queue job set and records its hosted run; `--status` reports results and elapsed time.
+
+### Fixed — Pending CI merges
+
+- **Parked merges resume when CI turns green** — Was: A supervisor retried each merge after pending CI completed. → Now: Cassy persists the authorized merge and retries it for the same source SHA, repository and target; red CI or a moved lane sends one supervisor notice.
+
+### Fixed — Factory CI
+
+- **Keep delivery code covered after docs pushes** — Compare every factory push with its shared delivery fork, so cancelling an earlier code run cannot let a docs followup skip the code checks.
+
+### Fixed — Factory context and reminders
+
+- **Quiet repeated planning** — Operation lessons match the spawned harness and appear once per session; task and spawn recall filters weak matches and repeats. Close upkeep details live in receipt files. Worker reminders end with shutdown or terminal tasks, and supervisor stall prompts wait for actionable idle time and current, eligible work.
+
+### Fixed — Queued candidate builds
+
+- **Queued builds run again** — Was: Every queued candidate build failed within seconds with "bwrap: No permissions to create a new namespace", because the sandbox was told to run `/proc/self/exe`, which names bubblewrap once it is inside. → Now: The sandbox runs the daemon's real binary path.
+- **Refused at the request** — Was: A worker on macOS, on a host without `bwrap`, or under a daemon that cannot start the sandbox got "Queued" and a failure later. → Now: The daemon tests its own sandbox when it starts, and the request is refused at once, with the reason and the supervisor's direct build named as the fallback.
+- **Killed builds no longer leak disk** — Was: A build killed by a timeout or a daemon restart left its checkout and up to 20 GiB of target behind, and the retry started a new one. → Now: The next build removes what a killed build left, and leaves a running build alone.
+
+### Fixed — Factory wait deadlines
+
+- **Bounded verification and background waits** — Was: an approved verdict could leave a task blocked forever, a close retry after the expiry relay could wake the supervisor twice, and a missing background completion kept a worker busy indefinitely. → Now: an unretried approval escalates once after five minutes, pending and timed-out dispatches share one expiry relay, and silent native background jobs become stalled after the configured stall window.
+
+### Fixed — Factory coordination
+
+- **Quiet idle turns and peer FYIs** — Refuse delay reminders that poll inbox or external status, with event/completion guidance; omit content-free supervisor status bubbles in Commander and keep untyped peer FYIs quiet while retaining explicit actions.
+
+### Fixed — Commander project card status and dismissed sessions
+
+- **Session dots follow three states** — Was: a live idle session showed an open green ring and a stopped one could read as alive. → Now: Green means the session is working, muted green means it is live and idle, and gray means it is disconnected or ended. A live session never shows a gray dot.
+- **Dismissed sessions stay reachable** — Was: a dismissed session in a project whose only session had ended could not be reached from the list. → Now: Search finds a dismissed ended session, and a "Show dismissed sessions" action at the end of the list reveals them with Restore, including a project whose only session has ended. Restore applies on every paired device.
+- **Restore holds on the browser that dismissed** — Was: after a restore on another device, the browser that dismissed the session kept hiding it and dismissed it again for every device on its next catalog read. → Now: A browser keeps its local dismissal only until the hub confirms it, so a restore on any paired device stays restored and the row returns everywhere.
+
+### Changed — One verifier per release
+
+- **Tier 1 deliveries close on one release verdict** — Was: with `qa.mode=batch`, each merged delivery opened its own verifier (9 on 3.96, 1.57M fresh tokens). Now: Tier 1 merges open no dispatch, and one review of the assembled tip closes them all once `verification action=batch_receipt verification_type=release` records a report naming every delivery. Tier 2 guard, CI and release code, unmeasurable diffs, `force-verifier` and `qa.mode=per_task` keep their own verifier, and a verdict never counts as QA evidence.
+
+### Fixed — Release verdict closes what it covers
+
+- **The verdict closes its Tier 1 deliveries** — Was: `verification action=batch_receipt verification_type=release` recorded the verdict and nothing closed the merged deliveries it named, so they stayed parked. Now: recording it runs the merge close for each Tier 1 delivery and reports what closed and what a gate still holds, and a QA receipt recorded afterwards finishes a close that waited on QA. Tier 2 deliveries named in the verdict keep their own verifier.
+- **Waiting for the verdict no longer nags** — Was: each merged Tier 1 delivery woke the supervisor as a blocked close, said "awaiting worker close" and suggested `supervisor_override`, which skips the review. Now: the epic gets one prompt to run the release review, once nothing else in it is active, with no override.
+- **An unassigned delivery can be covered by the verdict** — Was: with its assignee cleared, close waited for the verdict and the verdict refused it as having no implementer. Now: its recorded start and anchor name the implementer, and they still count for the no-self-review check.
+- **`verification_type=task` works on `batch_receipt`** — Was: the documented default was rejected. Now: it records a batch QA receipt.
+- **Unreadable worker holds suppress only assignment prompts** — Was: merge and close prompts were dropped along with them. Now: only an assignment, which could pick a held worker, is refused.
 
 ## [3.97.0] - 2026-11-02
 

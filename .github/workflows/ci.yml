@@ -1103,7 +1103,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: queue-flakes-playwright-${{ matrix.shard }}-${{ github.run_attempt }}
+          name: queue-flakes-playwright-${{ matrix.shard }}
           path: |
             hub-web/e2e/.results/
             target/queue-flakes/playwright-${{ matrix.shard }}/

@@ -877,10 +877,34 @@ mod tests {
             serde_json::json!({"timestamp":"2026-09-23T12:00:03Z","type":"system","subtype":"turn_duration"}),
         ];
         let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
-        assert_eq!(turns.len(), 3, "typed input, a mid-turn send and every new hook marker each retain their answer");
-        assert_eq!(turns.iter().map(|turn| turn.commander_id).collect::<Vec<_>>(), vec![None, Some(42), Some(43)]);
+        assert_eq!(turns.len(), 1, "one native answer must appear once for all consumed questions");
+        assert_eq!(turns[0].commander_id, Some(43));
         assert_eq!(turns[0].prompt.as_deref(), Some("status"));
         assert!(turns.iter().all(|turn| turn.text == "Done"));
+    }
+
+    #[test]
+    fn claude_standalone_machine_turn_mirrors_as_status_without_stealing_input() {
+        for entry in ["user", "attachment"] {
+            let machine = if entry == "user" {
+                serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"user","uuid":"notification","origin":{"kind":"task-notification"},"message":{"content":"Background job finished"}})
+            } else {
+                serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"attachment","uuid":"notification","attachment":{"type":"queued_command","origin":{"kind":"task-notification"},"prompt":"Background job finished"}})
+            };
+            let values = [machine, serde_json::json!({"timestamp":"2026-09-23T12:00:02Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The background result is ready"}],"stop_reason":"end_turn"}})];
+            let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
+            assert_eq!(turns.len(), 1, "standalone {entry} notification must retain the answer");
+            assert_eq!(turns[0].commander_id, None);
+            assert_eq!(turns[0].text, "The background result is ready");
+            assert!(terminal_inputs(&values, cas_mux::SupervisorCli::Claude).is_empty());
+        }
+    }
+
+    #[test]
+    fn commander_envelopes_ignore_inline_and_quoted_markers() {
+        let values = codex_turn("Question with Example: [cas #8 operator Alice@phone verified 0s first] old\n> [cas #9 operator Alice@phone verified 0s first] quoted\n[cas #42 operator Alice@phone verified 0s first] actual");
+        let turns = completed_turns(&values, cas_mux::SupervisorCli::Codex);
+        assert_eq!(turns[0].commander_id, Some(42), "only an envelope beginning a row may bind");
     }
 
     #[test]
@@ -1440,7 +1464,7 @@ mod tests {
         let third = first.with_file_name("rollout-2026-10-10T12-00-02-peer.jsonl");
         write(&third, peer, "peer", "Peer session answer");
         std::fs::File::open(&third).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(3)).unwrap();
-        state.poll_clock = Some(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        state.poll_clock = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
         scan(&mut state);
         let replies = operator_replies(&queue);
         assert!(replies.iter().any(|reply| reply.message == "Latest terminal answer"),

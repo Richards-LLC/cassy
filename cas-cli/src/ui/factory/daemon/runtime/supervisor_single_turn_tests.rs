@@ -863,7 +863,7 @@ async fn non_claude_commander_send_waits_through_dialogs() {
             assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "{cli:?}: {screen}");
             assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "dialog must receive no body or submit");
         }
-        daemon.app.mux.get_mut(&supervisor).unwrap().feed(b"\x1b[2J\x1b[Hready").unwrap();
+        daemon.app.mux.get_mut(&supervisor).unwrap().feed(b"\x1b[2J\x1b[HThe instructions say enter to confirm or esc to cancel.\r\nDo you trust this example?\r\n\r\n> ").unwrap();
         typed_once(&root, &mut daemon, body).await;
         assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap().matches(body).count(), 1);
     }

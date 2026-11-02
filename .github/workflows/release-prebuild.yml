@@ -16,11 +16,27 @@ name: Release Prebuild
 # calling this workflow (workflow_call), so the build steps exist once.
 #
 # Every lane is GitHub-hosted. workflow_dispatch builds the dispatched ref
-# unconditionally; it exists for dry runs and recovery and publishes nothing.
+# by default; seed_only proves the miss/save/hit gate without publishing.
 on:
   merge_group:
+  push:
+    branches: [main]
   workflow_call:
+    inputs:
+      platform:
+        type: string
+        default: all
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build (all, linux or macos)
+        type: choice
+        options: [all, linux, macos]
+        default: all
+      seed_only:
+        description: Seed missing dependency caches; skip compilation on an exact hit
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,6 +50,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Optimized rustc work can take >600s without another request. sccache's
+  # default idle shutdown allows only 10s for active clients before exiting.
+  SCCACHE_IDLE_TIMEOUT: "0"
   SCCACHE_GHA_VERSION: "cas-v2"
   RELEASE_PROFILE: release-fast
   RELEASE_DIR: release-fast
@@ -79,19 +98,71 @@ jobs:
       !cancelled()
       && (needs.pending-release.result == 'skipped'
       || needs.pending-release.outputs.pending == 'true')
+      && (inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'linux')
     runs-on: ubuntu-latest
+    # Collapse overlapping main seeds; publication fallbacks and queue builds
+    # keep their own run group so a seed never delays a release build.
+    concurrency:
+      group: release-deps-linux-${{ github.event_name == 'push' && inputs.platform == '' && 'seed-main' || github.run_id }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           ref: ${{ github.sha }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Identify release dependency cache
+        id: cache-key
+        run: python3 scripts/release-cache-key.py x86_64-unknown-linux-gnu | tee -a "$GITHUB_OUTPUT"
+
+      # Scope is the run ref, not the checked-out SHA. A main push seeds only
+      # after an exact-key lookup misses. Queue builds can read main's cache.
+      - name: Look up release dependency cache
+        id: cache-lookup
+        uses: actions/cache/restore@v4
         with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-key.outputs.key }}
+          lookup-only: true
+
+      # A workflow_call inherits its caller's push event. Its nonempty
+      # platform input distinguishes a publication fallback from a main seed.
+      - name: Decide whether compilation is needed
+        id: compile
+        env:
+          SEED_ONLY: ${{ (github.event_name == 'push' && inputs.platform == '') || inputs.seed_only }}
+          CACHE_HIT: ${{ steps.cache-lookup.outputs.cache-hit }}
+        run: |
+          if [[ "$SEED_ONLY" == true && "$CACHE_HIT" == true ]]; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+            echo 'Exact release dependency cache hit; seed compilation skipped' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # Dispatch seeds also restore on a hit to prove the save/restore path.
+      # Ordinary main cache hits do not download or compile anything.
+      - name: Restore release dependencies
+        if: steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Install pinned Rust
+        if: steps.compile.outputs.needed == 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.cache-key.outputs.toolchain }}
           targets: x86_64-unknown-linux-gnu
 
       - name: Install Linux linker
+        if: steps.compile.outputs.needed == 'true'
         run: |
           sudo apt-get update
           # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
@@ -100,11 +171,13 @@ jobs:
           mold --version
 
       - name: Setup sccache
+        if: steps.compile.outputs.needed == 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
+        if: steps.compile.outputs.needed == 'true'
         env:
           SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
@@ -117,16 +190,20 @@ jobs:
               "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
-      - name: Cache release dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Restore pinned Zig
+        if: steps.compile.outputs.needed == 'true'
+        id: zig-cache
+        uses: actions/cache/restore@v4
         with:
-          key: release-linux-x86_64
-          cache-on-failure: true
+          path: .context/zig
+          key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
 
       - name: Install Zig
+        if: steps.compile.outputs.needed == 'true'
         run: ./scripts/bootstrap-zig.sh
 
       - name: Build
+        if: steps.compile.outputs.needed == 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: |
@@ -136,6 +213,7 @@ jobs:
           cargo build -p cas --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu --locked
 
       - name: Stage package
+        if: steps.compile.outputs.needed == 'true'
         run: |
           mkdir -p package
           cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/cas" package/
@@ -146,17 +224,20 @@ jobs:
       # here. The packaged-binary ISA audit and launch smoke run again in
       # release.yml on the exact archive that ships.
       - name: Audit build outputs and packaged Linux executable
+        if: steps.compile.outputs.needed == 'true'
         run: |
           ./scripts/check-blake3-no-avx512-build.sh "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"
           ./scripts/test-check-portable-x86_64-isa.sh package/cas
 
       - name: Package
+        if: steps.compile.outputs.needed == 'true'
         run: |
           cd package
           tar -czvf cas-x86_64-unknown-linux-gnu.tar.gz cas LICENSE
           mv cas-x86_64-unknown-linux-gnu.tar.gz ../
 
       - name: Upload artifact
+        if: steps.compile.outputs.needed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cas-x86_64-unknown-linux-gnu
@@ -164,13 +245,36 @@ jobs:
           retention-days: 14
 
       - name: Report sccache stats
-        if: always()
+        if: always() && steps.compile.outputs.needed == 'true'
         run: |
           if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
             ./scripts/ci-sccache-summary.sh "Prebuild Linux x86_64"
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
+
+      - name: Save release dependencies
+        if: >-
+          steps.compile.outputs.needed == 'true'
+          && steps.cache-lookup.outputs.cache-hit != 'true'
+          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Save pinned Zig
+        if: >-
+          steps.compile.outputs.needed == 'true'
+          && steps.zig-cache.outputs.cache-hit != 'true'
+          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@v4
+        with:
+          path: .context/zig
+          key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
 
   # There is no Mac in the fleet, so this stays on hosted macOS. Starting it at
   # enqueue overlaps the slowest release build with the merge-queue tests.
@@ -181,9 +285,13 @@ jobs:
       !cancelled()
       && (needs.pending-release.result == 'skipped'
       || needs.pending-release.outputs.pending == 'true')
+      && (inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'macos')
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
     # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
     runs-on: macos-26
+    concurrency:
+      group: release-deps-macos-${{ github.event_name == 'push' && inputs.platform == '' && 'seed-main' || github.run_id }}
+      cancel-in-progress: false
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       # cas-d8ec: the macOS asset ships without LTO. Measured cold on macos-26
@@ -194,23 +302,79 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           ref: ${{ github.sha }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Identify release dependency cache
+        id: cache-key
+        run: python3 scripts/release-cache-key.py aarch64-apple-darwin | tee -a "$GITHUB_OUTPUT"
+
+      # Scope is the run ref, not the checked-out SHA. A main push seeds only
+      # after an exact-key lookup misses. Queue builds can read main's cache.
+      - name: Look up release dependency cache
+        id: cache-lookup
+        uses: actions/cache/restore@v4
         with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-key.outputs.key }}
+          lookup-only: true
+
+      # A workflow_call inherits its caller's push event. Its nonempty
+      # platform input distinguishes a publication fallback from a main seed.
+      - name: Decide whether compilation is needed
+        id: compile
+        env:
+          SEED_ONLY: ${{ (github.event_name == 'push' && inputs.platform == '') || inputs.seed_only }}
+          CACHE_HIT: ${{ steps.cache-lookup.outputs.cache-hit }}
+        run: |
+          if [[ "$SEED_ONLY" == true && "$CACHE_HIT" == true ]]; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+            echo 'Exact release dependency cache hit; seed compilation skipped' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # Dispatch seeds also restore on a hit to prove the save/restore path.
+      # Ordinary main cache hits do not download or compile anything.
+      - name: Restore release dependencies
+        if: steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Install pinned Rust
+        if: steps.compile.outputs.needed == 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.cache-key.outputs.toolchain }}
           targets: aarch64-apple-darwin
 
+      - name: Restore pinned Zig
+        if: steps.compile.outputs.needed == 'true'
+        id: zig-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .context/zig
+          key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
+
       - name: Install Zig
+        if: steps.compile.outputs.needed == 'true'
         run: ./scripts/bootstrap-zig.sh
 
       - name: Setup sccache
+        if: steps.compile.outputs.needed == 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
+        if: steps.compile.outputs.needed == 'true'
         env:
           SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
@@ -223,17 +387,8 @@ jobs:
               "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
-      # cas-542e: no Cargo.lock hash in `key`. Every release bumps workspace
-      # versions in Cargo.lock, and `key` is part of the restore prefix, so the
-      # previous release's dependencies never restored (8 of 9 runs were cold,
-      # 21-25 min). rust-cache appends its own lockfile hash to the saved key.
-      - name: Cache release dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-macos-aarch64
-          cache-on-failure: true
-
       - name: Build
+        if: steps.compile.outputs.needed == 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --profile "$RELEASE_PROFILE" --target aarch64-apple-darwin --locked
@@ -242,6 +397,7 @@ jobs:
       # produces the Darwin bytes signs and verifies them; release.yml verifies
       # the signature again on the exact archive that ships.
       - name: Package
+        if: steps.compile.outputs.needed == 'true'
         run: |
           mkdir -p package
           cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
@@ -256,6 +412,7 @@ jobs:
           mv cas-aarch64-apple-darwin.tar.gz ../
 
       - name: Upload artifact
+        if: steps.compile.outputs.needed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cas-aarch64-apple-darwin
@@ -263,10 +420,33 @@ jobs:
           retention-days: 14
 
       - name: Report sccache stats
-        if: always()
+        if: always() && steps.compile.outputs.needed == 'true'
         run: |
           if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
             ./scripts/ci-sccache-summary.sh "Prebuild macOS ARM64"
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
+
+      - name: Save release dependencies
+        if: >-
+          steps.compile.outputs.needed == 'true'
+          && steps.cache-lookup.outputs.cache-hit != 'true'
+          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Save pinned Zig
+        if: >-
+          steps.compile.outputs.needed == 'true'
+          && steps.zig-cache.outputs.cache-hit != 'true'
+          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@v4
+        with:
+          path: .context/zig
+          key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}

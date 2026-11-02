@@ -15,6 +15,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Skip unchanged visual-QA tool fixtures** — Integration CI selects these tests from their registered inputs and keeps exhaustive assembly coverage. Codemap receipt fixtures use a tiny Git repository, scoped lanes share diff classification, and obsolete PR receipt recording is removed.
 
+### Fixed — Release builds
+
+- **Reuse release dependencies across queue entries** — Main seeds missing dependency caches, release builds keep sccache alive during long compiles, and each uploaded platform archive starts its audit before cache saving finishes. The publisher checks out only the release commit and builds only a missing platform.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

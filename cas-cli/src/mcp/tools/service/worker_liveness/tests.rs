@@ -674,6 +674,8 @@ if child:
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("background.jsonl");
         std::fs::write(&path, concat!(
+            r#"{"timestamp":"2026-09-10T18:59:59Z","type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"shell","name":"Bash","input":{"command":"background job","run_in_background":true}}]}}"#,
+            "\n",
             r#"{"timestamp":"2026-09-10T19:00:00Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"shell","content":"Command running in background with ID: job-42."}]}}"#,
             "\n",
             r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#,

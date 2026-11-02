@@ -171,6 +171,7 @@ async function cleanup() {
     await stopLaunchedDaemon(state.home, { pid: state.hub.pid });
   await stop(state.hub);
   await stop(state.daemon);
+  for (const daemon of state.extraDaemons ?? []) await stop(daemon);
   const ownedLaunch = join(state.home, "launched-pid");
   if (existsSync(ownedLaunch)) {
     const owned = JSON.parse(await readFile(ownedLaunch, "utf8"));
@@ -196,13 +197,13 @@ async function cleanup() {
   }
   state = undefined;
 }
-function startDaemon() {
-  state.daemon = launch(
+function startDaemon(session = state.session) {
+  const daemon = launch(
     [
       "factory",
       "daemon",
       "--session",
-      state.session,
+      session,
       "--cwd",
       state.project,
       "--workers",
@@ -211,10 +212,52 @@ function startDaemon() {
       "--no-phone-home",
       "--foreground",
       "--supervisor-name",
-      "journey-supervisor",
+      session === state.session ? "journey-supervisor" : session,
     ],
-    "daemon-process.log",
+    session === state.session ? "daemon-process.log" : `${session}-daemon-process.log`,
   );
+  if (session === state.session) state.daemon = daemon;
+  else {
+    state.extraDaemons ??= [];
+    state.extraDaemons.push(daemon);
+    state.namedDaemons ??= new Map();
+    state.namedDaemons.set(session, daemon);
+  }
+  return daemon;
+}
+// Real daemon processes create both stale metadata and an end receipt; no
+// catalog payloads are fabricated for the stopped-session regression.
+async function stoppedSessions() {
+  const result = [];
+  state.extraDaemons ??= [];
+  for (const kind of ["crashed", "ended"]) {
+    const name = `${kind}-journey`;
+    const daemon = launch(["factory", "daemon", "--session", name, "--cwd", state.project,
+      "--workers", "0", "--no-worktrees", "--no-phone-home", "--foreground",
+      "--supervisor-name", `${kind}-supervisor`], `${kind}-process.log`);
+    state.extraDaemons.push(daemon);
+    const dir = join(state.home, ".cas", "sessions");
+    const deadline = performance.now() + 20000;
+    let metadata;
+    while (performance.now() < deadline) {
+      for (const file of await readdir(dir)) {
+        try { const value = JSON.parse(await readFile(join(dir, file), "utf8"));
+          if (value.name === name && value.ws_port) metadata = value;
+        } catch { /* The writer may be replacing metadata. */ }
+      }
+      if (metadata) break;
+      if (daemon.exitCode !== null) throw Error(`${kind} fixture daemon exited early`);
+      await delay(100);
+    }
+    if (!metadata) throw Error(`${kind} fixture daemon metadata missing`);
+    if (kind === "crashed") {
+      const exited = new Promise(resolve => daemon.once("exit", resolve));
+      daemon.kill("SIGKILL");
+      await exited;
+    } else await stop(daemon);
+    result.push({ name, pid: daemon.pid, signal: kind === "crashed" ? "SIGKILL" : "SIGTERM" });
+  }
+  return result;
 }
 async function reset({ messageControl = false, newSession = false, nativeCommander = false, endSession = false } = {}) {
   await cleanup();
@@ -532,12 +575,18 @@ const server = createServer(async (req, res) => {
         case "/start":
           await startHub();
           return { started: true };
-        case "/daemon-stop":
-          await stop(state.daemon);
-          return { daemonPid: state.daemon.pid };
-        case "/daemon-start":
-          startDaemon();
-          return { daemonPid: state.daemon.pid };
+        case "/stopped-sessions":
+          return stoppedSessions();
+        case "/daemon-stop": {
+          const daemon = data.session ? state.namedDaemons?.get(data.session) : state.daemon;
+          if (!daemon) throw Error("unknown owned fixture daemon");
+          await stop(daemon);
+          return { daemonPid: daemon.pid };
+        }
+        case "/daemon-start": {
+          const daemon = startDaemon(data.session);
+          return { daemonPid: daemon.pid };
+        }
         case "/attachment": {
           const path = join(state.project, ".cas", "factory-daemon", state.session + ".loop.json");
           const loop = existsSync(path) ? JSON.parse(await readFile(path, "utf8")) : {};

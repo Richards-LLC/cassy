@@ -50,14 +50,6 @@ describe("project-first navigation", () => {
     }
   });
 
-  it("shows a stopped session as disconnected on a machine that is still online, and a live idle one as idle", () => {
-    const nav = setup();
-    const ended = { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] };
-    new ProjectNavigation().render(nav, [row("stopped-swan", { supervisorState: "idle", attention: 1, machine_online: true, ended }), row("resting-owl", { supervisorState: "idle", machine_online: true })], () => undefined, async () => undefined);
-    expect(nav.querySelector('[data-thread-key="stopped-swan"] .supervisor-state')?.getAttribute("aria-label")).toBe("Offline");
-    expect(nav.querySelector('[data-thread-key="resting-owl"] .supervisor-state')?.getAttribute("aria-label")).toBe("Idle");
-  });
-
   it("orders cards by project name and rows by supervisor, and activity never moves either (cas-ade2)", () => {
     const nav = setup();
     const navigation = new ProjectNavigation();
@@ -111,72 +103,16 @@ describe("project-first navigation", () => {
     expect(nav.querySelector(".project-card-toggle")?.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("keeps an ended generation dismissed when its end receipt changes, but shows its replacement", async () => {
+  it("hides ended rows and removes the last project's card without dismissal (cas-f8ab)", () => {
     const nav = setup(); const list = new ProjectNavigation();
-    const ended = row("calm-swan-15", { startedAt: 1000, ended: { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
-    const save = vi.fn(async () => {});
-    list.render(nav, [ended], vi.fn(), undefined, { dismissEnded: save });
-    nav.querySelector<HTMLButtonElement>('[aria-label="Dismiss ended session calm-swan-15"]')!.click();
-    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    expect(save).toHaveBeenCalledWith(expect.objectContaining(ended));
-    const updated = { ...ended, ended: { ...ended.ended!, at: "2026-10-31T10:00:01Z" } };
-    list.render(nav, [updated], vi.fn());
-    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    new ProjectNavigation().render(nav, [updated], vi.fn());
-    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    new ProjectNavigation().render(nav, [{ ...updated, startedAt: 2000 }], vi.fn());
+    const ended = row("gone", { ended: { at: "2026-11-01T10:00:00Z", reason: "exit", workers_stopped: [], orphans: [] } });
+    list.render(nav, [row("running"), ended], vi.fn());
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(1);
-    // A fresh browser reads the hub's preference, without a local key.
-    localStorage.clear();
-    new ProjectNavigation().render(nav, [{ ...updated, dismissed: true }], vi.fn());
-    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    // Pre-upgrade keys are carried to shared storage when their receipt matches.
-    localStorage.setItem("commander.dismissed-ended-sessions", JSON.stringify([`${ended.key}\u0000${ended.ended!.at}`]));
-    const migrate = vi.fn(async () => { throw new Error("Hub unreachable"); });
-    new ProjectNavigation().render(nav, [ended], vi.fn(), undefined, { dismissEnded: migrate });
-    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    expect(migrate).toHaveBeenCalledWith(expect.objectContaining(ended));
-    await Promise.resolve();
-    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(0);
-    // Interrupted or failed sync is retried on reload, without resurrecting the row.
-    const retry = vi.fn(async () => {});
-    new ProjectNavigation().render(nav, [ended], vi.fn(), undefined, { dismissEnded: retry });
-    expect(retry).toHaveBeenCalledWith(expect.objectContaining(ended));
-    // The key is only an unsynced marker: a hub receipt drops it.
-    await vi.waitFor(() => expect(localStorage.getItem("commander.dismissed-ended-sessions")).toBe("[]"));
-    // A key kept from before this rule goes once the hub reports its tombstone.
-    localStorage.setItem("commander.dismissed-ended-sessions", JSON.stringify([`${ended.machineId}\u0000${ended.session}\u0000${ended.startedAt}`]));
-    new ProjectNavigation().render(nav, [{ ...ended, dismissed: true }], vi.fn());
-    expect(localStorage.getItem("commander.dismissed-ended-sessions")).toBe("[]");
-  });
-
-  it("restores a hub-dismissed session through the hub, and keeps it dismissed when the hub refuses", async () => {
-    const nav = setup();
-    const ended = row("calm-swan-15", { startedAt: 1000, dismissed: true, ended: { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
-    const reveal = () => [...nav.querySelectorAll("button")].find((button) => button.textContent === "Show 1 dismissed session")!.click();
-    const restoreButton = () => nav.querySelector<HTMLButtonElement>('[aria-label="Restore dismissed session calm-swan-15"]');
-    const dismissButton = () => nav.querySelector<HTMLButtonElement>('[aria-label="Dismiss ended session calm-swan-15"]');
-    const refused = vi.fn(async () => { throw new Error("Hub unreachable"); });
-    const failing = new ProjectNavigation();
-    failing.render(nav, [ended], vi.fn(), undefined, { restoreEnded: refused });
-    reveal();
-    restoreButton()!.click();
-    await vi.waitFor(() => expect(nav.querySelector('[role="alert"]')?.textContent).toContain("Could not restore calm-swan-15"));
-    expect(restoreButton()).not.toBeNull();
-
-    nav.replaceChildren();
-    const save = vi.fn(async () => {});
-    const list = new ProjectNavigation();
-    list.render(nav, [ended], vi.fn(), undefined, { restoreEnded: save });
-    reveal();
-    restoreButton()!.click();
-    expect(save).toHaveBeenCalledWith(expect.objectContaining({ session: "calm-swan-15" }));
-    // The row is back at once, even while the catalog in hand still says dismissed.
-    expect(dismissButton()).not.toBeNull();
-    list.render(nav, [ended], vi.fn(), undefined, { restoreEnded: save });
-    expect(dismissButton()).not.toBeNull();
-    list.render(nav, [{ ...ended, dismissed: false }], vi.fn(), undefined, { restoreEnded: save });
-    expect(dismissButton()).not.toBeNull();
+    expect(nav.textContent).not.toMatch(/Dismiss|Clear ended|Restore|Show .*dismissed/);
+    list.render(nav, [ended], vi.fn());
+    expect(nav.querySelectorAll(".project-card")).toHaveLength(0);
+    list.render(nav, [row("running")], vi.fn());
+    expect(nav.querySelectorAll(".project-card")).toHaveLength(1);
   });
 
   it("pins operator decisions and intersects the Needs you and machine filters with the supplied search results", () => {

@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.98.1] - 2026-11-02
+
+### Fixed — Commander
+
+- **Offline messages show their send deadline** — Waiting messages and the composer explain the two-minute automatic-send window, after which the words stay available for Edit or Retry.
+
+- **Running sessions survive catalog failures** — Running dormant daemons and last-known sessions stay listed until the hub positively confirms a stop. Held messages and drafts keep their original session start identity, and restored messages immediately apply known stop evidence.
+
+- **Unsent drafts stay reachable when a session stops** — Focused and inactive drafts move to Saved messages, survive reload, and can be copied while other conversations stay open. A same-name replacement starts with an empty composer.
+
+- **Stopped conversations leave Commander automatically** — Ended and crashed sessions disappear without dismissal or attach retries. Machine outages keep running conversations available, and waiting messages to stopped sessions are saved as not sent.
+
+- **Live conversations tolerate unavailable session catalogs** — Explicit sends use the current live connection, and reconnects settle while catalog reads retry. Drafts from older clients keep their words; old session sends cannot alter a replacement's delivery status, and failed draft archives preserve the original copy. Stale-session cleanup retains stop evidence for devices that reconnect later.
+
 ## [3.98.0] - 2026-11-02
 
 ### Fixed — Supervisor merges

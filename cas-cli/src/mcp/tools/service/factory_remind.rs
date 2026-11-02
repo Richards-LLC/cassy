@@ -997,6 +997,26 @@ mod tests {
             .expect("self-targeted reminder");
         assert_eq!(self_reminders.len(), 1);
         assert_eq!(self_reminders[0].target_id, worker.id);
+
+        for message in [
+            "Poll inbox_poll for operator messages in three minutes",
+            "Check CI on the pushed SHA",
+            "Recheck whether the delivery has merged",
+            "Poll detached build log for completion",
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "remind", "remind_message": message, "remind_delay_secs": 180
+            })).unwrap();
+            let error = service.factory_remind(request).await
+                .expect_err("delay-based polling must not create a wake");
+            let error = error.to_string();
+            for pointer in ["ci_completed", "task", "branch_contained_in", "background-task"] {
+                assert!(error.contains(pointer), "missing {pointer}: {error}");
+            }
+        }
+        assert_eq!(reminders.list_pending_for_target(&worker.id).unwrap().len(), 1,
+            "refused polls leave no pending timer");
+
     }
 
     #[test]

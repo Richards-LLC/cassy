@@ -2198,6 +2198,18 @@ mod tests {
             "Noted the worker update.",
             now + chrono::Duration::seconds(10),
         ));
+        for (index, text) in [
+            "No new messages from you.",
+            "No action needed.",
+            "Thanks, received.",
+        ].into_iter().enumerate() {
+            turns.extend(codex_turn_at(
+                &format!("idle-{index}"),
+                "[cas #78 reminder 0s first] Check the inbox",
+                text,
+                now + chrono::Duration::seconds(20 + index as i64 * 10),
+            ));
+        }
         let (temp, root, queue) = terminal_session(turns);
         let terminal = queue
             .record_terminal_operator_turn("factory-1", question)

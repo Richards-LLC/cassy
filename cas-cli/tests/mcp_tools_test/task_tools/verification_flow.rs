@@ -1156,6 +1156,19 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     unassigned.assignee = None;
     tasks.update(&unassigned).unwrap();
 
+    // cas-d8b2 / cas-5249: old dispatches and deferred batch evidence must
+    // not strand merged Tier 1 work after a later, exact release verdict.
+    for (index, (id, _)) in deliveries.iter().take(2).enumerate() {
+        cas_store::defer_qa_batch_evidence(&cas_dir, id, &tips[index]).unwrap();
+        cas_store::create_verification_dispatch(
+            &cas_dir, id, "ended-supervisor", "ended-supervisor",
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+        ).unwrap();
+        if index == 0 {
+            cas_store::timeout_verification_dispatch(&cas_dir, id, chrono::Utc::now()).unwrap();
+        }
+    }
+
     let report = temp.path().join("RELEASE-REVIEW.md");
     let named: Vec<&str> = deliveries.iter().map(|(id, _)| id.as_str()).collect();
     std::fs::write(&report, format!("# Release review\n{}\n", named.join(" PASS\n"))).unwrap();
@@ -1187,7 +1200,8 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     for (index, (id, path)) in deliveries.iter().enumerate() {
         if path.starts_with("src/") {
             assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed, "{recorded}");
-            assert!(!dispatched(id), "{recorded}");
+            // The superseded dispatch remains immutable audit history.
+            assert!(dispatched(id), "{recorded}");
             continue;
         }
         assert!(!dispatched(id), "the verdict opens no verifier for Tier 2: {recorded}");

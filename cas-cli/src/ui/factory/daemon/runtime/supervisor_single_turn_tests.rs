@@ -964,7 +964,10 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                     assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_some(), "{context}");
                 } else {
                     assert!(!daemon.app.mux.has_pending_injects(), "{context}: denied wake must not admit PTY bytes");
-                    nothing_typed_or_relayed(&root, &daemon);
+                    let input = std::fs::read_to_string(root.path().join("input")).unwrap();
+                    assert!(input.is_empty(), "{context}: unexpected PTY input {input:.200}; report={:?}; inputs={:?}",
+                        queue.message_delivery_report(id).unwrap(), daemon.queue_jobs.prompt_preparation.recipient(&name));
+                    assert!(teams_messages(&daemon).is_empty(), "{context}");
                     let row = queue.queued_prompt(id).unwrap().unwrap();
                     assert!(row.processed_at.is_none(), "{context}: retain gated row");
                     assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_none(), "{context}");

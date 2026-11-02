@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander project card status and dismissed sessions
+
+- **Session dots follow three states** — Was: a live idle session showed an open green ring and a stopped one could read as alive. → Now: Green means the session is working, muted green means it is live and idle, and gray means it is disconnected or ended. A live session never shows a gray dot.
+- **Dismissed sessions stay reachable** — Was: a dismissed session in a project whose only session had ended could not be reached from the list. → Now: Search finds a dismissed ended session, and a "Show dismissed sessions" action at the end of the list reveals them with Restore, including a project whose only session has ended.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

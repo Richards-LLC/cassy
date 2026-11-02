@@ -216,7 +216,7 @@ function startDaemon() {
     "daemon-process.log",
   );
 }
-async function reset({ messageControl = false, newSession = false, nativeCommander = false } = {}) {
+async function reset({ messageControl = false, newSession = false, nativeCommander = false, endSession = false } = {}) {
   await cleanup();
   const home = await createRealHubHome();
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
@@ -344,7 +344,8 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
         "--json",
         "hub",
         "pair",
-        ...(newSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,session-launch"] : messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
+        // endSession: HUB-J14 ends its supervisor from Commander, which needs factory:manage.
+        ...(newSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,session-launch"] : endSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,factory:manage"] : messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
         "--origin",
         commanderOrigin,
         "--hub-url",

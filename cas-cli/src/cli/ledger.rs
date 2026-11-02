@@ -708,6 +708,19 @@ mod tests {
         // Backfill must recover its original time, then the report must count
         // it even though the immutable release snapshot recorded zero.
         git_in(repo, &["remote", "add", "origin", "https://github.com/example/project.git"]);
+        // cas-df19: v3.94-3.98 already emitted this fact under its queue-exit
+        // alias. The append-only ledger retains that row across the upgrade.
+        let mut old_ejection = NewQualityEvent::new(
+            "merge_queue|cas-release|1446|queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444",
+            QualityPayload::CheckRun { check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
+                stage: cas_store::CheckStage::Queue, outcome: CheckOutcome::Fail,
+                sha: None, minutes: None },
+        );
+        old_ejection.task_id = Some("cas-release".into());
+        old_ejection.occurred_at = at(2, 5);
+        old_ejection.title = Some("Rust tests shard 1".into());
+        old_ejection.link = Some("https://github.com/example/project/actions/runs/41246801444".into());
+        assert!(crate::quality_ledger::emit(&cas_root, &old_ejection));
         let queue = crate::store::open_supervisor_queue_store(&cas_root).unwrap();
         for occurrence in ["queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444", "merge-group-run:41246801444"] {
         let relay = queue.notify("old-supervisor", "merge_queue_ejected", &serde_json::json!({
@@ -776,5 +789,15 @@ mod tests {
                 "Feature feedback\n  none recorded"
             } else { "none with known scope" }), "{text}");
         }
+
+        // A fresh immutable release snapshot must also count the legacy run
+        // once, independently of the report's observed-ejection floor above.
+        git_in(repo, &["tag", "v1.1.1", "v1.1.0"]);
+        std::fs::write(&receipt, "TAG=v1.1.1\nPUBLISHED_AT=2026-10-02T12:10:00Z\n").unwrap();
+        record_release(&cas_root, repo, &receipt).unwrap();
+        let release = cas_store::quality_release_events(&cas_root).unwrap().into_iter()
+            .find(|event| event.release_version.as_deref() == Some("v1.1.1")).unwrap();
+        assert!(matches!(release.payload, QualityPayload::Release { ejections: 1, .. }),
+            "release snapshot double-counted the old emitter and recovered alias: {release:?}");
     }
 }

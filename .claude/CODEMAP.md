@@ -1,6 +1,6 @@
-# Cassy - Codemap
+# Cassy — Codemap
 
-> Structural map reconciled for the 3.97 release tree. Regenerate with `/codemap` when modules move.
+> Structural map reconciled for the merged hotfix tree. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -10,8 +10,7 @@
 - `docs/`, `site/` - design, QA, operations and release records; static website and system PDF.
 - `fixtures/`, `migration/` - retrieval parity baselines and historical Cloud-move scripts.
 - `ops/`, `scripts/` - service units, launch wrappers, installation, proof and release tooling.
-- `.cargo/`, `.config/` - Cargo settings and nextest profiles.
-- `.claude/`, `.codex/` - instructions, harness projections and working context.
+- `.cargo/`, `.config/`, `.claude/`, `.codex/` - Cargo/nextest settings, harness projections and working context.
 - `.githooks/`, `.github/` - Git policy hooks, CI workflows and issue templates.
 - `.github/actions/run-script-suite-tests/` - path-scoped script and visual QA dependencies/execution shared by PR, slim-lane and assembly jobs.
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, tooling and toolchain roots.
@@ -43,10 +42,8 @@
 - `cas-cli/src/agent_model.rs` - role-scoped pane model/effort observations shared by native hooks, Commander model selection, catalog and status.
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, module composition and command dispatch.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs` - initialization, recovery and provisioning.
-- `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - recommendation policy, exclusions and thresholds.
-- `cas-cli/src/account_registry.rs`, `cas-cli/src/account_registry/resolve.rs` - non-secret identity/alias discovery and native usage snapshots.
-- `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - guarded profile mutations and shared-link repair.
-- `cas-cli/src/accounts.rs`, `cas-cli/src/cli/accounts.rs` - subscription inventory, account configuration and drift operations.
+- `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs`, `cas-cli/src/account_registry/` - recommendation policy, aliases, thresholds and native usage snapshots.
+- `cas-cli/src/accounts.rs`, `cas-cli/src/cli/accounts.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - inventory, guarded profile mutations and shared-link repair.
 - `cas-cli/src/cli/limits.rs` - observation/reset dates, native Claude/Codex capacity and bounded reports.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs` - provider launch, login and account choice.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/` - health producers/rendering and update phases/receipts.
@@ -66,8 +63,8 @@
 ## Factory runtime and terminals
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, rendering and worker/worktree actions.
-- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
-- `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup, events, probes, relays and rendering schedule; `fixtures/claude-2.1.312-usage.txt` records the native Claude Usage screen.
+- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session.rs`, `cas-cli/src/ui/factory/session/socket_cleanup.rs` - attach guards, birth-bound end receipts and locked socket/metadata cleanup.
+- `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup, events, probes, relays and rendering schedule. Native screen fixtures live under `cas-cli/src/ui/factory/daemon/runtime/fixtures/`.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - Claude/Codex transcript ownership, answer mirroring and bounded historical reply watches.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - native prompt readiness, queued input and live recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
@@ -96,8 +93,7 @@
 
 ## QA, storage and Commander
 
-- `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub lifecycle, service definitions and exact-target Serve ownership/publication recovery.
-
+- `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub lifecycle, service definitions and Serve ownership/publication recovery.
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry/sidecar validation and diff-scoped journey selection.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - shared verifier grammar, scaffold and ledger checks.
 - `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/quality_ledger.rs`, `cas-cli/src/cli/ledger.rs`, `cas-cli/src/cloud/syncer/quality_events.rs` - friction ledger: append-only events and scope-A rules, emitters, `cas ledger`, batched team sync.
@@ -108,9 +104,9 @@
 - `crates/cas-store/src/worker_task_queue_store.rs` - persistent per-session worker queues and spawn payload binding.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and indexed QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and temporal memory/search.
-- `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - startup, selected conversation state and reply grants.
+- `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/commander-journal.ts`, `hub-web/src/inbox/` - startup, draft storage, durable send claims and reply grants.
 - `hub-web/src/project-navigation.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/machine-version.ts` - running-only grouped navigation, machine outage status, machine versions and release lookup.
-- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - authenticated streams, recovery and session subscriptions.
+- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/worker-visibility.ts` - authenticated streams, attach recovery and running/stopped catalog reconciliation.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/dismissed-asks.ts` - history paging, receipt progress, windowed turns and per-thread dismissal persistence.
 - `hub-web/src/provider-mark.ts` - harness/provider avatar marks, state dots and model/effort header labels.
 - `hub-web/src/supervisor-commands.ts` - slash palette, confirmations, native chooser controls and command receipts.
@@ -134,7 +130,7 @@
 - `hub-web/e2e/journeys/hub-double-runtime.ts`, `hub-web/preview/hub-double-runtime.ts` - Node and browser adapters for the shared protocol double; the preview build selects browser crypto, time and raw CSP without a test runner.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - routing and daemon entrypoints.
 
-## Cross-cutting and entrypoints
+## Cross-cutting
 
 - **Rust proof:** inline modules, `crates/cas-store/tests/`, explicit `cas-cli/tests/` harnesses and `cas-cli/tests/integration/`; isolation in `cas-cli/src/test_env_guard.rs`.
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright, `scripts/journey-eval.sh` affected selection and `hub-web/scripts/` visual/performance probes.
@@ -147,5 +143,8 @@
 - **Queue flake recovery:** `scripts/ci-queue-flakes.py` owns queue-only native result classification, routed GitHub issue publication and open-issue quarantine; `scripts/test-ci-queue-flakes.py` covers the native runner and HTTP boundaries. `.github/workflows/ci.yml` wires read-only shards and the required publication fan-in.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
 - **Runtime/config:** `ops/systemd/`, `docs/ci/`, `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`.
+
+## Entrypoints
+
 - **CLI/library:** `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`; **TUI/daemon:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`.
 - **Services:** `cas-cli/src/mcp/daemon.rs` (`cas serve`), `cas-cli/src/bridge/server/` (`cas bridge serve`), `hub-web/src/main.ts` (`cas hub` client).

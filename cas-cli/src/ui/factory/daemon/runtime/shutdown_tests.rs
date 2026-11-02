@@ -1245,7 +1245,7 @@ async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
 }
 
 async fn recover_dead_worker(recycle: bool) {
-    use crate::mcp::{server::CasCore, tools::CasService};
+    use crate::mcp::{CasCore, tools::CasService};
     use crate::worktree::{WorktreeConfig, WorktreeManager};
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let repo = env.home().join("project");

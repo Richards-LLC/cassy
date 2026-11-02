@@ -625,26 +625,253 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
     }
 }
 
-// Non-green decisions still use native Teams and PTY transport. Keep these
-// fallback and retraction contracts alongside the green durable-queue cases.
+// cas-1586: non-green batch handoffs, including refused/unfinished external
+// reads and shutdown, must survive as attributed queue rows and reach the real
+// supervisor PTY. Native transport is exercised separately below.
 #[tokio::test]
 async fn cas_91bab_non_green_direct_delivery_fallbacks() {
-    use super::super::supervisor_single_turn_tests::fixture_child;
-    if !fixture_child("ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_non_green_direct_delivery_fallbacks") {
+    use super::super::supervisor_single_turn_tests::{attach_supervisor_pty, fixture_child};
+    if !fixture_child(
+        "ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_non_green_direct_delivery_fallbacks",
+    ) {
         return;
     }
-    let mut shutdown_delivered = false;
-    let mut stale_fallback_suppressed = false;
     for scenario in [
         "superseded",
+        "superseded_queued",
         "missing",
         "shutdown",
         "merged_fallback",
         "superseded_refused",
         "superseded_unreported",
     ] {
-        let synchronous_fallback =
-            matches!(scenario, "superseded_refused" | "superseded_unreported");
+        let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        fixture.ci(Some("failure"));
+        let cas_dir = fixture.app.cas_dir().to_path_buf();
+        let mut daemon = daemon_on_lanes(&cas_dir);
+        std::mem::swap(&mut daemon.app, &mut fixture.app);
+        attach_supervisor_pty(
+            &mut daemon,
+            cas_dir.parent().unwrap(),
+            if matches!(scenario, "superseded_refused" | "superseded_unreported") {
+                cas_mux::SupervisorCli::Codex
+            } else {
+                cas_mux::SupervisorCli::Claude
+            },
+            true,
+        )
+        .await;
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") {
+            let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
+            std::fs::remove_dir_all(&tree).unwrap();
+            daemon.teams = Some(super::super::teams::TeamsManager::rooted_at(
+                tree,
+                &daemon.session_name,
+            ));
+        }
+        let (_, prompts, _) = daemon
+            .app
+            .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
+        assert_eq!(prompts.len(), 1);
+        assert!(!prompts[0].is_merge_ready());
+        assert!(prompts[0].text.contains("CI failed"));
+        let original_tip = prompts[0].merge_alert.as_ref().unwrap().factory_tip.clone();
+        if scenario.starts_with("superseded") && scenario != "superseded_queued" {
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = tasks.get("cas-9efb-test").unwrap();
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = cas_types::TaskStatus::Open;
+            tasks.update(&task).unwrap();
+        }
+        let mut refresh = DirectorRefresh::new();
+        let worker = super::super::store_worker::global();
+        if scenario == "superseded_refused" {
+            daemon.queue_jobs.close_lanes_for_test();
+            daemon
+                .deliver_director_events(
+                    &mut refresh,
+                    vec![fixture.event.clone()],
+                    (vec![fixture.event.clone()], prompts, None),
+                    Instant::now(),
+                    0.0,
+                    worker,
+                    &super::super::loop_watchdog::LoopProgress::new(),
+                )
+                .await;
+        } else {
+            let gate = (scenario == "superseded_unreported").then(|| Arc::new(ReadGate::default()));
+            if let Some(gate) = &gate {
+                refresh = DirectorRefresh::new().with_read_gate(Arc::clone(gate));
+            }
+            refresh
+                .start_deliverability_check(
+                    &daemon.app,
+                    &mut daemon.queue_jobs,
+                    prompts,
+                    vec![fixture.event.clone()],
+                    Instant::now(),
+                )
+                .unwrap();
+            if let Some(gate) = gate {
+                daemon
+                    .drain_director_deliveries_for_shutdown(&mut refresh, worker, Duration::ZERO)
+                    .await;
+                gate.open();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while daemon.queue_jobs.external_completions_ready() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("late recheck must finish");
+                assert!(
+                    refresh
+                        .take_deliverability(&mut daemon.queue_jobs)
+                        .is_empty(),
+                    "shutdown already consumed the unfinished batch"
+                );
+            } else {
+                let batch = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if let Some(batch) =
+                            refresh.take_deliverability(&mut daemon.queue_jobs).pop()
+                        {
+                            break batch;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("batch recheck must finish");
+                daemon.inject_rechecked_batch(batch, worker).await;
+            }
+        }
+        if scenario == "shutdown" {
+            daemon
+                .drain_director_deliveries_for_shutdown(
+                    &mut refresh,
+                    worker,
+                    Duration::from_secs(10),
+                )
+                .await;
+            assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
+        }
+        assert!(worker.wait_idle(Duration::from_secs(10)));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "{scenario}: one durable director wake");
+        let row = &rows[0];
+        assert_eq!(row.source, "director");
+        assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(!row.urgent);
+        assert_eq!(
+            row.factory_session.as_deref(),
+            Some(daemon.session_name.as_str())
+        );
+        assert!(
+            row.processed_at.is_none(),
+            "shutdown/refusal must preserve the pending row"
+        );
+        let prompt =
+            super::super::delivery::parse_director_prompt(&row.target, &row.prompt).unwrap();
+        assert_eq!(prompt.retract_task.as_deref(), Some("cas-9efb-test"));
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_tip, original_tip,
+            "the original delivery identity must survive the queue handoff");
+        if scenario.starts_with("superseded") && scenario != "superseded_queued" {
+            // pin: a withdrawn delivery must be labelled superseded and must never ask for a merge.
+            assert!(prompt.text.contains("Superseded delivery"));
+            // pin: a withdrawn delivery must never instruct a supervisor to merge it.
+            assert!(!prompt.text.contains("MERGE REQUIRED"));
+        }
+        if scenario == "superseded_queued" {
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = tasks.get("cas-9efb-test").unwrap();
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = cas_types::TaskStatus::Open;
+            tasks.update(&task).unwrap();
+        }
+        if scenario == "merged_fallback" {
+            fixture.advance_target(true);
+        }
+        if scenario == "superseded_refused" {
+            // Resume the same durable row after the unavailable lanes restart.
+            daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(
+                cas_dir.clone(),
+                daemon.app.project_scope(),
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if queue
+                    .queued_prompt(row.id)
+                    .unwrap()
+                    .unwrap()
+                    .processed_at
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{scenario}: queued wake did not complete: {:?}",
+                queue.message_delivery_report(row.id).unwrap()
+            )
+        });
+        let report = queue.message_delivery_report(row.id).unwrap().unwrap();
+        let capture = cas_dir.parent().unwrap().join("input");
+        if scenario == "merged_fallback" {
+            assert_eq!(
+                report.pending_reason,
+                Some(cas_store::PendingReason::SupersededStale)
+            );
+            assert!(report.delivered_at.is_none());
+            assert!(
+                std::fs::read_to_string(capture).unwrap().is_empty(),
+                "stale body must never reach PTY"
+            );
+        } else {
+            assert!(report.delivered_at.is_some(), "{scenario}: {report:?}");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let written = std::fs::read_to_string(&capture).unwrap();
+                    // pin: delayed request_changes must render the informational superseded label.
+                    let expected = if scenario == "superseded_queued" { "Superseded delivery" } else { &prompt.text };
+                    if written.contains(expected) && written.ends_with('\r') {
+                        if scenario.starts_with("superseded") {
+                            // pin: a delivery withdrawn during queue delay must not ask for a merge.
+                            assert!(!written.contains("MERGE REQUIRED"));
+                        }
+                        assert_eq!(written.matches('\r').count(), 1, "one submitted wake");
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{scenario}: queued body must reach supervisor PTY"));
+        }
+        assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
+    }
+}
+
+// Keep the native transport contract at its own seam. Supervisor director
+// wakes now use the durable queue, so batch injection does not submit this job.
+#[tokio::test]
+async fn cas_91bab_non_green_native_transport_fallbacks() {
+    use super::super::supervisor_single_turn_tests::fixture_child;
+    if !fixture_child(
+        "ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_non_green_native_transport_fallbacks",
+    ) {
+        return;
+    }
+    let mut shutdown_delivered = false;
+    let mut stale_fallback_suppressed = false;
+    for scenario in ["superseded", "missing", "shutdown", "merged_fallback"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         fixture.ci(Some("failure"));
         let cas_dir = fixture.app.cas_dir().to_path_buf();
@@ -652,21 +879,13 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
         let _queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         fixture
             .app
-            .set_supervisor_cli_for_test(if synchronous_fallback {
-                cas_mux::SupervisorCli::Codex
-            } else {
-                cas_mux::SupervisorCli::Claude
-            });
+            .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
         let (_, mut prompts, _) = fixture
             .app
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
         assert_eq!(prompts.len(), 1);
         // Red CI keeps the direct transport route after a6be40dba / 1ecb22e52.
-        assert!(
-            prompts[0]
-                .text
-                .contains("CI failed")
-        );
+        assert!(prompts[0].text.contains("CI failed"));
         assert!(!prompts[0].is_merge_ready());
         assert!(prompts[0].retract_task.is_some());
         let verdicts = fixture
@@ -688,7 +907,7 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
         let inbox = teams.teams_dir().join("inboxes/supervisor.json");
         daemon.teams = Some(teams);
 
-        if scenario == "superseded" || synchronous_fallback {
+        if scenario == "superseded" {
             let store = crate::store::open_task_store_local(&cas_dir).unwrap();
             let mut task = store.get("cas-9efb-test").unwrap();
             task.deliverables.decline_factory_branch_anchor();
@@ -697,46 +916,42 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
         }
         // Exercise the real batch job: relabelled prompts must survive its handoff.
         let mut refresh = DirectorRefresh::new();
-        let batch = if synchronous_fallback {
-            None
-        } else {
-            refresh
-                .start_deliverability_check(
-                    &daemon.app,
-                    &mut daemon.queue_jobs,
-                    prompts.clone(),
-                    vec![fixture.event.clone()],
-                    Instant::now(),
-                )
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let batch = loop {
-                let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
-                if let Some(batch) = batches.pop() {
-                    break batch;
-                }
-                assert!(Instant::now() < deadline, "batch recheck did not complete");
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            };
-            if scenario == "superseded" {
-                // pin: this failure identifies the missing superseded-body batch handoff.
-                assert!(
-                    batch.prompts[0].1,
-                    "superseded prompt must survive the batch handoff"
-                );
+        refresh
+            .start_deliverability_check(
+                &daemon.app,
+                &mut daemon.queue_jobs,
+                prompts.clone(),
+                vec![fixture.event.clone()],
+                Instant::now(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let batch = loop {
+            let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
+            if let Some(batch) = batches.pop() {
+                break batch;
             }
-            Some(batch)
+            assert!(Instant::now() < deadline, "batch recheck did not complete");
+            tokio::time::sleep(Duration::from_millis(5)).await;
         };
+        if scenario == "superseded" {
+            // pin: this failure identifies the missing superseded-body batch handoff.
+            assert!(
+                batch.prompts[0].1,
+                "superseded prompt must survive the batch handoff"
+            );
+        }
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
         let capture = cas_dir.parent().unwrap().join("input");
-        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") || synchronous_fallback {
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") {
             super::super::supervisor_single_turn_tests::attach_supervisor_pty(
                 &mut daemon,
                 cas_dir.parent().unwrap(),
-                if synchronous_fallback { cas_mux::SupervisorCli::Codex } else { cas_mux::SupervisorCli::Claude },
+                cas_mux::SupervisorCli::Claude,
                 true,
-            ).await;
+            )
+            .await;
             let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
             std::fs::remove_dir_all(&tree).unwrap();
             // A missing live tree with no saved roster exercises the real ENOENT path.
@@ -746,90 +961,10 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
             ));
         }
 
-        if synchronous_fallback {
-            let store_worker = super::super::store_worker::global();
-            if scenario == "superseded_refused" {
-                daemon.queue_jobs.close_lanes_for_test();
-                daemon
-                    .deliver_director_events(
-                        &mut refresh,
-                        vec![fixture.event.clone()],
-                        (vec![fixture.event.clone()], prompts, None),
-                        Instant::now(),
-                        0.0,
-                        store_worker,
-                        &super::super::loop_watchdog::LoopProgress::new(),
-                    )
-                    .await;
-            } else {
-                // The real read job cannot report until shutdown has used its
-                // unchecked fallback; no scheduling race or timed sleep.
-                let gate = Arc::new(ReadGate::default());
-                refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
-                refresh
-                    .start_deliverability_check(
-                        &daemon.app,
-                        &mut daemon.queue_jobs,
-                        prompts,
-                        vec![fixture.event.clone()],
-                        Instant::now(),
-                    )
-                    .unwrap();
-                daemon
-                    .drain_director_deliveries_for_shutdown(
-                        &mut refresh,
-                        store_worker,
-                        Duration::ZERO,
-                    )
-                    .await;
-                gate.open();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while daemon.queue_jobs.external_completions_ready() == 0 {
-                    assert!(Instant::now() < deadline, "late recheck did not finish");
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                // The original pending batch was already consumed by shutdown.
-                assert!(
-                    refresh
-                        .take_deliverability(&mut daemon.queue_jobs)
-                        .is_empty()
-                );
-            }
-            let name = daemon.app.supervisor_name().to_string();
-            // A Codex inject retains the submit boundary after writing its body.
-            // Wait for ownership to clear before issuing the marker; otherwise
-            // inject correctly defers it and there is nothing for cat to drain.
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(!daemon.app.mux.pane_submit_pending(&name));
-            let marker = "sync-fallback-check-finished";
-            assert_eq!(
-                daemon.app.mux.inject(&name, marker).await.unwrap(),
-                cas_mux::InjectOutcome::Delivered
-            );
-            while !std::fs::read_to_string(&capture)
-                .unwrap_or_default()
-                .contains(marker)
-                && Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let written = std::fs::read_to_string(&capture).unwrap_or_default();
-            assert!(
-                written.contains(marker),
-                "PTY did not drain its complete body"
-            );
-            // pin: both direct transport fallbacks must preserve the Superseded label and remove merge instructions.
-            assert!(written.contains("Superseded delivery"), "{scenario}: {written}");
-            assert!(!written.contains("MERGE REQUIRED"), "{scenario}: {written}");
-            assert!(daemon.finish_shutdown_writes(store_worker, Duration::from_secs(10)));
-            continue;
+        for (prompt, deliverable) in batch.prompts {
+            assert!(deliverable, "{scenario}: transport needs a live prompt");
+            assert!(daemon.submit_merge_alert_inbox(&prompt, batch.refresh_started));
         }
-        daemon
-            .inject_rechecked_batch(batch.unwrap(), super::super::store_worker::global())
-            .await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while daemon.queue_jobs.external_completions_ready() == 0 {
             assert!(
@@ -897,7 +1032,6 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
             let written = std::fs::read_to_string(&capture).unwrap_or_default();
             stale_fallback_suppressed =
                 written.contains(marker) && !written.contains(&expected_text);
-
         } else {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !std::fs::read_to_string(&capture)

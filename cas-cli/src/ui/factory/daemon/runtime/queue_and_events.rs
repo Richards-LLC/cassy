@@ -2802,14 +2802,23 @@ pub(crate) fn read_row_facts(
     };
     if row.origin == Some(cas_store::QueueOrigin::Daemon)
         && row.source == super::teams::DIRECTOR_AGENT_NAME
-        && let Some(prompt) = super::delivery::parse_director_prompt(&row.target, &row.prompt)
+        && let Some(mut prompt) = super::delivery::parse_director_prompt(&row.target, &row.prompt)
     {
         facts.director_ready = Some(if crate::ui::factory::app::prompt_needs_inject_read(&prompt) {
+            // Use the immutable delivery identity, including its declared repo,
+            // when a queued non-green signal outlives request_changes or a merge.
+            use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+            let repo_root = prompt.merge_alert.as_ref()
+                .and_then(|evidence| tasks.and_then(|tasks| tasks.get(&evidence.task_id).ok()))
+                .and_then(|task| task.deliverables.work_target
+                    .and_then(|target| resolve_repo_context(cas_dir, &target).ok()))
+                .map(|repo| repo.repo_root)
+                .unwrap_or_else(|| cas_dir.parent().unwrap_or(cas_dir).to_path_buf());
             crate::ui::factory::director::DirectorData::load_with_stores_for_project(
                 cas_dir, None, false, None, None,
             ).map_err(|error| error.to_string()).map(|data| {
-                crate::ui::factory::director::prompt_is_still_deliverable(
-                    &prompt, &data, cas_dir.parent().unwrap_or(cas_dir),
+                crate::ui::factory::director::refresh_ci_merge_signal(
+                    &mut prompt, &data, cas_dir, &repo_root,
                 ).then_some(prompt)
             })
         } else {

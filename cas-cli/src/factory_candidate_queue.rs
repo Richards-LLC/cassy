@@ -385,12 +385,8 @@ fn sandbox_problem(os: &str, bwrap: &str, program: &Path) -> Option<String> {
         Err(error) => return Some(format!("{error:#}")),
     };
     allow_build_environment(&mut probe);
-    let output = probe
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
+    probe.arg("--version");
+    let output = run_sandbox_probe(probe, |started| started.elapsed());
     match output {
         Ok(output) if output.status.success() => None,
         Ok(output) => Some(format!(
@@ -402,6 +398,22 @@ fn sandbox_problem(os: &str, bwrap: &str, program: &Path) -> Option<String> {
         }
         Err(error) => Some(format!("could not run bubblewrap: {error}")),
     }
+}
+
+fn run_sandbox_probe(mut probe: Command, _elapsed: fn(Instant) -> Duration) -> std::io::Result<std::process::Output> {
+    probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output()
+}
+
+fn initialize_runner(
+    cas_root: &Path,
+    probe: impl FnOnce() -> Option<String>,
+) -> Result<Option<(std::fs::File, RunnerHeartbeat)>> {
+    std::fs::create_dir_all(queue_dir(cas_root))?;
+    let lock = open_lock(&queue_dir(cas_root).join(RUNNER_LOCK))?;
+    let problem = probe();
+    record_sandbox_state(cas_root, problem.as_deref())?;
+    let heartbeat = RunnerHeartbeat::start(cas_root, HEARTBEAT_INTERVAL)?;
+    Ok(Some((lock, heartbeat)))
 }
 
 fn record_sandbox_state(cas_root: &Path, problem: Option<&str>) -> Result<()> {

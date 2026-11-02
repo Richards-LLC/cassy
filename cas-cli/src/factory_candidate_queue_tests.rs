@@ -374,6 +374,31 @@ fn sandbox_probe_runs_the_real_sandbox_from_this_process() {
     assert!(missing.contains("not installed"), "{missing}");
 }
 
+#[test]
+fn only_the_runner_owner_can_publish_sandbox_availability() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let owner = initialize_runner(root, || Some("owner sandbox unavailable".into())).unwrap().unwrap();
+    assert!(initialize_runner(root, || panic!("a second daemon must not probe or publish")).unwrap().is_none());
+    assert_eq!(sandbox_refusal(root).as_deref(), Some("owner sandbox unavailable"));
+    drop(owner);
+    let _successor = initialize_runner(root, || None).unwrap().unwrap();
+    assert!(sandbox_refusal(root).is_none(), "the new owner clears the old refusal");
+}
+
+#[test]
+fn sandbox_probe_has_a_heartbeat_and_an_execution_deadline() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let _owner = initialize_runner(root, || {
+        assert!(runner_is_live(root), "publish a heartbeat before probing");
+        let result = run_sandbox_probe(Command::new("true"), |_| Duration::MAX);
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        Some("sandbox probe timed out".into())
+    }).unwrap().unwrap();
+    assert!(sandbox_refusal(root).unwrap().contains("timed out"));
+}
+
 /// bwrap execs the program itself, so `/proc/self/exe` there names bwrap, which
 /// then re-enters with the build's arguments and fails to nest its namespace.
 #[cfg(target_os = "linux")]

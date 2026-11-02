@@ -1861,6 +1861,7 @@ mod worker_attention_tests {
         };
         let expired = dispatch("cas-b4d8", now - chrono::Duration::minutes(5));
         dispatch("cas-ancient", now - chrono::Duration::hours(30));
+        dispatch("cas-missing", now - chrono::Duration::minutes(3));
         dispatch("cas-due-later", now + chrono::Duration::minutes(10));
         dispatch("cas-finished", now - chrono::Duration::minutes(1));
         cas_store::timeout_verification_dispatch(&cas_dir, "cas-finished", now).unwrap();
@@ -1868,10 +1869,11 @@ mod worker_attention_tests {
         finished.status = cas_types::TaskStatus::Closed;
         tasks.update(&finished).unwrap();
 
-        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 1);
+        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 2);
         escalate_expired_verification_dispatches(&cas_dir, now);
         let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "one wake per expired dispatch, repeat sweeps included: {rows:?}");
+        assert_eq!(rows.len(), 2, "one wake per expired dispatch, including a task absent locally: {rows:?}");
+        assert!(rows.iter().any(|row| row.prompt.contains("cas-missing")));
         assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
         // pin: the lifecycle-wake source makes the row a supervisor wake and puts it under the GH #894 operator watchdog
         assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);

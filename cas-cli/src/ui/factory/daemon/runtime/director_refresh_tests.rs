@@ -325,6 +325,14 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             .unwrap();
         }
         assert_eq!(queue.peek_all(10).unwrap().len(), if owned { 1 } else { 2 });
+        if owned {
+            for _ in 0..2 {
+                reconcile_blocked_task_alert(&cas_dir, "cas-9efb-test",
+                    dispatch.deadline_at + chrono::Duration::hours(25)).unwrap();
+            }
+            assert_eq!(queue.peek_all(10).unwrap().len(), 2,
+                "{cause}: verification outside the expiry relay window gets one deadline alert");
+        }
     }
 }
 

@@ -7532,8 +7532,8 @@ impl FactoryDaemon {
     }
 
     /// Setup and approval pages can outlive the startup grace. Claude's chooser
-    /// is not a composer: require its ruled input. Other harnesses retain their
-    /// tool-call veto and confirmation boundary. Inspect the current viewport,
+    /// is not a composer: require its ruled input. Codex can queue operator
+    /// text mid-tool; other harnesses retain their tool-call veto. Inspect the current viewport,
     /// never scrollback; a safe working composer still accepts operator text.
     fn commander_native_input_ready(&self, pane_id: &str) -> bool {
         let cli = self.app.harness_for(pane_id);
@@ -7542,9 +7542,11 @@ impl FactoryDaemon {
             .map(|row| pane.dump_row(row).unwrap_or_default())
             .collect();
         if cli != cas_mux::SupervisorCli::Claude {
-            // These harnesses have no proven mid-tool composer contract. A
-            // submit must not answer an approval, even on a silent pane.
-            if self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
+            // cas-aa152: verified operator input can steer a running Codex
+            // turn. Native confirmation footers below still protect approvals;
+            // harnesses without that mid-tool input contract keep the veto.
+            if cli != cas_mux::SupervisorCli::Codex
+                && self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
                 return false;
             }
             // Native dialog footers are complete rows below the composer.

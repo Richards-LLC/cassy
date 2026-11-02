@@ -324,33 +324,62 @@ fi
             if name != 'fast-validation-runner-route':
                 self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
 
-    def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
+    def test_suite_fanin_reuses_classification_without_source_checkout(self):
+        job = self.ci()['jobs']['fast-validation-suite']
+        self.assertFalse(any(step.get('uses') for step in job['steps']))
+        report, assertion = job['steps']
+        for unaffected in ('true', 'false'):
+            context = {'needs.ci-diff.outputs.rust-unaffected': unaffected,
+                       'needs.ci-diff.outputs.class': 'hub-web-only'}
+            self.assertEqual(self.gh_expr(report['if'], context), unaffected == 'true')
+            self.assertEqual(self.gh_value(report['env']['DIFF_CLASS'], context), 'hub-web-only')
+        for result in ('success', 'failure', 'cancelled', 'skipped'):
+            run = subprocess.run(['bash', '-c', assertion['run']], env={**os.environ, 'SHARDS': result})
+            self.assertEqual(run.returncode == 0, result == 'success', result)
+
+    def test_macos_check_only_warms_missing_main_cache_after_queue_proof(self):
         job = self.ci()['jobs']['macos-check']
-        def context(event, ref, run='false', reuse='', diff='rust-touched'):
-            return {'github.event_name': event, 'github.ref': ref, 'github.base_ref': 'main',
-                    'github.event.repository.default_branch': 'main', 'needs.ci-diff.outputs.class': diff,
-                    'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': run,
-                    'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse}
+        cache = next(step for step in job['steps'] if step.get('id') == 'cargo-cache')
+        decision = next(step for step in job['steps'] if step.get('id') == 'cache-work')
+        compile_step = next(step for step in job['steps'] if step.get('name') == 'Check workspace')
         cases = [
-            # A deduplicated main push still runs: it saves main's Darwin cache.
-            (context('push', 'refs/heads/main'), True),
-            (context('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', run='true'), True),
-            (context('push', 'refs/heads/main', diff='docs-only'), False),
-            (context('push', 'refs/heads/factory/x', run='true'), False),
+            ('push', 'refs/heads/main', 'merge-queue', 'true', False),
+            ('push', 'refs/heads/main', 'merge-queue', 'false', True),
+            ('push', 'refs/heads/main', 'merge-queue', '', True),
+            ('push', 'refs/heads/main', '', 'true', True),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', '', 'true', True),
         ]
-        for ctx, expected in cases:
-            with self.subTest(event=ctx['github.event_name'], ref=ctx['github.ref'], diff=ctx['needs.ci-diff.outputs.class']):
-                self.assertEqual(self.gh_expr(job['if'], ctx), expected)
-        # Mutation control: without the main-push clause main never warms the cache.
-        without = job['if'].replace("|| (github.event_name == 'push' && github.ref == 'refs/heads/main')", '')
-        self.assertNotEqual(without, job['if'])
-        self.assertFalse(self.gh_expr(without, cases[0][0]))
-        # Only main saves the cargo cache; queue and tag refs restore main's copy.
-        cache = next(step for step in job['steps'] if str(step.get('uses', '')).startswith('Swatinem/rust-cache'))
-        save_if = cache['with']['save-if']
-        for ref, expected in [('refs/heads/main', True), ('refs/heads/gh-readonly-queue/main/pr-1-abc', False)]:
-            with self.subTest(save_ref=ref):
-                self.assertEqual(self.gh_expr(save_if, {'github.ref': ref}), expected)
+        for event, ref, reuse, hit, expected in cases:
+            with self.subTest(event=event, reuse=reuse, hit=hit):
+                context = {'github.event_name': event, 'github.ref': ref,
+                           'github.base_ref': 'main', 'github.event.repository.default_branch': 'main',
+                           'needs.ci-diff.outputs.class': 'rust-touched',
+                           'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
+                           'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                           'steps.classify-diff.outputs.rust-unaffected': 'false'}
+                self.assertTrue(self.gh_expr(job['if'], context))
+                self.assertEqual(self.gh_value(cache['with']['lookup-only'], context), reuse == 'merge-queue')
+                output = self.root / 'cache-decision.output'
+                output.write_text('')
+                result = subprocess.run(['bash', '-c', decision['run']], text=True, capture_output=True,
+                    env={**os.environ, 'GITHUB_OUTPUT': str(output), 'GITHUB_EVENT_NAME': event,
+                         'GITHUB_REF': ref, 'REUSE_SOURCE': reuse, 'CACHE_HIT': hit,
+                         'PRIOR_RUN_URL': 'https://example.test/queue/123'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(outputs['run-check'] == 'true', expected)
+                if not expected:
+                    self.assertIn('https://example.test/queue/123', result.stdout)
+                context['steps.cache-work.outputs.run-check'] = str(expected).lower()
+                self.assertEqual(self.gh_expr(compile_step['if'], context), expected)
+                for name in ('Install Zig', 'Setup sccache', 'Probe sccache backend'):
+                    step = next(s for s in job['steps'] if s.get('name') == name)
+                    self.assertEqual(self.gh_expr(step['if'], context), expected)
+                self.assertEqual(self.gh_expr(cache['with']['save-if'], context), ref == 'refs/heads/main')
+        self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
+            'github.ref': 'refs/heads/factory/x'}))
+        self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
+            'github.ref': 'refs/heads/main', 'needs.ci-diff.outputs.class': 'docs-only'}))
 
     def test_lane_slim_is_off_by_default_and_only_slims_factory_pushes_cas_eac2(self):
         jobs = self.ci()['jobs']

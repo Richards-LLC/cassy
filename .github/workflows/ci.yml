@@ -1472,20 +1472,10 @@ jobs:
     needs: [ci-diff, fast-validation-suite-shards, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - id: classify-diff
-        uses: ./.github/actions/classify-required-diff
-        with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-
       - name: Report Rust short-circuit
-        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        if: needs.ci-diff.outputs.rust-unaffected == 'true'
         env:
-          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+          DIFF_CLASS: ${{ needs.ci-diff.outputs.class }}
         run: echo "Full-suite fan-in short-circuited for $DIFF_CLASS diff."
 
       - name: Require every suite shard to pass
@@ -1787,7 +1777,7 @@ jobs:
           submodules: recursive
 
       - id: tree-dedupe
-        name: Check for protected-PR validation of this tree
+        name: Check for successful merge-queue validation of this tree
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/check-ci-tree-validation.sh
@@ -1796,7 +1786,7 @@ jobs:
         if: steps.tree-dedupe.outputs.run-heavy == 'false'
         env:
           PRIOR_RUN_URL: ${{ steps.tree-dedupe.outputs.prior-run-url }}
-        run: echo "Skipping Clippy; this tree was validated by $PRIOR_RUN_URL"
+        run: echo "Skipping Clippy; this tree passed merge-queue validation in $PRIOR_RUN_URL"
 
       - uses: ./.github/actions/setup-rust-linux
         if: steps.tree-dedupe.outputs.run-heavy != 'false'
@@ -1826,11 +1816,10 @@ jobs:
   # Linux test suite on a more expensive runner. The full check runs on the
   # canonical merge-queue tree; main PRs emit only a hosted admission receipt
   # so their code is not compiled twice before it can enter that queue.
-  # cas-861c0: it also runs on every main push, after the merge and off the
-  # queue's critical path, so main saves the Darwin cargo cache. Queue refs can
-  # read only their own and main's caches; with main never saving, every queue
-  # entry compiled cold (0 hits / 698 misses, 12-14 min). Warm, the job took
-  # 404 s (PR #1187 retry, 90% sccache hits), under the ~8.5 min Linux path.
+  # Main retains a cache-maintenance lane: a queue-proven tree only looks
+  # up its exact Darwin dependency key. A hit needs no download or Cargo;
+  # a miss compiles once to seed the main-scope cache later queue refs read.
+  # Release prebuild uses a different profile/key and is not warmed here.
   macos-check:
     name: macOS Check
     if: >-
@@ -1894,17 +1883,42 @@ jobs:
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: echo "macOS Rust checks skipped for $DIFF_CLASS diff."
 
-      - name: Install Rust
+      - name: Cache cargo
+        id: cargo-cache
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          lookup-only: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'merge-queue' }}
+          # Preserve main-scope dependency warming on a miss only.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Decide whether Darwin compilation is needed
+        id: cache-work
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        env:
+          REUSE_SOURCE: ${{ needs.fast-validation-main-push-dedupe.outputs.reuse-source }}
+          PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
+          CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$REUSE_SOURCE" == merge-queue && "$CACHE_HIT" == true ]]; then
+            echo 'run-check=false' >> "$GITHUB_OUTPUT"
+            echo "Skipping macOS compilation: this tree passed $PRIOR_RUN_URL and its exact main-scope Darwin dependency cache already exists."
+          else
+            echo 'run-check=true' >> "$GITHUB_OUTPUT"
+            echo "Running macOS compilation: validation is required or the main-scope dependency cache needs seeding."
+          fi
 
       # ghostty_vt_sys builds its native library with Zig even for cargo check.
       - name: Install Zig
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && steps.cache-work.outputs.run-check == 'true'
         run: ./scripts/bootstrap-zig.sh
 
       # Zig discovers Darwin SDKs through xcrun, which follows DEVELOPER_DIR.
@@ -1913,6 +1927,7 @@ jobs:
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && steps.cache-work.outputs.run-check == 'true'
         run: |
           echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           xcode-select --print-path
@@ -1926,6 +1941,7 @@ jobs:
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && steps.cache-work.outputs.run-check == 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
@@ -1934,6 +1950,7 @@ jobs:
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && steps.cache-work.outputs.run-check == 'true'
         env:
           SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
@@ -1944,28 +1961,17 @@ jobs:
               "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
-      - name: Cache cargo
-        if: >-
-          github.event_name != 'pull_request'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          # Only main's cache is readable by later queue entries; a queue or
-          # tag ref saving its own 333 MiB copy just evicts main's under the
-          # repository's 10 GB cache cap.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
       - name: Check workspace
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && steps.cache-work.outputs.run-check == 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check --workspace --all-targets
 
       - name: Report sccache stats
-        if: always() && github.event_name != 'pull_request' && steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: always() && steps.cache-work.outputs.run-check == 'true'
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.
@@ -2051,7 +2057,7 @@ jobs:
           submodules: recursive
 
       - id: tree-dedupe
-        name: Check for protected-PR validation of this tree
+        name: Check for successful merge-queue validation of this tree
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/check-ci-tree-validation.sh
@@ -2060,7 +2066,7 @@ jobs:
         if: steps.tree-dedupe.outputs.run-heavy == 'false'
         env:
           PRIOR_RUN_URL: ${{ steps.tree-dedupe.outputs.prior-run-url }}
-        run: echo "Skipping test compilation; this tree was validated by $PRIOR_RUN_URL"
+        run: echo "Skipping test compilation; this tree passed merge-queue validation in $PRIOR_RUN_URL"
 
       - uses: ./.github/actions/setup-rust-linux
         if: steps.tree-dedupe.outputs.run-heavy != 'false'

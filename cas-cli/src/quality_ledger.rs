@@ -19,6 +19,33 @@ use chrono::{DateTime, Duration, Utc};
 pub(crate) const MERGE_GATE_CHECK: &str = "worktree_merge";
 /// Check id of a delivery PR's merge-queue result.
 pub(crate) const MERGE_QUEUE_CHECK: &str = "merge_queue";
+
+#[derive(serde::Deserialize)]
+pub(crate) struct QueueEjection {
+    pub task_id: String,
+    pub pr_number: u64,
+    pub failed_run_id: Option<u64>,
+    pub occurrence: String,
+    pub failing_job: Option<String>,
+}
+
+/// Live relay and historical recovery share one identity, including the old
+/// queue-exit/merge-group-run aliases for the same failed run.
+pub(crate) fn queue_ejected(root: &Path, ejection: &QueueEjection, at: DateTime<Utc>) -> bool {
+    let occurrence = ejection.failed_run_id.map(|run| format!("merge-group-run:{run}"))
+        .unwrap_or_else(|| ejection.occurrence.clone());
+    let mut event = NewQualityEvent::new(
+        format!("merge_queue|{}|{}|{occurrence}", ejection.task_id, ejection.pr_number),
+        QualityPayload::CheckRun { check_id: MERGE_QUEUE_CHECK.into(), stage: CheckStage::Queue,
+            outcome: CheckOutcome::Fail, sha: None, minutes: None },
+    );
+    event.occurred_at = at;
+    event.task_id = Some(ejection.task_id.clone());
+    event.title = ejection.failing_job.clone();
+    event.link = ejection.failed_run_id.and_then(|run| crate::github_issue_attach::default_repo_for(root)
+        .map(|repo| format!("https://github.com/{repo}/actions/runs/{run}")));
+    emit(root, &event)
+}
 /// A spawn this soon after a force shutdown is the replacement for that worker.
 const RESPAWN_WINDOW_HOURS: i64 = 2;
 
@@ -36,11 +63,15 @@ fn project_scope(cas_root: &Path) -> String {
         .clone()
 }
 
-pub(crate) fn emit(cas_root: &Path, event: &NewQualityEvent) -> bool {
+/// The turn scanner keeps its cursor behind failed writes and retries later.
+pub(crate) fn emit_checked(cas_root: &Path, event: &NewQualityEvent) -> cas_store::Result<bool> {
     let mut event = event.clone();
     event.scope = project_scope(cas_root);
-    let event = &event;
-    match cas_store::record_quality_event(cas_root, event) {
+    cas_store::record_quality_event(cas_root, &event)
+}
+
+pub(crate) fn emit(cas_root: &Path, event: &NewQualityEvent) -> bool {
+    match emit_checked(cas_root, event) {
         Ok(inserted) => inserted,
         Err(error) => {
             tracing::warn!(kind = event.payload.kind(), %error, "friction ledger write failed");
@@ -398,8 +429,15 @@ pub(crate) fn handoff_saved(
 /// Lifetime retrieval totals have no recoverable time scope; only session end
 /// emits measured feature feedback, never a current-dated backfill snapshot.
 pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<usize> {
+    use cas_store::SupervisorQueueStore;
     use crate::store::{open_task_store, open_verification_store};
     let mut inserted = 0usize;
+    let queue = cas_store::SqliteSupervisorQueueStore::open(cas_root)?;
+    queue.init()?;
+    for row in queue.event_history_since("merge_queue_ejected", since)? {
+        let Ok(ejection) = serde_json::from_str::<QueueEjection>(&row.payload) else { continue };
+        inserted += usize::from(queue_ejected(cas_root, &ejection, row.created_at));
+    }
     let tasks = open_task_store(cas_root)?.list(None)?;
     for task in &tasks {
         for line in task.notes.lines() {

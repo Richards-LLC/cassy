@@ -4047,12 +4047,15 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     let mut dormant = fixture_session("orphaned-supervisor");
     dormant.dormant = true;
     dormant.workers.clear();
+    let mut stopped = fixture_session("stopped");
+    stopped.liveness = DaemonLiveness::StaleMetadata;
     let source = RecordingReadModel::with_sessions(vec![
         fixture_session("factory-a"),
         empty_supervisor,
         bare,
         hung_empty,
         dormant,
+        stopped,
     ]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
@@ -4098,17 +4101,18 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
         default_catalog["freshness_threshold_secs"],
         crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS
     );
+    assert_eq!(default_catalog["stopped_sessions"][0]["name"], "stopped");
     assert_eq!(
         names(default_catalog),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=0").await),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?dormant=1").await),
@@ -4117,18 +4121,6 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     assert_eq!(
         names(fetch("/v1/sessions?workers=1&dormant=1").await),
         vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
-    );
-}
-
-/// cas-94e1: metadata can outlive the supervisor pane and must be marked
-/// dormant rather than treated as a live Commander conversation.
-#[test]
-fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
-    let mut dormant = fixture_session("orphaned-supervisor");
-    dormant.dormant = true;
-    assert!(
-        super::server::supervisor_sessions(vec![dormant], false).is_empty(),
-        "a non-empty supervisor name is not proof of a live supervisor"
     );
 }
 
@@ -5501,12 +5493,17 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     f.app = app(reopened, vec![ended.clone()]);
     let (status, rows) = f.call("GET", "/v1/sessions", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(rows["sessions"][0]["dismissed"], true);
-    assert!(rows["sessions"][0]["ended"].is_object(), "history remains available");
+    assert_eq!(rows["sessions"], serde_json::json!([]), "ended history is not a navigation destination");
+    let markers = std::fs::read_dir(f.hub_root.join("dismissed-sessions")).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(markers.len(), 1, "the legacy dismissal stays durable across hub restart");
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(markers[0].path()).unwrap()).unwrap();
+    assert_eq!(marker, serde_json::json!({"session": ended.name, "started_at": ended.started_at}));
     // The same codename ending again is a new generation; stale dismissal cannot hide it.
     ended.started_at = Some("2026-10-31T12:00:00Z".into());
     f.app = app(f.auth.clone(), vec![ended.clone(), fixture_session("live-a")]);
     let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(rows["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["sessions"][0]["name"], "live-a");
     assert_eq!(rows["sessions"][0]["dismissed"], false);
     for (path, body) in [
         ("/v1/sessions/ended-a/dismiss", body),
@@ -5522,11 +5519,13 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     let path = "/v1/sessions/ended-a/restore";
     assert_eq!(f.call("POST", path, Some(other_birth)).await.0, StatusCode::CONFLICT);
     let (_, rows) = f.call("GET", "/v1/sessions", None).await;
-    assert_eq!(rows["sessions"][0]["dismissed"], true);
+    assert_eq!(rows["sessions"], serde_json::json!([]));
+    assert!(markers[0].path().is_file(), "a stale restore keeps the legacy tombstone");
     for _repeat in 0..2 {
         assert_eq!(f.call("POST", path, Some(restore.clone())).await.0, StatusCode::NO_CONTENT);
         let (_, rows) = f.call("GET", "/v1/sessions", None).await;
-        assert_eq!(rows["sessions"][0]["dismissed"], false);
+        assert_eq!(rows["sessions"], serde_json::json!([]), "restoring a legacy dismissal cannot list an ended session");
+        assert!(!markers[0].path().exists(), "restore removes the hub tombstone idempotently");
     }
 }
 
@@ -6537,7 +6536,8 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert_eq!(rows[0].machine_online, Some(false));
     manager.remove_metadata(&metadata.name).unwrap();
     assert!(manager.list_sessions_read_only().unwrap().is_empty());
-    let rows = super::server::supervisor_sessions(LocalSessionReadModel::default().list_sessions().unwrap(), false);
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert!(super::server::supervisor_sessions(rows.clone(), false).is_empty(), "ended history is readable but never listed in Commander");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].ended, Some(outcome));
     assert_eq!(rows[0].liveness, DaemonLiveness::StaleMetadata);

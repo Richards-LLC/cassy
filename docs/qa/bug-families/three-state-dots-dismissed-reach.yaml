@@ -1,4 +1,4 @@
-title: Status dots follow three states and a dismissed session stays reachable and restorable on every paired device
-tasks: [cas-51f6, cas-dbcb]
-invariants: [HUB-J14-GOAL]
+title: Running sessions keep three status dots and ended sessions leave navigation automatically
+tasks: [cas-51f6, cas-dbcb, cas-bbad5]
+invariants: [HUB-J14-RUNNING-ONLY, HUB-J14-IDLE-OFFLINE-DOT]
 journeys: [HUB-J14]

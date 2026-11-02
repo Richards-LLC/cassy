@@ -148,12 +148,17 @@ pub(crate) fn upkeep_message(
     title: &str,
     detail: &str,
     escape_token: &str,
-    _warnings: &[String],
+    warnings: &[String],
     caller_prefix: &str,
 ) -> String {
-    // Non-blocking findings are retained by the upkeep note/receipt writer.
+    // Routine documentation advisories remain in the note/receipt writer.
+    // Keep analysis context that explains an actual blocking finding.
+    let warnings = warnings.iter()
+        .filter(|warning| !warning.starts_with("UPKEEP ADVISORY G5")
+            && !warning.contains("attributed delivery base unavailable"))
+        .map(|warning| format!("\n{warning}")).collect::<String>();
     format!(
-        "⚠️ {title}\n\n{detail}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
+        "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )
 }
 

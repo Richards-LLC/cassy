@@ -70,6 +70,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_FRESH: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SANDBOX_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const FAILURE_TAIL_BYTES: usize = 1000;
@@ -385,12 +386,8 @@ fn sandbox_problem(os: &str, bwrap: &str, program: &Path) -> Option<String> {
         Err(error) => return Some(format!("{error:#}")),
     };
     allow_build_environment(&mut probe);
-    let output = probe
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
+    probe.arg("--version");
+    let output = run_sandbox_probe(probe, |started| started.elapsed());
     match output {
         Ok(output) if output.status.success() => None,
         Ok(output) => Some(format!(
@@ -402,6 +399,62 @@ fn sandbox_problem(os: &str, bwrap: &str, program: &Path) -> Option<String> {
         }
         Err(error) => Some(format!("could not run bubblewrap: {error}")),
     }
+}
+
+/// A regular file keeps stderr from filling a pipe or waiting on a descendant.
+fn run_sandbox_probe(
+    mut probe: Command,
+    elapsed: fn(Instant) -> Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Seek};
+    let mut stderr = tempfile::tempfile()?;
+    probe
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut probe, 0);
+    let mut child = probe.spawn()?;
+    let started = Instant::now();
+    let status = loop {
+        if elapsed(started) >= SANDBOX_PROBE_TIMEOUT {
+            stop_child(&mut child).map_err(std::io::Error::other)?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox probe timed out after 5 seconds",
+            ));
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    };
+    stderr.rewind()?;
+    let mut error = Vec::new();
+    stderr
+        .take(FAILURE_TAIL_BYTES as u64)
+        .read_to_end(&mut error)?;
+    Ok(std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: error,
+    })
+}
+
+fn initialize_runner(
+    cas_root: &Path,
+    probe: impl FnOnce() -> Option<String>,
+) -> Result<Option<(RunnerHeartbeat, std::fs::File)>> {
+    std::fs::create_dir_all(queue_dir(cas_root))?;
+    let lock = open_lock(&queue_dir(cas_root).join(RUNNER_LOCK))?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok(None);
+    }
+    // Only the owner may publish either liveness or sandbox availability.
+    let heartbeat = RunnerHeartbeat::start(cas_root, HEARTBEAT_INTERVAL)?;
+    let problem = probe();
+    record_sandbox_state(cas_root, problem.as_deref())?;
+    Ok(Some((heartbeat, lock)))
 }
 
 fn record_sandbox_state(cas_root: &Path, problem: Option<&str>) -> Result<()> {
@@ -595,7 +648,8 @@ impl Runner {
         Ok(())
     }
 
-    /// Build the oldest request, if the machine has room. Returns whether one ran.
+    /// Test entry point; the daemon retains this lock for its entire runner.
+    #[cfg(test)]
     pub(crate) fn run_next(&self) -> Result<bool> {
         let dir = queue_dir(&self.cas_root);
         if !dir.is_dir() {
@@ -605,6 +659,11 @@ impl Runner {
         if runner_lock.try_lock_exclusive().is_err() {
             return Ok(false);
         }
+        self.run_next_owned()
+    }
+
+    /// Build the oldest request while the caller holds the runner lock.
+    fn run_next_owned(&self) -> Result<bool> {
         self.requeue_orphans()?;
         let Some(request) = self.queued().into_iter().next() else {
             return Ok(false);
@@ -799,20 +858,28 @@ pub(crate) fn spawn_runner(
     std::thread::Builder::new()
         .name("cas-candidate-queue".to_string())
         .spawn(move || {
-            let problem = sandbox_problem(std::env::consts::OS, "bwrap", &runner.program);
-            if let Some(problem) = &problem {
-                tracing::warn!(%problem, "queued candidate builds are refused on this daemon");
-            }
-            if let Err(error) = record_sandbox_state(&runner.cas_root, problem.as_deref()) {
-                tracing::warn!(%error, "could not record the candidate sandbox state");
-            }
-            let mut beat: Option<Instant> = None;
-            while !runner.shutdown.load(Ordering::Relaxed) {
-                if beat.is_none_or(|beat| beat.elapsed() >= HEARTBEAT_INTERVAL) {
-                    let _ = mark_runner_live(&runner.cas_root);
-                    beat = Some(Instant::now());
+            // Other daemons wait without probing or changing the owner's marker.
+            let _owner = loop {
+                if runner.shutdown.load(Ordering::Relaxed) {
+                    return;
                 }
-                if let Err(error) = runner.run_next() {
+                match initialize_runner(&runner.cas_root, || {
+                    let problem = sandbox_problem(std::env::consts::OS, "bwrap", &runner.program);
+                    if let Some(problem) = &problem {
+                        tracing::warn!(%problem, "queued candidate builds are refused on this daemon");
+                    }
+                    problem
+                }) {
+                    Ok(Some(owner)) => break owner,
+                    Ok(None) => std::thread::sleep(POLL_INTERVAL),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not initialize the candidate runner");
+                        return;
+                    }
+                }
+            };
+            while !runner.shutdown.load(Ordering::Relaxed) {
+                if let Err(error) = runner.run_next_owned() {
                     tracing::warn!(%error, "candidate queue pass failed");
                 }
                 std::thread::sleep(POLL_INTERVAL);

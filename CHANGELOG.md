@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory liveness and recovery
+
+- **Keep healthy background work busy** — CPU-active process trees remain Executing after a background job passes the stall window; only quiet, unconfirmed jobs become Stalled. The candidate runner alone publishes its sandbox marker, starts its heartbeat before a five-second probe, and bounds probe cleanup. Old verification waits retain one deadline alert, recent expiries survive missing local task rows, and shorter supervisor guidance preserves the existing session-start budget.
+
 ### Fixed — Peer answers and reminder timers
 
 - **Peer answers resume the asking supervisor** — Untyped replies to actionable peer messages and explicit answers wake the idle asker; legacy untyped mail remains compatible, explicit receipts stay quiet, and unknown kinds are refused.

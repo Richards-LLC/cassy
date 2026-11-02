@@ -1206,6 +1206,10 @@ fn emit_task_lifecycle_transition_in_project(
     }
 }
 
+/// Recent unresolved dispatches use the daemon's expiry relay. Older active
+/// waits retain the generic deadline alert instead of disappearing as history.
+pub(crate) const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
+
 /// Exact verification waits have their own action path: the dispatch relay
 /// owns expiry (including close-persisted timeouts), and an approved verdict
 /// hands close back to the worker for a bounded grace period.
@@ -1291,6 +1295,17 @@ pub(crate) fn reconcile_blocked_task_alert(
         {
             emit(true, Some(
                 "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close.",
+            ))?;
+        }
+        if matches!(dispatch.state,
+            cas_types::VerificationDispatchState::Pending
+                | cas_types::VerificationDispatchState::Claimed
+                | cas_types::VerificationDispatchState::TimedOut)
+            && now >= dispatch.deadline_at
+                + chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS)
+        {
+            emit(true, Some(
+                "Verification is overdue beyond the expiry relay window; inspect the live task, re-dispatch verification and finish its close.",
             ))?;
         }
         return Ok(());

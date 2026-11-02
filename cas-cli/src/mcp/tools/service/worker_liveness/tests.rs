@@ -568,10 +568,17 @@ fn claude_background_job_keeps_a_completed_turn_busy_until_its_notification() {
     std::fs::write(&path, launch).unwrap();
     // No terminal notification: foreground end_turn must not own busy forever.
     let launched_at = now() - chrono::Duration::seconds(59);
-    for (elapsed, expected) in [(299, Liveness::Executing), (300, Liveness::Stalled)] {
-        assert_eq!(observe(SupervisorCli::Claude, Some(&path), process(true),
+    for (elapsed, cpu_busy, expected) in [
+        (299, Some(false), Liveness::Executing),
+        (300, Some(false), Liveness::Stalled),
+        (300, None, Liveness::Stalled),
+        (900, Some(true), Liveness::Executing),
+    ] {
+        let mut evidence = process(true);
+        evidence.cpu_busy = cpu_busy;
+        assert_eq!(observe(SupervisorCli::Claude, Some(&path), evidence,
             launched_at + chrono::Duration::seconds(elapsed), 300).state, expected,
-            "unconfirmed background job at {elapsed}s");
+            "unconfirmed background job at {elapsed}s, cpu busy: {cpu_busy:?}");
     }
     for (notice, expected) in [
         (

@@ -7,8 +7,6 @@ metadata:
 
 # Factory Supervisor
 
-Plan EPICs; workers implement.
-
 Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
 
 ## Hard Rules
@@ -29,7 +27,6 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **No polling or sleeping.** Wait on event reminders (`ci_completed`, task events, `branch_contained_in`) or harness background-task completion. Delay reminders are for actual deadlines and admission retries. Never poll the operator inbox; Commander already wakes you.
 - **Pane budget:** ~150 words of prose, answer first: findings, rejections, measurements, merge receipts, pointers. Show flows, comparisons and bad news [visually](references/operator-reply.md). Timelines, gates and lane history go to notes/artifacts; no narration/recap.
-- **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Commander answers:** reply once in the Claude/Codex pane. Web/phone receive the mirror, including offline catch-up. [Disabled or unmirrored supervisors](references/reference.md#verified-commander-messages) use explicit routing.
 - **Unprompted operator updates:** `target=operator kind=status|receipt|ask|blocker`, optional `attachment=<artifact-id>`; no pane prose.

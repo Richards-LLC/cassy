@@ -372,9 +372,8 @@ pub(crate) fn observe(
     // rather than reading a booting TUI's CPU as `executing`.
     let claude_without_transcript =
         cli == SupervisorCli::Claude && path.is_none_or(|path| !path.exists());
-    // A launch result proves activity only for the configured stall window.
-    // Missing completion notices must not keep an ended foreground turn busy
-    // forever, or be mistaken for an idle worker ready for another assignment.
+    // A launch result alone proves activity for the stall window. After that,
+    // live CPU activity can still prove the background job is executing.
     let active_background = background.running.values()
         .filter(|at| (now - **at).num_seconds() < stall_secs.max(0))
         .count();
@@ -391,7 +390,11 @@ pub(crate) fn observe(
         Liveness::Executing
     } else if let Some(event) = &last {
         if event.state == Liveness::WaitingForInput && expired_background > 0 {
-            Liveness::Stalled
+            if process.cpu_busy == Some(true) {
+                Liveness::Executing
+            } else {
+                Liveness::Stalled
+            }
         } else if event.state == Liveness::Executing
             && (now - event.at).num_seconds() > stall_secs
             && process.cpu_busy != Some(true)

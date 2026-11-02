@@ -2624,6 +2624,10 @@ button.chip:disabled { cursor: default; }
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
   .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
+  /* With a warning badge, Raw output uses its existing icon to keep every
+     phone action inside the header; its accessible name and 44px target stay. */
+  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-raw-output .action-label { display: none; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-raw-output .action-icon { display: block; }
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
   /* The rail, laid over the thread as a sheet holding only Attention. */

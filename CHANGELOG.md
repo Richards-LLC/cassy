@@ -7,6 +7,84 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.96.0] - 2026-11-02
+
+### Fixed — Commander messages and replies
+
+- **Messages reach the conversation like terminal input** — Was: Fresh background
+  heartbeats could hold a message instead of letting it reach an idle or working
+  conversation. → Now: Verified messages enter native input directly, and read
+  and delivered updates reach every connected device.
+- **Setup keeps the original message** — Was: Claude onboarding or sign-in could
+  consume input reported as delivered, and other native dialogs could receive
+  input meant for a prompt. → Now: Original words wait for a ready text prompt;
+  confirmation dialogs and pending tools keep their input protection.
+- **Replies stay with the right conversation** — Was: Boot-time sends, same-name
+  replacements and shared-project Codex rollouts could lose or misbind an answer.
+  → Now: Claude and Codex retain the original send and paired-device binding,
+  including framed Codex messages and ownership deep in long transcripts.
+- **Each native answer appears once** — Was: Background notifications could take
+  over an operator turn or leave answers and delivery receipts out of step.
+  → Now: Standalone status stays separate, each answer mirrors once under its
+  latest verified send, and every consumed send remains Delivered.
+
+### Fixed — Commander hub
+
+- **Recover the tailnet route after reboot** — Was: A Tailscale outage could leave
+  Serve pointing at a dead local shim. → Now: Auto-mode services keep serving on
+  loopback while publication retries in the background, then restore the route
+  and live status without a restart. Required mode still refuses failed publication.
+- **Preserve exact route ownership** — Was: Failed starts could lose their prior
+  target or treat an unrelated stopped service as an owned route. → Now: Prior
+  ownership survives failed starts, and only an exact recorded target can be
+  removed; foreign-route conflicts name a port-specific remedy for operator review.
+- **Keep local access when Tailscale is unavailable** — Was: A missing CLI or
+  incomplete Tailscale setup could stop an Auto-mode service's local hub.
+  → Now: Loopback stays available with a sanitized warning while public-route
+  recovery continues when possible.
+
+### Fixed — Commander phone header
+
+- **Delivery warnings keep actions visible** — Was: A delivery warning could push
+  phone header actions outside the screen. → Now: Every action stays in view,
+  with the existing Raw output icon beside the warning.
+
+### Fixed — Runtime identity
+
+- **Nested lookups preserve the live owner** — Was: Nested reviews and read-only
+  lookups could borrow a parent's identity, replace its process record or disable
+  its communication on exit. → Now: Process ownership is authenticated for reads
+  and writes; nested callers cannot replace or clean up a live owner's identity,
+  and prior exited-process and hostname records recover normally.
+
+### Fixed — Friction ledger
+
+- **Release feedback reports measured evidence** — Was: Backfill assigned lifetime
+  retrieval totals to a release, and empty feedback suggested unknown measurements.
+  → Now: Reports exclude unattributed totals, disclose exclusions and say none
+  recorded when no feedback exists; feature measurements stay tied to session end.
+
+### Fixed — QA candidates
+
+- **Source-only Commander candidates keep their identity** — Was: Regenerated
+  browser assets could mark a private candidate dirty and refuse its build.
+  → Now: Verified generated assets retain the source identity, while unrelated
+  tracked edits and mismatched served assets still refuse publication.
+
+### Changed — Release scope
+
+- **Session listing waits for the next release** — Was: This release included
+  automatic removal of stopped conversations and a new recovery path for their
+  unsent drafts. → Now: That work has been reverted from this release. Non-running
+  sessions remain listed until the next release, using the existing 3.95 behavior.
+
+### Test — Native delivery and recovery
+
+- **Assertions follow automatic recovery and real reply binding** — Was: Some
+  fixtures expected a manual restart, accepted obsolete message framing or reused
+  process identity without a fingerprint. → Now: Targeted tests assert background
+  publication, framed Codex reply binding and the owned process fingerprint.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

@@ -46,6 +46,8 @@ class CandidateVersionTests(unittest.TestCase):
             git("config", "user.email", "fixture@example.invalid")
             (repo / "cas-cli").mkdir()
             (repo / "cas-cli/Cargo.toml").write_text('[package]\nversion = "9.99.7"\n')
+            (repo / "cas-cli/src").mkdir()
+            (repo / "cas-cli/src/main.rs").write_text('fn main() {}\n')
             (repo / 'hub-web/src').mkdir(parents=True)
             (repo / 'hub-web/dist').mkdir()
             (repo / 'scripts').mkdir()
@@ -96,7 +98,7 @@ elif sys.argv[1] == 'hub':
             target_record = root / "target-record"
             compiler = tools / "cargo"
             compiler.write_text(f"#!{sys.executable}\n" + """
-import json, os, hashlib
+import json, os, hashlib, subprocess
 from pathlib import Path
 out = Path(os.environ['CARGO_TARGET_DIR'])
 (out / 'debug').mkdir(parents=True, exist_ok=True)
@@ -105,6 +107,12 @@ assets = {p.name:p.read_text() for p in dist.iterdir() if p.is_file()}
 if os.environ.get('FIXTURE_STALE'):
     assets['app.css'] = '.old {}'
 body = Path(os.environ['FIXTURE_BINARY']).read_text().replace('EMBEDDED_FIXTURE',repr(assets))
+# Model build.rs's real Git dirty check rather than always stamping a clean version.
+if os.environ.get('FIXTURE_DIRTY_SOURCE'):
+    with Path('cas-cli/src/main.rs').open('a') as source:
+        source.write('// source changed during build\\n')
+if subprocess.run(['git','diff','--quiet','HEAD']).returncode:
+    body = body.replace(' 2026-10-21)', '-dirty 2026-10-21)')
 (out/'debug/cas').write_text(body)
 (out/'debug/cas').chmod(0o700)
 Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
@@ -141,6 +149,9 @@ if sys.argv[1]=='run':
                 self.assertEqual(receipt['web']['dist_sha256'],receipt['web']['served_dist_sha256'])
                 original = (destination/'RECEIPT.json').read_bytes()
                 with mock.patch.dict(os.environ,{'FIXTURE_STALE':'1'}), self.assertRaisesRegex(ValueError,'served.*digest'):
+                    candidate['build'](repo,revision,destination)
+                self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
+                with mock.patch.dict(os.environ,{'FIXTURE_DIRTY_SOURCE':'1'}), self.assertRaisesRegex(ValueError,'unexpected format.*-dirty'):
                     candidate['build'](repo,revision,destination)
                 self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
             record = json.loads(target_record.read_text())

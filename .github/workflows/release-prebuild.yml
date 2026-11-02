@@ -16,7 +16,7 @@ name: Release Prebuild
 # calling this workflow (workflow_call), so the build steps exist once.
 #
 # Every lane is GitHub-hosted. workflow_dispatch builds the dispatched ref
-# by default; seed_only proves the miss/save/hit gate without publishing.
+# by default; seed_only skips compilation on an exact cache hit without publishing.
 on:
   merge_group:
   push:
@@ -34,7 +34,7 @@ on:
         options: [all, linux, macos]
         default: all
       seed_only:
-        description: Seed missing dependency caches; skip compilation on an exact hit
+        description: Check dependency caches; skip compilation on an exact hit
         type: boolean
         default: false
 
@@ -142,7 +142,7 @@ jobs:
             echo 'needed=true' >> "$GITHUB_OUTPUT"
           fi
 
-      # Dispatch seeds also restore on a hit to prove the save/restore path.
+      # Dispatch probes also restore on a hit but never publish caches.
       # Ordinary main cache hits do not download or compile anything.
       - name: Restore release dependencies
         if: steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch'
@@ -257,7 +257,7 @@ jobs:
         if: >-
           steps.compile.outputs.needed == 'true'
           && steps.cache-lookup.outputs.cache-hit != 'true'
-          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -270,7 +270,7 @@ jobs:
         if: >-
           steps.compile.outputs.needed == 'true'
           && steps.zig-cache.outputs.cache-hit != 'true'
-          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@v4
         with:
           path: .context/zig
@@ -336,7 +336,7 @@ jobs:
             echo 'needed=true' >> "$GITHUB_OUTPUT"
           fi
 
-      # Dispatch seeds also restore on a hit to prove the save/restore path.
+      # Dispatch probes also restore on a hit but never publish caches.
       # Ordinary main cache hits do not download or compile anything.
       - name: Restore release dependencies
         if: steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch'
@@ -432,7 +432,7 @@ jobs:
         if: >-
           steps.compile.outputs.needed == 'true'
           && steps.cache-lookup.outputs.cache-hit != 'true'
-          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -445,7 +445,7 @@ jobs:
         if: >-
           steps.compile.outputs.needed == 'true'
           && steps.zig-cache.outputs.cache-hit != 'true'
-          && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@v4
         with:
           path: .context/zig

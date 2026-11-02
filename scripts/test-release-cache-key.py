@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Release dependency identity follows build compatibility, not local versions."""
 import importlib.util
+import re
 from pathlib import Path
 import tempfile
 import unittest
+import yaml
 
 spec = importlib.util.spec_from_file_location("release_cache_key", Path(__file__).with_name("release-cache-key.py"))
 cache = importlib.util.module_from_spec(spec)
@@ -11,6 +13,32 @@ spec.loader.exec_module(cache)
 
 
 class ReleaseCacheKeyTest(unittest.TestCase):
+    def test_cache_saves_stay_in_main_scope_without_dispatch_writes(self):
+        workflow = yaml.safe_load((Path(__file__).resolve().parent.parent /
+                                   ".github/workflows/release-prebuild.yml").read_text())
+        saves = [step for job in workflow["jobs"].values() for step in job.get("steps", [])
+                 if step.get("uses") == "actions/cache/save@v4"]
+        self.assertTrue(saves, "release prebuild must still seed caches on main")
+        for step in saves:
+            for event, ref, needed, hit, expected in [
+                ("push", "refs/heads/main", "true", "false", True),
+                ("push", "refs/heads/main", "false", "true", False),
+                ("push", "refs/heads/main", "true", "true", False),
+                ("workflow_dispatch", "refs/heads/main", "true", "false", False),
+                ("workflow_dispatch", "refs/heads/factory/test", "true", "false", False),
+                ("push", "refs/heads/factory/test", "true", "false", False),
+                ("push", "refs/tags/v1.2.3", "true", "false", False),
+                ("merge_group", "refs/heads/gh-readonly-queue/main/test", "true", "false", False),
+            ]:
+                values = {"github.event_name": event, "github.ref": ref,
+                          "steps.compile.outputs.needed": needed,
+                          "steps.cache-lookup.outputs.cache-hit": hit,
+                          "steps.zig-cache.outputs.cache-hit": hit}
+                expression = re.sub(r"[\w-]+(?:\.[\w-]+)+", lambda m: repr(values[m[0]]), step["if"])
+                expression = expression.replace("&&", " and ").replace("||", " or ")
+                with self.subTest(step=step["name"], event=event, ref=ref, needed=needed, hit=hit):
+                    self.assertEqual(eval(expression, {"__builtins__": {}}), expected)
+
     def test_workspace_version_churn_and_build_compatibility(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

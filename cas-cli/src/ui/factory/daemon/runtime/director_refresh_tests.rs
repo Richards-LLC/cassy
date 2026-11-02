@@ -26,7 +26,9 @@ async fn r1_approved_verdict_leaves_close_retry_with_worker() {
 
 #[tokio::test]
 async fn r1_expired_dispatch_wakes_supervisor_once() {
-    r1_verification_wait_wakes("deadline").await;
+    for release in ["deadline", "close-timeout"] {
+        r1_verification_wait_wakes(release).await;
+    }
 }
 
 async fn r1_verification_wait_wakes(release: &str) {
@@ -164,11 +166,17 @@ async fn r1_verification_wait_wakes(release: &str) {
             "the real verdict path must queue the worker's close retry: {rows:?}"
         );
     }
-    let released_at = if release == "deadline" {
+    let released_at = if release != "verdict" {
         deadline + chrono::Duration::seconds(1)
     } else {
         chrono::Utc::now()
     };
+    if release == "close-timeout" {
+        // The close retry persists this transition before the daemon sees it.
+        let timed_out = cas_store::timeout_verification_dispatch(&root, &task.id, released_at)
+            .unwrap().unwrap();
+        assert_eq!(timed_out.state, cas_types::VerificationDispatchState::TimedOut);
+    }
     for _ in 0..3 {
         reconcile_blocked_task_alert(&root, &task.id, released_at).unwrap();
         crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
@@ -182,9 +190,27 @@ async fn r1_verification_wait_wakes(release: &str) {
             .filter(|row| row.target != "merge-w"
                 && !crate::supervisor_message_wakes::quiet(&row.prompt))
             .count(),
-        if release == "deadline" { 2 } else { 1 },
+        if release != "verdict" { 2 } else { 1 },
         "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
     );
+    if release == "verdict" {
+        let resolved_at = cas_store::get_latest_verification_dispatch(&root, &task.id)
+            .unwrap().unwrap().resolved_at.unwrap();
+        let close_deadline = resolved_at + chrono::Duration::minutes(5);
+        reconcile_blocked_task_alert(&root, &task.id, close_deadline - chrono::Duration::seconds(1)).unwrap();
+        assert_eq!(queue.peek_all(20).unwrap().len(), rows.len(),
+            "approval gives the worker a bounded chance to retry close");
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&root, &task.id, close_deadline).unwrap();
+            crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+                &root, close_deadline,
+            );
+        }
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target != "merge-w"
+            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 2,
+            "an unretried approval must escalate exactly once after its grace period: {rows:?}");
+    }
 }
 
 #[tokio::test]

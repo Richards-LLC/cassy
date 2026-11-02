@@ -76,7 +76,7 @@ it("puts reported trouble ahead of same-state peers and names the worker in atte
   };
   renderTeam(root, snapshot, vi.fn(), progress);
   expect([...root.querySelectorAll<HTMLElement>(".team-lane")].map(node => node.dataset.worker)).toEqual(["owl", "lark", "wren"]);
-  expect([...root.querySelectorAll(".team-state")].map(node => node.textContent)).toEqual(["Waiting", "Waiting", "Waiting"]);
+  expect([...root.querySelectorAll(".team-state")].map(node => node.textContent)).toEqual(["Blocked", "Waiting", "Waiting"]);
   expect(root.querySelector('.team-lane[data-worker="owl"]')?.textContent).toContain("Blocked");
   const shortcut = [...root.querySelectorAll("button")].find(button => button.textContent === "owl · Blocked")!;
   expect(shortcut).toBeDefined(); shortcut.click();

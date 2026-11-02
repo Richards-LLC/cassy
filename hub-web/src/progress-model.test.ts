@@ -60,6 +60,8 @@ it("scopes server-shaped project epics to the supervisor and keeps the full boar
 it("keeps worker delivery states shared with the rail and never guesses milestone receipts", async () => {
   const { workerState } = await import("./progress-model");
   const task = { id: "t", status: "AwaitingMerge" };
+  const blocked = { ...task, status: "Blocked" };
+  expect(workerState(workerProgress(["a"], [{ name: "a", current_task: "t", liveness: "waiting_for_input" }], [blocked])[0], [blocked])).toBe("Blocked");
   for (const [agent, expected] of [
     [{ name: "a", current_task: "t", liveness: "executing" }, "Parked for merge"],
     [{ name: "a", liveness: "waiting_for_input" }, "Waiting"],

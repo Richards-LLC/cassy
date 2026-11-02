@@ -19,11 +19,11 @@ export interface TeamSnapshot {
 }
 
 /** The avatar dot repeats the pill's state as a mark; the pill still says it in words. */
-const LANE_DOTS: Readonly<Record<string, AvatarState>> = { Executing: "working", Merged: "working", Waiting: "idle", Stalled: "needs-you", "Budget stopped": "needs-you", "Parked for merge": "needs-you", Offline: "offline" };
+const LANE_DOTS: Readonly<Record<string, AvatarState>> = { Executing: "working", Merged: "working", Waiting: "idle", Blocked: "needs-you", Stalled: "needs-you", "Budget stopped": "needs-you", "Parked for merge": "needs-you", Offline: "offline" };
 
 const STEPS = [["started", "Started"], ["pushed", "Pushed"], ["ci_green", "CI green"], ["merged", "Merged"], ["verified", "Verified"]] as const;
 
-const FINDING_GROUPS: ReadonlyArray<readonly [string, string]> = [["Executing", "working"], ["Waiting", "waiting"], ["Parked for merge", "parked"], ["Merged", "merged"], ["Stalled", "stalled"], ["Budget stopped", "stopped"], ["Offline", "offline"]];
+const FINDING_GROUPS: ReadonlyArray<readonly [string, string]> = [["Executing", "working"], ["Blocked", "blocked"], ["Waiting", "waiting"], ["Parked for merge", "parked"], ["Merged", "merged"], ["Stalled", "stalled"], ["Budget stopped", "stopped"], ["Offline", "offline"]];
 
 /** The sentence Team leads with: only what this session reports, never a guess at health. */
 export function teamFinding(states: readonly string[], decisions: number): string {
@@ -118,7 +118,6 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
     identity.append(text("h3", worker.name), text("span", [worker.agent?.harness ?? "Harness not reported", worker.agent?.model ?? "Model not reported"].join(" · "), "team-model"));
     const badge = text("span", state, `team-state status-chip status-chip--${statusClass(state)}`); badge.setAttribute("aria-label", `${worker.name}: ${state}`);
     if (priorStates.has(worker.name) && priorStates.get(worker.name) !== state) badge.classList.add("team-state--changed");
-    if (reason && reason !== state && reason !== "Merge waiting") identity.append(text("span", reason, "team-reason"));
     const work = text("p", worker.work, "team-task");
     const elapsed = text("p", "Task time not reported", "team-elapsed");
     if (worker.agent?.task_started_at) elapsed.dataset.taskStart = worker.agent.task_started_at;

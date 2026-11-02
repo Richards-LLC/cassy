@@ -58,9 +58,16 @@ cat >"$repo/CHANGELOG.md" <<'EOF'
 
 - The previous release.
 EOF
+git -C "$repo" commit --quiet --allow-empty -m 'previous release'
 git -C "$repo" add CHANGELOG.md
 git -C "$repo" commit --quiet -m 'release: v9.99.2'
 git -C "$repo" push --quiet origin HEAD:refs/heads/main
+# Match the publisher's exact-commit checkout: no older history or tags.
+repo="$tmp/shallow"
+git clone --quiet --depth=1 --branch main "file://$remote" "$repo"
+git -C "$repo" config user.email test@example.com
+git -C "$repo" config user.name Test
+check '[[ "$(git -C "$repo" rev-parse --is-shallow-repository)" == true ]]' 'publisher fixture has only the landed commit'
 sha="$(git -C "$repo" rev-parse HEAD)"
 assets="$tmp/assets"
 mkdir -p "$assets"

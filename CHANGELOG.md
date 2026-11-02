@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Release builds
+
+- **Reuse release dependencies across queue entries** — Main seeds missing dependency caches, release builds keep sccache alive during long compiles, and each uploaded platform archive starts its audit before cache saving finishes. The publisher checks out only the release commit and builds only a missing platform.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

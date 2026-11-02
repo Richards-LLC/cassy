@@ -5514,6 +5514,20 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     ] {
         assert_eq!(f.call("POST", path, Some(body)).await.0, StatusCode::CONFLICT);
     }
+    // Restore lifts the tombstone for every paired device, for this birth only.
+    ended.started_at = Some("2026-10-31T10:00:00Z".into());
+    f.app = app(f.auth.clone(), vec![ended.clone()]);
+    let restore = serde_json::json!({"started_at": ended.started_at});
+    let other_birth = serde_json::json!({"started_at": "2026-10-31T12:00:00Z"});
+    let path = "/v1/sessions/ended-a/restore";
+    assert_eq!(f.call("POST", path, Some(other_birth)).await.0, StatusCode::CONFLICT);
+    let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(rows["sessions"][0]["dismissed"], true);
+    for _repeat in 0..2 {
+        assert_eq!(f.call("POST", path, Some(restore.clone())).await.0, StatusCode::NO_CONTENT);
+        let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+        assert_eq!(rows["sessions"][0]["dismissed"], false);
+    }
 }
 
 /// End session was the one Commander mutation with no audit row (brief O8).

@@ -6,7 +6,7 @@ export interface NavigationMachine { id: string; label: string; online?: boolean
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
-interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[]; dismissEnded?: (row: ConversationRow) => Promise<void> }
+interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; allRows?: readonly ConversationRow[]; dismissEnded?: (row: ConversationRow) => Promise<void>; restoreEnded?: (row: ConversationRow) => Promise<void> }
 interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; clearEnded: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const DISMISSED_ENDED_KEY = "commander.dismissed-ended-sessions";
@@ -45,6 +45,8 @@ export class ProjectNavigation {
   private dismissedEnded = new Set<string>();
   private pendingDismissals = new Set<string>();
   private syncAttempted = new Set<string>();
+  // Restored here while the catalog in hand may still report the hub's tombstone.
+  private restoredEnded = new Set<string>();
   // QA cas-51f6 F02: dismissed rows stay reachable on this page by search and
   // by the list's Show dismissed control, where each can be restored.
   private showDismissed = false;
@@ -71,7 +73,8 @@ export class ProjectNavigation {
   }
 
   private isDismissedEnded(row: ConversationRow): boolean {
-    return row.ended !== undefined && (row.dismissed === true || this.dismissedEnded.has(endedSessionKey(row)));
+    const key = endedSessionKey(row);
+    return row.ended !== undefined && !this.restoredEnded.has(key) && (row.dismissed === true || this.dismissedEnded.has(key));
   }
 
   private dismissEnded(row: ConversationRow): void {
@@ -81,8 +84,9 @@ export class ProjectNavigation {
 
   private async persistDismissal(row: ConversationRow, keepHidden = false): Promise<void> {
     const key = endedSessionKey(row);
-    if (row.dismissed || this.pendingDismissals.has(key)) return;
+    if ((row.dismissed && !this.restoredEnded.has(key)) || this.pendingDismissals.has(key)) return;
     this.pendingDismissals.add(key);
+    this.restoredEnded.delete(key);
     this.dismissedEnded.add(key);
     this.saveDismissedEnded();
     const latest = this.latest;
@@ -104,11 +108,30 @@ export class ProjectNavigation {
     } finally { this.pendingDismissals.delete(key); }
   }
 
-  private restoreEnded(row: ConversationRow): void {
-    this.dismissedEnded.delete(endedSessionKey(row));
-    this.saveDismissedEnded();
+  private async restoreEnded(row: ConversationRow): Promise<void> {
     const latest = this.latest;
-    if (latest) this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    if (!latest) return;
+    const key = endedSessionKey(row);
+    const wasShowing = this.showDismissed;
+    const heldLocally = this.dismissedEnded.delete(key);
+    this.saveDismissedEnded();
+    this.restoredEnded.add(key);
+    this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
+    try {
+      await latest.options.restoreEnded?.(row);
+    } catch {
+      this.restoredEnded.delete(key);
+      if (heldLocally) this.dismissedEnded.add(key);
+      // The last dismissed row's restore closed the list; a refusal reopens it.
+      this.showDismissed = wasShowing;
+      this.saveDismissedEnded();
+      const current = this.latest!;
+      this.render(current.container, current.rows, current.open, current.end, current.options);
+      const error = current.container.ownerDocument.createElement("p");
+      error.setAttribute("role", "alert");
+      error.textContent = `Could not restore ${row.supervisor}. Try Restore again.`;
+      current.container.append(error);
+    }
   }
 
   private clearProjectEnded(project: string): void {
@@ -161,6 +184,7 @@ export class ProjectNavigation {
       const migrated = row.ended && this.dismissedEnded.delete(legacy);
       if (migrated) this.saveDismissedEnded();
       const key = endedSessionKey(row);
+      if (!row.dismissed) this.restoredEnded.delete(key);
       if (row.ended && !row.dismissed && (migrated || this.dismissedEnded.has(key)) && !this.syncAttempted.has(key)) {
         // A tab can close between saving locally and the hub's receipt. Replay
         // that preference on reload, once per page, without resurrecting it.
@@ -274,8 +298,8 @@ export class ProjectNavigation {
       const newest = sorted.reduce<ConversationRow | undefined>((best, row) => rank(row) > (best ? rank(best) : -Infinity) ? row : best, undefined);
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
-      const nested = sorted.map((row) => ({ ...row, ...(this.isDismissedEnded(row) ? { dismissed: true } : {}), supervisorState: row.ended ? "offline" as const : needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
-      card.rows.render(card.body, nested, open, end, (row) => row.dismissed ? this.restoreEnded(row) : this.dismissEnded(row));
+      const nested = sorted.map((row) => ({ ...row, dismissed: this.isDismissedEnded(row), supervisorState: row.ended ? "offline" as const : needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
+      card.rows.render(card.body, nested, open, end, (row) => { if (row.dismissed) void this.restoreEnded(row); else this.dismissEnded(row); });
       ordered.push(card.node);
     }
     if (!ordered.length && rows.length) {

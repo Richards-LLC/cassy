@@ -31,39 +31,52 @@ pub(super) struct DismissRequest {
     started_at: String,
 }
 
+/// Authorizes a shared list change and binds it to this exact session birth.
+async fn tombstone_path<R: SessionReadModel>(
+    state: &HubState<R>,
+    name: &str,
+    action: &str,
+    headers: &HeaderMap,
+    started_at: &str,
+) -> Result<PathBuf, Response> {
+    let uri = format!("/v1/sessions/{name}/{action}");
+    // This changes only the shared list preference, never the daemon or history.
+    if let Err(error) = authorize(
+        state,
+        HubAction::Mutation,
+        Scope::SessionRead,
+        headers,
+        "POST",
+        &uri,
+    ) {
+        return Err(with_cors(unauthorized_for(&error), headers));
+    }
+    let Some(auth) = &state.auth else {
+        return Err(with_cors(StatusCode::SERVICE_UNAVAILABLE.into_response(), headers));
+    };
+    let sessions = match state.catalog.list().await {
+        Ok(rows) => rows,
+        Err(error) => return Err(internal_error(error)),
+    };
+    let Some(session) = sessions.iter().find(|row| row.name == name) else {
+        return Err(with_cors(StatusCode::NOT_FOUND.into_response(), headers));
+    };
+    if session.ended.is_none() || session.started_at.as_deref() != Some(started_at) {
+        return Err(with_cors(StatusCode::CONFLICT.into_response(), headers));
+    }
+    Ok(marker(auth.root(), name, started_at))
+}
+
 pub(super) async fn dismiss<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path(name): Path<String>,
     headers: HeaderMap,
     Json(request): Json<DismissRequest>,
 ) -> Response {
-    let uri = format!("/v1/sessions/{name}/dismiss");
-    // This changes only the shared list preference, never the daemon or history.
-    if let Err(error) = authorize(
-        &state,
-        HubAction::Mutation,
-        Scope::SessionRead,
-        &headers,
-        "POST",
-        &uri,
-    ) {
-        return with_cors(unauthorized_for(&error), &headers);
-    }
-    let Some(auth) = &state.auth else {
-        return with_cors(StatusCode::SERVICE_UNAVAILABLE.into_response(), &headers);
+    let path = match tombstone_path(&state, &name, "dismiss", &headers, &request.started_at).await {
+        Ok(path) => path,
+        Err(response) => return response,
     };
-    let sessions = match state.catalog.list().await {
-        Ok(rows) => rows,
-        Err(error) => return internal_error(error),
-    };
-    let Some(session) = sessions.iter().find(|row| row.name == name) else {
-        return with_cors(StatusCode::NOT_FOUND.into_response(), &headers);
-    };
-    if session.ended.is_none() || session.started_at.as_deref() != Some(request.started_at.as_str())
-    {
-        return with_cors(StatusCode::CONFLICT.into_response(), &headers);
-    }
-    let path = marker(auth.root(), &name, &request.started_at);
     let result = (|| -> anyhow::Result<()> {
         let dir = path.parent().expect("marker parent");
         std::fs::create_dir_all(dir)?;
@@ -80,5 +93,24 @@ pub(super) async fn dismiss<R: SessionReadModel>(
         return internal_error(error);
     }
     state.events.session_dismissed(&name);
+    with_cors(StatusCode::NO_CONTENT.into_response(), &headers)
+}
+
+/// Lifts a dismissal for every paired device. Restoring twice is not an error.
+pub(super) async fn restore<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<DismissRequest>,
+) -> Response {
+    let path = match tombstone_path(&state, &name, "restore", &headers, &request.started_at).await {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => state.events.session_restored(&name),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return internal_error(error.into()),
+    }
     with_cors(StatusCode::NO_CONTENT.into_response(), &headers)
 }

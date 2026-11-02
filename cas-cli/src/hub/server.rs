@@ -225,6 +225,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/sessions/{session}/dismiss",
             post(dismissed_sessions::dismiss::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/sessions/{session}/restore",
+            post(dismissed_sessions::restore::<R>).options(preflight::<R>),
+        )
         .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
         .route(
             "/v1/projects/browse",

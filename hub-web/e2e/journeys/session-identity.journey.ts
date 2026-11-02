@@ -503,6 +503,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(otter(demo())).toHaveCount(1);
     await expect(list.getByRole("group", { name: /^pulse-card ·/ }).locator(".conversation-row")).toHaveCount(4);
     await demo().getByRole("button", { name: "Restore dismissed session quiet-otter-12", exact: true }).click();
+    // The hub lifts the shared tombstone, so a reload cannot hide it again.
+    await expect.poll(() => hub.machine("atlas").sessions.find(row => row.name === "quiet-otter-12")?.dismissed).toBe(false);
     await list.getByRole("button", { name: "Hide 3 dismissed sessions", exact: true }).click();
     await expect(list.getByRole("group", { name: /^pulse-card ·/ }).locator(".conversation-row")).toHaveCount(1);
     await expect(demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true })).toBeVisible();

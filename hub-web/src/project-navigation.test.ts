@@ -144,6 +144,35 @@ describe("project-first navigation", () => {
     expect(retry).toHaveBeenCalledWith(expect.objectContaining(ended));
   });
 
+  it("restores a hub-dismissed session through the hub, and keeps it dismissed when the hub refuses", async () => {
+    const nav = setup();
+    const ended = row("calm-swan-15", { startedAt: 1000, dismissed: true, ended: { at: "2026-10-31T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
+    const reveal = () => [...nav.querySelectorAll("button")].find((button) => button.textContent === "Show 1 dismissed session")!.click();
+    const restoreButton = () => nav.querySelector<HTMLButtonElement>('[aria-label="Restore dismissed session calm-swan-15"]');
+    const dismissButton = () => nav.querySelector<HTMLButtonElement>('[aria-label="Dismiss ended session calm-swan-15"]');
+    const refused = vi.fn(async () => { throw new Error("Hub unreachable"); });
+    const failing = new ProjectNavigation();
+    failing.render(nav, [ended], vi.fn(), undefined, { restoreEnded: refused });
+    reveal();
+    restoreButton()!.click();
+    await vi.waitFor(() => expect(nav.querySelector('[role="alert"]')?.textContent).toContain("Could not restore calm-swan-15"));
+    expect(restoreButton()).not.toBeNull();
+
+    nav.replaceChildren();
+    const save = vi.fn(async () => {});
+    const list = new ProjectNavigation();
+    list.render(nav, [ended], vi.fn(), undefined, { restoreEnded: save });
+    reveal();
+    restoreButton()!.click();
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ session: "calm-swan-15" }));
+    // The row is back at once, even while the catalog in hand still says dismissed.
+    expect(dismissButton()).not.toBeNull();
+    list.render(nav, [ended], vi.fn(), undefined, { restoreEnded: save });
+    expect(dismissButton()).not.toBeNull();
+    list.render(nav, [{ ...ended, dismissed: false }], vi.fn(), undefined, { restoreEnded: save });
+    expect(dismissButton()).not.toBeNull();
+  });
+
   it("pins operator decisions and intersects the Needs you and machine filters with the supplied search results", () => {
     const nav = setup(); const list = new ProjectNavigation(); const open = vi.fn();
     const rows = [row("answer-me", { attention: 1 }), row("merge-me", { machineId: "prowl", host: "prowl", needsYou: true }), row("only-unread", { unread: 2 })];

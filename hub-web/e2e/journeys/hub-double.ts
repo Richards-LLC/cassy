@@ -1034,13 +1034,13 @@ export class HubDouble {
     }
     if (path === "/v1/sessions" && method === "POST") return this.launch(route, machineId);
     // cas-55a4: End session, as hub/server.rs `end_session` answers it.
-    const dismissing = /^\/v1\/sessions\/([^/]+)\/dismiss$/.exec(path);
+    const dismissing = /^\/v1\/sessions\/([^/]+)\/(dismiss|restore)$/.exec(path);
     if (dismissing && method === "POST") {
       if (!this.scopesFor(machineId).includes("session-read")) return route.fulfill({ status: 403 });
       const session = this.sessionsFor(machineId).find(row => row.name === decodeURIComponent(dismissing[1]!));
       if (!session) return route.fulfill({ status: 404 });
       if (!session.ended || session.started_at !== route.request().postDataJSON().started_at) return route.fulfill({ status: 409 });
-      session.dismissed = true;
+      session.dismissed = dismissing[2] === "dismiss";
       return route.fulfill({ status: 204 });
     }
     const ending = /^\/v1\/sessions\/([^/]+)$/.exec(path);

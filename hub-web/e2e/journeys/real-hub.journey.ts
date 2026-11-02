@@ -836,7 +836,9 @@ test("HUB-J14 real hub supervisor-only card shows live status and keeps a dismis
     await list.getByRole("button", { name: "Show 1 dismissed session", exact: true }).click();
     await expect(row).toHaveCount(1);
     await page.screenshot({ path: join(directory, "J03-dismissed-shown.png") });
+    const restored = page.waitForResponse((response) => response.url().endsWith("/restore") && response.status() === 204);
     await card.getByRole("button", { name: "Restore dismissed session journey-supervisor", exact: true }).click();
+    await restored;
     await page.reload();
     await expect(card.getByRole("button", { name: "Dismiss ended session journey-supervisor", exact: true })).toBeVisible();
     await page.screenshot({ path: join(directory, "J04-restored.png") });

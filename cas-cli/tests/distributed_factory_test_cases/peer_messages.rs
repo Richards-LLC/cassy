@@ -594,9 +594,9 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     let invalid = coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"invalid", "message":"unknown kind", "kind":"answr", "in_reply_to":rows[0].id})).await.unwrap_err();
     // pin: an unsupported kind must return an actionable validation error.
     assert!(invalid.contains("unknown peer message kind"), "{invalid}");
-    // Untyped peer reports retain compatibility; explicit receipts stay quiet.
+    // New untyped FYIs remain quiet; replies to an ask and explicit actions wake.
     for (kind, blocker, wakes) in [
-        (None, false, true),
+        (None, false, false),
         (Some("blocker"), false, true), (None, true, true), (Some("status"), false, true),
         (Some("receipt"), false, false), (Some("quiet"), false, false),
     ] {
@@ -1420,8 +1420,8 @@ async fn ct2_p3_overcap_peer_body_readable() {
     let (sender, receiver) = (service_for(&a, "a"), service_for(&b, "b"));
     let body = format!("contract-v2 over-cap body\n{}\nend-of-body", "readable 体\n".repeat(400));
     assert!(body.chars().count() > cas::config::Config::default().factory().message_max_chars);
-    coordinate(&sender, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"long peer body", "message":body})).await.unwrap();
-    assert_eq!(mailbox.lock().unwrap()[0]["body"].as_str(), Some(format!("<cas-peer-intent kind=\"status\"/>\n{body}").as_str()));
+    coordinate(&sender, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"long peer body", "message":body, "kind":"ask"})).await.unwrap();
+    assert_eq!(mailbox.lock().unwrap()[0]["body"].as_str(), Some(format!("<cas-peer-intent kind=\"ask\"/>\n{body}").as_str()));
     let rows = tokio::task::spawn_blocking(move || { tick(&b, "b"); inbox(&b) }).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].prompt.ends_with(&body));

@@ -161,7 +161,9 @@ async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
     let (_root, mut daemon) = peer_fixture().await;
     let replies = [None, Some("answer")].into_iter().enumerate().map(|(i, kind)| {
         let mut reply = peer_message(&format!("pm-reply-{i}"), true);
-        reply.body = crate::cloud::peer_mailbox::attach_message_intent(&reply.body, kind, false);
+        if let Some(kind) = kind {
+            reply.body = crate::cloud::peer_mailbox::attach_message_intent(&reply.body, Some(kind), false);
+        }
         reply
     }).collect();
     let imported = import(&daemon, replies);

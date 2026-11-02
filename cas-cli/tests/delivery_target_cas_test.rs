@@ -1600,8 +1600,9 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         assert!(!request.exists(), "{outcome}: settled intent is consumed once");
+        // pin: retry notices share the CI watcher's durable lifecycle wake namespace.
         let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
-            .peek_all(100).unwrap().into_iter().filter(|p| p.prompt.contains("Automatic merge stopped")).collect();
+            .peek_all(100).unwrap().into_iter().filter(|p| p.source.starts_with("lifecycle-wake:ci-red-run:") || p.source.starts_with("lifecycle-wake:merge-ci-retry:")).collect();
         if outcome == "green" {
             assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"));
             assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");

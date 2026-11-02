@@ -60,6 +60,7 @@ async fn r1_verification_wait_wakes(release: &str) {
     )
     .unwrap();
     task.status = TaskStatus::Blocked;
+    task.pending_verification = true;
     task.notes = format!(
         "[{}] 🚫 BLOCKER {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),

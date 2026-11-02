@@ -45,6 +45,11 @@ pub enum SupervisorActionableState {
         branches: Vec<(String, String, String)>,
         merged_close_blocked: Vec<MergedCloseBlockedTask>,
     },
+    /// cas-f497: everything left in the epic is merged and waiting for the one
+    /// release verdict. One prompt for the release, never one per delivery.
+    ReleaseVerdictDue {
+        task_ids: Vec<String>,
+    },
     AssignReadyWork {
         task_ids: Vec<String>,
         idle_workers: Vec<String>,
@@ -91,6 +96,11 @@ impl SupervisorActionableState {
                 );
                 format!("{unmerged}\n{merged}")
             }
+            Self::ReleaseVerdictDue { task_ids } => format!(
+                "Drive to the exit: {} merged Tier 1 deliveries wait for one release verdict: {}. Review the assembled tip, publish a report naming each one, then record `{tool_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>`. The verdict closes them.",
+                task_ids.len(),
+                task_ids.join(", "),
+            ),
             Self::AssignReadyWork {
                 task_ids,
                 idle_workers,
@@ -175,6 +185,17 @@ impl SupervisorActionableState {
         Some(format!("merged-close-blocked:{}", merged_close_blocked_key(tasks)))
     }
 
+    /// The key of a state that wakes once until it changes, however long it stays.
+    fn wake_once_key(&self) -> Option<String> {
+        match self {
+            Self::MergeCloseBlocked { .. } => self.merged_close_blocked_relay_key(),
+            Self::ReleaseVerdictDue { task_ids } => {
+                Some(format!("release-verdict-due:{}", task_ids.join("|")))
+            }
+            _ => None,
+        }
+    }
+
     /// Render only the genuinely unmerged portion of a mixed merge queue.
     pub(crate) fn unmerged_merge_state(&self) -> Option<Self> {
         match self {
@@ -221,6 +242,7 @@ pub struct SupervisorStallTracker {
     /// Stable merged-delivery state most recently delivered. A changed anchor
     /// may wake after the rate limit, while an unchanged merged
     /// delivery must not refire the same close demand every ten minutes.
+    /// A due release verdict shares this one-wake record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
     /// Recent delivered assignment texts, retained across supervisor activity
@@ -280,11 +302,7 @@ impl SupervisorStallTracker {
             .last_wake_at
             .map(|last| (now - last).num_seconds() >= SUPERVISOR_STALL_REFIRE_SECS)
             .unwrap_or(true);
-        let merged_key = actionable.as_ref().and_then(|action| {
-            matches!(action, SupervisorActionableState::MergeCloseBlocked { .. })
-                .then(|| action.merged_close_blocked_relay_key())
-                .flatten()
-        });
+        let merged_key = actionable.as_ref().and_then(SupervisorActionableState::wake_once_key);
         let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
             self.last_merged_close_blocked_key.as_ref() == Some(key)
         });
@@ -366,6 +384,9 @@ pub enum DeliveryHold {
     /// not arrived for this task yet. Unknown is never "merge now"; the next
     /// snapshot carries the evidence.
     EvidencePending,
+    /// cas-f497: merged and correctly waiting for the one release verdict, which
+    /// closes it. Not a close failure and not a per-delivery supervisor action.
+    ReleaseVerdictPending,
 }
 
 /// cas-03ff: whether the supervisor has a pending external reminder waiting
@@ -878,6 +899,7 @@ fn focused_epic_exit_state(
 ) -> Option<SupervisorActionableState> {
     let mut mergeable = Vec::new();
     let mut merged_close_blocked = Vec::new();
+    let mut awaiting_verdict = Vec::new();
     for task in data.in_progress_tasks.iter().filter(|task| {
         task.epic.as_deref() == Some(epic_id) && task.status == TaskStatus::AwaitingMerge
     }) {
@@ -891,8 +913,16 @@ fn focused_epic_exit_state(
             .unwrap_or(assignee);
         // GH #896: a delivery held for a decision is not "merge now". It
         // stays parked without keeping the stall relay firing.
-        if held_workers.contains(worker) || classify_delivery_hold(task, worker).is_some() {
+        if held_workers.contains(worker) {
             continue;
+        }
+        match classify_delivery_hold(task, worker) {
+            Some(DeliveryHold::ReleaseVerdictPending) => {
+                awaiting_verdict.push(task.id.clone());
+                continue;
+            }
+            Some(_) => continue,
+            None => {}
         }
         let (branch, tip) = resolve_delivery(task, worker);
         // cas-03ff: the supervisor is waiting on this delivery's CI or on it
@@ -945,6 +975,14 @@ fn focused_epic_exit_state(
         .chain(data.in_progress_tasks.iter())
         .filter(|task| task.epic.as_deref() == Some(epic_id))
         .count();
+    // The verdict reviews the assembled tip, so it is due only when nothing else
+    // in the epic can still change that tip.
+    if !awaiting_verdict.is_empty() && active_children == awaiting_verdict.len() {
+        awaiting_verdict.sort();
+        return Some(SupervisorActionableState::ReleaseVerdictDue {
+            task_ids: awaiting_verdict,
+        });
+    }
     if active_children == 0
         && data.epic_closed_counts.get(epic_id).copied().unwrap_or(0) > 0
     {

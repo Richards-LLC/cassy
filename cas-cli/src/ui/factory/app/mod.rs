@@ -2045,15 +2045,15 @@ impl FactoryApp {
         let mut tracker = self.supervisor_stall_tracker.clone().unwrap_or(file_tracker);
         let before = tracker.clone();
         let now = Utc::now();
-        let held_workers = self.session_progress.held_workers.clone()?;
         // cas-223f: the git, CI and task-store evidence arrived with the
         // snapshot; this only looks it up.
         let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
-        let actionable = self.supervisor_actionable_from_evidence(
+        let actionable = self.supervisor_actionable_from_ownership(
             &self.unfiltered_director_data,
             &evidence,
-            &held_workers,
+            self.session_progress.held_workers.as_ref(),
             now,
+            &self.assignment_evidence,
         );
         let supervisor_ids = self
             .unfiltered_director_data
@@ -2128,8 +2128,7 @@ impl FactoryApp {
         if last_call.is_some_and(|last| last > detected_at) {
             return false;
         }
-        let Some(held_workers) = session_progress.held_workers.as_ref() else { return false; };
-        self.supervisor_actionable_from_ownership(data, evidence, held_workers, Utc::now(),
+        self.supervisor_actionable_from_ownership(data, evidence, session_progress.held_workers.as_ref(), Utc::now(),
             assignment.unwrap_or(&Default::default()))
             .as_ref()
             == Some(next_step)
@@ -2144,22 +2143,26 @@ impl FactoryApp {
         held_workers: &HashSet<String>,
         now: DateTime<Utc>,
     ) -> Option<super::director::SupervisorActionableState> {
-        self.supervisor_actionable_from_ownership(data, evidence, held_workers, now, &self.assignment_evidence)
+        self.supervisor_actionable_from_ownership(data, evidence, Some(held_workers), now, &self.assignment_evidence)
     }
 
+    /// cas-f497: an unreadable hold set refuses only assignment, which could
+    /// otherwise pick a held worker. Merge and close prompts still reach the
+    /// supervisor; delivery evidence carries their own holds.
     fn supervisor_actionable_from_ownership(
         &self,
         data: &DirectorData,
         evidence: &delivery_evidence::DeliveryEvidenceMap,
-        held_workers: &HashSet<String>,
+        held_workers: Option<&HashSet<String>>,
         now: DateTime<Utc>,
         assignment: &assignment_evidence::AssignmentEvidence,
     ) -> Option<super::director::SupervisorActionableState> {
+        let no_holds = HashSet::new();
         supervisor_actionable_state_with_ownership(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
-            held_workers,
+            held_workers.unwrap_or(&no_holds),
             now,
             self.supervisor_stall_after_secs,
             |task, worker| delivery_evidence::evidence_delivery(evidence, task, worker),
@@ -2169,6 +2172,10 @@ impl FactoryApp {
             |task, worker| delivery_evidence::evidence_hold(evidence, task, worker),
             |task| assignment.allows(&task.id),
         )
+        .filter(|state| {
+            held_workers.is_some()
+                || !matches!(state, super::director::SupervisorActionableState::AssignReadyWork { .. })
+        })
     }
 
     /// Route worker panes whose registry rows are all non-live through the normal shutdown path.

@@ -79,6 +79,8 @@ pub(crate) struct ParkedFacts {
     close_rejection: String,
     /// Preserve the same delivery/snapshot metadata epic_status evaluates.
     record: Option<cas_types::Task>,
+    /// Where the close gate reads this delivery's tier and release verdict.
+    cas_dir: PathBuf,
 }
 
 /// Store facts by task id.
@@ -95,6 +97,8 @@ pub(crate) struct GitEvidence {
     ci_pending: bool,
     /// The anchor is already on its target (merged, close blocked).
     merged_close_blocked: Option<MergedCloseBlockedTask>,
+    /// cas-f497: on its target and correctly waiting for the release verdict.
+    awaits_release_verdict: bool,
 }
 
 /// Git evidence by task id.
@@ -320,6 +324,7 @@ impl StallEvidenceRequest {
                 .and_then(|record| last_close_rejection_reason(&record.notes))
                 .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
             record: record.clone(),
+            cas_dir: self.cas_dir.clone(),
             task: parked.task,
         }
     }
@@ -395,14 +400,17 @@ impl CiStatusRequest {
             |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
         );
         // A contained delivery no longer needs lane CI or another merge.
-        let merged_close_blocked = facts.target.as_deref()
+        let contained = facts.target.as_deref()
             .and_then(|target| self.merged_close_blocked(facts, &delivery, target));
-        let ci_pending = merged_close_blocked.is_none() && self.delivery_ci_pending(facts, &delivery);
+        let ci_pending = contained.is_none() && self.delivery_ci_pending(facts, &delivery);
+        let awaits_release_verdict = contained.is_some() && facts.record.as_ref()
+            .is_some_and(|record| crate::qa_batch::awaits_release_verdict(&facts.cas_dir, record));
         GitEvidence {
             inputs: facts.inputs(),
             delivery,
             ci_pending,
-            merged_close_blocked,
+            merged_close_blocked: contained.filter(|_| !awaits_release_verdict),
+            awaits_release_verdict,
         }
     }
 
@@ -521,7 +529,8 @@ pub(crate) fn combine(facts: &ParkedFactsMap, git: &GitEvidenceMap) -> DeliveryE
                     Some(found) => DeliveryEvidence {
                         worker: facts.worker.clone(),
                         delivery: found.delivery.clone(),
-                        hold: found.ci_pending.then_some(DeliveryHold::LaneCiPending),
+                        hold: found.ci_pending.then_some(DeliveryHold::LaneCiPending)
+                            .or(found.awaits_release_verdict.then_some(DeliveryHold::ReleaseVerdictPending)),
                         merged_close_blocked: found.merged_close_blocked.clone(),
                     },
                     None => DeliveryEvidence {
@@ -688,6 +697,98 @@ mod tests {
         assert!(!matches!(state, SupervisorActionableState::MergeBranches { .. }), "merged live tip cannot demand another merge: {state:?}");
     }
 
+    /// cas-f497: a merged Tier 1 delivery waiting for the release verdict is not a
+    /// blocked close: the release gets one prompt, once nothing else can change the
+    /// assembled tip, with no per-delivery wake and no override to offer.
+    #[test]
+    fn release_verdict_wait_is_one_release_prompt_cas_f497() {
+        use crate::ui::factory::director::{
+            SupervisorActionableState, SupervisorStallTracker, supervisor_actionable_state_with_classifiers,
+        };
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-b", "main"]);
+        git(repo, &["config", "user.name", "Fixture"]);
+        git(repo, &["config", "user.email", "fixture@example.test"]);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "// base\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "base"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("src/lib.rs"), "// delivered\n").unwrap();
+        git(repo, &["commit", "-am", "cas-a: delivery"]);
+        let anchor = git(repo, &["rev-parse", "HEAD"]);
+
+        let cas_dir = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id='release-wait'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+        let mut child = cas_types::Task::new("cas-a".into(), "delivery".into());
+        child.status = cas_types::TaskStatus::AwaitingMerge;
+        child.assignee = Some("wa".into());
+        child.deliverables.factory_branch_anchor = Some(anchor.clone());
+        child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+            assignee: "wa".into(),
+            branch: "factory/wa".into(),
+            base_sha: base,
+        });
+        crate::store::open_task_store(&cas_dir).unwrap().add(&child).unwrap();
+
+        let mut facts = parked("cas-a", "wa", None);
+        facts.target = Some("main".into());
+        facts.anchor = Some(anchor);
+        facts.parked_branch = None;
+        facts.cas_dir = cas_dir;
+        facts.record = Some(child);
+        let map = HashMap::from([("cas-a".to_string(), facts.clone())]);
+        let git_evidence = CiStatusRequest::new(repo.into(), &map, LaneCiCache::default(), DeliveryContainmentCache::default())
+            .unwrap().run().git;
+        let evidence = combine(&map, &git_evidence);
+        assert_eq!(evidence["cas-a"].hold, Some(DeliveryHold::ReleaseVerdictPending));
+        assert_eq!(evidence["cas-a"].merged_close_blocked, None);
+
+        let mut data = DirectorData {
+            ready_tasks: Vec::new(), in_progress_tasks: vec![facts.task.clone()], epic_tasks: Vec::new(),
+            agents: Vec::new(), activity: Vec::new(), agent_id_to_name: HashMap::new(),
+            changes: Vec::new(), git_loaded: false, reminders: Vec::new(),
+            epic_closed_counts: HashMap::new(), start_gated_task_ids: Default::default(),
+        };
+        let mut epic = facts.task.clone();
+        epic.id = "cas-epic".into();
+        epic.status = cas_types::TaskStatus::InProgress;
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("main".into());
+        data.epic_tasks.push(epic);
+        let state = |data: &DirectorData| supervisor_actionable_state_with_classifiers(
+            data, Some("cas-epic"), "supervisor", &Default::default(), Utc::now(), 600,
+            |task, worker| evidence_delivery(&evidence, task, worker),
+            |task, _, target, _| evidence_merged_close_blocked(&evidence, task, target),
+            |task, worker| evidence_hold(&evidence, task, worker),
+        );
+
+        let due = state(&data).expect("the release needs one prompt");
+        assert_eq!(due, SupervisorActionableState::ReleaseVerdictDue { task_ids: vec!["cas-a".into()] });
+        assert_eq!(due.merged_close_blocked_relay_key(), None, "no per-delivery relay");
+        let text = due.next_step_text();
+        assert!(text.contains("verification_type=release"), "{text}");
+        assert!(!text.contains("supervisor_override") && !text.contains("worker close"), "{text}");
+
+        let now = Utc::now();
+        let silent_since = Some(now - chrono::Duration::seconds(600));
+        let mut tracker = SupervisorStallTracker::default();
+        assert!(tracker.observe(Some(due.clone()), silent_since, false, now, 600).wake.is_some());
+        assert!(tracker.observe(Some(due), silent_since, false, now + chrono::Duration::seconds(1200), 600).wake.is_none());
+
+        // Other work in the epic can still change the tip under review.
+        let mut sibling = facts.task.clone();
+        sibling.id = "cas-b".into();
+        sibling.status = cas_types::TaskStatus::InProgress;
+        data.in_progress_tasks.push(sibling);
+        assert_eq!(state(&data), None);
+    }
+
     fn parked(task_id: &str, worker: &str, store_hold: Option<DeliveryHold>) -> ParkedFacts {
         ParkedFacts {
             task: TaskSummary {
@@ -710,6 +811,7 @@ mod tests {
             anchor: Some("abc123".into()),
             close_rejection: "MERGE REQUIRED".into(),
             record: None,
+            cas_dir: PathBuf::new(),
         }
     }
 

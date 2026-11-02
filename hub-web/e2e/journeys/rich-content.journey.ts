@@ -177,7 +177,8 @@ for (const [index, variant] of variants.entries()) {
         hub.supervisorSays(PELICAN, "```mermaid\nflowchart TD\n  A[Worker parks the task] --> B[Supervisor merges to the epic]\n  B --> C[Merge queue runs the suite]\n  C -->|green| D[main]\n  C -->|red| B\n```");
         const flow = log.locator(".code-frame").filter({ hasText: "mermaid" }).filter({ has: page.getByText("Merge queue runs the suite") });
         await expect(flow.locator(".rich-diagram svg")).toBeVisible();
-        expect((await flow.locator(".rich-diagram svg").boundingBox())!.height).toBeGreaterThan(288);
+        // The SVG can be visible and still have no box for a moment on a fast runner.
+        await expect.poll(async () => (await flow.locator(".rich-diagram svg").boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThan(288);
         expect(await flow.locator(".code-frame-content").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
       });
 

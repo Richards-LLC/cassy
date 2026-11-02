@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map reconciled for the 3.96 release tree. Regenerate with `/codemap` when modules move.
+> Structural map reconciled for the 3.97 release tree. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -89,7 +89,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates and merged-delivery closure; `recall_terms.rs` filters content terms for task-create context and epic scope comparison.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - delivery anchors, close audit tracking and guarded note-preserving park.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - worktree-keyed receipts and introducing-merge boundaries.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep modules.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, `gate_preflight.rs` start-time close requirements, queue proof, reviewed corrections and upkeep modules.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - supervisor-approved replacement branch takeover, checked against the prior start and retained in the audit trail.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.

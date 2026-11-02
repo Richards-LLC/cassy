@@ -6,14 +6,16 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use cas_store::PromptQueueStore;
 
 const TRANSCRIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REPLY_CHARS: usize = 4_000;
+const UNBOUND_CODEX_RETRY: Duration = Duration::from_secs(30);
+const FINALIZED_RECEIPT_POLL: Duration = Duration::from_secs(30);
 /// How far from a turn's start a recorded terminal question may be and still
 /// be the question that turn answers (cas-5c89).
 const TERMINAL_TURN_MATCH_SECS: i64 = 120;
@@ -405,9 +407,13 @@ fn resume_floor(
     }
 }
 
+type TranscriptSource = (String, cas_mux::SupervisorCli, Option<String>);
+
 #[derive(Default)]
 pub(crate) struct MirrorScanState {
     cursors: HashMap<String, TranscriptCursor>,
+    resolution_misses: HashMap<String, (TranscriptSource, Option<i64>, Instant)>,
+    receipt_next_poll: HashMap<i64, Instant>,
     published_inputs: HashSet<i64>,
     pub(super) operator_messages: Vec<crate::ui::factory::ConversationHistoryMessage>,
     pub(super) pending_operator_receipts: HashSet<i64>,
@@ -423,7 +429,7 @@ pub(crate) struct MirrorScanState {
 }
 
 struct TranscriptCursor {
-    source: (String, cas_mux::SupervisorCli, Option<String>),
+    source: TranscriptSource,
     path: PathBuf,
     length: u64,
     modified: Option<SystemTime>,
@@ -439,14 +445,20 @@ fn codex_rollout_owns_recipient(
     recipient: &str,
     startup_id: Option<i64>,
 ) -> bool {
-    let Ok(values) = transcript_tail(path) else { return false };
-    values.iter().any(|value| {
+    // Ownership can predate the bounded reply tail by hours. Stream from
+    // the beginning, parsing only candidate envelopes; the first proven input
+    // binds the rollout without retaining its tool output in memory.
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    BufReader::new(file).lines().map_while(Result::ok)
+        .filter(|line| line.contains("[cas #"))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .any(|value| {
         if value.get("type").and_then(Value::as_str) != Some("response_item")
             || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
             || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
             return false;
         }
-        let Some(text) = text_blocks(value, "/payload/content", "input_text") else { return false };
+        let Some(text) = text_blocks(&value, "/payload/content", "input_text") else { return false };
         let first = text.lines().next().unwrap_or("").trim();
         let marker = first.strip_prefix("[cas #").or_else(|| {
             first.strip_prefix("Message from ")?.split_once(": [cas #").map(|(_, marker)| marker)
@@ -471,10 +483,18 @@ pub(super) fn scan_supervisor_replies(
     agents: &[cas_types::Agent],
     state: &mut MirrorScanState,
 ) {
+    let now = Instant::now();
+    #[cfg(test)]
+    let now = state.poll_clock.unwrap_or(now);
     // Inbox reads and explicit answers can settle a message in another
     // process. Publish those durable changes to connected devices as well as
     // history pages, independently of optional assistant-reply mirroring.
     for id in std::mem::take(&mut state.pending_operator_receipts) {
+        if state.receipt_next_poll.get(&id).is_some_and(|next| now < *next) {
+            state.pending_operator_receipts.insert(id);
+            continue;
+        }
+        state.receipt_next_poll.remove(&id);
         #[cfg(test)]
         { state.receipt_reads += 1; }
         let row = match queue.queued_prompt(id) {
@@ -484,10 +504,17 @@ pub(super) fn scan_supervisor_replies(
                 continue;
             }
         };
+        let finalized = row.as_ref().is_some_and(|row| row.processed_at.is_some());
         let message = row.filter(|row| row.factory_session.as_deref() == Some(session))
             .and_then(|row| super::queue_and_events::commander_history_send(queue, row, session));
         match message {
             Some(message) if message.state == "acknowledged" => {
+                // Old cleanup-only rows have no active transport left to
+                // watch every second. Keep watching slowly: a later genuine
+                // recipient receipt must still reach connected devices.
+                if finalized {
+                    state.receipt_next_poll.insert(id, now + FINALIZED_RECEIPT_POLL);
+                }
                 state.pending_operator_receipts.insert(id);
             }
             Some(message) => {
@@ -502,6 +529,7 @@ pub(super) fn scan_supervisor_replies(
     };
     if !config.factory().commander_mirror_enabled {
         state.cursors.clear();
+        state.resolution_misses.clear();
         let _ = resume_floor(root, session, false, None);
         return;
     }
@@ -538,6 +566,7 @@ pub(super) fn scan_supervisor_replies(
     state
         .cursors
         .retain(|id, _| supervisors.iter().any(|agent| &agent.id == id));
+    state.resolution_misses.retain(|id, _| supervisors.iter().any(|agent| &agent.id == id));
     for agent in supervisors {
         // Supervisor registration persists its own harness under
         // `supervisor_cli`; `worker_cli` names the default child harness.
@@ -556,19 +585,26 @@ pub(super) fn scan_supervisor_replies(
             .cursors
             .get(&agent.id)
             .filter(|cursor| cursor.source == source);
+        let unbound_codex = cli == cas_mux::SupervisorCli::Codex && session_id.starts_with("codex-");
+        let startup_id = if unbound_codex && cached.is_none() {
+            queue.latest_from_source_to_targets(
+                super::queue_and_events::SUPERVISOR_STARTUP_SOURCE,
+                &[&agent.name], Some(session),
+            ).ok().flatten().filter(|row| matches!(row.origin, Some(cas_store::QueueOrigin::Daemon))).map(|row| row.id)
+        } else { None };
+        let miss_held = state.resolution_misses.get(&agent.id).is_some_and(|(prior, floor, next)| {
+            prior == &source && *floor == startup_id && now < *next
+        });
         let path = cached
             .filter(|cursor| cursor.path.is_file())
             .map(|cursor| cursor.path.clone())
             .or_else(|| {
+                if miss_held { return None; }
                 #[cfg(test)]
                 { state.resolution_scans += 1; }
                 // cas-4735: eagerly registered factory Codex ids are synthetic.
                 // Never cache a same-cwd guess before this pane's rollout exists.
-                if cli == cas_mux::SupervisorCli::Codex && session_id.starts_with("codex-") {
-                    let startup_id = queue.latest_from_source_to_targets(
-                        super::queue_and_events::SUPERVISOR_STARTUP_SOURCE,
-                        &[&agent.name], Some(session),
-                    ).ok().flatten().filter(|row| matches!(row.origin, Some(cas_store::QueueOrigin::Daemon))).map(|row| row.id);
+                if unbound_codex {
                     return crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
                         project_path.to_str()?, account.as_deref(),
                         &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id),
@@ -583,8 +619,12 @@ pub(super) fn scan_supervisor_replies(
             });
         let Some(path) = path else {
             state.cursors.remove(&agent.id);
+            if unbound_codex && !miss_held {
+                state.resolution_misses.insert(agent.id.clone(), (source, startup_id, now + UNBOUND_CODEX_RETRY));
+            }
             continue;
         };
+        state.resolution_misses.remove(&agent.id);
         let Ok(metadata) = std::fs::metadata(&path) else {
             state.cursors.remove(&agent.id);
             continue;

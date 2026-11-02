@@ -18,6 +18,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   parent's identity. → Now: Auto services retain local access with a warning,
   read-only identity checks enforce process ownership, and Commander holds
   non-Claude input during confirmation dialogs and pending tool calls.
+- **Long Codex conversations keep their replies** — Was: a daemon restart could
+  miss ownership older than the reply tail and repeatedly rescan rollouts.
+  → Now: streamed ownership survives long transcripts, unresolved scans back
+  off, and old finalized Queued receipts keep a slower watch for real delivery.
 - **Explain empty feedback and route recovery** — Was: empty feedback implied
   unknown measurements and a refused foreign Serve route offered no recovery.
   → Now: empty feedback says none recorded unless measurements were excluded;

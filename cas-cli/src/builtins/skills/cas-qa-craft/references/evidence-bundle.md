@@ -24,7 +24,7 @@ mixed rendered changes still require the web bundle below.
 
 ## Playwright evidence bundle
 
-Rendered web/hub cells use this bundle with `@playwright/test` `^1.63`.
+Rendered web/hub cells use this bundle with `@playwright/test` **1.64+**.
 Older Playwright means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
 
 ## Layout
@@ -263,6 +263,12 @@ Task `cas-1234` says: “User filters tasks and sees no matches.” The spec wal
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
 Use 10 fps for QA screencasts to reduce the encoder backlog.
+Playwright 1.64 encodes VP9 automatically and exposes `fps` on `use.video`,
+`recordVideo` and `screencast.start`; keep this cap until a measured shard
+supports changing it. Firefox/WebKit capture at most 25 fps. Action decoration
+uses `showActions({ style: { title: 'font-size: 16px' } })`, replacing deprecated
+`fontSize`; `style.point` and `style.highlight` also accept CSS declarations.
+Use the project's type tokens when styling; see the [official 1.64 notes](https://playwright.dev/docs/release-notes#version-164).
 The worked example below is self-contained for other projects. Its chapter
 helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
 styles to the target project's DESIGN.md.

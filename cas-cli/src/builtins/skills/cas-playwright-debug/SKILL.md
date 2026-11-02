@@ -17,6 +17,31 @@ section 2) ships only from 1.62; `retryStrategy` needs 1.62+, and test locks and
 `locator.visible()` need 1.63+. On an older version, use
 `npx playwright show-trace <trace.zip>` and recommend upgrading.
 
+For coding-agent browser work, default to `npx playwright cli`: snapshots live
+in files and element refs keep tool output small. Use Playwright MCP for a long
+exploratory walk that needs its persistent session. Neither replaces the named
+test run or the project's evidence bundle. See the [official CLI guide](https://playwright.dev/docs/getting-started-cli).
+
+## Playwright 1.64 recording and agents
+
+- Videos use VP9 automatically. `use.video`, `recordVideo` and
+  `page.screencast.start()` accept `fps`; keep QA at **10 fps** until a measured
+  shard justifies raising it. Firefox and WebKit capture at most 25 fps.
+- `showActions({ style: { title: 'font-size: 16px' } })` replaces deprecated
+  `fontSize`; `style.point` and `style.highlight` also take CSS declarations.
+  Chapter captions still follow the project's DESIGN.md and CSP.
+- After a Playwright update, run `npx playwright init-agents --loop=claude`
+  (or the project's harness) in scratch and review the regenerated definitions.
+  Trial the healer only on a named failure in scratch. Accept locator-only
+  patches after a real rerun; reject assertion edits, retries, sleeps, timeout
+  increases and `skip`/`fixme`. Its upstream instructions permit skipping a
+  correct failing test, so never install it as an unattended repair gate.
+- WebMCP is for testing tools the app registers with the experimental browser
+  API; ordinary UI walks need no WebMCP configuration.
+
+API details: [1.64 release notes](https://playwright.dev/docs/release-notes#version-164),
+[test agents](https://playwright.dev/docs/test-agents).
+
 ## 1. Read the trace from the terminal
 
 The trace path is printed under the failure, usually

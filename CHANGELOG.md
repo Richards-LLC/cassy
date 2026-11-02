@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Browser QA
+
+- **Refresh Playwright agent guidance** — Document 1.64 VP9 recording, frame-rate controls and action styles, default coding agents to the browser CLI, constrain healer trials to reviewed locator fixes, and flag Playwright more than one minor behind during release prep.
+
 ### Fixed — Supervisor input
 
 - **Keep ordinary messages out of running Codex turns** — Standard, unattributed and other nonoperator messages now obey the supervisor wake gate before PTY delivery, including oversized bodies. Verified Commander input can still steer a running turn; gated messages remain available through the inbox.

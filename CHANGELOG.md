@@ -9,7 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Worker startup
 
-- **Keep task briefs out of process listings** — Workers read their assignment from a private launch file instead of carrying its text in command-line arguments, preventing process-name cleanup commands from matching and killing workers because their brief mentions the same command. The file stays available through startup and resume and is removed when the worker pane is torn down.
+- **Keep task briefs out of process listings** — Workers read their assignment from a private launch file inside their worktree, so harnesses that deny external-directory reads can still start. The file replaces the assignment text previously carried in command-line arguments, preventing process-name cleanup commands from matching and killing workers because their brief mentions the same command. The file stays available through startup and resume and is removed when the worker pane is torn down.
 
 ### Fixed — Director delivery
 

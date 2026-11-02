@@ -1435,9 +1435,23 @@ impl PtyConfig {
             }
         });
         let Some(brief) = brief else { return Ok(None) };
+        // OpenCode denies external_directory reads. Keep the pointer target
+        // inside the worker's worktree, under Cassy's git-excluded state path.
+        let worktree = self.cwd.as_deref()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .canonicalize()
+            .map_err(|e| Error::pty(format!("Failed to resolve worker worktree: {e}")))?;
+        let brief_dir = worktree.join(".cas");
+        std::fs::create_dir_all(&brief_dir)
+            .map_err(|e| Error::pty(format!("Failed to create worker brief directory: {e}")))?;
+        let brief_dir = brief_dir.canonicalize()
+            .map_err(|e| Error::pty(format!("Failed to resolve worker brief directory: {e}")))?;
+        if !brief_dir.starts_with(&worktree) {
+            return Err(Error::pty("Worker brief directory resolves outside its worktree"));
+        }
         let mut file = tempfile::Builder::new()
             .prefix("cas-worker-")
-            .tempfile()
+            .tempfile_in(&brief_dir)
             .map_err(|e| Error::pty(format!("Failed to create worker brief: {e}")))?;
         #[cfg(unix)]
         {
@@ -3621,6 +3635,9 @@ mod tests {
     async fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
         use std::os::unix::fs::PermissionsExt;
 
+        let project = tempfile::tempdir().unwrap();
+        let worktree = project.path().canonicalize().unwrap();
+
         for (command, args, backend) in [
             (
                 "codex",
@@ -3654,6 +3671,7 @@ mod tests {
             let mut config = PtyConfig {
                 command: command.into(),
                 args: args.into_iter().map(str::to_owned).collect(),
+                cwd: Some(worktree.clone()),
                 env: vec![("CAS_SESSION_ID".into(), "new-session".into())],
                 ..PtyConfig::default()
             };
@@ -3745,6 +3763,8 @@ mod tests {
                     "{argv}"
                 );
                 assert!(argv.contains(path.to_str().unwrap()), "{argv}");
+                assert!(path.starts_with(worktree.join(".cas")),
+                    "{backend} brief must stay inside its ignored worktree .cas directory for external_directory=deny: {}", path.display());
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
                 drop(pty);
                 assert!(!path.exists(), "worker teardown must remove the brief");

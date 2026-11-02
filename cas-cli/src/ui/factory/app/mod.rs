@@ -2045,7 +2045,7 @@ impl FactoryApp {
         let mut tracker = self.supervisor_stall_tracker.clone().unwrap_or(file_tracker);
         let before = tracker.clone();
         let now = Utc::now();
-        let held_workers = self.session_progress.held_workers.clone().unwrap_or_default();
+        let held_workers = self.session_progress.held_workers.clone()?;
         // cas-223f: the git, CI and task-store evidence arrived with the
         // snapshot; this only looks it up.
         let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
@@ -2109,12 +2109,13 @@ impl FactoryApp {
         let DirectorEvent::SupervisorStalled {
             next_step,
             occurrence,
+            actionable_idle_secs,
             ..
         } = event
         else {
             return false;
         };
-        if self.factory_session.is_none() {
+        if self.factory_session.is_none() || *actionable_idle_secs < self.supervisor_stall_after_secs.max(60) {
             return false;
         }
         // cas-3b16: read with the fresh delivery read, off the loop.
@@ -2127,8 +2128,8 @@ impl FactoryApp {
         if last_call.is_some_and(|last| last > detected_at) {
             return false;
         }
-        let held_workers = session_progress.held_workers.clone().unwrap_or_default();
-        self.supervisor_actionable_from_ownership(data, evidence, &held_workers, Utc::now(),
+        let Some(held_workers) = session_progress.held_workers.as_ref() else { return false; };
+        self.supervisor_actionable_from_ownership(data, evidence, held_workers, Utc::now(),
             assignment.unwrap_or(&Default::default()))
             .as_ref()
             == Some(next_step)
@@ -2484,7 +2485,7 @@ impl FactoryApp {
                     "failed to clear removed worker from durable hold set"
                 );
             }
-            resume_held_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker), &known_ids);
+            cancel_worker_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker), &known_ids);
         };
         // cas-5e72: a worker exit is handled inside the daemon's PTY
         // exchange; the session-metadata write runs on the store worker, in
@@ -2516,11 +2517,10 @@ impl FactoryApp {
             .collect()
     }
 
-    /// cas-c5ab/cas-5f4b: a session shutdown ends every hold, so re-arm all
-    /// its workers' held reminders before their agents are unregistered.
-    pub(crate) fn rearm_held_reminders_at_shutdown(&self, session_name: &str) {
+    /// A session shutdown ends every worker wait before agents are unregistered.
+    pub(crate) fn cancel_worker_reminders_at_shutdown(&self, session_name: &str) {
         let workers = self.worker_names.clone();
-        resume_held_reminders(
+        cancel_worker_reminders(
             self.cas_dir(),
             session_name,
             &workers,
@@ -3700,13 +3700,9 @@ pub(crate) fn persist_session_metadata_delivery_mode_at(
     })
 }
 
-/// cas-c5ab: re-arm the suspended reminders of workers leaving a factory
-/// session (removed, or the session shutting down). Their hold ends with
-/// them, so nothing else would ever resume or cancel those reminders.
-/// cas-5f4b: `known_ids` come from the director snapshot taken before the
-/// worker left, so a worker record deleted before this runs still has its
-/// reminders re-armed; the store lookup only adds ids the snapshot missed.
-pub(crate) fn resume_held_reminders(
+/// End pending and suspended waits when workers leave this factory. Captured
+/// IDs keep cancellation possible after SessionEnd has deleted the agent row.
+pub(crate) fn cancel_worker_reminders(
     cas_dir: &std::path::Path,
     session_name: &str,
     workers: &[String],
@@ -3715,7 +3711,7 @@ pub(crate) fn resume_held_reminders(
     let reminders = match crate::store::open_reminder_store(cas_dir) {
         Ok(reminders) => reminders,
         Err(error) => {
-            tracing::warn!(factory_session = %session_name, %error, "failed to open reminders to re-arm held reminders");
+            tracing::warn!(factory_session = %session_name, %error, "failed to open leaving workers reminder store");
             return;
         }
     };
@@ -3726,14 +3722,21 @@ pub(crate) fn resume_held_reminders(
         Ok(agents) => ids.extend(agents.into_iter().filter(|agent| {
             workers.contains(&agent.name) && agent.factory_session.as_deref() == Some(session_name)
         }).map(|agent| agent.id)),
-        Err(error) => tracing::warn!(factory_session = %session_name, %error, "failed to list agents to re-arm held reminders"),
+        Err(error) => tracing::warn!(factory_session = %session_name, %error, "failed to list leaving workers"),
     }
     ids.sort();
     ids.dedup();
-    for id in ids {
-        if let Err(error) = reminders.resume_suspended_for_target(&id) {
-            tracing::warn!(agent_id = %id, factory_session = %session_name, %error, "failed to re-arm a leaving worker's held reminders");
-        }
+    let rows = reminders.list_all_pending().and_then(|mut pending| {
+        pending.extend(reminders.list_suspended(None)?);
+        Ok(pending)
+    });
+    match rows {
+        Ok(rows) => for row in rows.into_iter().filter(|row| ids.contains(&row.owner_id) || ids.contains(&row.target_id)) {
+            if let Err(error) = reminders.cancel(row.id, &row.owner_id) {
+                tracing::warn!(reminder_id = row.id, %error, "failed to cancel leaving worker reminder");
+            }
+        },
+        Err(error) => tracing::warn!(%error, "failed to read leaving workers reminders"),
     }
 }
 
@@ -5319,7 +5322,7 @@ mod tests {
     /// Same-name cache entries from another factory session must not release
     /// that session's held reminders.
     #[test]
-    fn worker_removal_does_not_rearm_same_named_foreign_session_reminder() {
+    fn worker_removal_does_not_cancel_same_named_foreign_session_reminder() {
         use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
         use crate::types::{Agent, AgentRole};
 
@@ -5415,7 +5418,7 @@ mod tests {
 
         let mut app = super::FactoryApp::for_test_at(cas_dir);
         app.worker_names = vec!["lively-crow".into(), "quiet-wren".into()];
-        app.rearm_held_reminders_at_shutdown("shutdown-5f4b");
+        app.cancel_worker_reminders_at_shutdown("shutdown-5f4b");
 
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
         assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 0);

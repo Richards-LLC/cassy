@@ -297,7 +297,7 @@ impl SupervisorStallTracker {
         });
         let assignment_recent = assignment_key.as_ref()
             .is_some_and(|key| self.recent_assignment_wakes.contains_key(key));
-        let wake = if condition_true && refire_due && !merged_state_repeated && !assignment_recent {
+        let wake = if condition_true && current_secs >= stall_after_secs.max(60) && refire_due && !merged_state_repeated && !assignment_recent {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
             if let Some(key) = assignment_key {
@@ -832,6 +832,8 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
                 && !pending_reviewers.contains(agent.id.as_str())
                 && !pending_reviewers.contains(agent.name.as_str())
                 && !held_workers.contains(&agent.name)
+                && !held_workers.contains(&agent.id)
+                && matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
                 && !assigned_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.id)
         })

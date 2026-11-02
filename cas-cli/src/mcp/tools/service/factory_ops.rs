@@ -3411,12 +3411,13 @@ impl CasService {
             });
         let related_context = recall_subject
             .and_then(|subject| {
-                self.inner.related_recall(
+                self.inner.related_recall_excluding(
                     &crate::mcp::tools::core::task::lifecycle::task_recall_query(
                         &subject.title,
                         &subject.labels,
                         &subject.description,
                     ),
+                    Some(&subject.id),
                 )
             })
             .unwrap_or_default();

@@ -54,6 +54,25 @@ pub(crate) fn compact_receipt(
 
 /// What the timed-out verification cycle was bound to.
 #[derive(Debug, Clone, Copy)]
+/// Keep advisory upkeep in the existing receipt channel. Failure to write the
+/// file leaves the task's durable upkeep notes as the fallback, never a nag.
+pub(crate) fn upkeep_receipt(
+    cas_root: &std::path::Path,
+    configured_artifacts_root: Option<&str>,
+    task_id: &str,
+    kind: &str,
+    visible: String,
+    notices: &[String],
+) -> String {
+    if notices.is_empty() { return visible; }
+    let detail = format!("{visible}\n\n{}", notices.join("\n"));
+    compact_receipt(cas_root, configured_artifacts_root, task_id, kind, &visible, &detail)
+        .unwrap_or_else(|error| {
+            tracing::warn!(task_id, %error, "upkeep receipt detail unavailable; retained in task notes");
+            visible
+        })
+}
+
 pub(crate) enum VerificationTimeout<'a> {
     /// A typed dispatch exists and has been marked `timed_out`.
     Dispatch {

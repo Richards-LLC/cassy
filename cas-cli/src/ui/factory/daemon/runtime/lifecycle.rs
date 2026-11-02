@@ -4472,7 +4472,7 @@ impl FactoryDaemon {
 
         // cas-c5ab: a shutdown ends every hold, so re-arm held workers'
         // reminders before their agents are unregistered.
-        self.app.rearm_held_reminders_at_shutdown(&self.session_name);
+        self.app.cancel_worker_reminders_at_shutdown(&self.session_name);
 
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {

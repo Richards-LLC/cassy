@@ -310,19 +310,20 @@ fn identical_assignment_nudge_has_a_session_cooldown_cas_c73a() {
         task_ids: vec!["cas-ready".into()], idle_workers: vec!["gold-fox".into()],
     });
     let mut tracker = SupervisorStallTracker::default();
-    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(10)), false, start, 600).wake.is_some());
+    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(20)), false, start - Duration::minutes(10), 600).wake.is_none());
+    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(20)), false, start, 600).wake.is_some());
     // The session receipt survives a daemon serialization round trip and a
     // supervisor tool call; neither may restart an identical assignment nag.
     let mut tracker: SupervisorStallTracker = serde_json::from_str(&serde_json::to_string(&tracker).unwrap()).unwrap();
-    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(10)), false, start + Duration::minutes(10), 600).wake.is_none());
+    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(20)), false, start + Duration::minutes(10), 600).wake.is_none());
     let changed = Some(SupervisorActionableState::AssignReadyWork {
         task_ids: vec!["cas-new-ready".into()], idle_workers: vec!["gold-fox".into()],
     });
-    assert!(tracker.observe(changed, Some(start - Duration::minutes(10)), false, start + Duration::minutes(10), 600).wake.is_some());
+    assert!(tracker.observe(changed, Some(start - Duration::minutes(20)), false, start + Duration::minutes(10), 600).wake.is_some());
     let active = Some(start + Duration::minutes(11));
     assert!(tracker.observe(action.clone(), active, false, start + Duration::minutes(11), 600).wake.is_none());
     assert!(tracker.observe(action.clone(), active, false, start + Duration::minutes(21), 600).wake.is_none());
-    assert!(tracker.observe(action, active, false, start + Duration::minutes(30), 600).wake.is_some());
+    assert!(tracker.observe(action, active, false, start + Duration::minutes(31), 600).wake.is_some());
 }
 
 /// cas-7456 (GH #1302 D): two supervisors left their idle page unanswered for
@@ -361,11 +362,11 @@ fn an_unanswered_idle_page_keeps_asking_for_the_operator_until_delivered_gh1302(
     let first = pages(&mut tracker, 0, 10..=160);
     assert_eq!(
         first,
-        vec![(130, start), (160, start)],
+        vec![(140, start)],
         "every wake of the silence asks, so a dropped first page is asked again"
     );
-    let second = pages(&mut tracker, 400, 410..=530);
-    assert_eq!(second, vec![(530, start + Duration::minutes(400))], "a new silence is a new episode");
+    let second = pages(&mut tracker, 400, 410..=540);
+    assert_eq!(second, vec![(540, start + Duration::minutes(400))], "a new silence is a new episode");
 }
 
 #[test]
@@ -479,12 +480,13 @@ fn supervisor_tool_activity_resets_actionable_idle_clock() {
         epic_id: "cas-epic".into(),
     };
     let mut tracker = SupervisorStallTracker::default();
+    assert!(tracker.observe(Some(actionable.clone()), Some(start - Duration::seconds(1200)), false, start - Duration::seconds(600), 600).wake.is_none());
 
     assert!(
         tracker
             .observe(
                 Some(actionable.clone()),
-                Some(start - Duration::seconds(600)),
+                Some(start - Duration::seconds(1200)),
                 false,
                 start,
                 600,
@@ -507,13 +509,14 @@ fn supervisor_tool_activity_resets_actionable_idle_clock() {
     assert!(after_activity.wake.is_none());
 
     let after_silence = tracker.observe(
-        Some(actionable),
+        Some(actionable.clone()),
         Some(start + Duration::seconds(1)),
         false,
         start + Duration::seconds(601),
         600,
     );
-    assert!(after_silence.wake.is_some());
+    assert!(after_silence.wake.is_none());
+    assert!(tracker.observe(Some(actionable), Some(start + Duration::seconds(1)), false, start + Duration::seconds(1201), 600).wake.is_some());
 }
 
 #[test]
@@ -530,12 +533,13 @@ fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_s
         }],
     };
     let mut tracker = SupervisorStallTracker::default();
+    assert!(tracker.observe(Some(merged("target-a")), Some(start - Duration::seconds(1200)), false, start - Duration::seconds(600), 600).wake.is_none());
 
     assert!(
         tracker
             .observe(
                 Some(merged("target-a")),
-                Some(start - Duration::seconds(600)),
+                Some(start - Duration::seconds(1200)),
                 false,
                 start,
                 600,
@@ -547,7 +551,7 @@ fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_s
         tracker
             .observe(
                 Some(merged("target-a")),
-                Some(start - Duration::seconds(600)),
+                Some(start - Duration::seconds(1200)),
                 false,
                 start + Duration::seconds(600),
                 600,
@@ -559,7 +563,7 @@ fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_s
         tracker
             .observe(
                 Some(merged("target-b")),
-                Some(start - Duration::seconds(600)),
+                Some(start - Duration::seconds(1200)),
                 false,
                 start + Duration::seconds(601),
                 600,

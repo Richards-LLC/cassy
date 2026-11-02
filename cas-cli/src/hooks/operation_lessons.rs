@@ -104,7 +104,51 @@ pub(crate) fn context_for_tool(cas_root: &Path, input: &HookInput) -> Option<Str
             .and_then(|store| store.get(id).ok())
             .is_some_and(|task| task.task_type == crate::types::TaskType::Epic)
     })?;
-    checklist(&crate::store::open_store(cas_root).ok()?.list().ok()?, operation)
+    let mut entries = crate::store::open_store(cas_root).ok()?.list().ok()?;
+    let response = input.tool_response.as_ref().map(serde_json::Value::to_string).unwrap_or_default();
+    let request = input.tool_input.as_ref();
+    let matches_harness = |harness: &str| {
+        // The resolved spec wins over the request, including provider fallback.
+        if response.contains("Worker spec:") {
+            return response.contains(&format!(": {harness} model="));
+        }
+        request.is_some_and(|request| {
+            request.get("cli").and_then(serde_json::Value::as_str) == Some(harness)
+                || request.get("workers").and_then(serde_json::Value::as_array)
+                    .is_some_and(|workers| workers.iter().any(|worker| {
+                        worker.get("cli").and_then(serde_json::Value::as_str) == Some(harness)
+                    }))
+        })
+    };
+    entries.retain(|entry| {
+        let scopes: Vec<_> = ["codex", "claude", "grok", "opencode"].into_iter()
+            .filter(|harness| entry.tags.iter().any(|tag| {
+                tag.eq_ignore_ascii_case(harness)
+                    || tag.eq_ignore_ascii_case(&format!("harness:{harness}"))
+                    || tag.eq_ignore_ascii_case(&format!("cli:{harness}"))
+            })).collect();
+        !entry.archived
+            && entry.tags.iter().any(|tag| tag.eq_ignore_ascii_case(&format!("operation:{operation}")))
+            && (operation != "spawn" || scopes.is_empty() || scopes.into_iter().any(matches_harness))
+    });
+    entries.sort_by(|left, right| right.importance.total_cmp(&left.importance).then_with(|| right.created.cmp(&left.created)));
+    let entries: Vec<_> = entries.into_iter()
+        .filter(|entry| claim_session_item(cas_root, &input.session_id, &entry.id))
+        .take(MAX_LESSONS).collect();
+    checklist(&entries, operation)
+}
+
+/// Atomic session-scoped recall dedupe shared by the hook and MCP receipts.
+/// Only IDs are retained; neither memory text nor request contents reach disk.
+/// Missing session identity or an unavailable marker store stays quiet.
+pub(crate) fn claim_session_item(cas_root: &Path, session: &str, id: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    if session.trim().is_empty() { return false; }
+    let directory = cas_root.join("session-context-fingerprints")
+        .join(format!("{:x}", Sha256::digest(session.as_bytes())));
+    if std::fs::create_dir_all(&directory).is_err() { return false; }
+    std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(directory.join(format!("{:x}.seen", Sha256::digest(id.as_bytes())))).is_ok()
 }
 
 #[cfg(test)]
@@ -180,7 +224,7 @@ mod tests {
         assert!(!context.contains(&untagged) && !context.contains(&report), "{context}");
 
         let skill = input("Skill", serde_json::json!({ "skill": "cas-cut-release" }));
-        assert!(surfaced(temp.path(), &skill).contains(&scratch));
+        assert!(!surfaced(temp.path(), &skill).contains("[operation lessons"));
         let status = input(
             "Bash",
             serde_json::json!({ "command": "scripts/release.sh --next-version" }),

@@ -12767,7 +12767,8 @@ struct ReminderScanInput {
 /// must not prevent another reminder from firing or reaching its deadline.
 fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error::CasError> {
     let reminders = crate::store::open_reminder_store(&scan.cas_dir)?;
-    let pending = reminders.list_all_pending()?;
+    let mut pending = reminders.list_all_pending()?;
+    pending.extend(reminders.list_suspended(None)?);
     if pending.is_empty() { return Ok(()) }
     let tasks = crate::store::open_task_store_local(&scan.cas_dir)?;
     for reminder in pending {
@@ -12810,6 +12811,14 @@ fn reconcile_task_reminder(
     reminders: &Arc<dyn cas_store::ReminderStore>,
     tasks: &dyn cas_store::TaskStore,
 ) -> Result<(), crate::error::CasError> {
+    // A retired worker cannot delegate its wait to the supervisor, including
+    // cross-session waits. Reconcile before expiry or any event delivery.
+    let owner = crate::store::open_agent_store(&scan.cas_dir)?.get(&reminder.owner_id).ok();
+    let worker_owned = owner.as_ref().is_some_and(|owner| owner.role == cas_types::AgentRole::Worker);
+    if worker_owned && owner.as_ref().is_some_and(|owner| owner.status == cas_types::AgentStatus::Shutdown) {
+        cancel_task_reminder(reminders.as_ref(), reminder)?;
+        return Ok(());
+    }
     let event = reminder.trigger_event.as_deref();
     let filtered_task = matches!(event, Some("task_completed" | "task_blocked"))
         .then(|| reminder.trigger_filter.as_ref().and_then(|filter| filter.get("task_id"))
@@ -12821,6 +12830,11 @@ fn reconcile_task_reminder(
         Some(Err(cas_store::StoreError::TaskNotFound(_))) | None => None,
         Some(Err(error)) => return Err(error.into()),
     };
+    if worker_owned && task.as_ref().is_some_and(|task| task.is_terminal()) {
+        cancel_task_reminder(reminders.as_ref(), reminder)?;
+        return Ok(());
+    }
+    if reminder.status == cas_store::ReminderStatus::Suspended { return Ok(()); }
     if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
         if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
             let worker = task.assignee.as_deref().unwrap_or("remote");
@@ -14488,7 +14502,7 @@ mod tests {
     #[test]
     fn worker_reminders_end_silently_on_shutdown_or_terminal_task() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        for (shutdown, terminal) in [(true, false), (false, true)] {
+        for (shutdown, terminal, suspended) in [(true, false, false), (true, false, true), (false, true, false), (false, true, true)] {
             let root = tempfile::tempdir().unwrap();
             let cas = root.path();
             let agents = crate::store::open_agent_store(cas).unwrap();
@@ -14507,6 +14521,7 @@ mod tests {
             reminders.create_with_scope(&owner.id, None, "retry task", cas_store::ReminderTriggerType::Time,
                 Some(chrono::Utc::now() - chrono::Duration::hours(2)), None, None, 60,
                 Some("s"), Some(&task.id), true, None).unwrap();
+            if suspended { reminders.suspend_pending_for_target(&owner.id).unwrap(); }
             for _ in 0..2 {
                 super::run_reminder_scan(super::ReminderScanInput {
                     cas_dir: cas.to_path_buf(), session_name: "s".into(), supervisor_name: "sup".into(),

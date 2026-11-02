@@ -1127,6 +1127,17 @@ impl CasCore {
         let rules = self.open_rule_store().ok();
         let tasks = self.open_task_store().ok();
         let mut lines = Vec::new();
+        let query_terms = recall_terms::content_terms(query);
+        let session = self.get_registered_agent_id_read_only().ok().and_then(|id| {
+            self.open_agent_store().ok()?.get(&id).ok().map(|agent| agent.cc_session_id.unwrap_or(id))
+        }).or_else(|| std::env::var("CAS_SESSION_ID").ok())
+            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok())?;
+        let relevant = |text: &str| {
+            let terms = recall_terms::content_terms(text);
+            // BM25 ranks even incidental single-word matches. Require two
+            // content terms (or the complete query when it has one term).
+            query_terms.iter().filter(|term| terms.contains(term)).count() >= query_terms.len().min(2).max(1)
+        };
 
         for hit in results {
             if lines.len() == RELATED_RECALL_LIMIT {
@@ -1137,7 +1148,7 @@ impl CasCore {
             }
             let line = match hit.doc_type {
                 DocType::Entry => store.as_ref().and_then(|store| {
-                    store.get(&hit.id).ok().map(|entry| {
+                    store.get(&hit.id).ok().filter(|entry| !entry.archived && relevant(&format!("{} {}", entry.title.as_deref().unwrap_or_default(), entry.content))).map(|entry| {
                         let title = entry.title.as_deref().unwrap_or("untitled memory");
                         format!(
                             "- Memory [{}]: {} — {}",
@@ -1149,7 +1160,7 @@ impl CasCore {
                 }),
                 DocType::Rule => rules.as_ref().and_then(|rules| {
                     rules.get(&hit.id).ok().and_then(|rule| {
-                        (!matches!(
+                        (relevant(&rule.content) && !matches!(
                             rule.status,
                             cas_types::RuleStatus::Stale | cas_types::RuleStatus::Retired
                         ))
@@ -1161,7 +1172,7 @@ impl CasCore {
                 }),
                 DocType::Task => tasks.as_ref().and_then(|tasks| {
                     tasks.get(&hit.id).ok().and_then(|task| {
-                        (task.task_type == crate::types::TaskType::Epic).then(|| {
+                        (task.task_type == crate::types::TaskType::Epic && relevant(&format!("{} {}", task.title, task.description))).then(|| {
                             let detail = task.description.lines().next().unwrap_or_default();
                             format!(
                                 "- Past epic [{}]: {} — {}",
@@ -1177,6 +1188,7 @@ impl CasCore {
             if let Some(line) = line
                 && lines.iter().map(String::len).sum::<usize>() + line.len()
                     <= RELATED_RECALL_CHAR_CAP
+                && crate::hooks::operation_lessons::claim_session_item(&self.cas_root, &session, &hit.id)
             {
                 lines.push(line);
             }
@@ -5453,8 +5465,7 @@ mod related_recall_response_tests {
                 .await
                 .expect("start qa task"),
         );
-        assert!(started.contains("m-golden-set"), "{started}");
-        assert!(started.contains("QA golden test data"), "{started}");
+        assert!(!started.contains("m-golden-set"), "the same session already saw this memory: {started}");
         let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
         assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
     }

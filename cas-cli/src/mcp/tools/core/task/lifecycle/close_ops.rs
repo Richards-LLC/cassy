@@ -9182,10 +9182,6 @@ impl CasCore {
                         conflict_check_error.as_deref(),
                     );
 
-                    let msg = if registry_upkeep_notices.is_empty() { msg } else {
-                        format!("{msg}\n\n{}", registry_upkeep_notices.join("\n"))
-                    };
-
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
                     // mode) used to re-run `park_task_awaiting_merge` on
@@ -9437,6 +9433,8 @@ impl CasCore {
                         None => msg,
                     };
 
+                    let msg = gate_text::upkeep_receipt(&self.cas_root,
+                        configured_artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
                     return Ok(Self::tool_error(msg));
                 }
             }
@@ -12301,9 +12299,6 @@ impl CasCore {
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
         }
-        if !registry_upkeep_notices.is_empty() {
-            receipt.push_str(&format!("\n\n{}", registry_upkeep_notices.join("\n")));
-        }
         if task.task_type == TaskType::Epic {
             let summary = registry_upkeep::epic_escape_summary(task_store.as_ref(), &task);
             append_close_decision_note(task_store.as_ref(), &mut task, &summary);
@@ -12313,7 +12308,6 @@ impl CasCore {
         let routine_close = task.task_type != TaskType::Epic
             && auto_unblocked_tasks.is_empty()
             && held_blocked_tasks.is_empty()
-            && registry_upkeep_notices.is_empty()
             && epic_close_msg.is_empty()
             && epic_issue_warning.is_empty();
         if routine_close {
@@ -12339,10 +12333,13 @@ impl CasCore {
                 &task.id,
                 "close",
                 &summary,
-                &receipt,
+                &format!("{receipt}\n\n{}", registry_upkeep_notices.join("\n")),
             ) {
                 receipt = compact;
             }
+        } else {
+            receipt = gate_text::upkeep_receipt(&self.cas_root,
+                configured_artifacts_root.as_deref(), &task.id, "close", receipt, &registry_upkeep_notices);
         }
         Ok(Self::success(receipt))
     }

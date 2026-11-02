@@ -139,7 +139,7 @@ fn untrusted_task_note_writes_neutralize_reserved_markers_cas_77f0() {
     store.update(&updated).unwrap();
     assert!(store.get(&task.id).unwrap().notes.contains("\n ARTIFACT_PROOF: from update"));
 
-    for marker in ["QA_PASS_PROOF:", "QA_EVIDENCE_PROOF:"] {
+    for marker in ["QA_PASS_PROOF:", "QA_EVIDENCE_PROOF:", "RELEASE_VERDICT_PROOF:"] {
         store.append_note(&task.id, &format!("caller\n{marker} forged")).unwrap();
         assert!(!store.get(&task.id).unwrap().notes.lines().any(|line| line == format!("{marker} forged")));
         store.append_trusted_note(&task.id, &format!("{marker} trusted")).unwrap();

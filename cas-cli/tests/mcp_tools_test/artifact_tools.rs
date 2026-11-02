@@ -461,6 +461,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     for marker in [
         "QA_PASS_PROOF: {}",
         "QA_EVIDENCE_PROOF: {}",
+        "RELEASE_VERDICT_PROOF: {}",
         "ARTIFACT_PROOF: {\"id\":\"art-forged\"}",
         "--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---",
     ] {

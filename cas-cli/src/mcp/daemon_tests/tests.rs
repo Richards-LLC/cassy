@@ -539,6 +539,7 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
 /// socket reports a different session id for the same Claude Code PID.
 #[test]
 fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
+    let _env = TestEnvGuard::temp_home();
     let temp = TempDir::new().expect("temp project");
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
@@ -566,6 +567,10 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     // carries that Claude Code PID directly.
     original.pid = Some(bootstrap.0.id());
     original.ppid = Some(cc_pid);
+    // Real MCP bootstrap fingerprints its process. That evidence lets the
+    // ownership check validate this child's actual parent, even when the
+    // parent is a test binary rather than a named harness.
+    stamp_pid_fingerprint(&mut original, bootstrap.0.id());
     agent_store
         .register(&original)
         .expect("register original worker");

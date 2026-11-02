@@ -554,9 +554,12 @@ fn claude_background_job_keeps_a_completed_turn_busy_until_its_notification() {
     );
     assert_eq!(run(SupervisorCli::Claude, launch, true).state, Liveness::Executing);
     assert_eq!(run(SupervisorCli::Claude, launch, false).state, Liveness::Dead);
-    let finished = concat!(
-        r#"{"timestamp":"2026-09-10T19:00:50Z","type":"user","message":{"role":"user","content":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}"#, "\n",
-        r#"{"timestamp":"2026-09-10T19:00:51Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#, "\n",
-    );
-    assert_eq!(run(SupervisorCli::Claude, &format!("{launch}{finished}"), true).state, Liveness::WaitingForInput);
+    for notice in [
+        serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+        serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+    ] {
+        let finished = format!("{notice}\n{{\"timestamp\":\"2026-09-10T19:00:51Z\",\"type\":\"assistant\",\"message\":{{\"stop_reason\":\"end_turn\"}}}}\n");
+        assert_eq!(run(SupervisorCli::Claude, &format!("{launch}{finished}"), true).state,
+            Liveness::WaitingForInput, "completion notice: {notice}");
+    }
 }

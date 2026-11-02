@@ -115,6 +115,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   revision lives in `<task>/candidates/<revision>/` and `candidate` points at the
   newest; asking again for a published revision reuses it without compiling.
 
+### Fixed — Worker launch with a task
+
+- **A Claude worker spawned with a task starts** — Was: The assignment followed
+  `--mcp-config`, whose list swallowed it as a config path, so the worker exited at
+  launch with "Invalid MCP configuration" and the task stayed on a dead worker. →
+  Now: `--` ends the options before the prompt for Claude and Grok, confirmed
+  against Claude 2.1.312 and Grok 1.0.70.
+- **A failed launch leaves nothing behind** — Was: A launch that failed before it
+  used its assignment kept that prompt for the next launch of the same name. → Now:
+  The prompt is cleared and the task is released at the point of failure.
+- **A same-name replacement gets its assignment** — Was: The row its predecessor
+  received blocked a new one, so the replacement got nothing while the row counted
+  as delivered. → Now: Each launch frees the rows already received; a row still
+  pending keeps carrying the assignment, once.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

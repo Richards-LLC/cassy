@@ -3144,6 +3144,12 @@ pub trait PromptQueueStore: Send + Sync {
         Ok(false)
     }
 
+    /// Free the dedupe keys under `key_prefix` of rows `target` already
+    /// received or that already ended, so a same-name replacement process can
+    /// enqueue its own row. A row still pending keeps its key: it carries the
+    /// wake to the replacement, exactly once. Returns how many were freed.
+    fn release_received_dedupe_keys(&self, target: &str, factory_session: &str, key_prefix: &str) -> Result<usize>;
+
     /// At daemon start, release this session's transport claims that were
     /// never handed off (cas-786a6 review M2, spec §4.5 rule 5): a
     /// `transport_claimed` receipt with no `delivered_at`, no Teams body
@@ -7867,6 +7873,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )
             .optional()?;
         Ok(handed_off.is_some())
+    }
+
+    fn release_received_dedupe_keys(&self, target: &str, factory_session: &str, key_prefix: &str) -> Result<usize> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            // The range is a prefix match that uses the unique dedupe index.
+            Ok(conn.execute(
+                "UPDATE prompt_queue SET dedupe_key = NULL
+                 WHERE target = ?1 AND factory_session = ?2
+                   AND dedupe_key >= ?3 AND dedupe_key < ?3 || char(1114111)
+                   AND (processed_at IS NOT NULL OR transport_delivered_at IS NOT NULL OR acked_at IS NOT NULL
+                        OR EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                            WHERE seen.prompt_id = prompt_queue.id AND seen.recipient = ?1
+                              AND (COALESCE(seen.source, '') <> 'transport_claimed'
+                                   OR seen.delivered_at IS NOT NULL
+                                   OR seen.teams_body_fallback_at IS NOT NULL)))",
+                params![target, factory_session, key_prefix],
+            )?)
+        })
     }
 
     fn release_orphaned_transport_claims(&self, factory_session: &str) -> Result<usize> {

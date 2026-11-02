@@ -4256,6 +4256,28 @@ fn cas_940c_worker_mcp_modes_preserve_supervisor_and_codex_launches() {
     }
 }
 
+/// Claude's `--mcp-config` is variadic: a bare prompt after it is read as a
+/// config path and the worker exits at launch. Only the terminator ends it.
+#[test]
+fn startup_prompt_follows_the_option_terminator_on_a_real_worker_tail() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(project.path().join(".mcp.json"), r#"{"mcpServers":{"cas":{"command":"cas-fixture"}}}"#).unwrap();
+    let assignment = "Assigned task cas-abcd";
+    let mut mux = Mux::new(24, 80);
+    mux.set_worker_startup_prompt("worker", Some(assignment.into()));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Grok] {
+        let spec = WorkerSpec { cli, ..WorkerSpec::builtin_default() };
+        let config = mux.build_add_worker_config("worker", project.path().into(), Some(&root), "supervisor", None, Some(spec));
+        assert!(env_value(&config, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(config.args[config.args.len() - 2..], ["--", assignment], "{cli:?}: {:?}", config.args);
+        assert_eq!(config.args.contains(&"--mcp-config".to_string()), cli == SupervisorCli::Claude);
+    }
+}
+
 #[test]
 fn cas_940c_inherit_refuses_denials_and_needs_no_strict_capability() {
     let mut env = TestEnvGuard::temp_home();

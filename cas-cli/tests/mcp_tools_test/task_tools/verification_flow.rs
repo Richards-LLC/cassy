@@ -1112,7 +1112,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     )
     .unwrap();
     let mut deliveries = vec![(first, "src/one.rs")];
-    for path in ["src/two.rs", "src/live.rs", "src/rejected.rs", ".github/workflows/guard.yml"] {
+    for path in ["src/two.rs", "src/live.rs", "src/rejected.rs", "src/approved.rs", ".github/workflows/guard.yml"] {
         let created = worker
             .cas_task_create(Parameters(simple_task_req(path)))
             .await
@@ -1158,18 +1158,18 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
 
     // cas-d8b2 / cas-5249: old dispatches and deferred batch evidence must
     // not strand merged Tier 1 work after a later, exact release verdict.
-    for (index, (id, _)) in deliveries.iter().take(4).enumerate() {
+    for (index, (id, _)) in deliveries.iter().take(5).enumerate() {
         cas_store::defer_qa_batch_evidence(&cas_dir, id, &tips[index]).unwrap();
-        if index == 3 {
-            let mut rejected = Verification::new("ver-rejected".into(), id.clone());
-            rejected.status = cas::types::VerificationStatus::Rejected;
-            add_exact_supervisor_fixture_verdict(&cas_dir, rejected, None);
+        if index == 3 || index == 4 {
+            let mut prior = Verification::new(format!("ver-prior-{index}"), id.clone());
+            prior.status = if index == 3 { cas::types::VerificationStatus::Rejected } else { cas::types::VerificationStatus::Approved };
+            add_exact_supervisor_fixture_verdict(&cas_dir, prior, None);
         }
         cas_store::create_verification_dispatch(
             &cas_dir, id, "ended-supervisor", "ended-supervisor",
             chrono::Utc::now() + chrono::Duration::minutes(if index == 2 { 10 } else { -1 }),
         ).unwrap();
-        if index == 0 || index == 3 {
+        if index == 0 || index == 3 || index == 4 {
             cas_store::timeout_verification_dispatch(&cas_dir, id, chrono::Utc::now()).unwrap();
         }
     }
@@ -1199,15 +1199,15 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     .unwrap();
     let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
     assert!(recorded.contains("Release verdict"), "{recorded}");
-    assert!(recorded.contains("Closed 2: "), "{recorded}");
-    assert!(recorded.contains(&format!("Keeps its own review: {}", named[4])), "{recorded}");
+    assert!(recorded.contains("Closed 3: "), "{recorded}");
+    assert!(recorded.contains(&format!("Keeps its own review: {}", named[5])), "{recorded}");
     assert!(recorded.contains("Still held (2):"), "{recorded}");
 
     for (index, (id, path)) in deliveries.iter().enumerate() {
         if path.starts_with("src/") {
-            let expected = if index < 2 { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+            let expected = if index < 2 || index == 4 { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
             assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, expected, "{recorded}");
-            if index < 2 {
+            if index < 2 || index == 4 {
                 let notes = open_task_store(&cas_dir).unwrap().get(id).unwrap().notes;
                 assert!(notes.contains("QA batch debt satisfied by release verdict"), "release review pays debt without claiming a QA walk: {notes}");
             }

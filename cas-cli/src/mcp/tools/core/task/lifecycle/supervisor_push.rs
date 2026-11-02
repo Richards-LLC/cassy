@@ -1065,7 +1065,7 @@ fn emit_task_lifecycle_transition_in_project(
     };
 
     let verification_wait = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
-        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
+        verification_wait_has_action_owner(root, task_id, &recipient.id)
     });
     let answered_blocker = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
@@ -1206,10 +1206,39 @@ fn emit_task_lifecycle_transition_in_project(
     }
 }
 
+/// Exact verification waits have their own action path: the dispatch relay
+/// owns expiry, and an approved verdict hands close back to the worker.
+/// Other verdicts, owners and independent holds retain the blocker alert.
+fn verification_wait_has_action_owner(root: &Path, task_id: &str, recipient: &str) -> bool {
+    let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, task_id)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    if dispatch.owner_agent_id != recipient
+        || !super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
+    {
+        return false;
+    }
+    match dispatch.state {
+        cas_types::VerificationDispatchState::Pending
+        | cas_types::VerificationDispatchState::Claimed => true,
+        cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+                .ok()
+                .flatten()
+                .is_some_and(|verdict| verdict.status == cas_types::VerificationStatus::Approved)
+        }
+        _ => false,
+    }
+}
+
 /// Reconcile the director's blocked/liveness signals with the lifecycle
 /// outbox, never a direct prompt. The outbox is the durable episode memory:
-/// one initial alert and, once its owner/deadline releases the wait, at most
-/// one escalation. Runs on the daemon's store lane; `now` is injectable.
+/// one initial receipt and at most one escalation for other blockers. Exact
+/// verification waits use their dispatch/worker action path instead. Runs on
+/// the daemon's store lane; `now` is injectable.
 pub(crate) fn reconcile_blocked_task_alert(
     root: &Path,
     task_id: &str,
@@ -1250,8 +1279,7 @@ pub(crate) fn reconcile_blocked_task_alert(
         )
     };
     emit(false, None)?;
-    if super::super::block_hold::owned_verification_wait_at(root, task_id, &recipient.id, now)
-        .is_some()
+    if verification_wait_has_action_owner(root, task_id, &recipient.id)
         || super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
     {
         return Ok(());

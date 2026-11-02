@@ -74,6 +74,12 @@ impl BackgroundJobs {
         if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             return;
         }
+        if value.get("type").and_then(Value::as_str) == Some("attachment")
+            && value.pointer("/attachment/type").and_then(Value::as_str) == Some("queued_command")
+            && let Some(text) = value.pointer("/attachment/prompt").and_then(Value::as_str)
+        {
+            self.notification(text);
+        }
         let Some(content) = value.pointer("/message/content") else {
             return;
         };

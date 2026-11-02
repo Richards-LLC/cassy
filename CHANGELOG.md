@@ -36,6 +36,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **One alert per blocker episode** — Director blocked and idle signals share the durable task lifecycle queue, stay quiet during owned verification waits, and escalate once after the deadline. Native background jobs keep a worker busy until their completion notice.
 
+- **Verification waits wake only their next owner** — Approved verdicts leave close retries with workers, and expired dispatches send one supervisor wake. Background-job completions recorded as queued-command attachments now end the job's busy state.
+
 ### Changed — Close gates
 
 - **Workers see close requirements at start and every park failure at once** — Was:

@@ -1881,7 +1881,11 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
 #[tokio::test]
 async fn queued_task_starts_after_close_or_park_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
-    for (park, pending_brief, cli) in [(false, false, "claude"), (true, false, "codex"), (true, true, "codex")] {
+    for (park, pending_brief, cli, restart) in [
+        (true, false, "codex", false), // Default config must keep the context.
+        (false, false, "claude", true), (true, false, "codex", true),
+        (true, true, "codex", true),
+    ] {
         let f = fixture(&mut env, "main");
         let config = f.cas_dir().join("config.toml");
         let mut body = std::fs::read_to_string(&config).unwrap();
@@ -1989,6 +1993,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             drop(queue_lock);
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "other-session").await.unwrap();
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
+            if restart {
             let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
             let stop = spawns.enqueue_shutdown(None, &[WORKER.into()], false, Some("queue-session")).unwrap();
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
@@ -1996,9 +2001,18 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert!(!spawns.peek(100).unwrap().iter().any(|r| r.action == cas_store::SpawnAction::Recycle),
                 "automatic handoff must not override a pending shutdown");
             spawns.mark_processed(stop).unwrap();
+            }
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
-        // cas-7f57a: a successor must not enter the preceding conversation.
+        if !restart {
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::InProgress,
+                "cas-6f7d: default queue handoff must not require a restart");
+            let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+            assert!(!spawns.peek(100).unwrap().iter().any(|r| r.action == cas_store::SpawnAction::Recycle));
+            assert_ne!(agents.get("nocode-worker-session").unwrap().cc_session_id.as_deref(),
+                Some("fresh-successor-conversation"));
+        } else {
+        // cas-7f57a: an opted-in successor must not enter the preceding conversation.
         assert_eq!(f.task("cas-8488b").status, TaskStatus::Open,
             "queued successor started before a fresh harness generation");
         let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
@@ -2026,6 +2040,7 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         spawns.mark_processed(resets[0].id).unwrap();
         spawns.record_spawn_state(resets[0].id, cas_store::SpawnLifecycleState::Registered, Some(WORKER), None).unwrap();
         crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        }
         let next = f.task("cas-8488b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));

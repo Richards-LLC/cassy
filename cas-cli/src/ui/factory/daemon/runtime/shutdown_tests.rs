@@ -1229,6 +1229,123 @@ async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0
     assert_eq!(held.assignee.as_deref(), Some(name), "recycle retains the replacement's work");
 }
 
+/// cas-35f6: both supervisor recovery routes keep the dead worker's checkout.
+#[tokio::test(flavor = "current_thread")]
+async fn same_name_spawn_recovers_dead_pane_cas_35f6() {
+    if !run_hermetic_recycle_child("same_name_spawn_recovers_dead_pane_cas_35f6") {
+        recover_dead_worker(false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
+    if !run_hermetic_recycle_child("recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6") {
+        recover_dead_worker(true).await;
+    }
+}
+
+async fn recover_dead_worker(recycle: bool) {
+    use crate::mcp::{server::CasCore, tools::CasService};
+    use crate::worktree::{WorktreeConfig, WorktreeManager};
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let repo = env.home().join("project");
+    std::fs::create_dir(&repo).unwrap();
+    env.set_current_dir(&repo);
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git").current_dir(cwd).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&repo, &["init", "-qb", "main"]);
+    git(&repo, &["config", "user.name", "Fixture"]);
+    git(&repo, &["config", "user.email", "fixture@example.invalid"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
+    let cas = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &cas);
+    let name = "recover-worker";
+    let mut manager = WorktreeManager::new(&repo, WorktreeConfig {
+        enabled: true, base_path: cas.join("worktrees").display().to_string(),
+        branch_prefix: "factory/".into(), cleanup_on_close: false,
+        ..Default::default()
+    }).unwrap();
+    let worker = manager.create_for_worker(name).unwrap().path.clone();
+    std::fs::write(worker.join("precious"), "unpublished work").unwrap();
+    git(&worker, &["add", "precious"]);
+    git(&worker, &["commit", "-qm", "unpublished"]);
+    let tip = git(&worker, &["rev-parse", "HEAD"]);
+    assert_eq!(git(&worker, &["rev-list", "--count", "main..HEAD"]), "1");
+    let mut daemon = daemon(&cas);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    daemon.app.set_worktree_manager_for_test(manager);
+    register_idle_worker(&cas, name);
+    let agents = open_agent_store(&cas).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    old.metadata.insert("clone_path".into(), worker.display().to_string());
+    old.metadata.insert("worker_cli".into(), "codex".into());
+    old.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+    let tasks = crate::store::open_task_store_local(&cas).unwrap();
+    let mut task = cas_types::Task::new("cas-recover".into(), "Continue unpublished work".into());
+    task.assignee = Some(name.into());
+    task.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let pane = idle_worker_pane(name, cas_mux::SupervisorCli::Codex);
+    let pid = pane.process_group_id().unwrap();
+    old.pid = Some(pid);
+    agents.update(&old).unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    // Kill only this fixture's child; consume its real PTY exit event.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, events) = daemon.app.mux.poll_batch();
+            if events.iter().any(|event| matches!(event, cas_mux::MuxEvent::PaneExited { pane_id, .. } if pane_id == name)) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("killed worker emits its exit");
+    // The crash handler retains the checkout because the worker holds work.
+    daemon.app.mark_worker_crashed(name).await;
+    old.status = cas_types::AgentStatus::Stale;
+    agents.update(&old).unwrap();
+    let spec = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Codex, model: Some("gpt-6.1-sol".into()),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    if recycle {
+        let core = CasCore::with_daemon(cas.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req = serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap();
+        service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::operator(SESSION), req)
+            .await.expect("supervisor can recycle a dead worker with unpublished work");
+        daemon.enqueue_spawn_requests().unwrap();
+        daemon.process_pending_spawns().await;
+        daemon.app.join_worker_worktree_cleanups();
+        daemon.process_pending_spawns().await;
+        assert!(daemon.spawn_verifications.contains_key(name), "replacement launched: {:?}", daemon.app.error_message);
+    } else {
+        // The named spawn consumer uses this same prepare/provision/finish path.
+        let prep = daemon.app.prepare_worker_spawn(Some(name), true, None).unwrap();
+        let prepared = prep.run().unwrap();
+        daemon.app.finish_worker_spawn(prepared, None, Some(spec), None)
+            .expect("same-name spawn reaps the exited pane");
+    }
+    assert_ne!(daemon.app.mux.pane_process_group_id(name), Some(pid));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !env.home().join("replacement-cwd").exists() { tokio::task::yield_now().await; }
+    }).await.expect("replacement starts in its worktree");
+    let cwd = std::fs::read_to_string(env.home().join("replacement-cwd")).unwrap();
+    assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(&worker).unwrap());
+    assert_eq!(git(&worker, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(std::fs::read_to_string(worker.join("precious")).unwrap(), "unpublished work");
+    assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(name));
+    daemon.app.mux.kill_worker(name, true).await.unwrap();
+}
+
 /// Keep harness discovery local to a child process, including the CAS binary
 /// required by the Codex PTY preflight. Neither stand-in uses the host install.
 fn run_hermetic_recycle_child(test_name: &str) -> bool {
@@ -1244,7 +1361,7 @@ fn run_hermetic_recycle_child(test_name: &str) -> bool {
         (
             "codex",
             format!(
-                "#!/bin/sh\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
+                "#!/bin/sh\npwd > \"$HOME/replacement-cwd\"\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
             ),
         ),
         ("claude", format!("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--mcp-config --strict-mcp-config --effort'; exit 0; fi\nprintf '%s\\n' \"$CAS_ROOT\" > \"$CAS_ROOT/replacement-root\"\nprintf '{REPLACEMENT_STARTUP}\\n'\nexec /bin/sleep 300\n")),

@@ -224,7 +224,7 @@ mod tests {
         assert!(!context.contains(&untagged) && !context.contains(&report), "{context}");
 
         let skill = input("Skill", serde_json::json!({ "skill": "cas-cut-release" }));
-        assert!(!surfaced(temp.path(), &skill).contains("[operation lessons"));
+        assert!(!surfaced(temp.path(), &skill).contains(&scratch));
         let status = input(
             "Bash",
             serde_json::json!({ "command": "scripts/release.sh --next-version" }),
@@ -247,7 +247,8 @@ mod tests {
         assert!(claude.contains(&general), "{claude}");
         let first = surfaced(temp.path(), &spawn("codex"));
         assert!(first.contains(&codex) && !first.contains(&general), "{first}");
-        assert!(!surfaced(temp.path(), &spawn("codex")).contains("[operation lessons"));
+        let repeated = surfaced(temp.path(), &spawn("codex"));
+        assert!(!repeated.contains(&codex) && !repeated.contains(&general), "{repeated}");
         let mut next = spawn("codex");
         next.session_id = "another-session".into();
         assert!(surfaced(temp.path(), &next).contains(&codex));

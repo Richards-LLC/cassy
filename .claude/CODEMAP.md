@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Auto-generated structural map of the 3.98 integration tree. Regenerate with `/codemap` when modules move.
+> Regenerated structural map of the 3.99 release tree (18 Rust workspace members plus TypeScript clients). Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -58,6 +58,7 @@
 ## Factory runtime and terminals
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
+- `crates/cas-pty/src/pty.rs` - private startup-brief files, harness argv construction and owned PTY lifetimes.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, verification expiry sweeps and shutdown cleanup.
@@ -98,7 +99,7 @@
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` - independent QA, release verdicts and audited author overrides.
 - `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - incremental Claude/Codex/Grok turn accounting before optional Commander mirroring; typed actions and authenticated wake provenance.
 - `cas-cli/src/migration/migrations/m292_quality_turns.rs` - append-only quality ledger CHECK upgrade, shared with store-open repair.
-- `cas-cli/src/quality_ledger.rs`, `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/cli/ledger.rs` - append-only quality events and friction-ledger commands.
+- `cas-cli/src/quality_ledger.rs`, `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/cli/ledger.rs` - append-only quality events, live/history queue identities and friction-ledger commands.
 - `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub service lifecycle and Serve target ownership.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE routes and MCP action schemas.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/`, `cas-cli/src/hub/accounts.rs` - pairing, durable operator input and account projections.
@@ -107,7 +108,7 @@
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversation and reply grants.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, subscriptions and ordered status publication.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - history paging and bounded transcript windows.
-- `hub-web/src/provider-mark.ts`, `hub-web/src/live-phase.ts`, `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts` - harness marks, live phase, Team state and release/task projections.
+- `hub-web/src/provider-mark.ts`, `hub-web/src/live-phase.ts`, `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts` - harness marks, live phase, attention-priority Team state and release/task projections.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - operation disclosures and worker activity views.
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` - safe Markdown, source controls and lazy evidence renderers.
 - `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `cas-cli/src/hub/composer_upload.rs` - upload identity, progress and stored attachment routes.
@@ -123,6 +124,7 @@
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/analysis/` and `docs/qa/bug-families/`.
 - **Release:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-integration-gates.py`, `scripts/deploy-hub-release.py`, `docs/release-notes/`, `docs/release-reports/`.
 - **CI:** `.github/workflows/ci.yml`, `.github/actions/run-script-suite-tests/`, `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` and script regression tests.
+- **Release reuse:** `scripts/release-cache-key.py`, `scripts/find-release-prebuild.sh`, `.github/workflows/release-prebuild.yml`, `.github/workflows/release.yml` - dependency keys, queue archives and publication.
 - **Host tooling:** `scripts/install-on-publish.sh`, `scripts/qa-rig/commander-two-machine/`, `ops/systemd/` and `docs/ci/`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/` and `hub-web/DESIGN.md`.

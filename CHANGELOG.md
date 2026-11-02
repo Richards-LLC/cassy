@@ -15,6 +15,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Parked merges resume when CI turns green** — Was: A supervisor retried each merge after pending CI completed. → Now: Cassy persists the authorized merge and retries it for the same source SHA, repository and target; red CI or a moved lane sends one supervisor notice.
 
+### Fixed — Factory CI
+
+- **Keep delivery code covered after docs pushes** — Compare every factory push with its shared delivery fork, so cancelling an earlier code run cannot let a docs followup skip the code checks.
+
+### Fixed — Factory context and reminders
+
+- **Quiet repeated planning** — Operation lessons match the spawned harness and appear once per session; task and spawn recall filters weak matches and repeats. Close upkeep details live in receipt files. Worker reminders end with shutdown or terminal tasks, and supervisor stall prompts wait for actionable idle time and current, eligible work.
+
+### Fixed — Queued candidate builds
+
+- **Queued builds run again** — Was: Every queued candidate build failed within seconds with "bwrap: No permissions to create a new namespace", because the sandbox was told to run `/proc/self/exe`, which names bubblewrap once it is inside. → Now: The sandbox runs the daemon's real binary path.
+- **Refused at the request** — Was: A worker on macOS, on a host without `bwrap`, or under a daemon that cannot start the sandbox got "Queued" and a failure later. → Now: The daemon tests its own sandbox when it starts, and the request is refused at once, with the reason and the supervisor's direct build named as the fallback.
+- **Killed builds no longer leak disk** — Was: A build killed by a timeout or a daemon restart left its checkout and up to 20 GiB of target behind, and the retry started a new one. → Now: The next build removes what a killed build left, and leaves a running build alone.
+
+### Fixed — Factory wait deadlines
+
+- **Bounded verification and background waits** — Was: an approved verdict could leave a task blocked forever, a close retry after the expiry relay could wake the supervisor twice, and a missing background completion kept a worker busy indefinitely. → Now: an unretried approval escalates once after five minutes, pending and timed-out dispatches share one expiry relay, and silent native background jobs become stalled after the configured stall window.
+
+### Fixed — Factory coordination
+
+- **Quiet idle turns and peer FYIs** — Refuse delay reminders that poll inbox or external status, with event/completion guidance; omit content-free supervisor status bubbles in Commander and keep untyped peer FYIs quiet while retaining explicit actions.
+
+### Fixed — Commander project card status and dismissed sessions
+
+- **Session dots follow three states** — Was: a live idle session showed an open green ring and a stopped one could read as alive. → Now: Green means the session is working, muted green means it is live and idle, and gray means it is disconnected or ended. A live session never shows a gray dot.
+- **Dismissed sessions stay reachable** — Was: a dismissed session in a project whose only session had ended could not be reached from the list. → Now: Search finds a dismissed ended session, and a "Show dismissed sessions" action at the end of the list reveals them with Restore, including a project whose only session has ended. Restore applies on every paired device.
+
+### Changed — One verifier per release
+
+- **Tier 1 deliveries close on one release verdict** — Was: with `qa.mode=batch`, each merged delivery opened its own verifier (9 on 3.96, 1.57M fresh tokens). Now: Tier 1 merges open no dispatch, and one review of the assembled tip closes them all once `verification action=batch_receipt verification_type=release` records a report naming every delivery. Tier 2 guard, CI and release code, unmeasurable diffs, `force-verifier` and `qa.mode=per_task` keep their own verifier, and a verdict never counts as QA evidence.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

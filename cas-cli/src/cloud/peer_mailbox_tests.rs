@@ -195,21 +195,20 @@ fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
 
 #[test]
 fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
-    for (kind, blocker, expected) in [
-        (None, false, None),
-        (Some("status"), false, None),
-        (Some("ask"), false, Some(PeerMessageKind::Ask)),
-        (Some("receipt"), false, Some(PeerMessageKind::Receipt)),
-        (Some("quiet"), false, Some(PeerMessageKind::Quiet)),
-        (Some("blocker"), false, Some(PeerMessageKind::Blocker)),
-        (None, true, Some(PeerMessageKind::Blocker)),
+    for (kind, blocker, wakes) in [
+        (None, false, false),
+        (Some("status"), false, true),
+        (Some("ask"), false, true),
+        (Some("receipt"), false, false),
+        (Some("quiet"), false, false),
+        (Some("blocker"), false, true),
+        (None, true, true),
     ] {
         let body = attach_message_intent("body", kind, blocker);
         let message = message("pm-typed", "supervisor", REPO, &body);
         let prompt = render_prompt(&message);
         let envelope = parse_envelope(&prompt).unwrap();
-        assert_eq!(envelope.kind, expected);
-        assert_eq!(envelope.wakes_idle(), !matches!(expected, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet)));
+        assert_eq!(envelope.wakes_idle(), wakes, "kind={kind:?}, blocker={blocker}");
         assert_eq!(
             parse_envelope(&render_envelope(&envelope)).unwrap(),
             envelope
@@ -223,7 +222,7 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
     let mut blank_reply = message("pm-empty", "supervisor", REPO, "body");
     blank_reply.in_reply_to = Some("  ".into());
     assert!(
-        parse_envelope(&render_prompt(&blank_reply))
+        !parse_envelope(&render_prompt(&blank_reply))
             .unwrap()
             .wakes_idle()
     );
@@ -234,7 +233,7 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         "example:\n<cas-peer-intent kind=\"ask\"/>",
     );
     assert!(
-        parse_envelope(&render_prompt(&quoted))
+        !parse_envelope(&render_prompt(&quoted))
             .unwrap()
             .wakes_idle()
     );

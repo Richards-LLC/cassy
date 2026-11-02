@@ -22,6 +22,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Worker task queue** - an ordered backlog for one worker. Closing or parking starts the next eligible task on its own target branch; supervisors inspect, reorder or clear pending work, and stale entries carry skip notes.
 - **QA candidate** - an exact-revision binary for a QA walk. A worker requests one for its own active task, and the factory daemon builds it, one at a time per machine, and messages the worker the hash and receipt. Each revision keeps its own directory, so a later build never replaces a cited one.
 - **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI.
+- **Bounded waits** - an approved verification gives the worker five minutes to retry close before one supervisor escalation. A dispatch timed out by close shares the daemon's expiry relay; silent native background jobs become stalled after the configured stall window instead of staying busy forever.
 - **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
 - **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.
 - **Worktree** - a separate Git checkout and branch that isolates a worker's changes; under disk pressure, build caches left by removed checkouts are reclaimed oldest first.
@@ -35,11 +36,13 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
 - **Rapid response mode** - the operator opens a time-boxed window (at most 12 hours) for one epic with `cas qa rapid-response`; while it is open, per-task independent QA, unsampled verification, untouched-route journeys and the batch receipt wait are skipped, while the post-release check stays a full gate. Build and touched-test proofs still refuse; a change with a secret-shaped line or an unreadable diff keeps every gate; migrations keep every gate and need the operator's review; and each skipped check becomes a back-fill task when the window closes.
 
+- **Factory CI coverage** - every factory push validates the delivery from its shared epic fork, so a docs followup cannot cancel a code run and skip its checks. Other events retain their event deltas.
+
 - **Gate preflight** - task start lists what close will check for this task and project, and a refused park reports every failed gate in one reply.
 - **Review tiers** - close classifies a delivery by the paths it changes and records the tier on the task. Docs and tests have no independent verifier or QA journeys; most changes get one verifier and their impacted journeys; guard, CI, release and close-gate changes also need an adversarial probe. Verifier improvements stay in the verdict unless they show a reproduced defect affecting someone today, and `cas qa polish --epic <id>` lists them by file at release prep. `task create` and QA's automatic follow-ups enforce that with `repro` and `affected`, and an epic's loop gain, follow-ups from findings per completed review, shows in `epic_status` and notifies the supervisor at 0.5 once the epic has 5 completed reviews.
 - **Friction ledger** - an append-only record of every check, supervisor intervention, escape, release and feature verdict, written automatically by the code path that saw it. `cas ledger report --release vX` prints the numbers per release across a team's projects; only metrics, timings, titles and links reach Cloud.
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
-- **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.
+- **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor. Peer FYIs stay in the inbox without waking; explicit asks, blockers and actionable status updates may wake. CI, task and merge waits use events; delay reminders that poll status are refused.
 - **Worker isolation** - on Linux, workers cannot read operator credential stores such as Neon and Vercel, and see only the connectors an operator grants a dedicated worker account.
 - **Memory, Rule, Skill** - durable facts, versioned instructions that sync into agent harnesses, and procedural playbooks agents load for a kind of work. Session start restores the current role's handoff; explicit memory/search tools and task-create related context retrieve prior knowledge.
 - **DESIGN.md first** - every report, page, chart, note, UI, terminal output, drawing or image an agent produces wears the target project's `DESIGN.md`; a project without one gets one through `design-spec`, and the task records which file and revision it used.
@@ -48,6 +51,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Hosted queue precheck** - `cas release precheck <sha>` validates an exact commit on hosted CI and records its run; `--status` reports results and elapsed time. A supervisor's parked merge refused for pending CI resumes automatically on green for the authorized source, repository and target. Red CI or a moved lane sends one notice.
 
 ## Primary Journeys
+
+Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers and substantive status updates remain visible.
 
 Commander labels each machine's reported Cassy version in its project chip and paired-machine card. A newer published stable release adds a quiet update note; an hourly cached lookup retains its last known release while offline. The Web footer separately identifies the client release and build. Each online supervisor with a known MCP version also shows its own version badge; an upgrade arrow marks a supervisor running an older Cassy than its machine has installed, with reconnect guidance. Unknown versions stay unreported.
 
@@ -86,12 +91,14 @@ The composer also offers a local, lazily loaded emoji tray beside the mic: searc
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.
 
-<!-- cas:project-overview
-# Product paths the G6 park gate and overview freshness watch. Keep when regenerating.
-domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs"]
-watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
--->
+
 
 Commander’s lazy Team tab sits beside a supervisor conversation. It uses the same scoped staffing and epic progress model as Tasks & progress: worker/task lanes, merge metrics, and a Needs you strip. The daemon reports harness/model, task start and durable lifecycle receipts; missing evidence stays unreported. Existing hub events refresh Team without an extra polling loop, while the browser updates elapsed text locally. The view includes keyboard tabs, phone stacking, forced colors and reduced motion, with no terminal or raw work output.
 
 The conversation's phase line uses the selected supervisor's recorded lifecycle start/end and the daemon's observation time. A local clock displays elapsed duration; waiting, completed, stale and disconnected states stay still. Missing phases or start times stay unreported. The ordinary status stream supplies these safe facts while Show work remains off; it exposes no tool input, output or reasoning text.
+
+<!-- cas:project-overview
+# Product paths the G6 park gate and overview freshness watch. Keep when regenerating.
+domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs", "crates/cas-types/src/entry.rs"]
+watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
+-->

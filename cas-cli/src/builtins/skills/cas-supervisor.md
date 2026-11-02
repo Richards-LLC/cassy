@@ -24,10 +24,10 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request and recipe.
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
-- **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
+- **Worker liveness:** on a lifecycle notice, read `factory action=worker_status summary_mode=true` once. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
-- **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
+- **No polling or sleeping.** Wait on event reminders (`ci_completed`, task events, `branch_contained_in`) or harness background-task completion. Delay reminders are for actual deadlines and admission retries. Never poll the operator inbox; Commander already wakes you.
 - **Pane budget:** ~150 words of prose, answer first: findings, rejections, measurements, merge receipts, pointers. Show flows, comparisons and bad news [visually](references/operator-reply.md). Timelines, gates and lane history go to notes/artifacts; no narration/recap.
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).

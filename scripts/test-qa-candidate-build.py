@@ -135,6 +135,28 @@ if sys.argv[1]=='run':
             legacy.mkdir()
             (legacy / "review-only").write_bytes(b"unmanaged output")
             destination = root / "artifacts/candidate"
+            # A build killed mid-compile never unwinds; one still running survives.
+            def hold_scratch(name):
+                holder = subprocess.Popen([sys.executable, '-c', f'''
+import signal, subprocess, sys
+sys.path.insert(0, {str(Path(__file__).parent)!r})
+import release_scratch
+owned = release_scratch.OwnedDirectory({str(scratch.name + ".qa-candidate-" + name)!r}, {str(scratch.parent)!r})
+subprocess.check_call(["git", "-C", {str(repo)!r}, "worktree", "add", "-q", "--detach", str(owned.path / "checkout"), "HEAD"])
+(owned.path / "target").mkdir()
+print(owned.path, flush=True)
+signal.pause()
+'''], stdout=subprocess.PIPE, text=True)
+                self.addCleanup(holder.wait)
+                self.addCleanup(holder.kill)
+                return holder, Path(holder.stdout.readline().strip())
+            killed, abandoned = hold_scratch('killed-')
+            running, retained = hold_scratch('running-')
+            killed.kill()
+            killed.wait()
+            stage = root / 'artifacts/.candidate-killed'
+            stage.mkdir(parents=True)
+            (stage / 'cas').write_bytes(b'partial binary')
             env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
                        FIXTURE_BINARY=str(binary), FIXTURE_TARGET_RECORD=str(target_record),
                        FIXTURE_TARGET_OWNER=candidate['release_scratch'].OWNER)
@@ -144,6 +166,11 @@ if sys.argv[1]=='run':
                  mock.patch.object(candidate['release_env'], 'resolve_zig',
                                    return_value=SimpleNamespace(path=str(binary), source='fixture')):
                 result = candidate['build'](repo, revision, destination)
+                self.assertFalse(abandoned.exists(), 'the next build sweeps a killed build')
+                self.assertFalse(stage.exists(), 'the next build sweeps its partial publication')
+                self.assertNotIn(str(abandoned), git('worktree', 'list', '--porcelain'))
+                self.assertTrue(retained.exists(), 'a held lease keeps a running build')
+                self.assertIn(str(retained), git('worktree', 'list', '--porcelain'))
                 receipt = json.loads((destination/'RECEIPT.json').read_text())
                 self.assertEqual(receipt['web']['source_sha'],revision)
                 self.assertEqual(receipt['web']['dist_sha256'],receipt['web']['served_dist_sha256'])

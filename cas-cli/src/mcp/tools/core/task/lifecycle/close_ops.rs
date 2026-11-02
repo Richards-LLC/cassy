@@ -9182,10 +9182,6 @@ impl CasCore {
                         conflict_check_error.as_deref(),
                     );
 
-                    let msg = if registry_upkeep_notices.is_empty() { msg } else {
-                        format!("{msg}\n\n{}", registry_upkeep_notices.join("\n"))
-                    };
-
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
                     // mode) used to re-run `park_task_awaiting_merge` on
@@ -9437,6 +9433,9 @@ impl CasCore {
                         None => msg,
                     };
 
+                    let artifacts_root = self.load_config().factory().artifacts_root;
+                    let msg = gate_text::upkeep_receipt(&self.cas_root,
+                        artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
                     return Ok(Self::tool_error(msg));
                 }
             }
@@ -9582,7 +9581,18 @@ impl CasCore {
                     ..
                 }))
         );
-        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip;
+        // cas-ce5e: with no per-task dispatch to protect it, a merged delivery whose
+        // worker has gone must not lose its release review to the orphan convenience.
+        // The explicit supervisor bypass and non-delivery dispositions are unaffected.
+        let orphan_skip_of_release_verdict = matches!(
+            skip_reason,
+            VerificationSkipReason::NoAssignee
+                | VerificationSkipReason::AssigneeInactive { .. }
+                | VerificationSkipReason::AssigneeUnknown
+        ) && !depth_light
+            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
+        let skip_verification =
+            skip_reason.is_skip() && exact_dispatch_allows_skip && !orphan_skip_of_release_verdict;
 
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
@@ -9647,11 +9657,46 @@ impl CasCore {
         {
             close_notes.record(&mut task, &decision.note());
         }
+        // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
+        // one verdict of the assembled tip names it. A dispatch or verdict already on
+        // record keeps its authority below, and Tier 2 never takes this path.
+        let release_verdict_covers = !rapid_unsampled
+            && no_verification_on_record
+            && verification_tier.is_some()
+            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
+        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers) {
+            match crate::qa_batch::satisfying_release_verdict(
+                &self.cas_root,
+                &task,
+                &close_project_root,
+                &resolved_parent_branch,
+                &decision.tip,
+            ) {
+                Ok(Some(verdict)) => close_notes.record(
+                    &mut task,
+                    &format!("Release verdict {} covers this delivery at {}.", verdict.id, decision.tip),
+                ),
+                Ok(None) => {
+                    return Ok(Self::tool_error(gate_text::waiting_for_release_verdict(
+                        &req.id,
+                        &decision.tip,
+                        crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    )));
+                }
+                Err(error) => {
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable release verdict state: {error}. Cassy refuses to infer close authority.",
+                        req.id
+                    )));
+                }
+            }
+        }
         if verification_enabled
             && !skip_verification
             && !depth_light
             && !rapid_unsampled
             && !tier_skips_verifier
+            && !release_verdict_covers
         {
             let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 
@@ -12301,9 +12346,6 @@ impl CasCore {
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
         }
-        if !registry_upkeep_notices.is_empty() {
-            receipt.push_str(&format!("\n\n{}", registry_upkeep_notices.join("\n")));
-        }
         if task.task_type == TaskType::Epic {
             let summary = registry_upkeep::epic_escape_summary(task_store.as_ref(), &task);
             append_close_decision_note(task_store.as_ref(), &mut task, &summary);
@@ -12313,7 +12355,6 @@ impl CasCore {
         let routine_close = task.task_type != TaskType::Epic
             && auto_unblocked_tasks.is_empty()
             && held_blocked_tasks.is_empty()
-            && registry_upkeep_notices.is_empty()
             && epic_close_msg.is_empty()
             && epic_issue_warning.is_empty();
         if routine_close {
@@ -12339,10 +12380,13 @@ impl CasCore {
                 &task.id,
                 "close",
                 &summary,
-                &receipt,
+                &format!("{receipt}\n\n{}", registry_upkeep_notices.join("\n")),
             ) {
                 receipt = compact;
             }
+        } else {
+            receipt = gate_text::upkeep_receipt(&self.cas_root,
+                configured_artifacts_root.as_deref(), &task.id, "close", receipt, &registry_upkeep_notices);
         }
         Ok(Self::success(receipt))
     }

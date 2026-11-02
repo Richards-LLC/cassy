@@ -1065,7 +1065,7 @@ fn emit_task_lifecycle_transition_in_project(
     };
 
     let verification_wait = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
-        verification_wait_has_action_owner(root, task_id, &recipient.id)
+        owned_verification_wait(root, task_id, &recipient.id).is_some()
     });
     let answered_blocker = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
@@ -1207,23 +1207,24 @@ fn emit_task_lifecycle_transition_in_project(
 }
 
 /// Exact verification waits have their own action path: the dispatch relay
-/// owns expiry, and an approved verdict hands close back to the worker.
+/// owns expiry (including close-persisted timeouts), and an approved verdict
+/// hands close back to the worker for a bounded grace period.
 /// Other verdicts, owners and independent holds retain the blocker alert.
-fn verification_wait_has_action_owner(root: &Path, task_id: &str, recipient: &str) -> bool {
-    let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, task_id)
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
+fn owned_verification_wait(
+    root: &Path,
+    task_id: &str,
+    recipient: &str,
+) -> Option<cas_types::VerificationDispatch> {
+    let dispatch = cas_store::get_latest_verification_dispatch(root, task_id).ok().flatten()?;
     if dispatch.owner_agent_id != recipient
         || !super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
     {
-        return false;
+        return None;
     }
-    match dispatch.state {
+    let owned = match dispatch.state {
         cas_types::VerificationDispatchState::Pending
-        | cas_types::VerificationDispatchState::Claimed => true,
+        | cas_types::VerificationDispatchState::Claimed
+        | cas_types::VerificationDispatchState::TimedOut => true,
         cas_types::VerificationDispatchState::Resolved => {
             cas_store::get_verification_for_dispatch(root, &dispatch.id)
                 .ok()
@@ -1231,7 +1232,8 @@ fn verification_wait_has_action_owner(root: &Path, task_id: &str, recipient: &st
                 .is_some_and(|verdict| verdict.status == cas_types::VerificationStatus::Approved)
         }
         _ => false,
-    }
+    };
+    owned.then_some(dispatch)
 }
 
 /// Reconcile the director's blocked/liveness signals with the lifecycle
@@ -1279,9 +1281,21 @@ pub(crate) fn reconcile_blocked_task_alert(
         )
     };
     emit(false, None)?;
-    if verification_wait_has_action_owner(root, task_id, &recipient.id)
-        || super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
-    {
+    if let Some(dispatch) = owned_verification_wait(root, task_id, &recipient.id) {
+        // Keep the initial receipt quiet. Unresolved and timed-out dispatches
+        // share the expiry relay; approval gives the worker five minutes to
+        // retry before this episode's single deadline alert takes over.
+        if dispatch.state == cas_types::VerificationDispatchState::Resolved
+            && now >= dispatch.resolved_at.unwrap_or(dispatch.requested_at)
+                + chrono::Duration::minutes(5)
+        {
+            emit(true, Some(
+                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close.",
+            ))?;
+        }
+        return Ok(());
+    }
+    if super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some() {
         return Ok(());
     }
     let mut deadline = start + chrono::Duration::minutes(5);

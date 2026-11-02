@@ -98,7 +98,12 @@ try {
   function colors(scheme) {
     return {
       ...Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, token(`color.${scheme}.${role}`)])),
-      "--state-idle": token(`color.series-neutral.${scheme}`),
+      // Session status dots (operator ruling 2026-11-01): --state-ok is active,
+      // --state-idle is a muted green for a live idle session, and --state-off
+      // is the neutral grey for a disconnected one. Each clears 3:1 on
+      // --bg-raised (light 3.16:1, dark 3.67:1).
+      "--state-idle": { light: "#4F8A6A", dark: "#3E8A63" }[scheme],
+      "--state-off": token(`color.series-neutral.${scheme}`),
       "--color-series-neutral": token(`color.series-neutral.${scheme}`),
     };
   }

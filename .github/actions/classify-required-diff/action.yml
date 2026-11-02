@@ -5,7 +5,7 @@ inputs:
     description: Commit on the base side of the comparison.
     required: true
   zero-base-ref:
-    description: Trusted comparison ref for branch-creation pushes whose before SHA is all-zero.
+    description: Trusted default-branch ref for new branches and factory delivery-range comparisons.
     required: false
     default: ""
 outputs:

@@ -1,0 +1,4 @@
+title: Status dots follow three states and a dismissed session stays reachable and restorable on every paired device
+tasks: [cas-51f6, cas-dbcb]
+invariants: [HUB-J14-GOAL]
+journeys: [HUB-J14]

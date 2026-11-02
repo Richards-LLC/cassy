@@ -214,6 +214,13 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
     )
 }
 
+/// A Tier 1 delivery in release QA mode, waiting on the one verdict that names it.
+pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_prefix: &str) -> String {
+    format!(
+        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. Close is retried after that; the worker has nothing to do."
+    )
+}
+
 /// VERIFICATION REQUIRED as a factory worker sees it: the gate line with its
 /// handoff, and nothing addressed to the verifier or the supervisor.
 pub(crate) fn worker_verification_required(task_id: &str, gate_line: &str) -> String {

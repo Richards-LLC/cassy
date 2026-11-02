@@ -251,6 +251,13 @@ pub(crate) fn author_refusal(task: &str, author: &str) -> String {
     )
 }
 
+/// Whether `report` names `task` as a whole ID, so `cas-12` is not `cas-123`.
+fn report_names(report: &str, task: &str) -> bool {
+    report
+        .split(|c: char| !(c.is_alphanumeric() || c == '-'))
+        .any(|word| word == task)
+}
+
 pub(crate) fn prepare_receipt(
     root: &Path,
     recorder: &cas_types::Agent,
@@ -259,6 +266,7 @@ pub(crate) fn prepare_receipt(
     staging: &str,
     artifact_id: &str,
     ledger: &Path,
+    schema: u32,
 ) -> Result<QaBatchReceipt, String> {
     if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("staging_sha must be a full 40-hex commit SHA".into());
@@ -272,6 +280,12 @@ pub(crate) fn prepare_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let (artifact, ledger) = validate_ledger(root, artifact_id, ledger)?;
+    if schema == cas_store::RELEASE_VERDICT_SCHEMA {
+        let report = std::fs::read_to_string(&ledger).map_err(|e| e.to_string())?;
+        if let Some(id) = task_ids.iter().find(|id| !report_names(&report, id)) {
+            return Err(format!("the published report does not name {id}; one verdict must name every delivery it covers"));
+        }
+    }
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     // A peer on another machine need not be registered here; record it as external.
@@ -321,7 +335,7 @@ pub(crate) fn prepare_receipt(
         heads.insert(id.clone(), anchor);
     }
     Ok(QaBatchReceipt {
-        schema_version: 1,
+        schema_version: schema,
         id: format!("qab-{}", uuid::Uuid::new_v4().simple()),
         project_id: project,
         ledger_artifact_id: artifact.id,
@@ -339,13 +353,36 @@ pub(crate) fn prepare_receipt(
     })
 }
 
-/// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
+/// The QA receipt covering this delivery.
 pub(crate) fn satisfying_receipt(
     root: &Path,
     task: &Task,
     repo: &Path,
     target: &str,
     head: &str,
+) -> Result<Option<QaBatchReceipt>, String> {
+    covering_receipt(root, task, repo, target, head, cas_store::qa_batch_receipts_for_task)
+}
+
+/// The release verdict covering this delivery, bound exactly as a QA receipt is.
+pub(crate) fn satisfying_release_verdict(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+) -> Result<Option<QaBatchReceipt>, String> {
+    covering_receipt(root, task, repo, target, head, cas_store::release_verdicts_for_task)
+}
+
+/// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
+fn covering_receipt(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+    receipts_for_task: fn(&Path, &str, &str) -> cas_store::Result<Vec<QaBatchReceipt>>,
 ) -> Result<Option<QaBatchReceipt>, String> {
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
@@ -360,11 +397,9 @@ pub(crate) fn satisfying_receipt(
     if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
         return Ok(None);
     }
-    let receipts = cas_store::qa_batch_receipts_for_task(root, &project, &task.id)
-        .map_err(|e| e.to_string())?;
+    let receipts = receipts_for_task(root, &project, &task.id).map_err(|e| e.to_string())?;
     for receipt in receipts {
-        if receipt.schema_version != 1
-            || receipt.project_id != project
+        if receipt.project_id != project
             || receipt.task_heads.get(&task.id) != Some(&anchor)
             || ancestor(repo, &anchor, head) != Some(true)
             || ancestor(repo, &anchor, &receipt.staging_sha) != Some(true)

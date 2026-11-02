@@ -2,6 +2,7 @@
 //! The daemon observes both Claude and Codex transcripts; Codex has no Stop
 //! hook, so a hook-only mirror would silently omit its supervisor turns.
 
+use std::cell::RefCell;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -14,7 +15,8 @@ use cas_store::PromptQueueStore;
 
 const TRANSCRIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REPLY_CHARS: usize = 4_000;
-const UNBOUND_CODEX_RETRY: Duration = Duration::from_secs(30);
+const UNBOUND_CODEX_RETRY: Duration = Duration::from_secs(1);
+const MAX_UNBOUND_CODEX_RETRY: Duration = Duration::from_secs(30);
 const FINALIZED_RECEIPT_POLL: Duration = Duration::from_secs(30);
 /// How far from a turn's start a recorded terminal question may be and still
 /// be the question that turn answers (cas-5c89).
@@ -27,6 +29,8 @@ struct CompletedTurn {
     completed_at: DateTime<Utc>,
     text: String,
     commander_id: Option<i64>,
+    /// All consumed envelope hints; the newest independently verified row wins.
+    commander_ids: Vec<i64>,
     /// The operator-visible prompt that started the turn, when the transcript
     /// carries it (cas-5c89: matched against recorded terminal turns).
     prompt: Option<String>,
@@ -65,16 +69,11 @@ fn commander_marker(text: &str) -> Option<i64> {
 
 fn commander_markers(text: &str) -> Vec<i64> {
     let mut seen = HashSet::new();
-    text.match_indices("[cas #").filter_map(|(offset, _)| {
-        let start = offset + 6;
-        let digits = text[start..]
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        text[start + digits.len()..]
-            .starts_with(" operator ")
-            .then(|| digits.parse::<i64>().ok())
-            .flatten()
+    text.lines().filter_map(|line| {
+        let marker = line.strip_prefix("[cas #")?;
+        let digits: String = marker.chars().take_while(char::is_ascii_digit).collect();
+        marker[digits.len()..].starts_with(" operator ")
+            .then(|| digits.parse::<i64>().ok()).flatten()
     }).filter(|id| seen.insert(*id)).collect()
 }
 
@@ -226,9 +225,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
-                if human_provenance(value)
-                    && value.get("attachment").is_none_or(human_provenance)
-                    && let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
+                if let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
                 {
                     let key = value
                         .get("promptId")
@@ -237,10 +234,12 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         .unwrap_or("")
                         .to_owned();
                     if !key.is_empty() {
-                        let ids = commander_markers(&prompt);
+                        let human = human_provenance(value)
+                            && value.get("attachment").is_none_or(human_provenance);
+                        let ids = if human { commander_markers(&prompt) } else { Vec::new() };
                         if ids.is_empty() {
                             let input = ClaudeInput { key, at, commander_id: None, prompt };
-                            if crate::hooks::handlers::handlers_middle::is_harness_prompt(&input.prompt) {
+                            if !human || crate::hooks::handlers::handlers_middle::is_harness_prompt(&input.prompt) {
                                 // A standalone worker wake still mirrors as status,
                                 // but a notification cannot take an operator's turn.
                                 if claude_inputs.is_empty() {
@@ -280,18 +279,22 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
                 if finished && let Some(text) = final_text.take()
                 {
-                    if claude_inputs.is_empty() {
+                    let status_only = claude_inputs.is_empty();
+                    if status_only {
                         claude_inputs.extend(claude_status.take());
                     }
-                    // One native answer can cover a typed question and several
-                    // Commander sends. Keep each question's durable reply link.
-                    for input in claude_inputs.drain(..) {
+                    // A terminal turn produces one visible answer. The latest
+                    // verified Commander send supplies its durable thread;
+                    // receipt scanning still marks every consumed send delivered.
+                    if let Some(input) = claude_inputs.first() {
                         turns.push(CompletedTurn {
-                            key: input.key, started_at: input.at, completed_at: at,
-                            text: text.clone(), commander_id: input.commander_id,
-                            prompt: Some(input.prompt),
+                            key: input.key.clone(), started_at: input.at, completed_at: at,
+                            text, commander_id: claude_inputs.iter().rev().find_map(|input| input.commander_id),
+                            commander_ids: claude_inputs.iter().filter_map(|input| input.commander_id).collect(),
+                            prompt: (!status_only).then(|| input.prompt.clone()),
                         });
                     }
+                    claude_inputs.clear();
                     claude_status = None;
                 }
             }
@@ -355,6 +358,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                                 completed_at: at,
                                 text,
                                 commander_id,
+                                commander_ids: commander_id.into_iter().collect(),
                                 prompt: started_prompt.take(),
                             });
                         }
@@ -436,7 +440,8 @@ type TranscriptSource = (String, cas_mux::SupervisorCli, Option<String>);
 #[derive(Default)]
 pub(crate) struct MirrorScanState {
     cursors: HashMap<String, TranscriptCursor>,
-    resolution_misses: HashMap<String, (TranscriptSource, Option<i64>, Instant)>,
+    resolution_misses: HashMap<String, (TranscriptSource, Option<i64>, Instant, Duration)>,
+    codex_ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
     receipt_next_poll: HashMap<i64, Instant>,
     published_inputs: HashSet<i64>,
     pub(super) operator_messages: Vec<crate::ui::factory::ConversationHistoryMessage>,
@@ -459,44 +464,75 @@ struct TranscriptCursor {
     modified: Option<SystemTime>,
 }
 
-/// A native input envelope identifies a durable queue row, not a directory.
-/// Synthetic Codex session ids have no rollout filename match. Bind their
-/// mirror only after observing input actually addressed to this recipient.
+#[derive(Default)]
+struct RolloutOwnership {
+    offset: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    ids: HashSet<i64>,
+    #[cfg(test)]
+    bytes_read: u64,
+}
+
+/// Incrementally index envelope IDs, then verify against the current recipient
+/// and startup boundary. A miss never rereads unchanged tool output; ownership
+/// can still precede the bounded reply tail by hours.
 fn codex_rollout_owns_recipient(
     path: &Path,
     queue: &dyn PromptQueueStore,
     session: &str,
     recipient: &str,
     startup_id: Option<i64>,
+    cache: &RefCell<HashMap<PathBuf, RolloutOwnership>>,
 ) -> bool {
-    // Ownership can predate the bounded reply tail by hours. Stream from
-    // the beginning, parsing only candidate envelopes; the first proven input
-    // binds the rollout without retaining its tool output in memory.
-    let Ok(file) = std::fs::File::open(path) else { return false };
-    BufReader::new(file).lines().map_while(Result::ok)
-        .filter(|line| line.contains("[cas #"))
-        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-        .any(|value| {
-            if value.get("type").and_then(Value::as_str) != Some("response_item")
-                || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
-                || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
-                return false;
-            }
-            let Some(text) = text_blocks(&value, "/payload/content", "input_text") else { return false };
-            let first = text.lines().next().unwrap_or("").trim();
-            let marker = first.strip_prefix("[cas #").or_else(|| {
-                first.strip_prefix("Message from ")?.split_once(": [cas #").map(|(_, marker)| marker)
-            });
-            let Some(id) = marker.and_then(|marker| marker.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<i64>().ok()) else { return false };
-            // A restart can reuse the name and factory. Older inputs must not
-            // bind the replacement to the previous generation's rollout.
-            if startup_id.is_some_and(|floor| id < floor) { return false; }
-            if startup_id == Some(id) { return true; }
-            queue.queued_prompt(id).ok().flatten().is_some_and(|row| {
-                row.factory_session.as_deref() == Some(session)
-                    && (row.target == recipient || row.target == "supervisor")
-            })
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let Ok(metadata) = file.metadata() else { return false };
+    let mut cache = cache.borrow_mut();
+    // The resolver considers at most 200 recent rollouts. Bound historical
+    // indexes as well when long-lived daemons move through many sessions.
+    if cache.len() > 512 { cache.clear(); }
+    let cursor = cache.entry(path.to_owned()).or_default();
+    let created = metadata.created().ok();
+    let modified = metadata.modified().ok();
+    if cursor.created != created || metadata.len() < cursor.offset
+        || (metadata.len() == cursor.offset && cursor.modified != modified) {
+        *cursor = RolloutOwnership::default();
+    }
+    if file.seek(SeekFrom::Start(cursor.offset)).is_err() { return false; }
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let Ok(bytes) = reader.read_line(&mut line) else { break };
+        if bytes == 0 || !line.ends_with('\n') { break; }
+        cursor.offset += bytes as u64;
+        #[cfg(test)] { cursor.bytes_read += bytes as u64; }
+        if !line.contains("[cas #") { continue; }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+        if value.get("type").and_then(Value::as_str) != Some("response_item")
+            || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+            || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(text) = text_blocks(&value, "/payload/content", "input_text") else { continue };
+        let first = text.lines().next().unwrap_or("");
+        let marker = first.strip_prefix("[cas #").or_else(|| {
+            first.strip_prefix("Message from ")?.split_once(": [cas #").map(|(_, marker)| marker)
+        });
+        if let Some(id) = marker.and_then(|marker| marker.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<i64>().ok()) {
+            cursor.ids.insert(id);
+        }
+    }
+    cursor.created = created;
+    cursor.modified = modified;
+    cursor.ids.iter().any(|id| {
+        if startup_id.is_some_and(|floor| *id < floor) { return false; }
+        if startup_id == Some(*id) { return true; }
+        queue.queued_prompt(*id).ok().flatten().is_some_and(|row| {
+            row.factory_session.as_deref() == Some(session)
+                && (row.target == recipient || row.target == "supervisor")
         })
+    })
 }
 
 pub(super) fn scan_supervisor_replies(
@@ -616,7 +652,7 @@ pub(super) fn scan_supervisor_replies(
                 &[&agent.name], Some(session),
             ).ok().flatten().filter(|row| matches!(row.origin, Some(cas_store::QueueOrigin::Daemon))).map(|row| row.id)
         } else { None };
-        let miss_held = state.resolution_misses.get(&agent.id).is_some_and(|(prior, floor, next)| {
+        let miss_held = state.resolution_misses.get(&agent.id).is_some_and(|(prior, floor, next, _)| {
             prior == &source && *floor == startup_id && now < *next
         });
         let path = cached
@@ -630,7 +666,7 @@ pub(super) fn scan_supervisor_replies(
                 if unbound_codex {
                     return crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
                         project_path.to_str()?, account.as_deref(),
-                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id),
+                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, &state.codex_ownership),
                     );
                 }
                 crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
@@ -643,7 +679,11 @@ pub(super) fn scan_supervisor_replies(
         let Some(path) = path else {
             state.cursors.remove(&agent.id);
             if unbound_codex && !miss_held {
-                state.resolution_misses.insert(agent.id.clone(), (source, startup_id, now + UNBOUND_CODEX_RETRY));
+                let delay = state.resolution_misses.get(&agent.id)
+                    .filter(|(prior, floor, _, _)| prior == &source && *floor == startup_id)
+                    .map(|(_, _, _, delay)| (*delay * 2).min(MAX_UNBOUND_CODEX_RETRY))
+                    .unwrap_or(UNBOUND_CODEX_RETRY);
+                state.resolution_misses.insert(agent.id.clone(), (source, startup_id, now + delay, delay));
             }
             continue;
         };
@@ -703,11 +743,7 @@ pub(super) fn scan_supervisor_replies(
             // terminal threads under that question, and is mirrored even if it
             // completed before mirroring started; other turns are not
             // backfilled, so first activation never floods an old transcript.
-            let terminal_question = turn
-                .commander_id
-                .is_none()
-                .then_some(turn.prompt.as_deref())
-                .flatten()
+            let terminal_question = turn.prompt.as_deref()
                 // cas-8737: harness envelopes are never operator questions,
                 // and skipping them keeps the per-poll lookups to real ones.
                 .filter(|prompt| {
@@ -728,9 +764,9 @@ pub(super) fn scan_supervisor_replies(
                 continue;
             }
             let prior = turn
-                .commander_id
-                .and_then(|id| queue.queued_prompt(id).ok().flatten())
-                .filter(|row| {
+                .commander_ids.iter().rev()
+                .filter_map(|id| queue.queued_prompt(*id).ok().flatten())
+                .find(|row| {
                     row.factory_session.as_deref() == Some(session)
                         && row
                             .origin
@@ -1488,12 +1524,35 @@ mod tests {
         let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
             &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state);
         scan(&mut state);
+        let bytes = || state.codex_ownership.borrow().values().map(|cursor| cursor.bytes_read).sum::<u64>();
+        let initial_bytes = bytes();
+        assert!(initial_bytes > 0, "fixture must exercise ownership reads");
         state.poll_clock = Some(now + std::time::Duration::from_secs(1));
         scan(&mut state);
-        assert_eq!(state.resolution_scans, 1, "an unresolved rollout miss must be cached");
-        state.poll_clock = Some(now + std::time::Duration::from_secs(31));
+        assert_eq!(state.resolution_scans, 2, "the first retry must bind a new rollout promptly");
+        state.poll_clock = Some(now + std::time::Duration::from_secs(2));
         scan(&mut state);
-        assert_eq!(state.resolution_scans, 2, "misses retry so a later rollout can bind");
+        assert_eq!(state.resolution_scans, 2, "repeated misses must back off");
+        state.poll_clock = Some(now + std::time::Duration::from_secs(3));
+        scan(&mut state);
+        assert_eq!(state.resolution_scans, 3, "misses keep retrying");
+        assert_eq!(state.codex_ownership.borrow().values().map(|cursor| cursor.bytes_read).sum::<u64>(), initial_bytes,
+            "retries must not reread unchanged rollout bodies");
+        let send = queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", "New words", Some("factory-1"),
+            None, None, false, None, &OperatorStamp {
+                operator: "Alice".into(), device_id: "phone".into(), device_label: "phone".into(),
+                scopes: vec!["message:send".into()], verified: true,
+            }).unwrap();
+        let path = temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        let append = codex_turn_at("new-turn", &format!("[cas #{} operator Alice@phone verified 0s first] New words", send.id()), "Incremental answer", Utc::now())
+            .iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(append.as_bytes()).unwrap();
+        state.poll_clock = Some(now + std::time::Duration::from_secs(7));
+        scan(&mut state);
+        assert_eq!(operator_replies(&queue)[0].message, "Incremental answer");
+        assert_eq!(state.codex_ownership.borrow().values().map(|cursor| cursor.bytes_read).sum::<u64>(), initial_bytes + append.len() as u64,
+            "a growing rollout must read only its appended records");
     }
 
     #[test]

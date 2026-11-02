@@ -7535,15 +7535,14 @@ impl FactoryDaemon {
             if self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
                 return false;
             }
-            // Confirmation footers and the Grok directory-trust question are
-            // input boundaries, not composers. Inspect the active viewport's
-            // last rows so old dialog text in scrollback cannot hold a send.
-            return !rows.iter().rev().filter(|row| !row.trim().is_empty()).take(4).any(|row| {
-                let text = row.trim().to_ascii_lowercase();
-                text.contains("enter to confirm") || text.contains("esc to cancel")
-                    || text.starts_with("do you trust ")
-                    || text.starts_with("press enter to continue")
-            });
+            // Native dialog footers are complete rows below the composer.
+            // Assistant prose above that row cannot hold the next send.
+            let composer = rows.iter().rposition(|row| matches!(row.trim(), ">" | "›" | "❯"));
+            let footer_rows = &rows[composer.map_or(0, |input| input + 1)..];
+            return !footer_rows.iter().any(|row| matches!(row.trim().to_ascii_lowercase().as_str(),
+                "enter to confirm · esc to cancel"
+                | "press enter to confirm or esc to cancel"
+                | "press enter to continue"));
         }
         let Some(input) = rows.iter().rposition(|row| row.trim_start().starts_with('❯')) else {
             return false;

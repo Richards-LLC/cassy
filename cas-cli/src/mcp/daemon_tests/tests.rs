@@ -543,6 +543,17 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
     let cc_pid = std::process::id();
+    struct Bootstrap(std::process::Child);
+    impl Drop for Bootstrap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // Hold an owned child on stdin, so PID liveness cannot depend on the
+    // host assigning cc_pid + 1 to an unrelated short-lived process.
+    let bootstrap = Bootstrap(std::process::Command::new("sh")
+        .args(["-c", "read line"]).stdin(std::process::Stdio::piped()).spawn().unwrap());
 
     let mut original = Agent::new(
         "worker-established-session".to_string(),
@@ -553,7 +564,7 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     // Eager MCP bootstrap runs in a child process: it records its own PID
     // and the Claude Code process as `ppid`. The follow-up socket event
     // carries that Claude Code PID directly.
-    original.pid = Some(cc_pid.checked_add(1).expect("non-max test pid"));
+    original.pid = Some(bootstrap.0.id());
     original.ppid = Some(cc_pid);
     agent_store
         .register(&original)

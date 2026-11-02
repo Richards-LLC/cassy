@@ -53,6 +53,8 @@ pub mod factory_hook_canary;
 pub(crate) mod factory_build_guard;
 pub(crate) mod factory_build_memory;
 pub(crate) mod factory_candidate_queue;
+#[doc(hidden)]
+pub mod factory_ci_retry;
 pub(crate) mod factory_worker_check;
 pub(crate) mod factory_capacity_wait;
 pub mod factory_context_reset;

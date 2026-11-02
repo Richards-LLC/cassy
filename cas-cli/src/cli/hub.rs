@@ -451,11 +451,10 @@ fn host_tailscale_default() -> Result<bool> {
     Ok(host_transport_mode()?.publishes())
 }
 
-// Transient service failures trigger launchd/systemd restart; Auto retains
-// local access when publication needs operator setup instead of daemon recovery.
-fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool, error: &anyhow::Error) -> bool {
-    mode == HubTransportMode::Required || (mode.publishes() && service_startup
-        && !TailscaleServeManager::publication_needs_setup(error))
+// Required explicitly refuses publication failure. Auto always preserves local
+// access and retries publication without asking the service manager to restart.
+fn publication_failure_is_fatal(mode: HubTransportMode) -> bool {
+    mode == HubTransportMode::Required
 }
 
 fn tailscale_policy(explicit_on: bool, explicit_off: bool, configured: bool) -> bool {
@@ -1181,7 +1180,7 @@ fn format_hub_transport_warning(warning: &str) -> String {
     format!(
         "Tailscale Serve inactive; hub is loopback-only.\n\
          Cause: {warning}\n\
-         Retry: tailscale status && cas hub restart"
+         Publication retries automatically in the background."
     )
 }
 
@@ -2178,10 +2177,14 @@ fn serve_foreground_logged(
             let proxy_port = proxy_listener.local_addr()?.port();
             let ensure_started = Instant::now();
             let service_startup = args.launched_by == "service";
-            let ensure_result = if service_startup {
-                tailscale_manager.ensure_for_service(proxy_port, tailscale_port, prior_serve_target).await
+            // Service Auto begins serving immediately, even if a CLI command
+            // hangs. Its publication work runs beside both listeners below.
+            let ensure_result = if service_startup && transport_mode == HubTransportMode::Auto {
+                Err(anyhow::anyhow!("Tailscale Serve publication pending; retrying in background"))
+            } else if service_startup {
+                tailscale_manager.ensure_for_service(proxy_port, tailscale_port, prior_serve_target.clone()).await
             } else {
-                tailscale_manager.ensure_with_prior_target(proxy_port, tailscale_port, prior_serve_target)
+                tailscale_manager.ensure_with_prior_target(proxy_port, tailscale_port, prior_serve_target.clone())
             };
             let _ = writeln!(
                 startup_log,
@@ -2197,7 +2200,7 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
-                Err(error) if publication_failure_is_fatal(transport_mode, service_startup, &error) => {
+                Err(error) if publication_failure_is_fatal(transport_mode) => {
                     if service_startup {
                         // Keep the cause observable between manager restarts. The
                         // next start captures old ownership before replacing this
@@ -2217,7 +2220,7 @@ fn serve_foreground_logged(
                 Err(error) => {
                     let warning = error.to_string();
                     tracing::warn!(%warning, "Tailscale Serve refused; keeping Commander loopback-only");
-                    (None, None, Some(warning))
+                    (Some(proxy_listener), None, Some(warning))
                 }
             }
         } else {
@@ -2226,7 +2229,7 @@ fn serve_foreground_logged(
         record.public_url = tailscale.as_ref().map(|receipt| receipt.public_url.clone());
         // Auto fallback can be a successful local start while the old Serve
         // route still points at a dead shim. Keep exact legacy ownership for
-        // the later signed-in restart; public_url never advertises it as ready.
+        // background recovery; public_url never advertises it as ready.
         if let Some(receipt) = &tailscale {
             record.tailscale_serve_port = Some(receipt.https_port);
             record.tailscale_serve_target = Some(receipt.local_target.clone());
@@ -2272,6 +2275,20 @@ fn serve_foreground_logged(
         if let Some(public_url) = tailscale.as_ref().map(|receipt| &receipt.public_url) {
             state = state.with_effective_origin(public_url.trim_end_matches('/'));
         }
+        let publication_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (publication_stop, publication_stopped) = tokio::sync::watch::channel(false);
+        let publication_task = if tailscale.is_none() && let Some(proxy) = &tailscale_listener {
+            let proxy_port = proxy.local_addr()?.port();
+            let manager = tailscale_manager.clone().with_cancellation(publication_cancelled.clone());
+            let state = state.clone();
+            let paths = paths.clone();
+            let record = record.clone();
+            let log = startup_log.try_clone()?;
+            Some(tokio::spawn(recover_tailscale_publication(
+                manager, proxy_port, tailscale_port, prior_serve_target,
+                paths, record, state, log, publication_stopped,
+            )))
+        } else { None };
         let event_catalog = catalog.clone();
         let event_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -2303,6 +2320,12 @@ fn serve_foreground_logged(
         } else {
             serve_with_bounded_connection_drain(listener, router(state)).await
         };
+        // Join the current CLI probe before owned-route cleanup. Cancelling
+        // only its async parent would leave spawn_blocking free to republish
+        // after stop. The probe reaps its own process group on cancellation.
+        publication_cancelled.store(true, std::sync::atomic::Ordering::Release);
+        let _ = publication_stop.send(true);
+        if let Some(task) = publication_task { let _ = task.await; }
         event_task.abort();
         operator_inbox_task.abort();
         idle_sync_loop.stop();
@@ -2324,6 +2347,67 @@ fn serve_foreground_logged(
         hold_instance_lock_after_record_removal_for_test()?;
         result
     })
+}
+
+/// Auto publication recovers in place; the listeners, pairing state and
+/// process identity survive every failure. Foreign handlers still pass through
+/// the manager's exact ownership checks on every attempt.
+async fn recover_tailscale_publication<R: crate::hub::SessionReadModel>(
+    manager: TailscaleServeManager,
+    proxy_port: u16,
+    https_port: u16,
+    prior_target: Option<(u16, String)>,
+    paths: HubRuntimePaths,
+    mut record: HubProcessRecord,
+    state: HubState<R>,
+    mut log: std::fs::File,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut delay = Duration::from_secs(1);
+    loop {
+        if *stop.borrow() { return; }
+        let attempt_manager = manager.clone();
+        let prior = prior_target.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            attempt_manager.ensure_with_prior_target(proxy_port, https_port, prior)
+        }).await;
+        if *stop.borrow() { return; }
+        let result = result.unwrap_or_else(|error| Err(anyhow::anyhow!("Tailscale publication task failed: {error}")));
+        match result {
+            Ok(receipt) => {
+                record.public_url = Some(receipt.public_url.clone());
+                record.tailscale_serve_port = Some(receipt.https_port);
+                record.tailscale_serve_target = Some(receipt.local_target);
+                record.transport_warning = None;
+                match paths.write_process_record(&record) {
+                    Ok(()) => {
+                        state.publish_tailscale_transport(&receipt.public_url);
+                        let _ = writeln!(log, "{}", hub_log_line("Tailscale Serve publication recovered in background"));
+                        return;
+                    }
+                    Err(error) => {
+                        // Retry persistence too; the owned receipt safely
+                        // recognizes this same live shim on the next pass.
+                        record.public_url = None;
+                        record.transport_warning = Some(format!("Cannot record Tailscale publication: {error}"));
+                    }
+                }
+            }
+            Err(error) => {
+                record.transport_warning = Some(format!("{error:#}"));
+                let _ = paths.write_process_record(&record);
+            }
+        }
+        if let Some(warning) = &record.transport_warning {
+            let _ = writeln!(log, "{}", hub_log_line(&format!(
+                "Tailscale Serve unavailable; keeping loopback and retrying in {}s: {warning}", delay.as_secs())));
+        }
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = tokio::time::sleep(delay) => {},
+        }
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
 }
 
 struct HubStartupGuard {
@@ -3791,11 +3875,16 @@ pub(crate) fn hub_transport_report(
     record: Option<&HubProcessRecord>,
 ) -> HubTransportReport {
     let manager = TailscaleServeManager::new(paths.root());
+    let live = record.is_some_and(|record| record_is_ready(paths, record));
+    if live && let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
+        return HubTransportReport::ok(format!(
+            "hub is loopback-only; Tailscale Serve publication unavailable: {warning}; publication retries automatically"
+        ));
+    }
     let receipt = match manager.owned_receipt() {
         Ok(receipt) => receipt,
         Err(error) => return HubTransportReport::unavailable(error.to_string()),
     };
-    let live = record.is_some_and(|record| record_is_ready(paths, record));
     if !live
         && let Some(record) = record
         && record.launched_by.as_deref() == Some("service")
@@ -3832,11 +3921,6 @@ pub(crate) fn hub_transport_report(
             );
         }
         if let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
-            if manager.is_logged_in().unwrap_or(false) {
-                return HubTransportReport::ok(format!(
-                    "hub is loopback-only; Tailscale is signed in but Serve publication failed: {warning}; run `cas hub restart --tailscale-serve` to publish the route"
-                ));
-            }
             return HubTransportReport::ok(format!(
                 "hub is loopback-only; Tailscale Serve publication was unavailable: {warning}"
             ));
@@ -4737,13 +4821,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_service_publication_failure_is_fatal_cas_3f03e() {
-        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true, &anyhow::anyhow!("daemon unavailable")),
-            "the service manager must retry Auto publication after bounded startup retries");
-        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false, &anyhow::anyhow!("daemon unavailable")),
-            "interactive Auto may retain loopback with a visible warning");
-        assert!(publication_failure_is_fatal(HubTransportMode::Required, false, &anyhow::anyhow!("daemon unavailable")));
-        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true, &anyhow::anyhow!("daemon unavailable")));
+    fn auto_publication_failure_keeps_local_service_cas_3f03e() {
+        assert!(!publication_failure_is_fatal(HubTransportMode::Auto));
+        assert!(publication_failure_is_fatal(HubTransportMode::Required));
+        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback));
     }
 
     #[test]

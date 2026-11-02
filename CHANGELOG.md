@@ -35,7 +35,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
 - **Claude queued answers keep their conversation** — Messages consumed during startup or a same-name restart retain their original message and paired device when the answer reaches Commander.
-- **Claude answers stay with every operator question** — Background task notifications no longer take over reply threading; a typed question and messages added during the same turn each retain their answer.
+- **Claude answers stay with every operator question** — Background task notifications mirror standalone status without taking over an operator turn. Each native answer appears once under its latest verified send, and every consumed send remains Delivered.
 
 ### Fixed — Commander messages
 
@@ -58,9 +58,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Service startup restores the tailnet route after reboot** — Was: A Linux hub
   could settle on loopback after Tailscale was briefly unavailable, leaving Serve
-  pointed at a dead shim. → Now: Both service managers retry publication and
-  restart transient failed starts; missing or signed-out Tailscale keeps Auto
-  services available on loopback with the cause in status and logs.
+  pointed at a dead shim. → Now: Auto services serve loopback immediately through every publication
+  failure, retry in the background, and restore the public route and live
+  metadata without a restart. Status and logs retain the cause.
 
 ### Fixed — Friction ledger
 

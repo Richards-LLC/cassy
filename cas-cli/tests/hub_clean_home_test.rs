@@ -392,7 +392,7 @@ fn hub_auto_fallback_warning_names_retry_and_fits_80_columns() {
     for expected in [
         "Tailscale Serve inactive; hub is loopback-only.",
         "Cause:",
-        "Retry: tailscale status && cas hub restart",
+        "Publication retries automatically in the background.",
     ] {
         assert!(warning.contains(expected), "missing {expected}: {warning}");
     }
@@ -1056,7 +1056,9 @@ fn auto_service_without_tailscale_keeps_healthy_loopback() {
         let _cleanup = LegacyHubCleanup(vec![child.id()]);
         let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
         loop {
-            if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
+            if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
+                && paths.read_process_record().ok().and_then(|record| record.transport_warning)
+                    .is_some_and(|warning| !warning.contains("publication pending")) { break; }
             assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(),
                 "Auto service must keep loopback for {cause}");
             thread::sleep(Duration::from_millis(20));
@@ -1121,7 +1123,8 @@ fn service_start_retries_tailscale_before_publication() {
     cleanup.0.push(child.id());
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
+        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
+            && paths.read_process_record().ok().is_some_and(|record| record.public_url.is_some()) { break; }
         assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(),
             "service never completed publication");
         thread::sleep(Duration::from_millis(20));
@@ -1141,7 +1144,7 @@ fn service_publication_failure_keeps_loopback_and_recovers_without_restart() {
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) if [ -f \"$HOME/deny-serve\" ]; then echo 'permission denied by fixture' >&2; exit 1; fi ;;\nesac\n{}",
+    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) if [ -f \"$HOME/hold-serve\" ]; then echo started > \"$HOME/serve-started\"; /bin/sleep 30; fi; if [ -f \"$HOME/deny-serve\" ]; then echo 'permission denied by fixture' >&2; exit 1; fi ;;\nesac\n{}",
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
     install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
     fs::write(home.path().join("mock-port"), "10047").unwrap();
@@ -1150,7 +1153,7 @@ fn service_publication_failure_keeps_loopback_and_recovers_without_restart() {
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve", "--tailscale-serve-port", "10047"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let _cleanup = LegacyHubCleanup(vec![child.id()]);
+    let mut cleanup = LegacyHubCleanup(vec![child.id()]);
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let deadline = Instant::now() + Duration::from_secs(20);
     let fallback = loop {
@@ -1182,6 +1185,32 @@ fn service_publication_failure_keeps_loopback_and_recovers_without_restart() {
     assert_eq!(recovered.pid, fallback.pid);
     let target = recovered.tailscale_serve_target.unwrap();
     assert!(ureq::get(&format!("{target}/v1/health")).timeout(Duration::from_secs(1)).call().is_ok(), "recovered trusted listener must serve the route");
+    let stop = cas_process_command(home.path(), bin.as_os_str()).args(["hub", "stop", "--force"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    child.wait().unwrap();
+    cleanup.0.clear();
+    assert!(!home.path().join("mock-route").exists(), "stop must remove the recovered route");
+
+    fs::write(home.path().join("hold-serve"), "hold").unwrap();
+    let mut child = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "serve", "--port", "0", "--launched-by", "service", "--tailscale-serve", "--tailscale-serve-port", "10047"])
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    cleanup.0.push(child.id());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !home.path().join("serve-started").exists() {
+        assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(), "background probe did not reach the held command");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let pending = paths.read_process_record().unwrap();
+    assert!(ureq::get(&format!("http://127.0.0.1:{}/v1/health", pending.port))
+        .timeout(Duration::from_secs(1)).call().is_ok(), "a stuck CLI must not delay loopback");
+    let stopped_at = Instant::now();
+    let stop = cas_process_command(home.path(), bin.as_os_str()).args(["hub", "stop", "--force"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    child.wait().unwrap();
+    cleanup.0.clear();
+    assert!(stopped_at.elapsed() < Duration::from_secs(10), "stop must cancel the held 30-second CLI command");
+    assert!(!home.path().join("mock-route").exists(), "an in-flight probe must not publish after stop");
 }
 
 #[cfg(unix)]

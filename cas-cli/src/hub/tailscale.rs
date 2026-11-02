@@ -10,7 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -79,13 +79,10 @@ pub struct TailscaleServeManager {
     state_dir: PathBuf,
     socket: Option<OsString>,
     deadline: Option<Deadline>,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TailscaleServeManager {
-    pub(crate) fn publication_needs_setup(error: &anyhow::Error) -> bool {
-        error.is::<PublicationUnavailable>()
-    }
-
     pub(crate) fn successful_ensure_budget() -> Duration {
         COMMAND_TIMEOUT * MAX_SUCCESSFUL_ENSURE_COMMANDS
     }
@@ -112,6 +109,7 @@ impl TailscaleServeManager {
             state_dir: state_dir.as_ref().to_path_buf(),
             socket: env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()),
             deadline: None,
+            cancelled: None,
         }
     }
 
@@ -121,6 +119,11 @@ impl TailscaleServeManager {
 
     pub(crate) fn socket(&self) -> Option<&OsStr> {
         self.socket.as_deref()
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancelled = Some(cancelled);
+        self
     }
 
     pub(crate) fn within_deadline(mut self, deadline: Deadline) -> Self {
@@ -187,7 +190,7 @@ impl TailscaleServeManager {
             if matches!(status.get("BackendState").and_then(Value::as_str),
                 Some("NeedsLogin" | "NeedsMachineAuth")) {
                 return Err(PublicationUnavailable(format!(
-                    "{issue}\nSign in to the selected daemon, then run `cas hub restart`."
+                    "{issue}\nSign in to the selected daemon."
                 )).into());
             }
             anyhow::bail!("{issue}");
@@ -573,10 +576,12 @@ impl TailscaleServeManager {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
         command.args(args);
-        let output = bounded_process::run_command(
+        let output = bounded_process::run_command_cancellable(
             &mut command,
             self.deadline.unwrap_or_else(|| Deadline::after(COMMAND_TIMEOUT)),
             COMMAND_TIMEOUT,
+            Stdio::null(),
+            self.cancelled.as_deref(),
         )
         .map_err(|error| match error {
             BoundedCommandError::TimedOut => anyhow::anyhow!("tailscale command timed out"),

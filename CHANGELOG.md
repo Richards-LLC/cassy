@@ -7,55 +7,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Fixed — Commander phone header
-
-- **Delivery warnings keep actions visible** — Every phone header action stays inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
-
-### Fixed — Commander boot replies
-
-- **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
-- **Claude queued answers keep their conversation** — Messages consumed during startup or a same-name restart retain their original message and paired device when the answer reaches Commander.
-
-### Fixed — Commander messages
-
-- **Keep messages through Claude setup** — Commander retains the original words while Claude shows onboarding or sign-in pages, then sends them once its text prompt is ready. Setup dialogs no longer consume a send reported as Delivered.
-
-- **Operator messages reach the harness like terminal input** — Verified
-  Commander messages enter idle and working supervisors' input directly; fresh
-  MCP heartbeats no longer hold them. Recipient reads and acknowledgements
-  update queued bubbles live on every connected device.
-
-### Fixed — Commander hub
-
-- **Failed hub starts preserve operator routes** — A stopped local service on a
-  previously used Serve port is left untouched unless its exact target is
-  recorded as Cassy's. Proven owned routes still recover after Tailscale outages.
-
-- **Slow boot retries keep their route ownership** — A failed service start
-  preserves its previous Serve target even when only a legacy runtime record
-  identifies it, so a later start can restore the route after Tailscale returns.
-
-- **Service startup restores the tailnet route after reboot** — Was: A Linux hub
-  could settle on loopback after Tailscale was briefly unavailable, leaving Serve
-  pointed at a dead shim. → Now: Both service managers retry publication and
-  restart failed starts; status retains the failure cause and systemd records
-  errors in its journal.
-
-### Fixed — Friction ledger
-
-- **Release feedback excludes lifetime totals** — Was: Backfill dated all-time
-  retrieval counts as new measurements, inflating release evidence and allowing
-  repeat snapshots on later days. → Now: Backfill leaves feature measurements to
-  session end; reports exclude historical measurements without session
-  attribution and disclose their count while retaining scoped feedback.
-
-### Fixed — QA candidates
-
-- **Source-only Commander changes build candidates** — Was: Rebuilt web assets
-  marked the private candidate checkout dirty and failed version verification.
-  → Now: Verified generated assets preserve the clean source revision; changes
-  to other tracked inputs and mismatched served assets still refuse publication.
-
 ### Fixed — Commander
 
 - **Offline messages show their send deadline** — Waiting messages and the composer explain the two-minute automatic-send window, after which the words stay available for Edit or Retry.
@@ -68,17 +19,227 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Live conversations tolerate unavailable session catalogs** — Explicit sends use the current live connection, and reconnects settle while catalog reads retry. Drafts from older clients keep their words; old session sends cannot alter a replacement's delivery status, and failed draft archives preserve the original copy. Stale-session cleanup retains stop evidence for devices that reconnect later.
 
-### Fixed — Factory
 
-- **Nested reviews preserve supervisor ownership** — Was: A disposable Codex
-  review could inherit the supervisor's identity, replace its process record,
-  and disable worker messages and the peer mailbox when it exited. → Now:
-  Nested harnesses cannot take over a live factory identity or run lifecycle
-  cleanup against it; the authenticated owner also repairs older exited-PID
-  records before heartbeats resume. Tool policy checks keep enforcing their
-  denials for nested callers, and legacy parent records and exited rows from
-  an earlier hostname can recover normally. Live owners also keep lifecycle
-  hooks and MCP reconnection working when their hostname changes.
+## [3.97.0] - 2026-11-02
+
+### Fixed — Candidate build queue
+
+- **Isolated, bounded candidate builds** — Was: worker-chosen builds inherited the daemon's credentials and supervisor role, a hung build could hold the machine lock indefinitely, and preparation could appear dead or replace a newer request. → Now: queued builds mask worker credential stores, receive only build environment variables, and stop their complete process tree after 30 minutes with an error to the requester. Preparation keeps heartbeating, and admission notices preserve newer requests.
+
+### Changed — Release closeout
+
+- **One review, one batch fix, one QA round** — Was: Supervisors built a candidate
+  and walked QA every hour, and each failure started another round, so 3.96 ran 6
+  rounds over 5 h 19 m with nothing on main. → Now: The supervisor guides fix one
+  order: freeze scope, run one full review with the queue precheck, fix everything
+  in one batch, re-review only the fix diff, run one QA round, then enqueue. A red
+  row gets one fix and a re-walk of that row, then moves to the next release unless
+  it loses operator data.
+- **No hourly QA overdue notice** — Was: The daemon told every supervisor to start a
+  QA round each hour merged work waited. → Now: The notice is gone, and a queued one
+  left by an older daemon does not wake anyone.
+
+### Fixed — Factory notification wakes
+
+- **Merged delivery facts wait for the next turn** — Was: Merge-close and lane-parked notices woke workers, and queued READY TO MERGE alerts could wake supervisors after Cassy had merged the delivery. → Now: These facts stay readable in the next-turn digest. New deliveries, verifier findings and blockers keep their action wakes.
+
+### Fixed — Worker assignments
+
+- **One assignment turn at spawn and queue advance** — Startup, the supervisor's brief and the assigned task arrive together. Queued successors survive delivery after automatic start, and worker ready/status messages name any current task.
+
+### Fixed — Factory blocker alerts
+
+- **One alert per blocker episode** — Director blocked and idle signals share the durable task lifecycle queue, stay quiet during owned verification waits, and escalate once after the deadline. Native background jobs keep a worker busy until their completion notice.
+
+- **Verification waits wake only their next owner** — Approved verdicts leave close retries with workers, and expired dispatches send one supervisor wake. Background-job completions recorded as queued-command attachments now end the job's busy state.
+
+### Changed — Close gates
+
+- **Workers see close requirements at start and every park failure at once** — Was:
+  A worker learned each close requirement from a refusal, one per attempt, so
+  only 32% of tasks closed on the first attempt. → Now: The start context lists
+  what close will check for this task and project, and a refused park reports
+  proof claims, upkeep, ledger, QA evidence, unpushed tip, changelog, focused
+  proof and proof scope together in one reply.
+
+### Fixed — Supervisor replies
+
+- **Supervisors answer with diagrams, callouts, colored code and tables** — Was:
+  The reply contract limited operator answers to bold, bullets, lists,
+  inline code and links, so Commander's rich rendering went unused. → Now: The
+  contract, the pane guidance on every harness and the pointer beside each
+  Commander question steer supervisors to a diagram for a flow, a callout for
+  bad news or a decision, a language-tagged block for commands and a table for
+  a comparison, with a worked example and what the terminal pane shows.
+
+### Fixed — Commander diagrams
+
+- **A flowchart shows from start to finish** — Was: A diagram taller than 288 px
+  was cut mid-shape with no cue, including the reply guidance's own example, so
+  the end of the flow stayed hidden until the reader found Expand. → Now: A
+  rendered diagram shows whole at phone and desktop widths, and Expand appears
+  only on its source view, where long text can still overflow.
+- **A diagram has no dead Wrap button** — Was: Wrap on a rendered diagram changed
+  nothing and took header room on a phone. → Now: Wrap appears only on the
+  diagram's source view, where it has lines to wrap.
+
+### Fixed — Commander session dots
+
+- **A stopped session no longer looks alive** — Was: A stopped session on a
+  machine that was still online showed the same green idle dot as a live one,
+  or the needs-you dot if it had unanswered attention. → Now: It shows the gray
+  disconnected dot, and a live idle session stays green.
+
+### Fixed — Commander status updates
+
+- **A short status shows its formatting** — Was: A status of 140 characters or
+  fewer folded into the quiet status box as plain text, so `> [!WARNING]` and
+  `**bold**` appeared literally, and the same callout one character longer
+  rendered properly. → Now: A short status with a callout, heading or list reads
+  as a full message at any length, and bold, code and links render in the status
+  box.
+
+### Fixed — Commander diffs
+
+- **A hand-written diff shows its changes in color** — Was: A `diff` fence
+  without an `@@` line, the way a before/after is usually written in a reply,
+  rendered as one color with no Source control. → Now: Its added and removed
+  lines are tinted like any other diff, with no line numbers because none were
+  written, and a fence with no changed line stays plain code.
+
+### Fixed — Commander tables
+
+- **Reply tables read as tables, not code boxes** — Was: A table in a reply sat
+  in a dark rounded panel with monospace numbers, no row rules, a blank
+  nameless header over the label column and Copy buttons floating above an
+  empty band. → Now: Tables are ruled rows in the bubble's own font, with
+  numbers right-aligned in tabular figures, a blank corner left as an empty
+  cell, and compact Copy Markdown and Copy CSV buttons on the table's closing
+  rule, at phone and desktop widths in light and dark.
+
+### Changed — QA candidates
+
+- **Candidates build on a worker's request** — Was: Every QA candidate took a
+  supervisor turn to start and a message back with the hash, and a request could
+  go stale in the hand-off. → Now: `factory action=candidate_request` names the
+  worker's own active task and an exact revision reachable in its own checkout;
+  the factory daemon builds it from a checkout it keeps at the default branch tip,
+  one build per machine under the build guard, and messages the worker the path,
+  version, revision, hash and log, or the exact error. A newer request replaces a
+  queued one, and a refusal names why. The worker refusal of direct builds stays.
+- **A later build keeps a cited candidate** — Was: Each build overwrote
+  `<task>/candidate`, so a ledger's cited binary could disappear. → Now: Each
+  revision lives in `<task>/candidates/<revision>/` and `candidate` points at the
+  newest; asking again for a published revision reuses it without compiling.
+
+### Fixed — Worker launch with a task
+
+- **A Claude worker spawned with a task starts** — Was: The assignment followed
+  `--mcp-config`, whose list swallowed it as a config path, so the worker exited at
+  launch with "Invalid MCP configuration" and the task stayed on a dead worker. →
+  Now: `--` ends the options before the prompt for Claude and Grok, confirmed
+  against Claude 2.1.312 and Grok 1.0.70.
+- **A failed launch leaves nothing behind** — Was: A launch that failed before it
+  used its assignment kept that prompt for the next launch of the same name. → Now:
+  The prompt is cleared and the task is released at the point of failure.
+- **A same-name replacement gets its assignment** — Was: The row its predecessor
+  received blocked a new one, so the replacement got nothing while the row counted
+  as delivered. → Now: Each launch frees the rows already received; a row still
+  pending keeps carrying the assignment, once.
+
+### Fixed — Close refusal details
+
+- **Keep earlier failures visible** — Close now includes collected proof refusals
+  beside later metadata, checkout, receipt and verification failures. Refused
+  attempts skip speculative delivery-anchor advancement.
+- **Runnable interim queue precheck** — The closeout guides name a clean-checkout
+  diagnostic with both npm installs, resolvable Playwright and Chromium, workspace
+  nextest and CI-tier tests until the hosted precheck replaces it.
+
+### Known limitation — Candidate builds
+
+- **Queued candidate builds on some Linux hosts** — On some Linux hosts, bubblewrap
+  refuses a queued candidate build in the daemon's launch context ("No permissions
+  to create a new namespace"). The worker gets that error within seconds and the
+  supervisor builds the candidate by hand. The fix is planned for the next release.
+
+## [3.96.0] - 2026-11-02
+
+### Fixed — Commander messages and replies
+
+- **Messages reach the conversation like terminal input** — Was: Fresh background
+  heartbeats could hold a message instead of letting it reach an idle or working
+  conversation. → Now: Verified messages enter native input directly, and read
+  and delivered updates reach every connected device.
+- **Setup keeps the original message** — Was: Claude onboarding or sign-in could
+  consume input reported as delivered, and other native dialogs could receive
+  input meant for a prompt. → Now: Original words wait for a ready text prompt;
+  confirmation dialogs and pending tools keep their input protection.
+- **Replies stay with the right conversation** — Was: Boot-time sends, same-name
+  replacements and shared-project Codex rollouts could lose or misbind an answer.
+  → Now: Claude and Codex retain the original send and paired-device binding,
+  including framed Codex messages and ownership deep in long transcripts.
+- **Each native answer appears once** — Was: Background notifications could take
+  over an operator turn or leave answers and delivery receipts out of step.
+  → Now: Standalone status stays separate, each answer mirrors once under its
+  latest verified send, and every consumed send remains Delivered.
+
+### Fixed — Commander hub
+
+- **Recover the tailnet route after reboot** — Was: A Tailscale outage could leave
+  Serve pointing at a dead local shim. → Now: Auto-mode services keep serving on
+  loopback while publication retries in the background, then restore the route
+  and live status without a restart. Required mode still refuses failed publication.
+- **Preserve exact route ownership** — Was: Failed starts could lose their prior
+  target or treat an unrelated stopped service as an owned route. → Now: Prior
+  ownership survives failed starts, and only an exact recorded target can be
+  removed; foreign-route conflicts name a port-specific remedy for operator review.
+- **Keep local access when Tailscale is unavailable** — Was: A missing CLI or
+  incomplete Tailscale setup could stop an Auto-mode service's local hub.
+  → Now: Loopback stays available with a sanitized warning while public-route
+  recovery continues when possible.
+
+### Fixed — Commander phone header
+
+- **Delivery warnings keep actions visible** — Was: A delivery warning could push
+  phone header actions outside the screen. → Now: Every action stays in view,
+  with the existing Raw output icon beside the warning.
+
+### Fixed — Runtime identity
+
+- **Nested lookups preserve the live owner** — Was: Nested reviews and read-only
+  lookups could borrow a parent's identity, replace its process record or disable
+  its communication on exit. → Now: Process ownership is authenticated for reads
+  and writes; nested callers cannot replace or clean up a live owner's identity,
+  and prior exited-process and hostname records recover normally.
+
+### Fixed — Friction ledger
+
+- **Release feedback reports measured evidence** — Was: Backfill assigned lifetime
+  retrieval totals to a release, and empty feedback suggested unknown measurements.
+  → Now: Reports exclude unattributed totals, disclose exclusions and say none
+  recorded when no feedback exists; feature measurements stay tied to session end.
+
+### Fixed — QA candidates
+
+- **Source-only Commander candidates keep their identity** — Was: Regenerated
+  browser assets could mark a private candidate dirty and refuse its build.
+  → Now: Verified generated assets retain the source identity, while unrelated
+  tracked edits and mismatched served assets still refuse publication.
+
+### Changed — Release scope
+
+- **Session listing waits for the next release** — Was: This release included
+  automatic removal of stopped conversations and a new recovery path for their
+  unsent drafts. → Now: That work has been reverted from this release. Non-running
+  sessions remain listed until the next release, using the existing 3.95 behavior.
+
+### Test — Native delivery and recovery
+
+- **Assertions follow automatic recovery and real reply binding** — Was: Some
+  fixtures expected a manual restart, accepted obsolete message framing or reused
+  process identity without a fingerprint. → Now: Targeted tests assert background
+  publication, framed Codex reply binding and the owned process fingerprint.
 
 ## [3.95.0] - 2026-11-01
 

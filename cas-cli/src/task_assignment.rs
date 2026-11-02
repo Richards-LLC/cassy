@@ -30,17 +30,17 @@ pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
     "Workers close their own tasks; never ask the supervisor to close your task on their behalf."
 );
 
-/// Queue the assignment once for the current live worker registration. This
+/// Queue the assignment once for the current worker in its factory session. This
 /// does not depend on the task appearing in the director's focused snapshot.
 pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>> {
-    enqueue_with_queue_occurrence(cas_dir, task, None)
+    enqueue_with_queue_occurrence(cas_dir, task, None, false)
 }
 
-pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64) -> crate::Result<Option<i64>> {
-    enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence))
+pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initial: bool) -> crate::Result<Option<i64>> {
+    enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence), initial)
 }
 
-fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>) -> crate::Result<Option<i64>> {
+fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool) -> crate::Result<Option<i64>> {
     let prompts = crate::config::Config::load(cas_dir)?
         .orchestration()
         .auto_prompt;
@@ -107,12 +107,15 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
             .map(|start| start.branch.as_str()).unwrap_or("see task details");
         text = format!("You have been assigned a new task:\nTask ID: {}\nTitle: {}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.\n\nView full details: {prefix}task action=show id={}\n\n{}\n\nWhile working, post progress notes with {prefix}task action=notes id={}.", task.id, task.title, task.id, WORKER_ASSIGNMENT_TEST_POLICY, task.id);
     }
+    if occurrence.is_some() && task.status == TaskStatus::InProgress {
+        text = crate::prompt_revalidation::attach_queue_continuation(&text, &task.id);
+    }
     let key = match occurrence {
-        Some(occurrence) => format!("task-queue-assignment:{}:{}:{occurrence}", task.id, worker.id),
-        None => format!("task-assignment:{}:{}", task.id, worker.id),
+        Some(occurrence) if !initial => format!("task-queue-assignment:{}:{}:{occurrence}", task.id, worker.id),
+        _ => assignment_key(session, &worker.name, &task.id),
     };
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
-    let result = queue.enqueue_idempotent(
+    let mut result = queue.enqueue_idempotent(
         "task-assignment",
         &worker.name,
         &text,
@@ -122,7 +125,36 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         &key,
         Some(&cas_store::QueueOrigin::Daemon),
     )?;
-    if matches!(result, cas_store::EnqueueIdempotentResult::Created(_)) {
+    let mut upgraded = false;
+    if initial && task.status == TaskStatus::InProgress
+        && let cas_store::EnqueueIdempotentResult::AlreadyExists(id) = result
+        && !queue.recipient_handed_off(id, &worker.name)?
+        && let Some(row) = queue.queued_prompt(id)?
+        && crate::prompt_revalidation::assignment_stale_task(
+            &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
+        ).is_some()
+    {
+        // An Open assignment may still be waiting when its queue head starts.
+        // Preserve the brief, but make that same pending row a continuation.
+        let branch = task.deliverables.factory_branch_start.as_ref()
+            .map(|start| start.branch.as_str()).unwrap_or("see task details");
+        let continued = crate::prompt_revalidation::attach_queue_continuation(
+            &format!("{}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.",
+                crate::prompt_revalidation::strip_assignment_envelopes(&row.prompt)), &task.id,
+        );
+        upgraded = queue.rewrite_pending(id, &continued, Some(&format!("Assigned task: {}", task.id)))?;
+        if !upgraded {
+            // A stale row can already be terminal at recovery. A fresh queue
+            // occurrence remains actionable without rewriting delivery history.
+            result = queue.enqueue_idempotent(
+                "task-assignment", &worker.name, &text, Some(session),
+                Some(&format!("Assigned task: {}", task.id)), Some(cas_store::NotificationPriority::High),
+                &format!("task-queue-assignment:{}:{}:{}", task.id, worker.id, occurrence.unwrap_or_default()),
+                Some(&cas_store::QueueOrigin::Daemon),
+            )?;
+        }
+    }
+    if upgraded || matches!(result, cas_store::EnqueueIdempotentResult::Created(_)) {
         if let Err(error) = cas_factory::notify_daemon(cas_dir) {
             tracing::debug!(%error, "assignment queued; daemon wake datagram unavailable");
         }
@@ -131,4 +163,36 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         cas_store::EnqueueIdempotentResult::Created(id)
         | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
     }))
+}
+
+/// Startup, registration repair and ordinary assignment share one durable row.
+/// A queue successor uses its own occurrence key, so a later continuation is
+/// never mistaken for the original launch instruction.
+pub(crate) fn assignment_key(session: &str, worker: &str, task: &str) -> String {
+    format!("task-assignment:{session}:{worker}:{task}")
+}
+
+/// A launched process is a new recipient even under a reused name. Rows its
+/// predecessor received must not swallow this process's assignment, so the
+/// shared key is scoped to one launch. Call once per launch, after it starts.
+pub(crate) fn release_received_assignment_keys(
+    cas_dir: &Path, session: &str, worker: &str,
+) -> crate::Result<usize> {
+    Ok(crate::store::open_prompt_queue_store(cas_dir)?.release_received_dedupe_keys(
+        worker, session, &format!("task-assignment:{session}:{worker}:"),
+    )?)
+}
+
+pub(crate) fn enqueue_spawn_message(
+    cas_dir: &Path, session: &str, worker: &str, task: &str, message: &str,
+) -> crate::Result<i64> {
+    let result = crate::store::open_prompt_queue_store(cas_dir)?.enqueue_idempotent(
+        "task-assignment", worker, message, Some(session),
+        Some(&format!("Assigned task: {task}")), Some(cas_store::NotificationPriority::High),
+        &assignment_key(session, worker, task), Some(&cas_store::QueueOrigin::Daemon),
+    )?;
+    Ok(match result {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    })
 }

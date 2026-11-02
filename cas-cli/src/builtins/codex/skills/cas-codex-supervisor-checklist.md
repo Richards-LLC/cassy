@@ -11,7 +11,7 @@ metadata:
 
 - Codex runs Cassy's lifecycle hooks once they are installed and trusted: `cas update` writes user-level `SessionStart`, `Stop`, `PreToolUse` and `PostToolUse` handlers and their trust, and factory spawns refuse to launch if Cassy's own handlers or the directory are untrusted. A hook only orients and guards the session. Codex loads no `.md` agents, so still call the Cassy tools (`task`, `memory`, `rule`, `search`) explicitly with the Codex prefix. Triage from the supervisor core in your developer instructions; open a `cas-supervisor` reference only for epic planning, releases, worker recovery or an unfamiliar refusal.
 - Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
-- Answer verified Commander questions once in your final pane reply; web, phone and offline catch-up receive the mirror. Use the shared [routing policy](../cas-supervisor/references/reference.md#verified-commander-messages) for unprompted updates or confirmed disabled/unmirrored delivery.
+- Answer verified Commander questions once in your final pane reply; web, phone and offline catch-up receive the mirror. Shape it with the [reply contract](../cas-supervisor/references/operator-reply.md): diagrams, tables, callouts and tagged code render there. Use the shared [routing policy](../cas-supervisor/references/reference.md#verified-commander-messages) for unprompted updates or confirmed disabled/unmirrored delivery.
 - Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
 
 - For every Slack read and post, follow the `violet` skill and use `violet.violet_read` / `violet.violet_post` through the Violet proxy. Never use the Claude Slack connector or Codex Slack app. `cas doctor --host` warns when local Codex app metadata exposes Slack; Cassy's user-level Codex `PreToolUse` hook also matches Slack/Violet MCP tool names, but an older or untrusted install does not, so this guidance still applies. Only an explicit operator setting `slack.transport=any` opts out of the write guard.
@@ -97,8 +97,8 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 - Run `factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error. `EPIC CLOSE CHECK INCOMPLETE` is resumable: retry the same close until it completes.
 - Confirm task deliverables exist on the epic branch
-- Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
-- Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
+- Run the closeout once, in order: freeze scope; one full review and the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck) together; one batch fix; re-review only the fix diff; one QA round using the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when any child has a demo statement; enqueue.
+- Require the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 
 ## Session End
 

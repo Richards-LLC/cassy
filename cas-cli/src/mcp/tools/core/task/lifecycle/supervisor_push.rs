@@ -454,7 +454,7 @@ pub(crate) enum ApprovedCloseRetry {
 }
 
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
-/// merged delivery, so it neither waits for a merge reply nor re-closes.
+/// merged delivery, in its next-turn digest without waking it.
 pub(crate) fn queue_cassy_merge_close_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -470,7 +470,8 @@ pub(crate) fn queue_cassy_merge_close_notice(
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                "{}Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id,
                 if task.deliverables.parked_close_reason.is_some() {
                     "with your parked close reason"
@@ -484,7 +485,7 @@ pub(crate) fn queue_cassy_merge_close_notice(
 }
 
 /// cas-e9d6: tell the worker once that a supervisor merge parked its lane
-/// tip and released its lease, so it neither resumes nor re-closes.
+/// tip and released its lease. This is next-turn context, not a worker action.
 pub(crate) fn queue_merged_lane_parked_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -495,7 +496,8 @@ pub(crate) fn queue_merged_lane_parked_notice(
         (
             format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
             format!(
-                "Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                "{}Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id
             ),
             format!("Merged and parked by Cassy: {}", task.id),
@@ -1034,7 +1036,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
 ) -> Result<LifecyclePushResult, String> {
     emit_task_lifecycle_transition_in_project(
         supervisor_queue, prompt_queue, agent_store, task_id, task_title,
-        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None,
+        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None, false,
     )
 }
 
@@ -1053,6 +1055,7 @@ fn emit_task_lifecycle_transition_in_project(
     occurrence_id: &str,
     branch_tip: Option<&str>,
     cas_dir: Option<&Path>,
+    escalation: bool,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some((supervisor, recipient)) =
@@ -1061,21 +1064,30 @@ fn emit_task_lifecycle_transition_in_project(
         return Ok(LifecyclePushResult::NoSupervisor);
     };
 
-    let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
-        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
+    let verification_wait = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+        verification_wait_has_action_owner(root, task_id, &recipient.id)
     });
-    let answered_blocker = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+    let answered_blocker = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
     });
 
-    let key = transition_key(
-        task_id,
-        old_status,
-        new_status,
-        factory_session.as_deref(),
-        kind,
-        occurrence_id,
-    );
+    let key = if kind == LifecycleTransition::Blocked && let Some(root) = cas_dir {
+        let task = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+            .get(task_id).map_err(|e| e.to_string())?;
+        let (_, episode) = super::super::block_hold::alert_episode(root, &task)?;
+        format!("{task_id}:blocked-episode:{}:{}:{episode}:{}", factory_session.as_deref().unwrap_or(""), recipient.id,
+            if escalation { "deadline" } else { "initial" })
+    } else {
+        transition_key(task_id, old_status, new_status, factory_session.as_deref(), kind, occurrence_id)
+    };
+    // Quiet refreshes only read completed episodes; they must not take a
+    // SQLite writer transaction every two seconds for an unchanged wait.
+    if kind == LifecycleTransition::Blocked && cas_dir.is_some()
+        && let Some(row) = supervisor_queue.get_by_transition_key(&key).map_err(|e| e.to_string())?
+        && row.prompt_delivered_at.is_some()
+    {
+        return Ok(LifecyclePushResult::AlreadyComplete { notification_id: row.id });
+    }
     let now = Utc::now();
     let payload = json!({
         "task_id": task_id,
@@ -1121,6 +1133,15 @@ fn emit_task_lifecycle_transition_in_project(
     // Fully complete occurrence — no side effects.
     if prompt_already_delivered {
         return Ok(LifecyclePushResult::AlreadyComplete { notification_id });
+    }
+
+    // Episode retries can arrive with newer activity timestamps. Recover the
+    // original payload rather than changing the envelope under its durable key.
+    if already_existed && kind == LifecycleTransition::Blocked && cas_dir.is_some() {
+        let notification = supervisor_queue.get(notification_id).map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("missing lifecycle outbox row {notification_id}"))?;
+        let pq = prompt_queue.ok_or_else(|| "prompt_queue unavailable; lifecycle outbox remains pending".to_string())?;
+        return deliver_lifecycle_outbox_row_with_agents(supervisor_queue, pq, &notification, Some(agent_store));
     }
 
     // The owning supervisor already knows about lifecycle mutations they performed.
@@ -1183,6 +1204,110 @@ fn emit_task_lifecycle_transition_in_project(
     } else {
         Ok(LifecyclePushResult::Enqueued { notification_id })
     }
+}
+
+/// Exact verification waits have their own action path: the dispatch relay
+/// owns expiry, and an approved verdict hands close back to the worker.
+/// Other verdicts, owners and independent holds retain the blocker alert.
+fn verification_wait_has_action_owner(root: &Path, task_id: &str, recipient: &str) -> bool {
+    let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, task_id)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    if dispatch.owner_agent_id != recipient
+        || !super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
+    {
+        return false;
+    }
+    match dispatch.state {
+        cas_types::VerificationDispatchState::Pending
+        | cas_types::VerificationDispatchState::Claimed => true,
+        cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+                .ok()
+                .flatten()
+                .is_some_and(|verdict| verdict.status == cas_types::VerificationStatus::Approved)
+        }
+        _ => false,
+    }
+}
+
+/// Reconcile the director's blocked/liveness signals with the lifecycle
+/// outbox, never a direct prompt. The outbox is the durable episode memory:
+/// one initial receipt and at most one escalation for other blockers. Exact
+/// verification waits use their dispatch/worker action path instead. Runs on
+/// the daemon's store lane; `now` is injectable.
+pub(crate) fn reconcile_blocked_task_alert(
+    root: &Path,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    if task.status != TaskStatus::Blocked {
+        return Ok(());
+    }
+    let Some(actor) = task.assignee.as_deref() else {
+        return Ok(());
+    };
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    let session = resolve_lifecycle_factory_session(agents.as_ref(), actor);
+    let Some((_, recipient)) = lifecycle_notice_owner(agents.as_ref(), session.as_deref()) else {
+        return Ok(());
+    };
+    let sq = open_supervisor_queue_store(root).map_err(|e| e.to_string())?;
+    let pq = open_prompt_queue_store(root).map_err(|e| e.to_string())?;
+    let (start, _) = super::super::block_hold::alert_episode(root, &task)?;
+    let emit = |escalation, reason| {
+        emit_task_lifecycle_transition_in_project(
+            sq.as_ref(),
+            Some(pq.as_ref()),
+            agents.as_ref(),
+            &task.id,
+            &task.title,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            actor,
+            reason,
+            LifecycleTransition::Blocked,
+            &start.min(task.updated_at).to_rfc3339(),
+            None,
+            Some(root),
+            escalation,
+        )
+    };
+    emit(false, None)?;
+    if verification_wait_has_action_owner(root, task_id, &recipient.id)
+        || super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
+    {
+        return Ok(());
+    }
+    let mut deadline = start + chrono::Duration::minutes(5);
+    if let Some(dispatch) =
+        cas_store::get_latest_verification_dispatch(root, task_id).map_err(|e| e.to_string())?
+        && super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
+    {
+        deadline = if matches!(
+            dispatch.state,
+            cas_types::VerificationDispatchState::Pending
+                | cas_types::VerificationDispatchState::Claimed
+        ) {
+            deadline.min(dispatch.deadline_at)
+        } else {
+            now
+        };
+    }
+    if now >= deadline {
+        emit(
+            true,
+            Some(
+                "Blocker deadline reached or verification ended; inspect the live task and resolve its next step.",
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// Source marker for the verification-dispatch handoff (cas-8725).
@@ -1730,6 +1855,7 @@ impl CasCore {
             occurrence_id,
             branch_tip,
             Some(&self.cas_root),
+            false,
         ) {
             Err(e) if e.contains("prompt_queue unavailable") => {
                 if let Some(open_err) = open_err {
@@ -1950,6 +2076,43 @@ mod tests {
                 .notes
                 .contains("Auto-unblock wake queued for worker 'quiet-worker'")
         );
+    }
+
+    #[test]
+    fn merged_worker_notices_wait_for_next_turn_without_a_wake() {
+        use cas_store::HookDrain;
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-merge-notices")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents.register(&agent_in_session(
+            "merge-worker-id", "merge-worker", AgentRole::Worker, "sess-merge-notices",
+        )).unwrap();
+        let mut task = Task::new("cas-merge-notice".into(), "merged delivery".into());
+        task.assignee = Some("merge-worker".into());
+        let parked = queue_merged_lane_parked_notice(temp.path(), &task, "delivery-tip", "merge-tip")
+            .unwrap().unwrap();
+        let closed = queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap().unwrap();
+        assert_eq!(queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap(), Some(closed));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap().is_empty(),
+            "merged/parked facts must never reach worker wake transport");
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::Unseen, 10, 10000).unwrap().rows.is_empty());
+        let digest = queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+        assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
+        for row in &digest {
+            assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),
+                "the next turn must retain task and merge evidence");
+        }
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows.is_empty(), "digest is shown once");
+        let rejected = queue_rejected_merge_reopen_notice(temp.path(), &task, "verdict", "fix the regression")
+            .unwrap().unwrap();
+        assert_eq!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![rejected], "findings still wake the worker");
     }
 
     #[test]

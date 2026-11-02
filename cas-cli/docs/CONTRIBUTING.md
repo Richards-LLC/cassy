@@ -46,6 +46,24 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+Synthetic Codex supervisors bind only to a rollout carrying their own queue
+input, including an ownership envelope older than the 4 MiB reply tail. A first miss
+retries after one second, doubling up to 30 seconds; ownership reads resume at
+the last complete JSONL row rather than rescanning unchanged file bodies.
+A changed harness/account/session or startup envelope invalidates that wait. Finalized sends without delivery proof retain Queued and
+use a 30-second receipt watch; active pending sends keep the one-second watch.
+A later actual receipt still publishes Delivered.
+
+Commander text waits at confirmation/trust dialogs and at non-Claude in-flight
+tool calls. Dialog footers must match a complete native row below the composer;
+assistant prose above it never holds a send. Claude's visible native composer remains eligible during working
+turns. Held text and its submit are delivered together after that boundary clears.
+
+Each completed native turn creates one visible answer, bound to its latest
+verified Commander send; every consumed send still receives its delivery receipt.
+Standalone machine notifications create status replies when no operator input is
+pending. Only operator envelopes beginning a line can supply reply bindings.
+
 Pending Commander replies retry after one second, doubling to a sixty-second
 cap while a paired-device receipt is missing. A valid receipt, a new daemon
 WebSocket connection, or a device's first history-page request resets that retry
@@ -80,7 +98,9 @@ label and the durable reply reference.
 Factory registrations belong to their live harness process. A nested review
 that inherits `CAS_SESSION_ID`, name and role cannot re-register that identity
 from a different process, publish a socket mapping for it, or apply lifecycle
-hooks to its owner. Replacement MCP servers under the same fingerprinted harness
+hooks to its owner. Read-only guidance and receipt identity lookups apply the
+same owner check before caching an identity or authorizing later tools.
+Replacement MCP servers under the same fingerprinted harness
 remain valid. The authenticated cached owner repairs an exited PID left by older
 nested registrations before its next heartbeat, preserving its durable session.
 Tool permission hooks always retain their policy checks, even for a nested
@@ -195,8 +215,8 @@ Unmerged user-facing deliveries park with evidence deferred and no automatic
 per-task QA pass. A registered supervisor records the shared published ledger
 with `verification action=batch_receipt`; each listed delivery must be contained
 in that task's configured target. See [batch QA](../../docs/qa/batch-qa.md).
-Every hour with new deliveries, build an exact epic-tip candidate, walk its batch
-matrix and publish the PASS ledger. Record `verification action=batch_receipt`
+Once per release, after the fix-diff re-review, build an exact epic-tip candidate,
+walk its batch matrix and publish the ledger. Record `verification action=batch_receipt`
 with the included task IDs and delivery anchors, then close those deliveries.
 
 Message bodies default to 1,200 characters, or 2,500 for blocker and merge
@@ -1041,7 +1061,7 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none.
+Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
 `task action=create` enforces the threshold. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, needs `repro` and `affected`, or it is refused. It carries the `from-finding` label and a note recording all three. A P0/P1 bug that an operator or supervisor observed directly is exempt, and `finding_origin=none` declares that finding-like text is not a finding; reviewers cannot use it. `qa_record` applies the same threshold to its automatic pre-existing follow-ups: an issue without `repro` and `affected` stays in the verdict. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
 
@@ -3161,7 +3181,8 @@ the merge queue proves the exact tree that ships and builds it once, and the
 version change landing on `main` publishes it with no agent in between.
 Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 
-1. On the code-done epic branch, write the release entries under
+1. On the epic branch, after closeout is complete (one full review, one batch fix,
+   fix-diff re-review, one QA round), write the release entries under
    `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog format).
 2. Run `scripts/release.sh --next-version`. It prints the next version (one
    minor step above `main`) and the release-notes draft path

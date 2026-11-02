@@ -1768,32 +1768,9 @@ pub fn generate_prompt_at(
             })
         }
 
-        DirectorEvent::TaskBlocked {
-            task_id,
-            task_title,
-            worker,
-        } => {
-            if !config.on_task_blocked {
-                return None;
-            }
-
-            let text = format!(
-                "Worker {worker} is blocked on task {task_id} ({task_title}).\n\
-                 They may need assistance or the blocker needs to be resolved."
-            );
-
-            Some(Prompt {
-                merge_ready: false, merge_alert: None,
-                target: supervisor_name.to_string(),
-                text: with_response_instructions(&text, worker, supervisor_cli),
-                retract_worker: None,
-                retract_task: None,
-                retract_epic: None,
-                drop_if_worker_assigned: None,
-                stall_nudge_task: None,
-                durable_retry: false,
-            })
-        }
+        // Blocked tasks belong to the durable task_blocked episode. The
+        // lifecycle outbox owns its first alert and bounded deadline escalation.
+        DirectorEvent::TaskBlocked { .. } => None,
 
         DirectorEvent::WorkerIdle {
             worker,
@@ -1871,35 +1848,10 @@ pub fn generate_prompt_at(
             }
 
             if let Some(task) = active_task {
-                // cas-728b/cas-627f: Blocked and AwaitingMerge are
-                // supervisor-parked states. This arm is NOT the
-                // worker-assistance "please assign this idle worker
-                // something" ping (that's the `ready_count` branch below,
-                // reached only when `active_task` is `None`). An earlier
-                // version of this fix unconditionally suppressed this arm
-                // for Blocked/AwaitingMerge — that re-hid the flagship
-                // close-rejected notification cas-627f spent real effort
-                // making reachable again (park releases the lease, so
-                // `active_lease` — and this `Some(task)` — was `None` for
-                // every parked task until that fix). Tick-by-tick repetition
-                // is already handled upstream: the event detector's
-                // `idle_already_emitted` gate (events.rs) fires `WorkerIdle`
-                // once per sustained idle streak, not every 2s tick, and
-                // `IDLE_RATE_LIMIT` floors any streak-reset repeat to once
-                // per 5 minutes. No additional suppression needed here.
-                //
-                // cas-c145: when the park is specifically MERGE REQUIRED /
-                // AwaitingMerge, upgrade from vague "resolve the rejection"
-                // to an actionable merge-queue prompt (task, factory branch,
-                // epic target, next steps). Other close-rejection reasons
-                // keep the informational wording.
-                let text = if task.task_status == TaskStatus::Blocked {
-                    format!(
-                        "Worker {worker} is blocked on task {} ({}).\n\
-                         Check the live blocker and respond: `{supervisor_prefix}task action=show id={}`",
-                        task.task_id, task.task_title, task.task_id
-                    )
-                } else if is_merge_required_idle(task) {
+                if task.task_status == TaskStatus::Blocked {
+                    return None;
+                }
+                let text = if is_merge_required_idle(task) {
                     merge_required_idle_prompt_text(
                         worker,
                         task,
@@ -5173,13 +5125,10 @@ mod tests {
         );
     }
 
-    /// cas-dbbb P2: WorkerIdle must NOT be suppressed when the worker's only task
-    /// is Blocked. A Blocked task means the worker is genuinely stalled; the
-    /// supervisor still needs an idle nudge so they can resolve the blocker or
-    /// assign new work. Including Blocked tasks in the busy-guard would suppress
-    /// the nudge indefinitely.
+    /// Keep the event available for lifecycle reconciliation, without emitting
+    /// a second direct prompt alongside the durable blocked episode.
     #[test]
-    fn test_dbbb_idle_not_suppressed_when_worker_only_has_blocked_task() {
+    fn test_blocked_idle_uses_lifecycle_instead_of_a_second_prompt() {
         let blocked_task = TaskSummary {
             id: "task-blocked".to_string(),
             title: "Blocked Task".to_string(),
@@ -5246,11 +5195,7 @@ mod tests {
             &HashSet::new(),
             None,
         );
-        let prompt = prompt.expect("blocked task must notify the supervisor");
-        // pin: blocker guidance must name the assigned task.
-        assert!(prompt.text.contains("blocked on task task-blocked"), "{}", prompt.text);
-        // pin: a blocked assignment cannot be described as no assigned work.
-        assert!(!prompt.text.contains("no assigned tasks"), "{}", prompt.text);
+        assert!(prompt.is_none());
     }
 
     /// cas-dbbb P2: WorkerIdle must be suppressed when the worker has a session-ID

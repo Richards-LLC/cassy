@@ -4975,6 +4975,19 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label} catalog missing operator-reply.md"));
             assert_eq!(contract.content, source, "{label} catalog source drifted");
         }
+
+        // cas-1e52: Commander renders diagrams, callouts, colored code and
+        // tables, so the shared contract must teach their syntax, not ban it.
+        let contract = include_str!("builtins/skills/cas-supervisor/references/operator-reply.md");
+        // pin: the retired sentence that kept every supervisor to plain bullets.
+        assert!(!contract.contains("Use only the Markdown subset"));
+        // pin: each needle is the syntax hub-web's renderer parses for that form.
+        for form in ["```mermaid", "> [!WARNING]", "```bash", "|---|"] {
+            assert!(
+                contract.contains(form),
+                "operator-reply.md must name the rendered form {form:?}"
+            );
+        }
     }
 
     /// cas-b342, audit D1: every harness installs the one supervisor body. This

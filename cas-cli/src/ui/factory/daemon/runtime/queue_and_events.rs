@@ -1052,12 +1052,22 @@ fn deliver_worker_task_brief(
     task_title: &str,
     worker_cli: cas_mux::SupervisorCli,
 ) -> anyhow::Result<i64> {
-    let queue = open_prompt_queue_store(cas_dir)?;
-    let summary = format!("Assigned task: {task_id}");
+    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli);
+    let id = crate::task_assignment::enqueue_spawn_message(
+        cas_dir, factory_session, worker_name, task_id, &message,
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Compose before launching: the first model turn has startup, task and brief.
+pub(crate) fn worker_spawn_prompt(
+    cas_dir: &std::path::Path, worker_name: &str, task_id: &str,
+    task_title: &str, worker_cli: cas_mux::SupervisorCli,
+) -> String {
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
     let mut message = format!(
-        "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
-         you now.\n\
+        "You were spawned for task {task_id} — \"{task_title}\". This is your task to start.\n\
          Start with `{worker_prefix}task action=show id={task_id}`, then \
          `{worker_prefix}task action=start id={task_id}` before you change any code.\n\n\
          {test_policy}",
@@ -1089,15 +1099,17 @@ fn deliver_worker_task_brief(
         message.push_str("\n\n");
         message.push_str(&instruction);
     }
-    let id = queue.enqueue_with_summary(
-        "director",
-        worker_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
-    super::delivery::wake_daemon_after_enqueue(cas_dir);
-    Ok(id)
+    let startup = format!(
+        "Cassy worker startup: run {worker_prefix}coordination action=whoami. Your session is automatically registered; do not call session_start.\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required.\n"
+    );
+    let message = if worker_cli == cas_mux::SupervisorCli::Claude {
+        // Claude consumes its role contract in this initial prompt; the other
+        // harnesses already carry it in their native developer/rules surface.
+        format!("{}\n\n{startup}\n{message}", cas_mux::claude_worker_contract(worker_name))
+    } else {
+        format!("{startup}\n{message}")
+    };
+    crate::prompt_revalidation::attach_assignment_envelope(&message, Some(task_id))
 }
 
 /// Surface stale output-path instructions before a worker acts on them. This is
@@ -7519,18 +7531,31 @@ impl FactoryDaemon {
         }
     }
 
-    /// Claude setup pages produce output for arbitrarily long periods before
-    /// readline exists. A chooser's ❯ is not a text prompt: require the native
-    /// composer between its two horizontal rules. Use the current viewport,
-    /// never scrollback, and keep busy turns eligible when their composer is up.
+    /// Setup and approval pages can outlive the startup grace. Claude's chooser
+    /// is not a composer: require its ruled input. Other harnesses retain their
+    /// tool-call veto and confirmation boundary. Inspect the current viewport,
+    /// never scrollback; a safe working composer still accepts operator text.
     fn commander_native_input_ready(&self, pane_id: &str) -> bool {
-        if self.app.harness_for(pane_id) != cas_mux::SupervisorCli::Claude {
-            return true;
-        }
+        let cli = self.app.harness_for(pane_id);
         let Some(pane) = self.app.mux.get(pane_id) else { return false };
         let rows: Vec<_> = (0..pane.rows())
             .map(|row| pane.dump_row(row).unwrap_or_default())
             .collect();
+        if cli != cas_mux::SupervisorCli::Claude {
+            // These harnesses have no proven mid-tool composer contract. A
+            // submit must not answer an approval, even on a silent pane.
+            if self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
+                return false;
+            }
+            // Native dialog footers are complete rows below the composer.
+            // Assistant prose above that row cannot hold the next send.
+            let composer = rows.iter().rposition(|row| matches!(row.trim(), ">" | "›" | "❯"));
+            let footer_rows = &rows[composer.map_or(0, |input| input + 1)..];
+            return !footer_rows.iter().any(|row| matches!(row.trim().to_ascii_lowercase().as_str(),
+                "enter to confirm · esc to cancel"
+                | "press enter to confirm or esc to cancel"
+                | "press enter to continue"));
+        }
         let Some(input) = rows.iter().rposition(|row| row.trim_start().starts_with('❯')) else {
             return false;
         };
@@ -10096,7 +10121,7 @@ impl FactoryDaemon {
                 } else {
                     target.as_str()
                 };
-                // Paired human text must wait for Claude's native composer,
+                // Paired human text must wait for a safe native input boundary,
                 // including in Teams mode and on the urgent path. Setup must
                 // receive neither the body nor the submit CR. Keep the original
                 // durable row pending without spending transport retries.
@@ -10107,7 +10132,7 @@ impl FactoryDaemon {
                         self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::PendingReason {
                             reason: cas_store::PendingReason::GatedNotReady,
-                            detail: Some("Claude is awaiting its input prompt; your message is kept".into()),
+                            detail: Some("The harness is awaiting a safe input prompt; your message is kept".into()),
                         },
                     );
                     continue;
@@ -15220,6 +15245,32 @@ mod tests {
             .unwrap()
             .remove(0)
             .prompt;
+        assert!(cas_mux::missing_contract_elements(&prompt, cas_mux::ContractRole::Worker).is_empty(),
+            "the single spawn message must include the worker startup contract");
+        deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,
+            &task.title, cas_mux::SupervisorCli::Claude).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-1".into(),
+            cas_types::AgentRole::Worker);
+        worker.factory_session = Some("factory-session".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        task.assignee = Some(worker.name.clone());
+        crate::store::open_task_store_cached(&cas_dir).unwrap().update(&task).unwrap();
+        crate::task_assignment::enqueue(&cas_dir, &task).unwrap();
+        // An ordered spawn starts its head at registration. It still shares
+        // the initial assignment rather than creating another model turn.
+        task.status = cas_types::TaskStatus::InProgress;
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
+            .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue.peek_all(10).unwrap().remove(0);
+        assert!(crate::prompt_revalidation::assignment_stale_task(
+            &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
+        ).is_none(), "an initial assignment still waiting for transport must become a continuation");
+        queue.record_recipient_transport_delivered(row.id, &worker.name).unwrap();
+        queue.mark_transport_delivered(row.id).unwrap();
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
+        assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(
@@ -22149,6 +22200,17 @@ mod supervisor_notice_wake_tests {
                 "owner",
                 "supervisor-notice:42",
                 "ordinary text"
+            ),
+            None
+        );
+        // A release runs one QA round, so a queued hourly overdue row left by an
+        // older daemon must not wake a supervisor to start another.
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon,
+                "owner",
+                "supervisor-notice:42",
+                "<cas-supervisor-notice kind=\"qa_batch_overdue\" notification_id=\"42\">\nStart a round.\n</cas-supervisor-notice>"
             ),
             None
         );

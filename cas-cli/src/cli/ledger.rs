@@ -491,7 +491,9 @@ fn render(report: &LedgerReport) -> String {
         );
     }
     if report.features.is_empty() {
-        let _ = writeln!(out, "  none with known scope");
+        let _ = writeln!(out, "  {}", if report.excluded_unscoped_measurements == 0 {
+            "none recorded"
+        } else { "none with known scope" });
     }
     for (feature, row) in &report.features {
         let mut parts = Vec::new();
@@ -662,5 +664,14 @@ mod tests {
         let unreleased = build_report(&cas_root, repo, None).unwrap();
         assert!(!unreleased.published);
         assert_eq!(unreleased.interventions.get("rebind"), Some(&1), "{unreleased:?}");
+        let mut empty = unreleased;
+        empty.features.clear();
+        for excluded in [0, 2] {
+            empty.excluded_unscoped_measurements = excluded;
+            let text = render(&empty);
+            assert!(text.contains(if excluded == 0 {
+                "Feature feedback\n  none recorded"
+            } else { "none with known scope" }), "{text}");
+        }
     }
 }

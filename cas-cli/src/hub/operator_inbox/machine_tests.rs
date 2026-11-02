@@ -348,7 +348,7 @@ fn enrollment_proves_both_keys_and_verifies_the_binding_before_saving() {
         principal.command_public
     );
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_support::private_hub_tempdir();
     let store = PrincipalStore::new(dir.path());
     assert!(store.load().unwrap().is_none());
     store.save(&principal).unwrap();
@@ -429,7 +429,7 @@ fn sealed_event(id: &str) -> SealedEvent {
 async fn relay_append_signs_each_request_and_resyncs_a_stale_generation() {
     let cloud = FakeCloud::new();
     let principal = enrolled(&cloud);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_support::private_hub_tempdir();
     let store = PrincipalStore::new(dir.path());
     store.save(&principal).unwrap();
     let http: Arc<dyn HttpClient> = Arc::new(Client(Arc::clone(&cloud)));

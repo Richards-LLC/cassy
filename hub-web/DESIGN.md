@@ -340,6 +340,10 @@ The heading answers, in this order of weight: which project, which model, where,
 
 Show work and worker timelines keep published reasoning subordinate to replies: a quiet label over a plain-text preview, with safe Markdown detail opened in place. Only `codex_summary` and `claude_thinking` v2 sources opt into formatting. Legacy and unknown sources remain literal. Raw summary exposes the exact published text; opening it survives repaints. Without a lifecycle boundary, use Reasoning summary (Reasoning for a work block); use Thinking for a reported start/phase and Thought for a reported end. Detail scroll and keyboard focus stay put across updates.
 
+### Reply tables
+
+A Markdown table in a reply (`renderBody`, `conversation-view.ts`) is a ruled ledger inside the bubble, never a filled or rounded sheet, so it never reads as a code frame. A `--line-strong` hairline closes the header and a `--line-subtle` hairline closes every row. Headers are `--ink-mid` at `--fs-xs`, medium weight; cells use the bubble's UI font at `--fs-meta`. Numeric and status columns right-align with tabular numerals in that same UI font, never mono. A blank corner header (`| | time |`) is an empty cell, not a nameless column header. Copy Markdown and Copy CSV are quiet `--ink-mid` text buttons right-aligned on the closing rule (28px tall, 44px on phone), with their status beneath. A wide table scrolls inside the bubble, never the page.
+
 ### Unknown and empty states
 
 - Say what is missing in plain words, at the weight of evidence, not of a verdict: `--ink-mid`, regular weight, `--fs-meta`. "Merge progress not reported", "Usage unknown", "Version unknown" are evidence lines; they are never bold, never headings and never status pills.

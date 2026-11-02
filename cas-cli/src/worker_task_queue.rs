@@ -560,6 +560,7 @@ impl CasCore {
                     &self.cas_root,
                     &tasks.get(&id).map_err(error)?,
                     queue.dispatch_revision,
+                    queue.dispatch_from.is_none(),
                 )
                 .map_err(error)?;
                 if notification.is_none() {

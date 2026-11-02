@@ -594,6 +594,34 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<BuilderSlot> {
     Err(CapacityRefusal(format!("max_concurrent_builders={cap} slots are occupied")).into())
 }
 
+/// A factory daemon's candidate build takes the same admission and builder slot
+/// as a capped check. Holding the returned file holds the slot.
+pub(crate) fn admit_daemon_build(cas_root: &Path) -> std::result::Result<File, String> {
+    let admit = || -> Result<std::result::Result<File, String>> {
+        let config = crate::config::Config::load(cas_root)?.factory();
+        let slots = cas_root.join("worker-check-slots");
+        std::fs::create_dir_all(&slots)?;
+        let admission = lock_file(&slots.join("admission.lock"))?;
+        admission.lock_exclusive()?;
+        let violations =
+            crate::factory_build_guard::inspect(cas_root, &config, 1).violations();
+        if !violations.is_empty() {
+            return Ok(Err(violations.join("; ")));
+        }
+        for index in 0..config.max_concurrent_builders {
+            let slot = lock_file(&slots.join(format!("slot-{index}.lock")))?;
+            if slot.try_lock_exclusive().is_ok() {
+                return Ok(Ok(slot));
+            }
+        }
+        Ok(Err(format!(
+            "max_concurrent_builders={} slots are occupied",
+            config.max_concurrent_builders
+        )))
+    };
+    admit().unwrap_or_else(|error| Err(format!("{error:#}")))
+}
+
 fn available_slot_count(root: &Path, cap: usize) -> Result<usize> {
     std::fs::create_dir_all(root)?;
     let mut available = 0;

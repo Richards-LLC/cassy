@@ -148,12 +148,38 @@ if sys.argv[1]=='run':
                 self.assertEqual(receipt['web']['source_sha'],revision)
                 self.assertEqual(receipt['web']['dist_sha256'],receipt['web']['served_dist_sha256'])
                 original = (destination/'RECEIPT.json').read_bytes()
-                with mock.patch.dict(os.environ,{'FIXTURE_STALE':'1'}), self.assertRaisesRegex(ValueError,'served.*digest'):
-                    candidate['build'](repo,revision,destination)
+                cited = destination.resolve()/'cas'
+                cited_bytes = cited.read_bytes()
+                self.assertEqual(result['candidate_dir'],str(cited.parent))
+                self.assertEqual(cited.parent.name,revision)
+                # A later proof build for the task leaves a cited candidate alone.
+                git('commit','-q','--allow-empty','-m','later proof')
+                later = git('rev-parse','HEAD')
+                later_binary = root/'later-binary'
+                later_binary.write_text(binary.read_text().replace(revision[:7],later[:7]))
+                later_binary.chmod(0o700)
+                with mock.patch.dict(os.environ,{'FIXTURE_STALE':'1','FIXTURE_BINARY':str(later_binary)}), \
+                     self.assertRaisesRegex(ValueError,'served.*digest'):
+                    candidate['build'](repo,later,destination)
                 self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
-                with mock.patch.dict(os.environ,{'FIXTURE_DIRTY_SOURCE':'1'}), self.assertRaisesRegex(ValueError,'unexpected format.*-dirty'):
-                    candidate['build'](repo,revision,destination)
+                # A source change during the compile stamps -dirty, and the candidate is refused.
+                with mock.patch.dict(os.environ,{'FIXTURE_DIRTY_SOURCE':'1','FIXTURE_BINARY':str(later_binary)}), \
+                     self.assertRaisesRegex(ValueError,'unexpected format.*-dirty'):
+                    candidate['build'](repo,later,destination)
                 self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
+                record_before = target_record.read_bytes()
+                with mock.patch.dict(os.environ,{'FIXTURE_BINARY':str(later_binary)}):
+                    candidate['build'](repo,later,destination)
+                self.assertEqual(destination.resolve().name,later)
+                self.assertEqual(cited.read_bytes(),cited_bytes)
+                # Asking again for a published revision reuses it without a compile.
+                target_record.unlink()
+                again = candidate['build'](repo,revision,destination)
+                self.assertFalse(target_record.exists())
+                self.assertEqual(again['candidate_dir'],str(cited.parent))
+                self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
+                self.assertEqual(destination.resolve(),cited.parent)
+                target_record.write_bytes(record_before)
             record = json.loads(target_record.read_text())
             target = Path(record['target'])
             self.assertTrue(target.is_relative_to(scratch.parent), str(target))

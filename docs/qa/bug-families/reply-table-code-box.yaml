@@ -1,0 +1,5 @@
+title: A short reply table rendered as a filled code-like sheet with monospace numbers, no row rules, a nameless blank header and Copy floating above it
+found: '2026-11-01'
+tasks: [cas-0e5e]
+invariants: [HUB-J4-READABLE-PROSE-TABLES, HUB-J4-TABLE-COPY]
+journeys: [HUB-J4]

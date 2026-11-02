@@ -1809,6 +1809,21 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
         "dynamic Codex cs MCP env must include CAS_FACTORY_SESSION; args={:?}",
         pty_config.args
     );
+    // Exercise the same config builder and backend selection used by launch.
+    let assignment = "Assigned task cas-abcd: show, start and implement it";
+    mux.set_worker_startup_prompt("dynamic-worker", Some(assignment.into()));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+        let mut spec = WorkerSpec::codex_default("dynamic-worker");
+        spec.cli = cli;
+        let config = mux.build_add_worker_config("dynamic-worker", PathBuf::from("/tmp/test"),
+            None, "supervisor", None, Some(spec));
+        assert_eq!(config.args.iter().filter(|arg| arg.as_str() == assignment).count(), 1,
+            "the assigned launch must carry one initial message for {cli:?}");
+        // pin: assigned startup must replace the generic Codex task-selection prompt.
+        assert!(!config.args.iter().any(|arg| arg.starts_with("I'm initiating Cassy worker startup now:")));
+
+    }
+
 }
 
 #[test]
@@ -4238,6 +4253,28 @@ fn cas_940c_worker_mcp_modes_preserve_supervisor_and_codex_launches() {
             }
             assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), original);
         }
+    }
+}
+
+/// Claude's `--mcp-config` is variadic: a bare prompt after it is read as a
+/// config path and the worker exits at launch. Only the terminator ends it.
+#[test]
+fn startup_prompt_follows_the_option_terminator_on_a_real_worker_tail() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(project.path().join(".mcp.json"), r#"{"mcpServers":{"cas":{"command":"cas-fixture"}}}"#).unwrap();
+    let assignment = "Assigned task cas-abcd";
+    let mut mux = Mux::new(24, 80);
+    mux.set_worker_startup_prompt("worker", Some(assignment.into()));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Grok] {
+        let spec = WorkerSpec { cli, ..WorkerSpec::builtin_default() };
+        let config = mux.build_add_worker_config("worker", project.path().into(), Some(&root), "supervisor", None, Some(spec));
+        assert!(env_value(&config, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(config.args[config.args.len() - 2..], ["--", assignment], "{cli:?}: {:?}", config.args);
+        assert_eq!(config.args.contains(&"--mcp-config".to_string()), cli == SupervisorCli::Claude);
     }
 }
 

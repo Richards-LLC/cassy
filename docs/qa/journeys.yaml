@@ -11,6 +11,21 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  catalog-independent-live-conversations:
+    title: Live sends and transport recovery survive catalog failures; drafts preserve unknown births and failed archives
+    tasks: [cas-bbad5]
+    invariants: [HUB-J14-RUNNING-ONLY, HUB-J14-STOPPED-DRAFT-REACHABLE, HUB-J12-DURABLE-SEND-REF]
+    journeys: [HUB-J11, HUB-J12, HUB-J14]
+  stopped-session-drafts:
+    title: Focused and inactive unsent drafts stay reachable when their sessions stop
+    tasks: [cas-45b8]
+    invariants: [HUB-J14-STOPPED-DRAFT-REACHABLE]
+    journeys: [HUB-J3, HUB-J14]
+  held-send-lifetime:
+    title: Offline auto-send discloses its two-minute wait and requires Retry after expiry
+    tasks: [cas-1c0e]
+    invariants: [HUB-J12-HELD-SEND-LIFETIME]
+    journeys: [HUB-J11, HUB-J12]
   phone-warning-header:
     title: Warning badges preserve every phone conversation header action
     tasks: [cas-a929]
@@ -24,12 +39,13 @@ bug_families:
   hub-serve-route-ownership:
     title: Failed starts and resumed publication preserve stopped foreign Serve targets; exact recorded targets still recover after outages
     tasks: [cas-bf4e]
-    # Native regression: hub::tailscale::tests::failed_start_preserves_stopped_foreign_route; real disposable Serve10443 proof.
-  stopped-session-drafts:
-    title: Focused and inactive unsent drafts stay reachable when their sessions stop
-    tasks: [cas-45b8]
-    invariants: [HUB-J14-STOPPED-DRAFT-REACHABLE]
-    journeys: [HUB-J3, HUB-J14]
+    invariants: [HUB-J12-SERVE-OWNERSHIP]
+    journeys: [HUB-J12]
+  release-input-and-identity:
+    title: Commander protects dialogs and factory identity follows the owning process on every lookup
+    tasks: [cas-fecd]
+    invariants: [HUB-J5-DIALOG-HOLD, HUB-J26-READONLY-OWNER, HUB-J12-LOCAL-HUB, HUB-J5-LONG-CODEX-ROLLOUT, HUB-J5-QUIET-RECEIPT-POLL]
+    journeys: [HUB-J5, HUB-J26, HUB-J12]
   stopped-session-retries:
     title: Stopped conversations disappear while machine outages recover once per machine
     tasks: [cas-f8ab]
@@ -79,14 +95,9 @@ bug_families:
     tasks: [cas-6f79]
     invariants: [HUB-J14-PROJECT-DISPLAY-NAME]
     journeys: [HUB-J14]
-  held-send-lifetime:
-    title: Offline auto-send discloses its two-minute wait and requires Retry after expiry
-    tasks: [cas-1c0e]
-    invariants: [HUB-J12-HELD-SEND-LIFETIME]
-    journeys: [HUB-J11, HUB-J12]
   claude-queued-replacement-reply:
     title: Consumed queued Claude inputs retain Commander message and paired-device reply binding
-    tasks: [cas-33e6]
+    tasks: [cas-33e6, cas-5e3a]
     invariants: [HUB-J5-CLAUDE-QUEUED-ANSWER]
     journeys: [HUB-J5]
 ignore:
@@ -135,6 +146,24 @@ invariants:
     statement: Focused and inactive unsent drafts from stopped sessions remain readable and copyable through Saved messages after reload; stopped rows stay absent and a same-name replacement starts empty.
     check: Extend the HUB-J3 supervisor exit case with two drafts and two stopped sessions at desktop and phone widths; read both through Details after reload. Walk the real candidate in light and dark, read Copy and persisted payloads, and check the existing held-message route without sending to a stopped session.
     bug: {task: cas-45b8}
+  HUB-J12-SERVE-OWNERSHIP:
+    statement: Failed starts preserve foreign Serve routes, including stopped targets; only an exact recorded owned target can be reclaimed.
+    check: Run hub::tailscale::tests::failed_start_preserves_stopped_foreign_route and hub_clean_home_test::service_start_retries_tailscale_before_publication; inspect the disposable Serve route before and after failure and recovery.
+  HUB-J12-LOCAL-HUB:
+    statement: Auto service starts retain healthy loopback through every publication failure and recover the public route and live metadata in background without restart; stopping cancels any in-flight publication.
+    check: Run hub_clean_home_test::auto_service_without_tailscale_keeps_healthy_loopback, service_start_retries_tailscale_before_publication and service_publication_failure_keeps_loopback_and_recovers_without_restart on Linux with a disposable HOME; read health, status, hub.log and route cleanup.
+  HUB-J5-LONG-CODEX-ROLLOUT:
+    statement: A proven Codex rollout mirrors terminal answers beyond the reply tail; initial ownership retries after one second, then backs off and indexes only appended rollout records.
+    check: Run commander_mirror::tests::codex_boot_mirror_waits_for_its_own_rollout_in_a_reused_project and unresolved_codex_resolution_does_not_poll_every_tick; keep other panes and previous generations excluded.
+  HUB-J5-QUIET-RECEIPT-POLL:
+    statement: Cleanup without transport proof keeps Queued honest without polling finalized sends every second; a later real receipt still updates the conversation.
+    check: Run commander_mirror::tests::finalized_receipts_back_off_without_losing_later_delivery with the injected clock and verify the durable transport receipt produces Delivered.
+  HUB-J5-DIALOG-HOLD:
+    statement: Commander sends no body or submit into native confirmation footers or pending non-Claude tool calls; assistant dialog prose above the composer does not hold input and retained words submit once after readiness returns.
+    check: Run supervisor_single_turn_tests::non_claude_commander_send_waits_through_dialogs and cas_bf20_verified_commander_send_wakes_an_idle_supervisor through the real queue and private PTY.
+  HUB-J26-READONLY-OWNER:
+    statement: Read-only identity lookup cannot cache a live parent identity for a nested harness or authorize later mutable tools.
+    check: Run mcp::daemon::tests::nested_harness_cannot_take_over_live_factory_identity_cas_b815 for supervisor and worker identities; confirm read-only and mutable calls refuse and parent registration stays unchanged.
   HUB-J14-RUNNING-ONLY:
     statement: Commander lists running sessions only; pending messages never resurrect stopped destinations, and machine outages do not multiply retry labels.
     check: Run the real stopped-session part of HUB-J14 and the catalog reconciliation regression; verify crashed/ended absence, no attach frames for two minutes, pending settlement, running replacement and HUB-J11/HUB-J12 recovery.
@@ -247,7 +276,7 @@ invariants:
       daemon and operator stamping are doubled'
   HUB-J5-CLAUDE-QUEUED-ANSWER:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
-    check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Run commander_mirror::tests, including queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
+    check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
@@ -975,6 +1004,11 @@ journeys:
   invariants:
   - HUB-J5-GOAL
   - HUB-J5-CLAUDE-QUEUED-ANSWER
+  - HUB-J5-DIALOG-HOLD
+  - HUB-J5-LONG-CODEX-ROLLOUT
+  - HUB-J5-QUIET-RECEIPT-POLL
+  - HUB-J12-SERVE-OWNERSHIP
+  - HUB-J12-LOCAL-HUB
   - HUB-J12-DURABLE-SEND-REF
   - HUB-J5-SEND-WITHOUT-PANE-LEASE
   - HUB-J5-RECEIPT-STAGES
@@ -1479,6 +1513,8 @@ journeys:
   invariants:
   - HUB-J12-GOAL
   - HUB-J12-HELD-SEND-LIFETIME
+  - HUB-J12-SERVE-OWNERSHIP
+  - HUB-J12-LOCAL-HUB
   - HUB-J12-DURABLE-SEND-REF
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS
@@ -2388,7 +2424,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE]
+  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

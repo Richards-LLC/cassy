@@ -314,8 +314,8 @@ end-of-lane, once the worker is done with that worktree.
    annotated with `cas-allow-skip: <reason>`.
    **User-facing delivery? Independent QA first (cas-619f).** When the park reports
    `INDEPENDENT QA DISPATCHED`, or a `<cas-qa-dispatch>` wakes you, spawn a reviewer who is
-   not the implementer, on the taste recipe:
-   `factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
+   not the implementer, on the account with the most room, using the cheapest recipe that has passed this kind of review:
+   `factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high task_id=<qa-task>`.
    Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
    `git merge factory/<worker>`, and task close all refuse until then. A rejection sends the
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
@@ -419,24 +419,60 @@ When a walk needs records a worker can't create (accounts, tokens or data in a s
 
 Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-delivery
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
-Every hour with new deliveries, build a candidate at the exact epic tip, walk the
-combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
+One round per release, after the fix-diff re-review: build a candidate at the exact
+frozen tip, walk the combined matrix and publish its PASS ledger. Report every
+failing row in that one ledger. Fix them in one batch and re-walk only those rows,
+once; a row still failing is reverted and moves to the next release unless it loses
+operator data. Record `verification action=batch_receipt`
 with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and
 `ledger_author`, who walked it and did not implement a listed task; every listed
 delivery anchor must be contained in that reviewed target commit. Then close those
 deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
 remain available.
 
-A round covers whatever is merged at the tip when it starts. Never hold a round for
-lanes still in review; they join the next round. Title its task `Batch QA round ...`,
-because that in-progress task is how Cassy knows a round is running. If a merged
-delivery has no receipt after 60 minutes and no round started in that time, every
-supervisor on the epic gets a `QA batch overdue` notice each hour. Start a round
-when it arrives.
+A round runs once, at the frozen tip. A lane not merged at freeze ships in the next
+release.
+
+Scope freezes when closeout starts. A new finding goes to the next board unless it
+loses data, hides state or hurts someone today. A fix for something hurting the
+operator ships alone with `scripts/release.sh --hotfix`.
+
+## Interim queue precheck
+
+Until the hosted precheck (cas-298f) ships, the supervisor runs this diagnostic
+in a new, clean checkout at the reviewed or corrected SHA. Replace the
+source path, destination and SHA below; the destination must not exist. Use the normal shell
+with Node, Cargo/nextest and Chromium system dependencies available:
+
+```bash
+set -e
+precheck_source=/absolute/path/to/cassy
+precheck_dir=/absolute/path/to/precheck
+precheck_sha=FULL_COMMIT_SHA
+git clone --no-hardlinks "$precheck_source" "$precheck_dir"
+cd "$precheck_dir"
+git checkout --detach "$precheck_sha"
+npm ci
+npm --prefix hub-web ci
+export PATH="$PWD/hub-web/node_modules/.bin:$PATH"
+export NODE_PATH="$PWD/hub-web/node_modules"
+export PLAYWRIGHT_BROWSERS_PATH="$PWD/target/playwright-browsers"
+(cd hub-web && npx --no-install playwright install chromium)
+node -e 'require("fs").accessSync(require("@playwright/test").chromium.executablePath())'
+cargo nextest run --workspace --no-fail-fast
+make -C cas-cli test-ci-tiers
+```
+
+Retain both test logs and their exit codes at that SHA. This is the interim
+precheck, not final merged-tree proof; the queue still owns that proof.
+Do not substitute `assembly-proof.py`: its scrubbed environment cannot resolve
+Playwright or browser installations outside `/home` on soundwave. cas-298f
+replaces this manual precheck when its hosted command is available.
 
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
+   Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Run targeted tests and journeys selected by the diff inside this loop. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 3), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
 3. Run the final assembled-tree gate. This is the epic's single build + test:
    targeted worker tests complement one full assembly gate run
@@ -449,8 +485,7 @@ when it arrives.
    With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
    Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
    if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project
-   with `scripts/assembly-proof.py` that gate, and the opt-in diagnostic after a
-   failed queue run, is
+   with `scripts/assembly-proof.py` that gate is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
    nextest in the worktree and archive-mode in a plain clone. Both use their
    own `<worktree>/target`, seeding immutable dependencies from the worker
@@ -464,12 +499,12 @@ when it arrives.
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
    reference the epic's integration proof; worker closes carry targeted receipts alongside it.
-4. Turn any final-gate failure or review gap that needs worker action into a
-   bounded epic-child fix-round task before messaging a worker. Put the finding,
-   required fix, acceptance criteria, and proof command in the task description;
+4. Put all findings from the review, precheck and QA that need worker action into
+   one batch: a bounded epic-child fix-round task per worker, started together. Put
+   the finding, required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
-5. After the fix lands, rerun the final assembled-tree gate on the new tip:
-   re-enqueue the PR, or for a local gate capture the real exit code and record
+5. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. After the fix
+   lands, rerun the final assembled-tree gate on the new tip: re-enqueue the PR, or for a local gate capture the real exit code and record
    a fresh `ASSEMBLY_PROOF` for it:
 
    ```bash

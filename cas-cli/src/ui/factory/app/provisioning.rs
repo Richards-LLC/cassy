@@ -48,7 +48,7 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 /// cas-cef2: this daemon's pinned copy of its own executable, set once at start.
 static PINNED_PROVISIONER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-fn provisioner_executable() -> anyhow::Result<PathBuf> {
+pub(crate) fn provisioner_executable() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     {
         Ok(crate::test_paths::cas_binary())

@@ -653,7 +653,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_queue' (inspect, reorder or clear pending task_ids for id=<worker>), 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session), 'restart_supervisor' (supervisor-only: replace only this supervisor's session; workers keep running. Record a handoff first)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_queue' (inspect, reorder or clear pending task_ids for id=<worker>), 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'candidate_request' (worker: the daemon builds your task's binary at revision= and messages you), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session), 'restart_supervisor' (supervisor-only: replace only this supervisor's session; workers keep running. Record a handoff first)"
     )]
     pub action: String,
 
@@ -934,7 +934,7 @@ pub struct FactoryRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -948,7 +948,7 @@ pub struct FactoryRequest {
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start expected port (advisory); server_list reports actual bound ports."
+        description = "server_start expected port (advisory)."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
@@ -959,6 +959,13 @@ pub struct FactoryRequest {
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
+
+    /// Exact revision for `candidate_request`.
+    #[schemars(
+        description = "candidate_request: full commit SHA."
+    )]
+    #[serde(default)]
+    pub revision: Option<String>,
 
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
@@ -1532,7 +1539,7 @@ pub struct CoordinationRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -1546,7 +1553,7 @@ pub struct CoordinationRequest {
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start expected port (advisory); server_list reports actual bound ports."
+        description = "server_start expected port (advisory)."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
@@ -1557,6 +1564,13 @@ pub struct CoordinationRequest {
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
+
+    /// Exact revision for `candidate_request`.
+    #[schemars(
+        description = "candidate_request: full commit SHA."
+    )]
+    #[serde(default)]
+    pub revision: Option<String>,
 
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
@@ -1707,6 +1721,7 @@ impl CoordinationRequest {
             cwd: self.cwd.clone(),
             port: self.port,
             shared: self.shared,
+            revision: self.revision.clone(),
             mine: self.mine.clone(),
             theirs: self.theirs.clone(),
             decision: self.decision.clone(),

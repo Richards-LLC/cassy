@@ -9404,7 +9404,7 @@ fn worker_activity_has_no_rows(
 /// for messaging (metadata if set, else convention). Sync treats that as a
 /// **retryable** skip (registration/provisioning lag), not a success.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum WorkerClonePathResolve {
+pub(super) enum WorkerClonePathResolve {
     /// Worktree path exists and is ready for git ops / status.
     Ready(std::path::PathBuf),
     /// No worktree on disk at metadata or convention path.
@@ -9415,7 +9415,7 @@ enum WorkerClonePathResolve {
     },
 }
 
-fn resolve_worker_clone_path(
+pub(super) fn resolve_worker_clone_path(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
 ) -> WorkerClonePathResolve {

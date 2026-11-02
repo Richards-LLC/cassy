@@ -40,6 +40,12 @@ mod dismissed_sessions;
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
 
+#[derive(Default)]
+struct PublicationState {
+    metadata: MachineMetadata,
+    effective_origins: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct HubState<R: SessionReadModel> {
     catalog: SessionCatalog<R>,
@@ -48,8 +54,7 @@ pub struct HubState<R: SessionReadModel> {
     connector: DaemonConnector,
     events: MachineEventBus,
     auth: Option<AuthStore>,
-    metadata: MachineMetadata,
-    effective_origins: Vec<String>,
+    publication: Arc<Mutex<PublicationState>>,
     response_transport: TransportSecurity,
     launches: Arc<Mutex<HashMap<std::path::PathBuf, (String, Instant, String)>>>,
     /// Outcomes of recent structured operations by (device, op_id), so a
@@ -83,8 +88,7 @@ impl<R: SessionReadModel> HubState<R> {
             connector,
             events,
             auth: None,
-            metadata: MachineMetadata::default(),
-            effective_origins: Vec::new(),
+            publication: Arc::new(Mutex::new(PublicationState::default())),
             response_transport: TransportSecurity::Plaintext,
             launches: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -116,14 +120,26 @@ impl<R: SessionReadModel> HubState<R> {
         self
     }
 
-    pub fn with_machine_metadata(mut self, metadata: MachineMetadata) -> Self {
-        self.metadata = metadata;
+    pub fn with_machine_metadata(self, metadata: MachineMetadata) -> Self {
+        self.publication.lock().unwrap().metadata = metadata;
         self
     }
 
-    pub fn with_effective_origin(mut self, origin: impl Into<String>) -> Self {
-        self.effective_origins.push(origin.into());
+    pub fn with_effective_origin(self, origin: impl Into<String>) -> Self {
+        self.publication.lock().unwrap().effective_origins.push(origin.into());
         self
+    }
+
+    /// All router clones observe the recovered endpoint and accept its origin.
+    pub(crate) fn publish_tailscale_transport(&self, public_url: &str) {
+        let mut publication = self.publication.lock().unwrap();
+        publication.metadata.transport = super::MachineTransport {
+            kind: "tailscale_serve".to_owned(), public_url: Some(public_url.to_owned()),
+        };
+        let origin = public_url.trim_end_matches('/').to_owned();
+        if !publication.effective_origins.contains(&origin) {
+            publication.effective_origins.push(origin);
+        }
     }
 
     /// Bind response policy to the server-owned listener, never request headers.
@@ -671,6 +687,7 @@ async fn machine<R: SessionReadModel>(
     ) {
         return with_cors(unauthorized_for(&error), &headers);
     }
+    let metadata = state.publication.lock().unwrap().metadata.clone();
     with_cors(
         Json(MachineResponse {
             schema_version: super::HUB_SCHEMA_VERSION,
@@ -685,8 +702,8 @@ async fn machine<R: SessionReadModel>(
                 "cloud_device_suggestions",
                 "supervisor_commands",
             ],
-            transport: state.metadata.transport,
-            cloud_devices: state.metadata.cloud_devices,
+            transport: metadata.transport,
+            cloud_devices: metadata.cloud_devices,
             default_supervisor_cli: crate::config::Config::load(
                 &crate::store::known_repos::host_cas_dir(),
             )
@@ -4547,6 +4564,7 @@ fn request_origin<R: SessionReadModel>(
         .and_then(|value| value.to_str().ok())
         .context("host required")?;
     state
+        .publication.lock().unwrap()
         .effective_origins
         .iter()
         .find(|effective| {

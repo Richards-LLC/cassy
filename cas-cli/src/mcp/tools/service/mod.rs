@@ -1403,7 +1403,7 @@ impl CasService {
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"
-                | "restart_spawn_queue" | "restart_supervisor" => {
+                | "candidate_request" | "restart_spawn_queue" | "restart_supervisor" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
                         "spawn_workers" => this.factory_spawn_workers(factory_req).await,
@@ -1434,6 +1434,7 @@ impl CasService {
                         "server_start" => this.factory_server_start(factory_req).await,
                         "server_stop" => this.factory_server_stop(factory_req).await,
                         "server_list" => this.factory_server_list(factory_req).await,
+                        "candidate_request" => this.factory_candidate_request(factory_req).await,
                         // cas-73b5 (GH #970): unwedge the spawn queue in place.
                         "restart_spawn_queue" => {
                             this.factory_restart_spawn_queue(factory_req).await
@@ -1617,6 +1618,7 @@ impl CasService {
                     | "server_start"
                     | "server_stop"
                     | "server_list"
+                    | "candidate_request"
                     | "restart_spawn_queue"
                     | "restart_supervisor"
                     | "record_test_receipt"
@@ -1677,6 +1679,7 @@ impl CasService {
             "server_start" => self.factory_server_start(req).await,
             "server_stop" => self.factory_server_stop(req).await,
             "server_list" => self.factory_server_list(req).await,
+            "candidate_request" => self.factory_candidate_request(req).await,
             _ => Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!("Unknown factory action: {action}"),
@@ -1696,6 +1699,7 @@ pub(crate) mod agent_search_system;
 #[cfg(feature = "mcp-proxy")]
 mod artifact_post;
 mod coordination_external_work;
+mod candidate_ops;
 mod core;
 mod db_branch_ops;
 mod epic_split_ops;

@@ -28,11 +28,12 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
-- **Pane budget:** ~150 words, answer first: findings, rejections, measurements, merge receipts, pointers. Timelines, gates and lane history go to notes/artifacts; no narration/recap.
+- **Pane budget:** ~150 words of prose, answer first: findings, rejections, measurements, merge receipts, pointers. Show flows, comparisons and bad news [visually](references/operator-reply.md). Timelines, gates and lane history go to notes/artifacts; no narration/recap.
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Commander answers:** reply once in the Claude/Codex pane. Web/phone receive the mirror, including offline catch-up. [Disabled or unmirrored supervisors](references/reference.md#verified-commander-messages) use explicit routing.
 - **Unprompted operator updates:** `target=operator kind=status|receipt|ask|blocker`, optional `attachment=<artifact-id>`; no pane prose.
+- **Pane text:** only for a decision or a result. A turn with neither ends with no text. Workers message only to state a need or ready.
 - **Need a key or token:** `target=operator kind=secret summary=<NAME> message="<what it is for, how to create it>"`; never ask for one in chat. You get the saved file's path ([secret requests](references/reference.md#secret-requests)).
 
 ### Drive to the exit

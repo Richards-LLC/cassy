@@ -392,7 +392,7 @@ fn hub_auto_fallback_warning_names_retry_and_fits_80_columns() {
     for expected in [
         "Tailscale Serve inactive; hub is loopback-only.",
         "Cause:",
-        "Retry: tailscale status && cas hub restart",
+        "Publication retries automatically in the background.",
     ] {
         assert!(warning.contains(expected), "missing {expected}: {warning}");
     }
@@ -468,7 +468,8 @@ fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful(
     assert!(hub["failure"].is_null(), "{receipt}");
     let warning = hub["transport_warning"].as_str().unwrap();
     assert!(warning.contains("Tailscale Serve inactive"), "{warning}");
-    assert!(hub["remedy"].as_str().unwrap().contains("cas hub restart"));
+    assert!(hub["remedy"].as_str().unwrap().contains("automatically"),
+        "Auto update must describe background recovery: {receipt}");
 }
 
 #[cfg(target_os = "linux")]
@@ -958,15 +959,18 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     let install = command(&["hub", "service", "install", "--tailscale-serve-port", "10046"]);
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if paths.read_process_record().is_ok_and(|record| record.public_url.is_some())
-            && ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
-                .timeout(Duration::from_millis(100)).call().is_ok() { break; }
-        assert!(Instant::now() < deadline, "isolated launchd hub did not become ready");
-        thread::sleep(Duration::from_millis(20));
-    }
-    let initial_pid = paths.read_process_record().unwrap().pid;
+    let wait_for_publication = || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(record) = paths.read_process_record()
+                && record.public_url.is_some()
+                && ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
+                    .timeout(Duration::from_millis(100)).call().is_ok() { return record; }
+            assert!(Instant::now() < deadline, "isolated launchd hub did not publish its route");
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let initial_pid = wait_for_publication().pid;
     let keep = command(&["hub", "start", "--port", &port.to_string()]);
     assert!(keep.status.success(), "{}", String::from_utf8_lossy(&keep.stderr));
     assert_eq!(paths.read_process_record().unwrap().pid, initial_pid);
@@ -978,7 +982,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     assert!(!home.path().join("mock-route").exists());
     let publish = command(&["hub", "start"]);
     assert!(publish.status.success(), "{}", String::from_utf8_lossy(&publish.stderr));
-    let first_pid = paths.read_process_record().unwrap().pid;
+    let first_pid = wait_for_publication().pid;
     assert_eq!(paths.read_process_record().unwrap().launched_by.as_deref(), Some("service"));
     assert!(paths.read_process_record().unwrap().public_url.is_some());
     socket.set(None);
@@ -1000,7 +1004,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     let restart = command(&["hub", "restart"]);
     assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
     assert!(restarted_at.elapsed() < Duration::from_secs(15));
-    let record = paths.read_process_record().unwrap();
+    let record = wait_for_publication();
     assert_ne!(record.pid, first_pid);
     assert_eq!(record.public_url.as_deref(), Some("https://launchd-proof.invalid:10046/"));
     let selected_socket = home.path().join("updated.socket");
@@ -1025,8 +1029,59 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     assert!(updated_at.elapsed() < Duration::from_secs(15));
     let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
     assert_eq!(receipt["hub_restart"]["verified"], true);
-    assert_eq!(paths.read_process_record().unwrap().public_url.as_deref(),
+    assert_eq!(wait_for_publication().public_url.as_deref(),
         Some("https://launchd-proof.invalid:10046/"));
+}
+
+/// Auto services remain useful locally when publication cannot be configured.
+#[cfg(unix)]
+#[test]
+fn auto_service_without_tailscale_keeps_healthy_loopback() {
+    for cause in ["missing", "NeedsLogin", "NeedsMachineAuth"] {
+        let home = private_home();
+        let bin = home.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        if cause != "missing" {
+            install_tailscale_mock(home.path(), &bin.join("tailscale"),
+                &format!("#!/bin/sh\nprintf '%s' '{{\"BackendState\":\"{cause}\",\"Self\":{{}}}}'\n"));
+        }
+        let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+        let (dead_port, _reservation) = reserve_refused_loopback_port();
+        let old_target = format!("http://127.0.0.1:{dead_port}");
+        let old_record = serde_json::from_value(serde_json::json!({
+            "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "old",
+            "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 443,
+            "tailscale_serve_target": old_target
+        })).unwrap();
+        paths.write_process_record(&old_record).unwrap();
+        let mut child = cas_process_command(home.path(), bin.as_os_str())
+            .args(["hub", "serve", "--port", "0", "--launched-by", "service", "--tailscale-serve"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let _cleanup = LegacyHubCleanup(vec![child.id()]);
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        loop {
+            if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
+                && paths.read_process_record().ok().and_then(|record| record.transport_warning)
+                    .is_some_and(|warning| !warning.contains("publication pending")) { break; }
+            assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(),
+                "Auto service must keep loopback for {cause}");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let record = paths.read_process_record().unwrap();
+        assert!(record.public_url.is_none());
+        assert!(record.transport_warning.is_some(), "fallback must explain {cause}");
+        assert_eq!(record.tailscale_serve_target.as_deref(), Some(old_target.as_str()),
+            "loopback fallback must retain exact legacy ownership for recovery");
+        assert!(ureq::get(&format!("http://127.0.0.1:{}/v1/health", record.port))
+            .timeout(Duration::from_secs(1)).call().is_ok());
+        let output = cas_command(home.path(), bin.as_os_str())
+            .args(["hub", "status", "--json"]).output().unwrap();
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["tailscale_serve"]["status"], "ok", "healthy fallback: {status}");
+        assert!(status["tailscale_serve"]["message"].as_str().unwrap().contains("loopback-only"));
+        let log = fs::read_to_string(paths.root().join("hub.log")).unwrap();
+        assert!(log.contains(if cause == "missing" { "unavailable" } else { cause }), "{log}");
+    }
 }
 
 #[cfg(unix)]
@@ -1054,25 +1109,25 @@ fn service_start_retries_tailscale_before_publication() {
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve", "--tailscale-serve-port", "10047"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    // The daemon stays unavailable beyond the first process's whole retry
-    // budget. Only the old process record proves ownership (no Serve receipt).
+    // No Serve receipt exists; only the old process record proves the dead
+    // route belongs to Cassy. The same process must survive the outage.
     fs::write(home.path().join("offline"), "").unwrap();
-    let mut failed = launch();
-    let mut cleanup = LegacyHubCleanup(vec![failed.id()]);
+    let mut child = launch();
+    let _cleanup = LegacyHubCleanup(vec![child.id()]);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while failed.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "offline service must exhaust its retries");
+    loop {
+        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
+            && paths.read_process_record().ok().and_then(|record| record.transport_warning)
+                .is_some_and(|warning| !warning.contains("publication pending")) { break; }
+        assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(), "offline service must stay on loopback");
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(!failed.wait().unwrap().success());
-    cleanup.0.clear();
     assert_eq!(fs::read_to_string(home.path().join("mock-route")).unwrap(), old_target);
     fs::remove_file(home.path().join("offline")).unwrap();
-    let mut child = launch();
-    cleanup.0.push(child.id());
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
+        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
+            && paths.read_process_record().ok().is_some_and(|record| record.public_url.is_some()) { break; }
         assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(),
             "service never completed publication");
         thread::sleep(Duration::from_millis(20));
@@ -1088,41 +1143,82 @@ fn service_start_retries_tailscale_before_publication() {
 
 #[cfg(unix)]
 #[test]
-fn service_publication_failure_survives_exit_in_status_and_logs() {
+fn service_publication_failure_keeps_loopback_and_recovers_without_restart() {
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) echo 'permission denied by fixture' >&2; exit 1 ;;\nesac\n{}",
+    let script = format!("#!/bin/sh\ncase \"$*\" in\n 'serve --bg '*) if [ -f \"$HOME/hold-serve\" ]; then echo started > \"$HOME/serve-started\"; /bin/sleep 30; fi; if [ -f \"$HOME/deny-serve\" ]; then echo 'permission denied by fixture' >&2; exit 1; fi ;;\nesac\n{}",
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
     install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
     fs::write(home.path().join("mock-port"), "10047").unwrap();
+    fs::write(home.path().join("deny-serve"), "denied").unwrap();
     let mut child = cas_process_command(home.path(), bin.as_os_str())
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve", "--tailscale-serve-port", "10047"])
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let _cleanup = LegacyHubCleanup(vec![child.id()]);
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let mut cleanup = LegacyHubCleanup(vec![child.id()]);
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let deadline = Instant::now() + Duration::from_secs(20);
-    while child.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline,
-            "failed publication must exit so the service manager retries");
+    let fallback = loop {
+        assert!(child.try_wait().unwrap().is_none(), "Auto publication failure must keep the service alive");
+        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") {
+            let record = paths.read_process_record().unwrap();
+            if record.transport_warning.as_deref().is_some_and(|warning| warning.contains("permission-denied")) { break record; }
+        }
+        assert!(Instant::now() < deadline, "loopback fallback did not become ready");
+        thread::sleep(Duration::from_millis(20));
+    };
+    let endpoint = format!("http://127.0.0.1:{}", fallback.port);
+    assert!(ureq::get(&format!("{endpoint}/v1/health")).timeout(Duration::from_secs(1)).call().is_ok());
+    let log = fs::read_to_string(paths.root().join("hub.log")).unwrap();
+    assert!(log.contains("permission-denied"), "{log}");
+    let status = cas_process_command(home.path(), bin.as_os_str()).args(["hub", "status", "--json"]).output().unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(status["tailscale_serve"]["message"].as_str().unwrap().contains("permission-denied"), "{status}");
+    let start = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "start", "--port", &fallback.port.to_string(), "--tailscale-serve", "--tailscale-serve-port", "10047"])
+        .output().unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    assert_eq!(paths.read_process_record().unwrap().pid, fallback.pid, "a concurrent start must retain the recovering Auto service");
+    fs::remove_file(home.path().join("deny-serve")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let recovered = loop {
+        assert!(child.try_wait().unwrap().is_none(), "recovery must not restart the hub");
+        let record = paths.read_process_record().unwrap();
+        if record.public_url.is_some() && record.transport_warning.is_none() { break record; }
+        assert!(Instant::now() < deadline, "background publication did not recover");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(recovered.pid, fallback.pid);
+    let target = recovered.tailscale_serve_target.unwrap();
+    assert!(ureq::get(&format!("{target}/v1/health")).timeout(Duration::from_secs(1)).call().is_ok(), "recovered trusted listener must serve the route");
+    let stop = cas_process_command(home.path(), bin.as_os_str()).args(["hub", "stop", "--force"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    child.wait().unwrap();
+    cleanup.0.clear();
+    assert!(!home.path().join("mock-route").exists(), "stop must remove the recovered route");
+
+    fs::write(home.path().join("hold-serve"), "hold").unwrap();
+    let mut child = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "serve", "--port", "0", "--launched-by", "service", "--tailscale-serve", "--tailscale-serve-port", "10047"])
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    cleanup.0.push(child.id());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !home.path().join("serve-started").exists() {
+        assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(), "background probe did not reach the held command");
         thread::sleep(Duration::from_millis(20));
     }
-    let output = child.wait_with_output().unwrap();
-    assert!(!output.status.success(), "failed publication must trigger service-manager restart");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("permission-denied"), "{stderr}");
-    let log = fs::read_to_string(home.path().join(".cas/hub/hub.log")).unwrap();
-    assert!(log.contains("permission-denied"), "{log}");
-    let status = cas_process_command(home.path(), bin.as_os_str())
-        .args(["hub", "status", "--json"]).output().unwrap();
-    assert!(!status.status.success());
-    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
-    assert!(status["tailscale_serve"]["message"].as_str().unwrap()
-        .contains("permission-denied"), "{status}");
-    let human = cas_process_command(home.path(), bin.as_os_str())
-        .args(["hub", "status"]).output().unwrap();
-    let human = String::from_utf8_lossy(&human.stdout);
-    assert!(human.contains("permission-denied"), "{human}");
+    let pending = paths.read_process_record().unwrap();
+    assert!(ureq::get(&format!("http://127.0.0.1:{}/v1/health", pending.port))
+        .timeout(Duration::from_secs(1)).call().is_ok(), "a stuck CLI must not delay loopback");
+    let stopped_at = Instant::now();
+    let stop = cas_process_command(home.path(), bin.as_os_str()).args(["hub", "stop", "--force"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    child.wait().unwrap();
+    cleanup.0.clear();
+    assert!(stopped_at.elapsed() < Duration::from_secs(10), "stop must cancel the held 30-second CLI command");
+    assert!(!home.path().join("mock-route").exists(), "an in-flight probe must not publish after stop");
 }
 
 #[cfg(unix)]

@@ -4,6 +4,7 @@ mod loaded_proof;
 mod registry_upkeep;
 mod docs_upkeep;
 mod proof_claims;
+mod gate_preflight;
 #[cfg(test)]
 mod loaded_proof_tests;
 pub(crate) mod task_attribution;
@@ -7872,6 +7873,12 @@ impl CasCore {
             )));
         }
 
+        // A delivery's refusals collect here, so one reply names every failure.
+        // They are returned before anything can park, verify or close.
+        let park_gated =
+            close_disposition.requires_delivery_gates() && task.task_type != TaskType::Epic;
+        let mut gate_refusals = Vec::new();
+
         // GH #1235: a reported/future proof is not completed evidence merely
         // because verification is disabled or another gate approves the task.
         if let Some(reason) = req.reason.as_deref() {
@@ -7884,7 +7891,10 @@ impl CasCore {
                     self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf()
                 });
             if let Err(message) = proof_claims::validate_claims(reason, &self.cas_root, &receipt_root) {
-                return Ok(Self::tool_error(message));
+                if !park_gated {
+                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
+                }
+                gate_refusals.push(message);
             }
         }
 
@@ -7901,7 +7911,7 @@ impl CasCore {
                 inline_external_ref.as_deref(),
             )
         {
-            return Ok(Self::tool_error(message));
+            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
         }
 
         if !(supervisor_override && is_supervisor_from_env())
@@ -7911,9 +7921,13 @@ impl CasCore {
                 close_reason_artifacts_root(&self.cas_root).as_deref(),
             )
         {
-            return Ok(Self::tool_error(format!(
+            let message = format!(
                 "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}` as evidence. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<project-key>/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. If that path is discussion rather than a cited receipt, cite your durable artifact under artifacts_root/<project-key>/<task-id>/ in the same reason and the mention will pass. A supervisor may use supervisor_override=true only for a legitimate historical reference."
-            )));
+            );
+            if !park_gated {
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
+            }
+            gate_refusals.push(message);
         }
 
         // An explicitly persisted proof cycle is stronger than configuration,
@@ -7923,10 +7937,10 @@ impl CasCore {
         if close_disposition != TaskCloseDisposition::Decision {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                 Err(error) => {
-                    return Ok(Self::tool_error(format!(
+                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
                         "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. Cassy refuses to infer close authority.",
                         req.id, error
-                    )));
+                    ))));
                 }
                 Ok(Some(dispatch))
                     if matches!(
@@ -7965,7 +7979,7 @@ impl CasCore {
                                 )),
                                 data: None,
                             })?;
-                        return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
                             &req.id,
                             gate_text::VerificationTimeout::Dispatch {
                                 dispatch_id: &timed_out.id,
@@ -7974,7 +7988,7 @@ impl CasCore {
                             },
                             crate::mcp::tools::core::guidance::supervisor_prefix(),
                             crate::mcp::tools::core::guidance::caller_prefix(),
-                        )));
+                        ))));
                     }
                     // cas-5c33: a dispatch whose bound proof no longer holds
                     // can never be resolved — `verification action=add`
@@ -8018,7 +8032,7 @@ impl CasCore {
                                 if supervisor_override { req.reason.as_deref() } else { None },
                             )
                         {
-                            return Ok(Self::tool_error(message.to_string()));
+                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message.to_string())));
                         }
                         let sup_ver = format!("{}verification", crate::mcp::tools::core::guidance::supervisor_prefix());
                         let bound_head = dispatch
@@ -8026,16 +8040,16 @@ impl CasCore {
                             .as_ref()
                             .map(|proof| format!(" Bound head: {}.", proof.head_commit))
                             .unwrap_or_default();
-                        return Ok(Self::tool_error(format!(
+                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
                             "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.{} If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
                             req.id, dispatch.id, bound_head, sup_ver, req.id, dispatch.id
-                        )));
+                        ))));
                     }
                 }
                 Ok(Some(dispatch))
                     if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
                 {
-                    return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
                         &req.id,
                         gate_text::VerificationTimeout::Dispatch {
                             dispatch_id: &dispatch.id,
@@ -8044,7 +8058,7 @@ impl CasCore {
                         },
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
                         crate::mcp::tools::core::guidance::caller_prefix(),
-                    )));
+                    ))));
                 }
                 Ok(_) => {}
             }
@@ -8106,7 +8120,8 @@ impl CasCore {
                     {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(
+                            message: Cow::from(gate_preflight::refusal_reply(
+                                gate_refusals,
                                 super::stale_close_guard::halt_blocks_task_work_message(
                                     &format!(
                                         "{}task action=close",
@@ -8114,7 +8129,7 @@ impl CasCore {
                                     ),
                                     super::stale_close_guard::halt_prompt_id(&agent.metadata),
                                 ),
-                            ),
+                            )),
                             data: None,
                         });
                     }
@@ -8150,7 +8165,7 @@ impl CasCore {
                 {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(msg.to_string()),
+                        message: Cow::from(gate_preflight::refusal_reply(gate_refusals, msg.to_string())),
                         data: None,
                     });
                 }
@@ -8216,7 +8231,7 @@ impl CasCore {
                     target,
                 ) {
                     Ok(context) => Some(context),
-                    Err(message) => return Ok(Self::tool_error(message)),
+                    Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
                 }
             }
             None => None,
@@ -8229,7 +8244,7 @@ impl CasCore {
         let close_project_root = match resolved_close_repo {
             Ok(repo_root) => repo_root,
             Err(message) if factory_merge_enforcement => {
-                return Ok(Self::tool_error(message));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
             }
             Err(_) => self
                 .cas_root
@@ -8309,7 +8324,7 @@ impl CasCore {
                 (Some(context), Some(receipt)) => {
                     match validate_pushed_task_receipt(&task, context, receipt) {
                         Ok(boundary) => Some(boundary),
-                        Err(message) => return Ok(Self::tool_error(message)),
+                        Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
                     }
                 }
                 _ => None,
@@ -8325,7 +8340,7 @@ impl CasCore {
         } else {
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
                 Ok(path) => path,
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
             }
         };
         if retired_receipt.is_some() {
@@ -8334,7 +8349,7 @@ impl CasCore {
                 req.commit_receipt.as_deref(), true)
             {
                 Ok(evidence) => task.deliverables.pre_close_hook = Some(evidence),
-                Err(message) => return Ok(Self::tool_error(format!("PRE-CLOSE HOOK FAILED: {message}"))),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!("PRE-CLOSE HOOK FAILED: {message}")))),
             }
         }
         let standalone_target_repo = if close_repo_verified {
@@ -8378,7 +8393,7 @@ impl CasCore {
                 .map(|(receipt, _)| receipt.commit_sha),
         ) {
             Ok(identity) => identity,
-            Err(message) => return Ok(Self::tool_error(message)),
+            Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
         };
         // An approved proof can be followed by an administrative re-claim
         // before the worker retries close. Keep the exact delivery commits
@@ -8458,7 +8473,7 @@ impl CasCore {
                     match resolve_close_gate_default_branch(&close_project_root) {
                         Ok(branch) => branch,
                         Err(message) if factory_merge_enforcement => {
-                            return Ok(Self::tool_error(message));
+                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
                         }
                         Err(_) => "master".to_string(),
                     }
@@ -8488,7 +8503,7 @@ impl CasCore {
                 check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
             if !unmerged.is_empty() {
                 let branch_list = unmerged.join("\n  - ");
-                return Ok(Self::tool_error(format!(
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
                     "⚠️ MERGE REQUIRED\n\n\
                     Epic {} has {} unmerged worker branch(es):\n  - {}\n\n\
                     Worker branches must be merged to {} before closing the epic.\n\n\
@@ -8504,7 +8519,7 @@ impl CasCore {
                     target_branch,
                     req.id,
                     tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
-                )));
+                ))));
             }
 
             // cas-8f8f: per-child factory-branch merge-state guard for
@@ -8577,20 +8592,20 @@ impl CasCore {
                     // supervisor-only, and audited, and it only exists once the
                     // gate has actually blocked.
                     let Some(reason) = req.stranded_branch_override.as_deref() else {
-                        return Ok(Self::tool_error(msg));
+                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, msg)));
                     };
                     let narrative = match validate_stranded_branch_override_reason(reason) {
                         Ok(narrative) => narrative,
                         Err(error) => {
-                            return Ok(Self::tool_error(format!(
+                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
                                 "EPIC CLOSE OVERRIDE REJECTED: {error}"
-                            )));
+                            ))));
                         }
                     };
                     let caller = match self.resolve_live_supervisor_authority() {
                         Ok(caller) => caller,
                         Err(error) => {
-                            return Ok(Self::tool_error(match error {
+                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, match error {
                                 SupervisorAuthorityError::Identity(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: stranded_branch_override requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                                 ),
@@ -8606,7 +8621,7 @@ impl CasCore {
                                     "EPIC CLOSE OVERRIDE REJECTED: only a live registered supervisor may use stranded_branch_override. Caller `{}` has role {}.",
                                     caller.name, caller.role
                                 ),
-                            }));
+                            })));
                         }
                     };
                     // The waived gate output is stored verbatim, but not before
@@ -8738,12 +8753,12 @@ impl CasCore {
             // therefore no branch-sensitive delivery gate. Keep that
             // lightweight path available without passing a fake ref to Git.
             Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
-            Err(message) => return Ok(Self::tool_error(message)),
+            Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
         };
         let measured_evidence = if let Some(receipt) = evidence_only_receipt.as_ref() {
             match evidence_only::measure(&close_project_root, &task, &resolved_parent_branch, &receipt.reference) {
                 Ok(measured) => Some(measured),
-                Err(message) => return Ok(Self::tool_error(format!("EVIDENCE ONLY CLOSE REJECTED: {message}"))),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!("EVIDENCE ONLY CLOSE REJECTED: {message}")))),
             }
         } else { None };
 
@@ -8759,7 +8774,7 @@ impl CasCore {
                 &task, &close_project_root, &resolved_parent_branch, Some(receipt),
             );
             if supplied.is_none() || supplied != landed {
-                return Ok(Self::tool_error("INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash"));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash")));
             }
             let original = batch.delivered_head.clone();
             close_notes.record(&mut task, &format!(
@@ -8786,7 +8801,7 @@ impl CasCore {
                 &resolved_parent_branch,
             )
         {
-            return Ok(Self::tool_error(message));
+            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
         }
 
         // A resolved approval owns its exact correction head, even if the
@@ -8805,14 +8820,14 @@ impl CasCore {
         {
             let reviewed = match verified_delivery::current(&self.cas_root, &task) {
                 Ok(reviewed) => reviewed,
-                Err(error) => return Ok(Self::tool_error(error)),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, error))),
             };
             if let Some(reviewed) = reviewed.as_ref() {
                 let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
                 match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed) {
                     Ok(Some(current)) => task = current,
                     Ok(None) => {}
-                    Err(error) => return Ok(Self::tool_error(error)),
+                    Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, error))),
                 }
             }
             reviewed
@@ -8887,7 +8902,7 @@ impl CasCore {
                     );
                     None
                 }
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
             }
         } else {
             None
@@ -8898,7 +8913,7 @@ impl CasCore {
                 &resolved_parent_branch, receipt, commit_receipt_window.as_ref(),
             )
         {
-            return Ok(Self::tool_error(refusal));
+            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, refusal)));
         }
         let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
 
@@ -8908,29 +8923,29 @@ impl CasCore {
         // on the next attempt, and no methodology or synthetic receipt is set.
         let empty_delivery = if no_delivery_declared {
             if recovery_branch.is_some() || !(close_repo_verified || worker_worktree_path.is_some()) {
-                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: a verified repository without a recovery delivery is required."));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "NO DELIVERY CLOSE REJECTED: a verified repository without a recovery delivery is required.")));
             }
             let actor = match self.get_registered_agent_id_read_only()
                 .and_then(|id| self.open_agent_store()?.get(&id).map_err(|error|
                     Self::error(ErrorCode::INVALID_REQUEST, error.to_string())))
             {
                 Ok(actor) => actor,
-                Err(error) => return Ok(Self::tool_error(format!(
-                    "NO DELIVERY CLOSE REJECTED: registered caller required ({error})."))),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                    "NO DELIVERY CLOSE REJECTED: registered caller required ({error}).")))),
             };
             let passes = match cas_store::list_qa_passes(&self.cas_root, &task.id) {
                 Ok(passes) => passes,
-                Err(error) => return Ok(Self::tool_error(format!(
-                    "NO DELIVERY CLOSE REJECTED: QA history is unavailable ({error})."))),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                    "NO DELIVERY CLOSE REJECTED: QA history is unavailable ({error}).")))),
             };
             if passes.iter().any(|pass| !pass.is_withdrawn()) {
-                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: a recorded QA round still binds this task; a declaration cannot withdraw it."));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "NO DELIVERY CLOSE REJECTED: a recorded QA round still binds this task; a declaration cannot withdraw it.")));
             }
             match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id) {
                 Ok(None) => {}
-                Ok(Some(_)) => return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: a worker delivery receipt is recorded.")),
-                Err(error) => return Ok(Self::tool_error(format!(
-                    "NO DELIVERY CLOSE REJECTED: worker delivery history is unavailable ({error})."))),
+                Ok(Some(_)) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "NO DELIVERY CLOSE REJECTED: a worker delivery receipt is recorded."))),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                    "NO DELIVERY CLOSE REJECTED: worker delivery history is unavailable ({error}).")))),
             }
             let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
             let measurement = match measure_no_delivery(
@@ -8938,8 +8953,8 @@ impl CasCore {
                 commit_receipt_window.as_ref(),
             ) {
                 Ok(measurement) => measurement,
-                Err(message) => return Ok(Self::tool_error(format!(
-                    "NO DELIVERY CLOSE REJECTED: {message}"))),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                    "NO DELIVERY CLOSE REJECTED: {message}")))),
             };
             close_notes.record(&mut task, &format!(
                 "No delivery declared by {}: {}. {measurement} QA and factory-branch delivery gates do not apply for this attempt; verification and dirty-work checks remain required.",
@@ -9015,18 +9030,14 @@ impl CasCore {
                     qa_receipt,
                 )
             });
+            let mut upkeep_refusals = Vec::new();
             match registry_upkeep::at_park(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices = notices,
-                Err(message) => {
-                    let recovery = self.return_merged_delivery_for_source_fix(
-                        &task, &evidence_repo, &resolved_parent_branch, &message,
-                    );
-                    return Ok(Self::tool_error(format!("{message}{recovery}")));
-                }
+                Err(message) => upkeep_refusals.push(message),
             }
             match docs_upkeep::at_park(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
@@ -9034,11 +9045,18 @@ impl CasCore {
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
-                Err(message) => {
-                    let recovery = self.return_merged_delivery_for_source_fix(
-                        &task, &evidence_repo, &resolved_parent_branch, &message,
-                    );
-                    return Ok(Self::tool_error(format!("{message}{recovery}")));
+                Err(message) => upkeep_refusals.push(message),
+            }
+            // Returning a merged delivery changes the task, so it happens once,
+            // for all of its upkeep findings, and ends this attempt.
+            if !upkeep_refusals.is_empty() {
+                let message = upkeep_refusals.join("\n\n");
+                let recovery = self.return_merged_delivery_for_source_fix(
+                    &task, &evidence_repo, &resolved_parent_branch, &message,
+                );
+                gate_refusals.push(format!("{message}{recovery}"));
+                if !recovery.is_empty() {
+                    return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                 }
             }
             let qa_base = qa_window.and_then(|window| {
@@ -9050,7 +9068,7 @@ impl CasCore {
                 )
             });
             if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
-                return Ok(Self::tool_error(message));
+                gate_refusals.push(message);
             }
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
@@ -9075,7 +9093,7 @@ impl CasCore {
                         ),
                     );
                 }
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => gate_refusals.push(message),
             }
         }
 
@@ -9085,10 +9103,12 @@ impl CasCore {
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            self.prepare_merged_verification_dispatch(
-                &task, &req, &close_project_root, &resolved_parent_branch,
-                declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
-            )?;
+            if gate_refusals.is_empty() {
+                self.prepare_merged_verification_dispatch(
+                    &task, &req, &close_project_root, &resolved_parent_branch,
+                    declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
+                )?;
+            }
             match run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,
@@ -9108,9 +9128,15 @@ impl CasCore {
                     close_notes.record(&mut task, &note);
                 }
                 MergeStateGateOutcome::Unresolved(message) => {
-                    return Ok(Self::tool_error(message));
+                    gate_refusals.push(message);
+                    return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                 }
                 MergeStateGateOutcome::Reject(msg) => {
+                    // MERGE REQUIRED is the park these refusals stand in front
+                    // of; anything else this outcome carries is another refusal.
+                    if !gate_refusals.is_empty() && !gate_preflight::is_merge_handoff(&msg) {
+                        gate_refusals.push(msg.clone());
+                    }
                     // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
                     // supervisor's merge will actually succeed — it fires for
                     // ANY stranded commits, whether or not they'd conflict.
@@ -9185,27 +9211,26 @@ impl CasCore {
                             )
                         })
                     {
+                        if !gate_refusals.is_empty() {
+                            return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+                        }
                         return Ok(Self::tool_error(msg));
                     }
                     // cas-44e93: the merge reads the pushed branch, so a
                     // commit origin lacks can never be the delivery anchor.
-                    if let Some(branch) = measured_branch.as_deref()
-                        && let Some(tip) = anchor.as_deref()
-                    {
-                        if let Some(pushed) = unpushed_delivery_tip(
-                            &close_project_root,
-                            branch,
-                            tip,
-                            task.delivery_mode,
-                        ) {
-                            return Ok(Self::tool_error(unpushed_delivery_tip_refusal(
-                                branch, tip, &pushed,
-                            )));
-                        }
-                    }
+                    // The anchor checks below judge a pushed tip, so they wait
+                    // for the push; the tip's receipts can be read already.
+                    let unpushed_refusal = measured_branch.as_deref().zip(anchor.as_deref()).and_then(|(branch, tip)| {
+                        unpushed_delivery_tip(&close_project_root, branch, tip, task.delivery_mode)
+                            .map(|pushed| unpushed_delivery_tip_refusal(branch, tip, &pushed))
+                    });
+                    let tip_is_pushed = unpushed_refusal.is_none();
+                    gate_refusals.extend(unpushed_refusal);
                     // cas-749f: close must not park a receipt absent from
                     // the source the supervisor will actually merge.
-                    let parking = if task.status != TaskStatus::AwaitingMerge {
+                    let parking = if task.status != TaskStatus::AwaitingMerge
+                        && tip_is_pushed && gate_refusals.is_empty()
+                    {
                         self.advance_commit_time_anchor_before_park_with_receipt(
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, measured_branch.as_deref(), anchor.as_deref(),
@@ -9218,7 +9243,7 @@ impl CasCore {
                             &resolved_parent_branch, anchor.as_deref(),
                         ).or_else(|| task.deliverables.factory_branch_anchor.clone())
                     } else { parking.deliverables.factory_branch_anchor.clone().or(anchor.clone()) };
-                    if let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
+                    if tip_is_pushed && let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
                         for boundary in req.commit_receipt.as_deref().into_iter()
                             .chain(park_anchor.as_deref())
                         {
@@ -9233,16 +9258,18 @@ impl CasCore {
                                 let receipt_was_tip = req.commit_receipt.as_deref()
                                     .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
                                     .is_some_and(|receipt| commit_ids_match(&receipt, tip));
-                                if receipt_was_tip {
-                                    return Ok(Self::tool_error(format!(
+                                gate_refusals.push(if receipt_was_tip {
+                                    format!(
                                         "PARK REFUSED: recorded delivery anchor {boundary} is absent from {branch}, and commit_receipt={tip} cannot replace it: the commits since {branch} left the target are not all attributable to {id} (another task's commit or work after a sibling's lease), or this is a rewritten delivery. No park or anchor change was recorded. Do not retry the same receipt; ask the supervisor to review the delivery and request changes or rebind the branch.",
                                         id = task.id,
-                                    )));
-                                }
-                                return Ok(Self::tool_error(format!(
-                                    "PARK REFUSED: delivery anchor {boundary} is absent from {branch} at pushed tip {tip}. No park or anchor change was recorded. Re-run `{}task action=close id={} commit_receipt={tip}` at that tip. If the rewritten delivery cannot be attributed, ask the supervisor to request changes and review the replacement delivery.",
-                                    crate::mcp::tools::core::guidance::caller_prefix(), task.id,
-                                )));
+                                    )
+                                } else {
+                                    format!(
+                                        "PARK REFUSED: delivery anchor {boundary} is absent from {branch} at pushed tip {tip}. No park or anchor change was recorded. Re-run `{}task action=close id={} commit_receipt={tip}` at that tip. If the rewritten delivery cannot be attributed, ask the supervisor to request changes and review the replacement delivery.",
+                                        crate::mcp::tools::core::guidance::caller_prefix(), task.id,
+                                    )
+                                });
+                                return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                             }
                         }
                     }
@@ -9250,6 +9277,7 @@ impl CasCore {
                     // a successful re-park of the pushed tip. Shared advance
                     // callers still retain their silent attribution fence.
                     if task.status == TaskStatus::AwaitingMerge
+                        && tip_is_pushed
                         && let (Some(recorded), Some(tip)) = (
                             task.deliverables.factory_branch_anchor.as_deref(), anchor.as_deref(),
                         )
@@ -9280,21 +9308,29 @@ impl CasCore {
                         if merge_conflicted && !task.deliverables.merge_conflicted {
                             self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                         }
-                        return Ok(Self::tool_error(format!(
+                        gate_refusals.push(format!(
                             "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored pushed tip {tip}. No anchor or QA round changed. {remedy}",
-                        )));
+                        ));
+                        return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
                     // Focused-test receipts at this
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
                     // parking locks the proof scope.
+                    // A refused attempt skips speculative anchor advancement, but
+                    // still checks proof against the pushed tip, not its old anchor.
+                    let receipt_tip = if tip_is_pushed && gate_refusals.is_empty() {
+                        park_anchor.as_deref()
+                    } else { anchor.as_deref() };
                     if (task.status != TaskStatus::AwaitingMerge
+                        || !tip_is_pushed
                         || park_anchor != task.deliverables.factory_branch_anchor)
-                        && let Some(tip) = park_anchor.as_deref()
+                        && let Some(tip) = receipt_tip
                         && let Some(window) = commit_receipt_window.as_ref()
                         && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
-                        && let Some(refusal) = receipt_scope::park_refusal(
+                    {
+                        gate_refusals.extend(receipt_scope::park_refusals(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                             &task,
@@ -9304,9 +9340,10 @@ impl CasCore {
                             task_attribution::range_bounds(
                                 &close_project_root, &resolved_parent_branch, window, Some(tip),
                             ).as_deref(),
-                        )
-                    {
-                        return Ok(Self::tool_error(refusal));
+                        ));
+                    }
+                    if !gate_refusals.is_empty() {
+                        return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
@@ -9403,6 +9440,9 @@ impl CasCore {
                     return Ok(Self::tool_error(msg));
                 }
             }
+            if !gate_refusals.is_empty() {
+                return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+            }
 
             // Exact approved B must land, even when legacy branch selection
             // or patch-equivalence admitted its earlier merged anchor A.
@@ -9434,6 +9474,9 @@ impl CasCore {
                     close_notes.record(&mut task, &note);
                 }
             }
+        }
+        if !gate_refusals.is_empty() {
+            return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
         }
 
         // cas-87e7 (GH #382): a child delivery that is already proven on an

@@ -3542,6 +3542,11 @@ impl FactoryDaemon {
             self.session_name.clone(),
             std::sync::Arc::clone(&self.shutdown),
         );
+        // A worker's candidate request builds here, with no supervisor turn.
+        let _candidate_queue = crate::factory_candidate_queue::spawn_runner(
+            self.app.cas_dir().to_path_buf(),
+            std::sync::Arc::clone(&self.shutdown),
+        );
         // cas-77f39 (GH #1210, factory loop v2 §5): output frames are capped
         // and coalesced; input echo is drawn at once. The caps are read once,
         // before this thread becomes a lane.
@@ -3705,7 +3710,6 @@ impl FactoryDaemon {
                     loop_progress.record_reset(outcome);
                 }
                 self.take_supervisor_restart_request();
-                crate::qa_batch_overdue::tick(self.app.cas_dir());
             }
             self.advance_supervisor_restart().await;
 
@@ -4780,13 +4784,30 @@ impl FactoryDaemon {
         // the actionable cases through the durable supervisor
         // wake lane before ordinary prompt injection.
         // GH #1165: on the store worker, in event order.
-        if !delivery_events.is_empty() {
+        let blocked_tasks: Vec<_> = self.app.director_data().ready_tasks.iter()
+            .filter(|task| task.status == cas_types::TaskStatus::Blocked
+                && task.assignee.as_deref().is_some_and(|assignee| {
+                    let name = self.app.director_data().agent_id_to_name.get(assignee).map(String::as_str).unwrap_or(assignee);
+                    self.app.worker_names().iter().any(|worker| worker == name)
+                }))
+            .filter(|_| self.app.auto_prompt_enabled() && self.app.auto_prompt_config().on_task_blocked)
+            .map(|task| task.id.clone()).collect();
+        if !delivery_events.is_empty() || !blocked_tasks.is_empty() {
             let cas_dir = self.app.cas_dir().to_path_buf();
             let events = delivery_events
                 .iter()
                 .map(|event| (event.clone(), self.app.worker_attention_episode_start(event)))
                 .collect::<Vec<_>>();
             store_worker.submit("worker attention relays", move || {
+                // Reconcile even on a quiet refresh: an owned dispatch can
+                // expire without another worker turn or a status transition.
+                for task in &blocked_tasks {
+                    if let Err(error) = crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert(
+                        &cas_dir, task, chrono::Utc::now(),
+                    ) {
+                        tracing::warn!(task_id = %task, %error, "blocked lifecycle reconciliation failed");
+                    }
+                }
                 for (event, episode_start) in &events {
                     enqueue_worker_attention_relay_for_episode(&cas_dir, event, *episode_start);
                 }

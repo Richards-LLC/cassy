@@ -294,8 +294,9 @@ it("never inserts a renderer's scripts, event handlers or foreignObject", async 
 it("renders unified diff lines literally and collapses long changes", async () => {
   const root = document.createElement("div"); document.body.append(root);
   const patch = ['--- a/app.ts', '+++ b/app.ts', '@@ -1,26 +1,26 @@', '-<script>bad()</script>', '+safe()', '--- SQL comment', '+++ counter', ...Array.from({ length: 24 }, (_, i) => ` context ${i}`)].join("\n");
-  const snippet = "-old()\n+new()";
-  root.append(...renderMarkdown(document, `\`\`\`diff\n${patch}\n\`\`\`\n\n\`\`\`diff\n${snippet}\n\`\`\``));
+  const snippet = "--- a/note.txt\n+++ b/note.txt\n- delivered after 11.5 minutes\n+ delivered in about 1 second\n unchanged";
+  const noChange = "--- a/note.txt\n+++ b/note.txt\nrename only";
+  root.append(...renderMarkdown(document, `\`\`\`diff\n${patch}\n\`\`\`\n\n\`\`\`diff\n${snippet}\n\`\`\`\n\n\`\`\`diff\n${noChange}\n\`\`\``));
   await vi.waitFor(() => expect(root.querySelector("details")).not.toBeNull());
   expect(root.querySelector("details")?.open).toBe(false);
   expect(root.querySelector("summary")?.textContent).toContain("lines");
@@ -306,8 +307,11 @@ it("renders unified diff lines literally and collapses long changes", async () =
   expect([...root.querySelectorAll('[data-change="remove"]')].some((row) => row.textContent?.includes("--- SQL comment"))).toBe(true);
   expect([...root.querySelectorAll('[data-change="add"]')].some((row) => row.textContent?.includes("+++ counter"))).toBe(true);
   await vi.dynamicImportSettled();
-  const code = [...root.querySelectorAll("pre.markdown-code")].find((node) => node.textContent === snippet)!;
+  const handwritten = root.querySelectorAll(".rich-diff")[1]!;
+  expect([...handwritten.querySelectorAll<HTMLElement>(".diff-line")].map((row) => row.dataset.change)).toEqual(["header", "header", "remove", "add", "context"]);
+  expect(handwritten.querySelector(".diff-numbers")).toBeNull();
+  const code = [...root.querySelectorAll("pre.markdown-code")].find((node) => node.textContent === noChange)!;
   expect(code).toBeDefined(); expect(code.hasAttribute("aria-label")).toBe(false);
-  expect(root.querySelectorAll(".rich-diff")).toHaveLength(1);
+  expect(root.querySelectorAll(".rich-diff")).toHaveLength(2);
   expect(root.querySelector("script")).toBeNull(); root.remove();
 });

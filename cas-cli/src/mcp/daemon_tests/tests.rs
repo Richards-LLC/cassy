@@ -67,6 +67,10 @@ async fn nested_harness_cannot_take_over_live_factory_identity_cas_b815() {
                 .is_err(),
             "an inherited CAS_SESSION_ID must not bind another live {role}'s MCP identity"
         );
+        assert!(core.get_registered_agent_id_read_only().is_err(),
+            "read-only guidance must not cache another live {role}'s identity");
+        assert!(core.get_agent_id().is_err(),
+            "a refused read-only lookup must not authorize later tools");
         let nested_pid = std::process::id();
         for event in [
             DaemonEvent::SessionStart {
@@ -535,10 +539,22 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
 /// socket reports a different session id for the same Claude Code PID.
 #[test]
 fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
+    let _env = TestEnvGuard::temp_home();
     let temp = TempDir::new().expect("temp project");
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
     let cc_pid = std::process::id();
+    struct Bootstrap(std::process::Child);
+    impl Drop for Bootstrap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // Hold an owned child on stdin, so PID liveness cannot depend on the
+    // host assigning cc_pid + 1 to an unrelated short-lived process.
+    let bootstrap = Bootstrap(std::process::Command::new("sh")
+        .args(["-c", "read line"]).stdin(std::process::Stdio::piped()).spawn().unwrap());
 
     let mut original = Agent::new(
         "worker-established-session".to_string(),
@@ -549,8 +565,12 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     // Eager MCP bootstrap runs in a child process: it records its own PID
     // and the Claude Code process as `ppid`. The follow-up socket event
     // carries that Claude Code PID directly.
-    original.pid = Some(cc_pid.checked_add(1).expect("non-max test pid"));
+    original.pid = Some(bootstrap.0.id());
     original.ppid = Some(cc_pid);
+    // Real MCP bootstrap fingerprints its process. That evidence lets the
+    // ownership check validate this child's actual parent, even when the
+    // parent is a test binary rather than a named harness.
+    stamp_pid_fingerprint(&mut original, bootstrap.0.id());
     agent_store
         .register(&original)
         .expect("register original worker");

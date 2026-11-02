@@ -26,6 +26,8 @@ pub(super) struct Scanner {
     cursors: HashMap<String, Cursor>,
     misses: HashMap<String, (SupervisorSource, Instant)>,
     ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
+    #[cfg(test)]
+    pub(super) before_read: Option<Box<dyn FnOnce(&Path) + Send>>,
 }
 
 struct Cursor {
@@ -38,12 +40,17 @@ struct Cursor {
     usage: (u64, u64),
     outbox: VecDeque<NewQualityEvent>,
     retry_at: Option<Instant>,
+    #[cfg(test)]
+    before_read: Option<Box<dyn FnOnce(&Path) + Send>>,
+    #[cfg(test)]
+    bytes_read: u64,
 }
 
 struct Pending {
     id: String,
     started: Option<DateTime<Utc>>,
     wake: Option<WakeChannel>,
+    may_answer: bool,
     actions: BTreeSet<TurnAction>,
     calls: HashMap<String, (TurnAction, bool)>,
     // Claude streams multiple rows with one message id; use its final usage once.
@@ -84,55 +91,58 @@ fn text(value: &Value) -> String {
         .join("\n")
 }
 
-/// Only an input envelope, never a marker quoted in tool output or prose.
+/// Context supplied by the harness is not the input that woke the turn.
+fn launch_context(prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    prompt.starts_with("# AGENTS.md instructions for ")
+        || (prompt.starts_with("<environment_context>")
+            && prompt.ends_with("</environment_context>"))
+}
+
+/// IDs inside a Teams envelope or a pointer select only authenticated queue
+/// facts addressed to this recipient. Sender prose never grants provenance.
 fn wake(
     prompt: &str,
     agent: &Agent,
     session: &str,
     queue: &dyn PromptQueueStore,
     agents: &[Agent],
-) -> WakeChannel {
-    let first = prompt.lines().next().unwrap_or("");
-    let marker = first.strip_prefix("[cas #").or_else(|| {
-        first
-            .strip_prefix("Message from ")?
-            .split_once(": [cas #")
-            .map(|(_, marker)| marker)
-    });
-    let Some(marker) = marker else {
-        return WakeChannel::Unknown;
-    };
-    let Some(id) = marker
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse::<i64>()
-        .ok()
+) -> (WakeChannel, bool) {
+    use crate::hooks::handlers::handlers_middle::factory_inbox::{envelope_ids, wake_named_ids};
+    let ids = envelope_ids(prompt)
+        .into_iter()
+        .chain(wake_named_ids(prompt));
+    let Some(row) = ids
+        .filter_map(|id| queue.queued_prompt(id).ok().flatten())
+        .find(|row| {
+            row.factory_session.as_deref() == Some(session)
+                && (row.target == agent.name
+                    || (agent.role == AgentRole::Supervisor && row.target == "supervisor"))
+        })
     else {
-        return WakeChannel::Unknown;
+        return (WakeChannel::Unknown, false);
     };
-    let Some(row) = queue.queued_prompt(id).ok().flatten().filter(|row| {
-        row.factory_session.as_deref() == Some(session)
-            && (row.target == agent.name
-                || (agent.role == AgentRole::Supervisor && row.target == "supervisor"))
-    }) else {
-        return WakeChannel::Unknown;
-    };
-    match row.origin {
+    let channel = match &row.origin {
         Some(QueueOrigin::PairedDevice { .. }) => WakeChannel::Operator,
         Some(QueueOrigin::Daemon) if row.source == super::teams::DIRECTOR_AGENT_NAME => {
             WakeChannel::Director
         }
         Some(QueueOrigin::Daemon) => WakeChannel::Daemon,
         Some(QueueOrigin::RegisteredAgent { agent_id }) => {
-            match agents.iter().find(|a| a.id == agent_id).map(|a| a.role) {
+            match agents.iter().find(|a| &a.id == agent_id).map(|a| a.role) {
                 Some(AgentRole::Supervisor) => WakeChannel::Supervisor,
                 Some(AgentRole::Worker) => WakeChannel::Worker,
                 _ => WakeChannel::Unknown,
             }
         }
         _ => WakeChannel::Unknown,
-    }
+    };
+    // A question is verified against the durable authenticated row, not the
+    // transcript's copied prompt. Status prose on other wakes isn't an action.
+    let may_answer = channel == WakeChannel::Operator
+        || (channel != WakeChannel::Unknown
+            && (row.kind.as_deref() == Some("ask") || row.prompt.contains('?')));
+    (channel, may_answer)
 }
 
 /// A candidate isn't an action until its result succeeds. Reads, waits, polls,
@@ -243,6 +253,7 @@ impl Pending {
             id: id.to_owned(),
             started: at,
             wake: None,
+            may_answer: false,
             actions: BTreeSet::new(),
             calls: HashMap::new(),
             messages: HashMap::new(),
@@ -273,9 +284,26 @@ impl Pending {
         }
     }
 
+    fn attribute(
+        &mut self,
+        prompt: &str,
+        agent: &Agent,
+        session: &str,
+        queue: &dyn PromptQueueStore,
+        agents: &[Agent],
+    ) {
+        if self.wake.is_some() || launch_context(prompt) {
+            return;
+        }
+        let (channel, may_answer) = wake(prompt, agent, session, queue, agents);
+        self.wake = Some(channel);
+        self.may_answer = may_answer;
+    }
+
     fn reply(&mut self, content: &Value) {
         let reply = text(content);
-        if !reply.trim().is_empty()
+        if self.may_answer
+            && !reply.trim().is_empty()
             && !no_action_reply(&reply)
             && !reply.trim_start().starts_with("status:")
         {
@@ -296,6 +324,10 @@ impl Cursor {
             usage: (0, 0),
             outbox: VecDeque::new(),
             retry_at: None,
+            #[cfg(test)]
+            before_read: None,
+            #[cfg(test)]
+            bytes_read: 0,
         }
     }
 
@@ -388,18 +420,21 @@ impl Cursor {
                     }
                     return;
                 }
-                if self.pending.is_none()
-                    && let Some(id) = value
-                        .get("promptId")
-                        .or_else(|| value.get("uuid"))
-                        .and_then(Value::as_str)
+                let prompt = text(content);
+                if launch_context(&prompt) {
+                    return;
+                }
+                if let Some(id) = value
+                    .get("promptId")
+                    .or_else(|| value.get("uuid"))
+                    .and_then(Value::as_str)
+                    && self.pending.as_ref().is_none_or(|turn| turn.id != id)
                 {
+                    // A fresh native input abandons an unfinished prior turn.
                     self.pending = Some(Pending::new(id, at, self.usage));
                 }
-                if let Some(turn) = &mut self.pending
-                    && turn.wake.is_none()
-                {
-                    turn.wake = Some(wake(&text(content), agent, session, queue, agents));
+                if let Some(turn) = &mut self.pending {
+                    turn.attribute(&prompt, agent, session, queue, agents);
                 }
             } else if kind == "assistant" {
                 if let Some(turn) = &mut self.pending {
@@ -459,8 +494,8 @@ impl Cursor {
         if kind == "event_msg" {
             match entry {
                 "task_started" | "turn_started" => {
-                    if self.pending.is_none()
-                        && let Some(id) = payload["turn_id"].as_str()
+                    if let Some(id) = payload["turn_id"].as_str()
+                        && self.pending.as_ref().is_none_or(|turn| turn.id != id)
                     {
                         self.pending = Some(Pending::new(id, at, self.usage));
                     }
@@ -493,13 +528,7 @@ impl Cursor {
         {
             match entry {
                 "message" if payload["role"] == "user" && turn.wake.is_none() => {
-                    turn.wake = Some(wake(
-                        &text(&payload["content"]),
-                        agent,
-                        session,
-                        queue,
-                        agents,
-                    ));
+                    turn.attribute(&text(&payload["content"]), agent, session, queue, agents);
                 }
                 "message"
                     if payload["role"] == "assistant" && payload["phase"] == "final_answer" =>
@@ -583,15 +612,15 @@ impl Cursor {
         }
         match kind {
             "user_message_chunk" if turn.wake.is_none() => {
-                turn.wake = Some(wake(
+                turn.attribute(
                     update["content"]["text"].as_str().unwrap_or(""),
                     agent,
                     session,
                     queue,
                     agents,
-                ));
+                );
             }
-            "agent_message_chunk" => {
+            "agent_message_chunk" if turn.may_answer => {
                 // Bounded streaming ack detection; discarded at completion.
                 let chunk = update["content"]["text"].as_str().unwrap_or("");
                 if turn.reply.len() + chunk.len() <= 256 {
@@ -658,6 +687,10 @@ impl Cursor {
             self.pending = None;
             self.usage = (0, 0);
         }
+        #[cfg(test)]
+        if let Some(hook) = self.before_read.take() {
+            hook(&self.path);
+        }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
@@ -672,16 +705,28 @@ impl Cursor {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 self.line(&value, root, agent, session, queue, agents);
             }
+            #[cfg(test)]
+            {
+                self.bytes_read += count as u64;
+            }
             self.offset += count as u64;
             read += count;
         }
-        self.created = created;
-        self.modified = modified;
+        // Appends may have been consumed after the initial metadata snapshot.
+        // Cache metadata from the file just read, so the next idle poll cannot
+        // mistake that append for a same-length rewrite and replay the file.
+        let after = reader.get_ref().metadata()?;
+        self.created = after.created().ok();
+        self.modified = after.modified().ok();
         Ok(())
     }
 }
 
 impl Scanner {
+    #[cfg(test)]
+    pub(super) fn bytes_read(&self) -> u64 {
+        self.cursors.values().map(|cursor| cursor.bytes_read).sum()
+    }
     pub(super) fn scan(
         &mut self,
         root: &Path,
@@ -788,10 +833,14 @@ impl Scanner {
                 self.cursors
                     .insert(source.agent_id.clone(), Cursor::new(source.clone(), path));
             }
-            if let Some(cursor) = self.cursors.get_mut(&source.agent_id)
-                && let Err(error) = cursor.refresh(root, agent, session, queue, agents)
-            {
-                tracing::debug!(%error, "turn ledger transcript read deferred");
+            if let Some(cursor) = self.cursors.get_mut(&source.agent_id) {
+                #[cfg(test)]
+                {
+                    cursor.before_read = self.before_read.take();
+                }
+                if let Err(error) = cursor.refresh(root, agent, session, queue, agents) {
+                    tracing::debug!(%error, "turn ledger transcript read deferred");
+                }
             }
         }
     }

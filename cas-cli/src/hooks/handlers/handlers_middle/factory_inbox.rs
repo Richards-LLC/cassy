@@ -949,7 +949,7 @@ fn turn_prompt_carries_row(
 /// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon
 /// stamps every queued message's body with this envelope, so a teams copy
 /// Claude Code renders as a teammate message names its row.
-fn envelope_ids(prompt: &str) -> Vec<i64> {
+pub(crate) fn envelope_ids(prompt: &str) -> Vec<i64> {
     const MARKER: &str = "[cas #";
     let mut ids = Vec::new();
     let mut rest = prompt;
@@ -1017,7 +1017,7 @@ fn already_shown_note(ids: &[i64]) -> Option<String> {
 /// cas-ad92: the message ids named by daemon pointer wakes in a submitted
 /// prompt (`CAS wake: message {id} from …`, see `pointer_wake_payload`).
 /// A named id only selects among rows already addressed to this recipient.
-fn wake_named_ids(prompt: &str) -> Vec<i64> {
+pub(crate) fn wake_named_ids(prompt: &str) -> Vec<i64> {
     const MARKER: &str = "CAS wake: message ";
     let mut ids = Vec::new();
     for line in prompt.lines() {

@@ -159,13 +159,12 @@ fn import(
 async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, mut daemon) = peer_fixture().await;
-    let imported = import(
-        &daemon,
-        vec![
-            peer_message("pm-reply-1", true),
-            peer_message("pm-reply-2", true),
-        ],
-    );
+    let replies = [None, Some("answer")].into_iter().enumerate().map(|(i, kind)| {
+        let mut reply = peer_message(&format!("pm-reply-{i}"), true);
+        reply.body = crate::cloud::peer_mailbox::attach_message_intent(&reply.body, kind, false);
+        reply
+    }).collect();
+    let imported = import(&daemon, replies);
     assert_eq!(imported.delivered, 2, "{imported:?}");
     age_imported(&daemon);
     daemon.process_prompt_queue().await.unwrap();

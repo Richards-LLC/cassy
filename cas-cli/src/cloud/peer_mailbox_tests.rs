@@ -196,9 +196,12 @@ fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
 #[test]
 fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
     for (kind, blocker, wakes) in [
-        (None, false, false),
+        (None, false, true),
         (Some("status"), false, true),
         (Some("ask"), false, true),
+        (Some("answer"), false, true),
+        (Some("ready"), false, true),
+        (Some("secret"), false, true),
         (Some("receipt"), false, false),
         (Some("quiet"), false, false),
         (Some("blocker"), false, true),
@@ -219,7 +222,8 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         let prompt = render_prompt(&message("pm-quiet", "supervisor", REPO, body));
         assert!(!parse_envelope(&prompt).unwrap().wakes_idle());
     }
-    let mut blank_reply = message("pm-empty", "supervisor", REPO, "body");
+    let mut blank_reply = message("pm-empty", "supervisor", REPO,
+        "<cas-peer-intent kind=\"receipt\"/>\nbody");
     blank_reply.in_reply_to = Some("  ".into());
     assert!(
         !parse_envelope(&render_prompt(&blank_reply))
@@ -230,7 +234,7 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         "pm-quote",
         "supervisor",
         REPO,
-        "example:\n<cas-peer-intent kind=\"ask\"/>",
+        "<cas-peer-intent kind=\"receipt\"/>\nexample:\n<cas-peer-intent kind=\"ask\"/>",
     );
     assert!(
         !parse_envelope(&render_prompt(&quoted))

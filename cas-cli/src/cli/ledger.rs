@@ -407,6 +407,12 @@ fn aggregate(
             }
         }
     }
+    // Recovered facts can arrive after an immutable release snapshot. Keep
+    // snapshot counts as a floor when older relay history has been pruned.
+    let observed_ejections = events.iter().filter(|event| event.project_id.is_empty()
+        && matches!(&event.payload, QualityPayload::CheckRun { check_id, stage: cas_store::CheckStage::Queue,
+            outcome: CheckOutcome::Fail, .. } if check_id == crate::quality_ledger::MERGE_QUEUE_CHECK)).count() as u32;
+    report.ejections = report.ejections.max(observed_ejections);
     report
 }
 
@@ -539,6 +545,7 @@ mod tests {
     /// release shows its speed, the window's interventions and the fleet's rows.
     #[test]
     fn receipt_becomes_a_release_and_the_report_reads_the_window() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         let cas_root = repo.join(".cas");
@@ -637,6 +644,33 @@ mod tests {
         .unwrap();
         assert_eq!(record_release(&cas_root, repo, &receipt).unwrap(), "v1.1.0");
         record_release(&cas_root, repo, &receipt).unwrap();
+
+        // cas-c28c: an already-consumed ejection relay predates the ledger.
+        // Backfill must recover its original time, then the report must count
+        // it even though the immutable release snapshot recorded zero.
+        git_in(repo, &["remote", "add", "origin", "https://github.com/example/project.git"]);
+        let queue = crate::store::open_supervisor_queue_store(&cas_root).unwrap();
+        for occurrence in ["queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444", "merge-group-run:41246801444"] {
+        let relay = queue.notify("old-supervisor", "merge_queue_ejected", &serde_json::json!({
+            "task_id":"cas-release", "pr_number":1446, "failed_run_id":41246801444_u64,
+            "occurrence":occurrence, "failing_job":"Rust tests shard 1"
+        }).to_string(), cas_store::NotificationPriority::High).unwrap();
+        queue.mark_prompt_delivered(relay).unwrap();
+        queue.ack(relay).unwrap();
+        rusqlite::Connection::open(cas_root.join("cas.db")).unwrap().execute(
+            "UPDATE supervisor_queue SET created_at=?1 WHERE id=?2",
+            rusqlite::params![at(2, 5).to_rfc3339(), relay]).unwrap();
+        }
+        crate::quality_ledger::backfill(&cas_root, at(1, 12)).unwrap();
+        assert_eq!(build_report(&cas_root, repo, Some("v1.1.0")).unwrap().ejections, 1,
+            "historical queue ejection must survive a zero release snapshot");
+        assert_eq!(crate::quality_ledger::backfill(&cas_root, at(1, 12)).unwrap(), 0,
+            "replaying consumed relay history must not add another ejection");
+        let recovered = cas_store::quality_events_for_task(&cas_root, "cas-release").unwrap();
+        assert_eq!(recovered.len(), 1, "one ejection across both historical relay aliases");
+        assert_eq!(recovered[0].occurred_at, at(2, 5));
+        assert_eq!(recovered[0].title.as_deref(), Some("Rust tests shard 1"));
+        assert_eq!(recovered[0].link.as_deref(), Some("https://github.com/example/project/actions/runs/41246801444"));
 
         let report = build_report(&cas_root, repo, Some("v1.1.0")).unwrap();
         assert_eq!(report.interventions.get("rebind"), Some(&1), "{report:?}");

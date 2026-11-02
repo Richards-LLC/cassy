@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Friction ledger
+
+- **Recover queue ejection costs** — Backfill now reads consumed merge-queue relay history and counts each failed run once. Release reports include recovered ejections even when their original release receipt recorded zero, with the failing job title and run link retained.
+
 ### Fixed — Supervisor input
 
 - **Keep ordinary messages out of running Codex turns** — Standard, unattributed and other nonoperator messages now obey the supervisor wake gate before PTY delivery, including oversized bodies. Verified Commander input can still steer a running turn; gated messages remain available through the inbox.

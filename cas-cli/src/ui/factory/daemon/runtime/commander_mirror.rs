@@ -414,6 +414,12 @@ pub(crate) struct MirrorScanState {
     pub(super) finished_operator_receipts: Vec<i64>,
     #[cfg(test)]
     transcript_reads: usize,
+    #[cfg(test)]
+    resolution_scans: usize,
+    #[cfg(test)]
+    receipt_reads: usize,
+    #[cfg(test)]
+    poll_clock: Option<std::time::Instant>,
 }
 
 struct TranscriptCursor {
@@ -469,6 +475,8 @@ pub(super) fn scan_supervisor_replies(
     // process. Publish those durable changes to connected devices as well as
     // history pages, independently of optional assistant-reply mirroring.
     for id in std::mem::take(&mut state.pending_operator_receipts) {
+        #[cfg(test)]
+        { state.receipt_reads += 1; }
         let row = match queue.queued_prompt(id) {
             Ok(row) => row,
             Err(_) => {
@@ -552,6 +560,8 @@ pub(super) fn scan_supervisor_replies(
             .filter(|cursor| cursor.path.is_file())
             .map(|cursor| cursor.path.clone())
             .or_else(|| {
+                #[cfg(test)]
+                { state.resolution_scans += 1; }
                 // cas-4735: eagerly registered factory Codex ids are synthetic.
                 // Never cache a same-cwd guess before this pane's rollout exists.
                 if cli == cas_mux::SupervisorCli::Codex && session_id.starts_with("codex-") {
@@ -1321,6 +1331,13 @@ mod tests {
         let own = enqueue("factory-1");
         let second = first.with_file_name("rollout-2026-10-10T12-00-01-native.jsonl");
         write(&second, own, "boot", "Boot words preserved");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&second).unwrap();
+        writeln!(file, "{}", serde_json::json!({"type":"event_msg", "padding":"x".repeat(TRANSCRIPT_TAIL_BYTES as usize)})).unwrap();
+        let question = "Terminal question after a long rollout";
+        let terminal_id = queue.record_terminal_operator_turn("factory-1", question).unwrap();
+        for value in codex_turn_at("later-terminal", question, "Latest terminal answer", Utc::now()) {
+            writeln!(file, "{value}").unwrap();
+        }
         // Another live pane can keep the prior cwd match newest. Freshness
         // alone must not bind either supervisor to the other pane's rollout.
         std::fs::File::open(&first).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
@@ -1331,15 +1348,63 @@ mod tests {
         let third = first.with_file_name("rollout-2026-10-10T12-00-02-peer.jsonl");
         write(&third, peer, "peer", "Peer session answer");
         std::fs::File::open(&third).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(3)).unwrap();
+        state.poll_clock = Some(std::time::Instant::now() + std::time::Duration::from_secs(31));
         scan(&mut state);
         let replies = operator_replies(&queue);
-        assert!(replies.iter().any(|reply| reply.message == "Boot words preserved"),
-            "completed boot answer must be mirrored without a registration/checklist call");
+        assert!(replies.iter().any(|reply| reply.message == "Latest terminal answer"),
+            "ownership beyond the tail must still mirror later terminal answers after daemon restart");
         assert_eq!(replies.len(), 1, "another session's answer must never enter this thread");
-        assert_eq!(replies[0].reply_to, Some(own));
+        assert_eq!(replies[0].reply_to, Some(terminal_id));
         let reads = state.transcript_reads;
         scan(&mut state);
         assert_eq!(state.transcript_reads, reads, "owned unchanged rollout remains cached");
+    }
+
+    #[test]
+    fn unresolved_codex_resolution_does_not_poll_every_tick() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.cc_session_id = Some("codex-unbound".into());
+        store.update(&agent).unwrap();
+        let now = std::time::Instant::now();
+        let mut state = MirrorScanState { poll_clock: Some(now), ..Default::default() };
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state);
+        scan(&mut state);
+        state.poll_clock = Some(now + std::time::Duration::from_secs(1));
+        scan(&mut state);
+        assert_eq!(state.resolution_scans, 1, "an unresolved rollout miss must be cached");
+        state.poll_clock = Some(now + std::time::Duration::from_secs(31));
+        scan(&mut state);
+        assert_eq!(state.resolution_scans, 2, "misses retry so a later rollout can bind");
+    }
+
+    #[test]
+    fn finalized_receipts_back_off_without_losing_later_delivery() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let stamp = OperatorStamp { operator: "Alice".into(), device_id: "phone".into(),
+            device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true };
+        let id = queue.enqueue_operator_message("commander:Alice@phone", "supervisor", "Unproven old send",
+            Some("factory-1"), None, None, false, None, &stamp).unwrap().id();
+        queue.mark_processed(id).unwrap();
+        let now = std::time::Instant::now();
+        let mut state = MirrorScanState { poll_clock: Some(now), ..Default::default() };
+        state.pending_operator_receipts.insert(id);
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &[], state);
+        scan(&mut state);
+        state.poll_clock = Some(now + std::time::Duration::from_secs(1));
+        scan(&mut state);
+        assert_eq!(state.receipt_reads, 1, "finalized unproven sends must use a slower receipt watch");
+        assert!(state.operator_messages.is_empty(), "cleanup is never delivery evidence");
+        queue.mark_transport_delivered(id).unwrap();
+        state.poll_clock = Some(now + std::time::Duration::from_secs(31));
+        scan(&mut state);
+        assert_eq!(state.receipt_reads, 2);
+        assert_eq!(state.operator_messages.len(), 1, "a later real receipt still publishes");
+        assert_eq!(state.operator_messages[0].state, "delivered");
+        assert_eq!(state.finished_operator_receipts, vec![id]);
     }
 
     #[test]

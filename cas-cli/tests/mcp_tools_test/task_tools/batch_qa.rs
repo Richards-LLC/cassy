@@ -747,6 +747,54 @@ async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() 
     assert!(close.contains("no `qa-bundle:` note"), "{close}");
 }
 
+/// cas-f497: either receipt may land first. A verdict that a QA gate holds is
+/// reported, and the later QA receipt finishes the close with no close call.
+/// `verification_type=task` is the documented default.
+#[tokio::test]
+async fn qa_receipt_after_the_verdict_finishes_the_close_cas_f497() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    std::fs::write(
+        fx.repo.join(".cas/config.toml"),
+        "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n",
+    )
+    .unwrap();
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+        assignee: "test-agent".into(),
+        branch: "factory/test-agent".into(),
+        base_sha: git(&fx.repo, &["rev-parse", &format!("{anchor}^")]),
+    });
+    tasks.update(&task).unwrap();
+    let receipt = |patch: serde_json::Value| -> VerificationRequest {
+        let mut request = serde_json::to_value(fx.request()).unwrap();
+        request.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+        serde_json::from_value(request).unwrap()
+    };
+
+    let verdict = extract_text(
+        fx.supervisor
+            .verification(Parameters(receipt(serde_json::json!({"verification_type": "release", "task_ids": ["cas-bq01"]}))))
+            .await
+            .unwrap(),
+    );
+    assert!(verdict.contains("Still held (1):\n- cas-bq01: "), "{verdict}");
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::AwaitingMerge);
+
+    let qa = extract_text(
+        fx.supervisor
+            .verification(Parameters(receipt(serde_json::json!({"verification_type": "task", "task_ids": ["cas-bq01"]}))))
+            .await
+            .unwrap(),
+    );
+    assert!(qa.contains("Batch QA receipt") && qa.contains("Closed 1: cas-bq01."), "{qa}");
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{qa}");
+}
+
 /// cas-ce5e: with no dispatch to protect it, a merged delivery whose worker has
 /// gone still needs the verdict; a QA receipt does not stand in for it.
 #[tokio::test]

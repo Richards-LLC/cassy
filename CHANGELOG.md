@@ -52,6 +52,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Tier 1 deliveries close on one release verdict** — Was: with `qa.mode=batch`, each merged delivery opened its own verifier (9 on 3.96, 1.57M fresh tokens). Now: Tier 1 merges open no dispatch, and one review of the assembled tip closes them all once `verification action=batch_receipt verification_type=release` records a report naming every delivery. Tier 2 guard, CI and release code, unmeasurable diffs, `force-verifier` and `qa.mode=per_task` keep their own verifier, and a verdict never counts as QA evidence.
 
+### Fixed — Release verdict closes what it covers
+
+- **The verdict closes its Tier 1 deliveries** — Was: `verification action=batch_receipt verification_type=release` recorded the verdict and nothing closed the merged deliveries it named, so they stayed parked. Now: recording it runs the merge close for each Tier 1 delivery and reports what closed and what a gate still holds, and a QA receipt recorded afterwards finishes a close that waited on QA. Tier 2 deliveries named in the verdict keep their own verifier.
+- **Waiting for the verdict no longer nags** — Was: each merged Tier 1 delivery woke the supervisor as a blocked close, said "awaiting worker close" and suggested `supervisor_override`, which skips the review. Now: the epic gets one prompt to run the release review, once nothing else in it is active, with no override.
+- **An unassigned delivery can be covered by the verdict** — Was: with its assignee cleared, close waited for the verdict and the verdict refused it as having no implementer. Now: its recorded start and anchor name the implementer, and they still count for the no-self-review check.
+- **`verification_type=task` works on `batch_receipt`** — Was: the documented default was rejected. Now: it records a batch QA receipt.
+- **Unreadable worker holds suppress only assignment prompts** — Was: merge and close prompts were dropped along with them. Now: only an assignment, which could pick a held worker, is refused.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

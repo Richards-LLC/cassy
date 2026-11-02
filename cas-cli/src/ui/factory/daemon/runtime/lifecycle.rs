@@ -644,17 +644,10 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
-    crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
-        natural_key: format!("merge_queue|{task_id}|{pr_number}|{occurrence}"),
-        check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
-        stage: cas_store::CheckStage::Queue,
-        outcome: cas_store::CheckOutcome::Fail,
-        task_id: Some(task_id),
-        sha: None,
-        minutes: None,
-        link: None,
-        actor: None,
-    });
+    crate::quality_ledger::queue_ejected(cas_dir, &crate::quality_ledger::QueueEjection {
+        task_id: task_id.into(), pr_number, failed_run_id,
+        occurrence: occurrence.into(), failing_job: failing_job.map(str::to_string),
+    }, chrono::Utc::now());
 
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {

@@ -1717,6 +1717,7 @@ mod tests {
         config.save(&root).unwrap();
         for (input, window, expected) in [(226000, Some(475000), None),
             (268000, Some(475000), Some("context used: 56%")),
+            (268000, Some(475000), None), // Same occupancy bucket is not repeated.
             (28000, Some(475000), None), (268000, None, Some("context used: unknown"))] {
             let row = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count",
                 "info":{"total_token_usage":{"input_tokens":9000000},
@@ -2082,7 +2083,8 @@ mod tests {
             .append_factory_context(Ok(CasCore::success("original result")))
             .await
             .unwrap();
-        assert_eq!(output.content.len(), 1);
+        assert_eq!(output.content.len(), 2);
+        assert!(serde_json::to_string(&output).unwrap().contains("context used: unknown"));
         assert!(
             !serde_json::to_string(&output)
                 .unwrap()

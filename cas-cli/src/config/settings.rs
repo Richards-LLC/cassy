@@ -826,6 +826,14 @@ impl BuildGuardConfig {
     }
 }
 
+/// Release policy for automatic task-boundary restarts. Serde, defaults and
+/// registry metadata derive from this one value.
+pub(crate) const DEFAULT_RESTART_WORKER_BETWEEN_TASKS: bool = false;
+
+fn default_restart_worker_between_tasks() -> bool {
+    DEFAULT_RESTART_WORKER_BETWEEN_TASKS
+}
+
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
@@ -1027,9 +1035,8 @@ pub struct FactoryConfig {
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
 
-    /// Opt in to a daemon recycle between queued tasks. Off while sibling
-    /// process isolation is tracked in cas-a290; context notices stay enabled.
-    #[serde(default)]
+    /// Whether to recycle between queued tasks. Independent of context notices.
+    #[serde(default = "default_restart_worker_between_tasks")]
     pub restart_worker_between_tasks: bool,
 
     /// Context occupancy threshold for worker MCP notices and idle status
@@ -1316,7 +1323,7 @@ impl Default for FactoryConfig {
             prompt_transcript_retention_days: default_prompt_transcript_retention_days(),
             supervisor_queue_retention_days: default_supervisor_queue_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
-            restart_worker_between_tasks: false,
+            restart_worker_between_tasks: default_restart_worker_between_tasks(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),

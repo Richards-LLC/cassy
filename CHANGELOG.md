@@ -13,7 +13,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Known limitations — Factory
 
-- **Automatic worker restarts default off** — Recycle can send SIGTERM to sibling workers on affected machines, tracked in cas-a290. Per-task restart requires explicit opt-in while that isolation bug remains; measured context notices stay enabled.
+- **Sibling-worker termination incident** — The incident tracked in cas-a290 was traced to a supervisor subagent's `pkill -f`, rather than recycle itself. Per-task restarts currently require explicit opt-in; measured context notices stay enabled.
 
 ### Fixed — QA evidence
 

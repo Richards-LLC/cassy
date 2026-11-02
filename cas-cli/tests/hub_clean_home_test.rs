@@ -1105,22 +1105,21 @@ fn service_start_retries_tailscale_before_publication() {
         .args(["hub", "serve", "--port", "0", "--launched-by", "service",
             "--tailscale-serve", "--tailscale-serve-port", "10047"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    // The daemon stays unavailable beyond the first process's whole retry
-    // budget. Only the old process record proves ownership (no Serve receipt).
+    // No Serve receipt exists; only the old process record proves the dead
+    // route belongs to Cassy. The same process must survive the outage.
     fs::write(home.path().join("offline"), "").unwrap();
-    let mut failed = launch();
-    let mut cleanup = LegacyHubCleanup(vec![failed.id()]);
+    let mut child = launch();
+    let _cleanup = LegacyHubCleanup(vec![child.id()]);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while failed.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "offline service must exhaust its retries");
+    loop {
+        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
+            && paths.read_process_record().ok().and_then(|record| record.transport_warning)
+                .is_some_and(|warning| !warning.contains("publication pending")) { break; }
+        assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(), "offline service must stay on loopback");
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(!failed.wait().unwrap().success());
-    cleanup.0.clear();
     assert_eq!(fs::read_to_string(home.path().join("mock-route")).unwrap(), old_target);
     fs::remove_file(home.path().join("offline")).unwrap();
-    let mut child = launch();
-    cleanup.0.push(child.id());
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running")
@@ -1173,6 +1172,11 @@ fn service_publication_failure_keeps_loopback_and_recovers_without_restart() {
     assert!(status.status.success());
     let status: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert!(status["tailscale_serve"]["message"].as_str().unwrap().contains("permission-denied"), "{status}");
+    let start = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "start", "--port", &fallback.port.to_string(), "--tailscale-serve", "--tailscale-serve-port", "10047"])
+        .output().unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    assert_eq!(paths.read_process_record().unwrap().pid, fallback.pid, "a concurrent start must retain the recovering Auto service");
     fs::remove_file(home.path().join("deny-serve")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     let recovered = loop {

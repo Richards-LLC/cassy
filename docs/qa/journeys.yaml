@@ -117,16 +117,16 @@ invariants:
     statement: Failed starts preserve foreign Serve routes, including stopped targets; only an exact recorded owned target can be reclaimed.
     check: Run hub::tailscale::tests::failed_start_preserves_stopped_foreign_route and hub_clean_home_test::service_start_retries_tailscale_before_publication; inspect the disposable Serve route before and after failure and recovery.
   HUB-J12-LOCAL-HUB:
-    statement: Auto service starts retain a healthy loopback hub and explain missing or signed-out Tailscale; transient daemon failures retain bounded retry and restart.
-    check: Run hub_clean_home_test::auto_service_without_tailscale_keeps_healthy_loopback and hub_clean_home_test::service_start_retries_tailscale_before_publication on Linux with a disposable HOME; read health, status and hub.log.
+    statement: Auto service starts retain healthy loopback through every publication failure and recover the public route and live metadata in background without restart; stopping cancels any in-flight publication.
+    check: Run hub_clean_home_test::auto_service_without_tailscale_keeps_healthy_loopback, service_start_retries_tailscale_before_publication and service_publication_failure_keeps_loopback_and_recovers_without_restart on Linux with a disposable HOME; read health, status, hub.log and route cleanup.
   HUB-J5-LONG-CODEX-ROLLOUT:
-    statement: A proven Codex rollout still mirrors terminal answers when its ownership envelope is older than the reply tail; unresolved ownership does not rescan every tick.
+    statement: A proven Codex rollout mirrors terminal answers beyond the reply tail; initial ownership retries after one second, then backs off and indexes only appended rollout records.
     check: Run commander_mirror::tests::codex_boot_mirror_waits_for_its_own_rollout_in_a_reused_project and unresolved_codex_resolution_does_not_poll_every_tick; keep other panes and previous generations excluded.
   HUB-J5-QUIET-RECEIPT-POLL:
     statement: Cleanup without transport proof keeps Queued honest without polling finalized sends every second; a later real receipt still updates the conversation.
     check: Run commander_mirror::tests::finalized_receipts_back_off_without_losing_later_delivery with the injected clock and verify the durable transport receipt produces Delivered.
   HUB-J5-DIALOG-HOLD:
-    statement: Commander sends no body or submit into confirmation dialogs or pending non-Claude tool calls; retained words submit once after readiness returns.
+    statement: Commander sends no body or submit into native confirmation footers or pending non-Claude tool calls; assistant dialog prose above the composer does not hold input and retained words submit once after readiness returns.
     check: Run supervisor_single_turn_tests::non_claude_commander_send_waits_through_dialogs and cas_bf20_verified_commander_send_wakes_an_idle_supervisor through the real queue and private PTY.
   HUB-J26-READONLY-OWNER:
     statement: Read-only identity lookup cannot cache a live parent identity for a nested harness or authorize later mutable tools.

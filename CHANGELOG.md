@@ -35,7 +35,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
 - **Claude queued answers keep their conversation** — Messages consumed during startup or a same-name restart retain their original message and paired device when the answer reaches Commander.
-- **Claude answers stay with every operator question** — Background task notifications mirror standalone status without taking over an operator turn. Each native answer appears once under its latest verified send, and every consumed send remains Delivered.
+- **Claude answers appear once per turn** — Background task notifications mirror standalone status without taking over an operator turn. Each native answer appears once under its latest verified send, and every consumed send remains Delivered.
 
 ### Fixed — Commander messages
 

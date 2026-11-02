@@ -514,7 +514,7 @@ fn decide_live_start(
     tailscale_serve: bool,
     tailscale_port: u16,
     binary_version: &str,
-    tailscale_cli_available: bool,
+    publication_required: bool,
 ) -> HubStartDecision {
     let version_drift = record.version != binary_version;
     let tailscale_flags_differ = tailscale_enabled(record) != tailscale_serve
@@ -523,7 +523,7 @@ fn decide_live_start(
                 .tailscale_serve_port
                 .is_some_and(|port| port != tailscale_port));
     let target_missing =
-        tailscale_serve && !serve_request_settled(record, tailscale_cli_available);
+        tailscale_serve && !serve_request_settled(record, publication_required);
     let flags_differ = record.bind != args.bind.to_string()
         || record.port != args.port
         || tailscale_flags_differ
@@ -566,7 +566,7 @@ fn running_hub_satisfies_request(
     tailscale_serve: bool,
     tailscale_port: u16,
     binary_version: &str,
-    tailscale_cli_available: bool,
+    publication_required: bool,
 ) -> bool {
     if record.version != binary_version || record.bind != args.bind.to_string() {
         return false;
@@ -586,30 +586,24 @@ fn running_hub_satisfies_request(
     {
         return false;
     }
-    if tailscale_serve && !serve_request_settled(record, tailscale_cli_available) {
+    if tailscale_serve && !serve_request_settled(record, publication_required) {
         return false;
     }
     true
 }
 
-/// Has a live hub reached the end state of its Serve request?
-///
-/// A published target without a warning always has. A loopback fallback
-/// (`transport_warning`) is final only when no Tailscale CLI can publish. With
-/// a CLI present it is a failed publication that `hub start` retries and the
-/// launch waiter refuses. Without one it is the documented loopback fallback,
-/// which a concurrent lifecycle command must accept rather than wait out the
-/// machine lock (cas-bf90).
-fn serve_request_settled(record: &HubProcessRecord, tailscale_cli_available: bool) -> bool {
+/// A warned Auto hub satisfies local lifecycle requests while its background
+/// publication is pending. Required callers demand a published route.
+fn serve_request_settled(record: &HubProcessRecord, publication_required: bool) -> bool {
     match (&record.tailscale_serve_target, &record.transport_warning) {
         (Some(_), None) => true,
-        (_, Some(_)) => !tailscale_cli_available,
+        (_, Some(_)) => !publication_required,
         (None, None) => false,
     }
 }
 
-fn tailscale_cli_available(paths: &HubRuntimePaths) -> bool {
-    TailscaleServeManager::new(paths.root()).cli_available()
+fn publication_required() -> bool {
+    host_transport_mode().map_or(true, |mode| mode == HubTransportMode::Required)
 }
 
 /// What the caller intends to do once the hub is stopped.
@@ -757,7 +751,7 @@ fn wait_for_stop_or_satisfying_hub(
                 intent.tailscale_serve,
                 intent.tailscale_port,
                 env!("CARGO_PKG_VERSION"),
-                tailscale_cli_available(paths),
+                publication_required(),
             )
             && record_is_ready(paths, &record)
         {
@@ -908,7 +902,7 @@ fn wait_for_lock_or_satisfying_hub(
                 tailscale_serve,
                 tailscale_port,
                 env!("CARGO_PKG_VERSION"),
-                tailscale_cli_available(paths),
+                publication_required(),
             )
             && record_is_ready(paths, &record)
         {
@@ -1412,7 +1406,7 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
                 && record_is_ready(&paths, record)
                 && running_hub_satisfies_request(
                     record, &request, enabled, port, env!("CARGO_PKG_VERSION"),
-                    tailscale_cli_available(&paths),
+                    publication_required(),
                 )
         }) {
             return status(cli);
@@ -1518,7 +1512,7 @@ fn start_with_output_resolved(
                 tailscale_serve,
                 tailscale_port,
                 env!("CARGO_PKG_VERSION"),
-                tailscale_cli_available(&paths),
+                publication_required(),
             ) {
                 HubStartDecision::Keep => {
                     if emit_output {
@@ -1852,7 +1846,7 @@ fn start_with_output_resolved(
             tailscale_serve,
             tailscale_port,
             env!("CARGO_PKG_VERSION"),
-            tailscale_cli_available(&paths),
+            publication_required(),
         )
     {
         if record_is_ready(&paths, &record) {
@@ -4501,18 +4495,18 @@ mod tests {
         }
 
         #[test]
-        fn a_loopback_fallback_settles_serve_only_without_a_tailscale_cli() {
+        fn a_loopback_fallback_settles_serve_only_in_auto_mode() {
             // The hub asked for Serve and fell back to loopback with a warning.
             let mut fallback = record(VERSION, 35053, None);
             fallback.tailscale_cli = Some("tailscale".to_owned());
             fallback.transport_warning = Some("tailscale CLI not found".to_owned());
             let args = ephemeral_args();
-            // No CLI can publish: the fallback is final, so a concurrent
-            // command accepts it instead of timing out on the machine lock.
+            // Auto keeps the live fallback while publication recovers, so a
+            // concurrent lifecycle command does not restart or wait it out.
             assert!(running_hub_satisfies_request(
                 &fallback, &args, true, TS_PORT, VERSION, false
             ));
-            // A CLI is present: the failed publication must be retried.
+            // Required mode still demands publication before accepting it.
             assert!(!running_hub_satisfies_request(
                 &fallback, &args, true, TS_PORT, VERSION, true
             ));

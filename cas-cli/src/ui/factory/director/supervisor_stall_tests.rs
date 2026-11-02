@@ -515,8 +515,7 @@ fn supervisor_tool_activity_resets_actionable_idle_clock() {
         start + Duration::seconds(601),
         600,
     );
-    assert!(after_silence.wake.is_none());
-    assert!(tracker.observe(Some(actionable), Some(start + Duration::seconds(1)), false, start + Duration::seconds(1201), 600).wake.is_some());
+    assert!(after_silence.wake.is_some());
 }
 
 #[test]

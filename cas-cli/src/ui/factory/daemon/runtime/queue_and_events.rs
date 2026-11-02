@@ -12813,9 +12813,14 @@ fn reconcile_task_reminder(
 ) -> Result<(), crate::error::CasError> {
     // A retired worker cannot delegate its wait to the supervisor, including
     // cross-session waits. Reconcile before expiry or any event delivery.
-    let owner = crate::store::open_agent_store(&scan.cas_dir)?.get(&reminder.owner_id).ok();
+    let agents = crate::store::open_agent_store(&scan.cas_dir)?;
+    let owner = agents.get(&reminder.owner_id).ok();
+    let target_shutdown = reminder.target_id != reminder.owner_id
+        && agents.get(&reminder.target_id).is_ok_and(|target| {
+            target.role == cas_types::AgentRole::Worker && target.status == cas_types::AgentStatus::Shutdown
+        });
     let worker_owned = owner.as_ref().is_some_and(|owner| owner.role == cas_types::AgentRole::Worker);
-    if worker_owned && owner.as_ref().is_some_and(|owner| owner.status == cas_types::AgentStatus::Shutdown) {
+    if target_shutdown || (worker_owned && owner.as_ref().is_some_and(|owner| owner.status == cas_types::AgentStatus::Shutdown)) {
         cancel_task_reminder(reminders.as_ref(), reminder)?;
         return Ok(());
     }
@@ -14534,7 +14539,7 @@ mod tests {
                 if watch_remote { cas_store::ReminderTriggerType::Event } else { cas_store::ReminderTriggerType::Time },
                 (!watch_remote).then(|| chrono::Utc::now() - chrono::Duration::hours(2)),
                 watch_remote.then_some("task_completed"), filter.as_ref(), 60,
-                Some("s"), Some(&task.id), true, None).unwrap();
+                Some("s"), Some("origin"), true, Some(&task.id)).unwrap();
             if suspended { reminders.suspend_pending_for_target(&owner.id).unwrap(); }
             for _ in 0..2 {
                 super::run_reminder_scan(super::ReminderScanInput {
@@ -14720,6 +14725,12 @@ mod tests {
                     agents.register(&target).unwrap();
                     scan("origin-factory", HashMap::new());
                     scan("origin-factory", HashMap::new());
+                    if role == AgentRole::Worker {
+                        assert!(reminders.list_pending(owner_id).unwrap().is_empty());
+                        assert_eq!(reminders.list_recently_ended(owner_id, 60).unwrap()[0].status, cas_store::ReminderStatus::Cancelled);
+                        assert!(prompts.peek_all(10).unwrap().is_empty());
+                        continue;
+                    }
                     let rows = prompts.peek_all(10).unwrap();
                     let observed: Vec<_> = rows
                         .iter()

@@ -1106,6 +1106,12 @@ impl CasCore {
         query: &str,
         exclude_id: Option<&str>,
     ) -> Option<String> {
+        self.related_recall_context(query, exclude_id, true)
+    }
+
+    /// Durable start instructions retain matching context even if this session
+    /// has already seen it. Only the response path claims session markers.
+    fn related_recall_context(&self, query: &str, exclude_id: Option<&str>, dedupe: bool) -> Option<String> {
         use crate::hybrid_search::{DocType, SearchOptions};
 
         let query = query.trim();
@@ -1131,7 +1137,7 @@ impl CasCore {
         let session = self.get_registered_agent_id_read_only().ok().and_then(|id| {
             self.open_agent_store().ok()?.get(&id).ok().map(|agent| agent.cc_session_id.unwrap_or(id))
         }).or_else(|| std::env::var("CAS_SESSION_ID").ok())
-            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok())?;
+            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok()).unwrap_or_default();
         let relevant = |text: &str| {
             let terms = recall_terms::content_terms(text);
             // BM25 ranks even incidental single-word matches. Require two
@@ -1188,7 +1194,7 @@ impl CasCore {
             if let Some(line) = line
                 && lines.iter().map(String::len).sum::<usize>() + line.len()
                     <= RELATED_RECALL_CHAR_CAP
-                && crate::hooks::operation_lessons::claim_session_item(&self.cas_root, &session, &hit.id)
+                && (!dedupe || crate::hooks::operation_lessons::claim_session_item(&self.cas_root, &session, &hit.id))
             {
                 lines.push(line);
             }
@@ -3584,7 +3590,10 @@ impl CasCore {
                 wt_info,
                 start_guidance,
             );
-            let context = format!("{advisory}{related_context}{cited_issues}");
+            let durable_recall = self.related_recall_context(
+                &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
+            ).unwrap_or_default();
+            let context = format!("{advisory}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(

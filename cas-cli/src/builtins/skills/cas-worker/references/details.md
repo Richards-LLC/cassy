@@ -100,7 +100,7 @@ message and note schemas enforce the traffic limits.
 Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 A batch park defers evidence and opens no automatic per-task round, including
 when older waived rounds exist. Capture visual before/after evidence while
-building. The supervisor owns the hourly epic-tip candidate, shared PASS ledger
+building. The supervisor owns the release's one epic-tip candidate, shared PASS ledger
 and `verification action=batch_receipt` listing delivery anchors. Close deferred
 deliveries after that receipt exists; "waiting for batch receipt" is a pending
 obligation. Explicit `qa_request` reviews remain available.

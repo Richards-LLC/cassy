@@ -22063,6 +22063,17 @@ mod supervisor_notice_wake_tests {
             ),
             None
         );
+        // A release runs one QA round, so a queued hourly overdue row left by an
+        // older daemon must not wake a supervisor to start another.
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon,
+                "owner",
+                "supervisor-notice:42",
+                "<cas-supervisor-notice kind=\"qa_batch_overdue\" notification_id=\"42\">\nStart a round.\n</cas-supervisor-notice>"
+            ),
+            None
+        );
     }
 }
 

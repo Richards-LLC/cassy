@@ -113,7 +113,6 @@ pub mod qa_traffic;
 pub(crate) mod backlog_hygiene;
 pub mod qa_author_override;
 pub(crate) mod qa_batch;
-pub(crate) mod qa_batch_overdue;
 pub(crate) mod review_body;
 pub mod retrieval_eval;
 pub mod retrieval_parity;

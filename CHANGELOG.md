@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Release closeout
+
+- **One review, one batch fix, one QA round** — Was: Supervisors built a candidate
+  and walked QA every hour, and each failure started another round, so 3.96 ran 6
+  rounds over 5 h 19 m with nothing on main. → Now: The supervisor guides fix one
+  order: freeze scope, run one full review with the queue precheck, fix everything
+  in one batch, re-review only the fix diff, run one QA round, then enqueue. A red
+  row gets one fix and a re-walk of that row, then moves to the next release unless
+  it loses operator data.
+- **No hourly QA overdue notice** — Was: The daemon told every supervisor to start a
+  QA round each hour merged work waited. → Now: The notice is gone, and a queued one
+  left by an older daemon does not wake anyone.
+
 ### Fixed — Factory notification wakes
 
 - **Merged delivery facts wait for the next turn** — Was: Merge-close and lane-parked notices woke workers, and queued READY TO MERGE alerts could wake supervisors after Cassy had merged the delivery. → Now: These facts stay readable in the next-turn digest. New deliveries, verifier findings and blockers keep their action wakes.

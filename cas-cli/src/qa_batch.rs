@@ -399,7 +399,9 @@ pub(crate) fn release_supersedes_stale_dispatch(
     let latest = crate::store::open_verification_store(root)
         .map_err(|e| e.to_string())?
         .get_latest_for_task(&task.id).map_err(|e| e.to_string())?;
-    if latest.is_some_and(|verdict| verdict.status != cas_types::VerificationStatus::Pending) {
+    if latest.is_some_and(|verdict| !matches!(
+        verdict.status, cas_types::VerificationStatus::Pending | cas_types::VerificationStatus::Approved
+    )) {
         return Ok(None);
     }
     let (repo, target) = task_context(root, task)?;

@@ -1564,7 +1564,8 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
         env.set("CAS_CI_RETRY_TEST_RESPONSE", &response);
         let slug = format!("pendingretry{outcome}");
-        let fixture = arm_delivery(&slug, &slug, &mut env).await;
+        let fixture = arm_delivery_with_selector(&slug, &slug, &mut env,
+            &format!("project:github.com/org/{slug}")).await;
         let remote = home.path().join("origin.git");
         run_git(&["init", "--bare", remote.to_str().unwrap()], &fixture.repo.root);
         run_git(&["config", &format!("url.{}.insteadOf", remote.display()),

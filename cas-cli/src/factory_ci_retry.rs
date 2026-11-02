@@ -104,7 +104,7 @@ fn notice(root: &Path, request: &Retry, detail: &str, red: bool) -> Result<()> {
     let key = if red {
         // Share the existing CI watcher's key: polling order and daemon restarts
         // must not produce a second red-CI supervisor turn for the same lane SHA.
-        format!("ci-red-run:{}:{}", request.branch, request.ci_sha)
+        format!("ci-red-run:{}:{}", request.branch, request.sha)
     } else {
         format!("merge-ci-retry:{}:{}", request.task, request.sha)
     };

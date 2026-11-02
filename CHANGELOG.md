@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Improved — Commander
+### Fixed — Commander
 
 - **Find workers needing attention in Team** — Blocked tasks and stalled workers lead the team with named attention shortcuts and a stronger count. Task titles distinguish workers sharing the same state; merge waits follow behind reported trouble.
 

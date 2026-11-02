@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.99.0] - 2026-11-02
+
 ### Fixed — Isolated worker turn records
 
 - **Find native Codex worker turns** — Turn collection resolves an isolated Codex worker's rollout from its registered worktree, so completed action and acknowledgement turns reach the ledger while supervisor lookup keeps its project directory.

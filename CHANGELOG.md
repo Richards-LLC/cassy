@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker startup
+
+- **Keep task briefs out of process listings** — Workers read their assignment from a private launch file instead of carrying its text in command-line arguments, preventing process-name cleanup commands from matching and killing workers because their brief mentions the same command. The file stays available through startup and resume and is removed when the worker pane is torn down.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

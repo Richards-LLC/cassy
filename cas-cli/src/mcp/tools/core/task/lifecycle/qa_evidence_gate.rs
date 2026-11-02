@@ -619,7 +619,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     };
     let tier = evidence_tier(&reasons, terminal_render);
     let carried_bundle = carried_bundle.filter(|_| tier == EvidenceTier::Bundle);
-    let batch_receipt = if batch_mode || deferred {
+    let batch_receipt = if deferred {
+        crate::qa_batch::satisfying_deferred_receipt(cas_root, task, repo, target_branch, &head)
+            .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read deferred receipts: {e}"))?
+    } else if batch_mode {
         crate::qa_batch::satisfying_receipt(cas_root, task, repo, target_branch, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch receipts: {e}"))?
     } else {
@@ -746,8 +749,13 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
     }
     if let Some(receipt) = batch_receipt {
+        let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
+            "QA batch debt satisfied by release verdict"
+        } else {
+            "QA batch evidence PASS"
+        };
         pass.notes.push(format!(
-            "QA batch evidence PASS: receipt={} staging={} ledger={} task={} anchor={}",
+            "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
             receipt.id,
             receipt.staging_sha,
             receipt.ledger_artifact_id,

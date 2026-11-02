@@ -11,6 +11,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Start queued work with fresh context** — Workers restart in place between queued tasks, keeping their name, checkout and launch recipe. MCP results surface actual harness context use at the configured threshold, so checkpoints use measured occupancy instead of cumulative token totals or tool-output size.
 
+### Fixed — Delivery recovery
+
+- **Carry merged work across supervisor sessions** — Startup lists every project delivery eligible for receipt recovery with a close action. A later exact release verdict clears expired Tier 1 dispatches and deferred batch debt, while live or newer reviews, rejected verdicts, Tier 2 probes and lost-content guards still hold the delivery.
+
 ### Fixed — Friction ledger
 
 - **Recover queue ejection costs** — Backfill now reads consumed merge-queue relay history and counts each failed run once. Release reports include recovered ejections even when their original release receipt recorded zero, with the failing job title and run link retained.

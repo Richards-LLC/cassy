@@ -87,6 +87,7 @@
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.
+- `cas-cli/src/supervisor_continuity.rs` - durable succession handoffs and project-scoped integrated-delivery recovery actions at startup.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 

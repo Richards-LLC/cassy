@@ -995,6 +995,56 @@ mod supervisor_handoff_tests {
         parked.deliverables.parked_branch = Some("factory/live-worker-cas-parked".into());
         parked.external_ref = Some("https://example.test/pull/42".into());
         tasks.add(&parked).unwrap();
+        // cas-d8b2: recovery is project-scoped, independent of who owned a
+        // retired lane, and must not truncate after two Codex handoff rows.
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(temp.path()).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/feature.rs"), "delivery\n").unwrap();
+        git(&["add", "src/feature.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff-project'\n[qa]\nmode='batch'\n").unwrap();
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-foreign", "cas-unmerged", "cas-override", "cas-dedicated", "cas-live-review"] {
+            let mut task = Task::new(id.into(), "Merged delivery".into());
+            task.origin_project = Some(if id == "cas-foreign" { "another-project" } else { "handoff-project" }.into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.parked_branch = Some(format!("factory/{id}"));
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "main".into() },
+                assignee: "ended-worker".into(), branch: format!("factory/{id}"), base_sha: base.clone(),
+            });
+            if id == "cas-unmerged" {
+                git(&["branch", "unmerged-target", &base]);
+                task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "unmerged-target".into() });
+            }
+            if id == "cas-override" {
+                task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+            }
+            if id == "cas-dedicated" {
+                task.labels.push("force-verifier".into());
+            }
+            tasks.add(&task).unwrap();
+            if id == "cas-live-review" {
+                cas_store::create_verification_dispatch(&root, id, "reviewer", "reviewer", chrono::Utc::now() + chrono::Duration::hours(1)).unwrap();
+            }
+        }
+        std::fs::write(temp.path().join("src/dropped.rs"), "lost delivery\n").unwrap();
+        git(&["add", "src/dropped.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "cas-dropped: deliver"]);
+        let mut dropped = tasks.get("cas-recover-one").unwrap();
+        dropped.id = "cas-dropped".into();
+        dropped.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+        tasks.add(&dropped).unwrap();
+        git(&["rm", "-q", "src/dropped.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "remove delivered content"]);
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
         let ask = queue.enqueue_with_session("ending", "operator", "Previously delivered open ask: select branch", "old-session").unwrap();
@@ -1081,6 +1131,15 @@ mod supervisor_handoff_tests {
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three"] {
+            assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
+            assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");
+        }
+        assert!(!context.contains("task action=close id=cas-foreign"), "foreign projects stay outside recovery: {context}");
+        assert!(!context.contains("task action=close id=cas-unmerged"), "unmerged work stays outside recovery: {context}");
+        for id in ["cas-override", "cas-dedicated", "cas-live-review", "cas-dropped"] {
+            assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
+        }
         assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
         assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();
@@ -1106,6 +1165,7 @@ mod supervisor_handoff_tests {
         assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
         assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+        assert!(!again.contains("Integrated deliveries to adopt/close"), "recovery actions must surface once per successor");
         handle_session_end(&HookInput { session_id: "successor-id".into(), reason: Some("operator".into()), ..Default::default() }, Some(&root)).unwrap();
         env.set("CAS_AGENT_NAME", "third-supervisor");
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();

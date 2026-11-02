@@ -26,7 +26,7 @@ pub const QUALITY_EVENT_SCHEMA_STATEMENTS: &[&str] = &[
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN
-            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback')),
+            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn')),
         occurred_at TEXT NOT NULL,
         task_id TEXT,
         release_version TEXT,
@@ -46,6 +46,46 @@ pub const QUALITY_EVENT_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TRIGGER IF NOT EXISTS quality_events_no_delete BEFORE DELETE ON quality_events
      BEGIN SELECT RAISE(ABORT, 'quality_events is append-only'); END",
 ];
+
+/// Rebuild the historical CHECK without changing any row. Caller owns the transaction.
+pub const QUALITY_EVENT_TURN_UPGRADE_STATEMENTS: &[&str] = &[
+    "CREATE TABLE quality_events_turn_upgrade (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN
+            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn')),
+        occurred_at TEXT NOT NULL, task_id TEXT, release_version TEXT, actor TEXT,
+        title TEXT, link TEXT, payload TEXT NOT NULL, local_note TEXT,
+        origin TEXT NOT NULL DEFAULT 'local' CHECK (origin IN ('local', 'cloud')),
+        project_id TEXT NOT NULL DEFAULT '', UNIQUE (project_id, id)
+    )",
+    "INSERT INTO quality_events_turn_upgrade SELECT * FROM quality_events",
+    "DROP TABLE quality_events",
+    "ALTER TABLE quality_events_turn_upgrade RENAME TO quality_events",
+    QUALITY_EVENT_SCHEMA_STATEMENTS[1],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[2],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[3],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[4],
+];
+
+/// Immutable channel evidence; never inferred from sender prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeChannel { Operator, Terminal, Director, Supervisor, Worker, Daemon, Unknown }
+
+impl WakeChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator", Self::Terminal => "terminal",
+            Self::Director => "director", Self::Supervisor => "supervisor",
+            Self::Worker => "worker", Self::Daemon => "daemon", Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Observed successful actions only; no arguments or text cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnAction { TaskMutation, FileEdit, Commit, Push, Check, Decision, Assignment, Answer }
 
 /// Largest batch a single Cloud request may carry (client contract).
 pub const QUALITY_EVENT_BATCH_LIMIT: usize = 200;
@@ -143,6 +183,14 @@ pub enum FeedbackSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QualityPayload {
+    Turn {
+        woken_by: WakeChannel,
+        actions: Vec<TurnAction>,
+        no_op: bool,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        minutes: Option<f64>,
+    },
     CheckRun {
         check_id: String,
         stage: CheckStage,
@@ -188,6 +236,7 @@ pub enum QualityPayload {
 impl QualityPayload {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Turn { .. } => "turn",
             Self::CheckRun { .. } => "check_run",
             Self::Intervention { .. } => "intervention",
             Self::Escape { .. } => "escape",
@@ -198,6 +247,13 @@ impl QualityPayload {
 
     fn validate(&self) -> std::result::Result<(), String> {
         match self {
+            Self::Turn { actions, no_op, minutes, .. } => {
+                if *no_op != actions.is_empty() || actions.len() > 8
+                    || actions.iter().collect::<std::collections::BTreeSet<_>>().len() != actions.len()
+                    || minutes.is_some_and(|n| !n.is_finite() || n < 0.0) {
+                    return Err("inconsistent turn metrics".into());
+                }
+            }
             Self::CheckRun { check_id, sha, .. } => {
                 if !is_slug(check_id) {
                     return Err(format!("check_id is not a slug: {check_id}"));
@@ -399,10 +455,20 @@ fn invalid(message: String) -> StoreError {
 
 /// Create the table, indexes and append-only triggers when missing.
 pub fn ensure_quality_event_schema(conn: &Connection) -> Result<()> {
-    for statement in QUALITY_EVENT_SCHEMA_STATEMENTS {
-        conn.execute(statement, [])?;
-    }
-    Ok(())
+    let historical = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='quality_events'",
+        [], |row| row.get::<_, String>(0),
+    ).ok().is_some_and(|sql| !sql.contains("'turn'"));
+    conn.execute_batch("SAVEPOINT quality_event_schema")?;
+    let result = (|| -> Result<()> {
+        let statements = if historical { QUALITY_EVENT_TURN_UPGRADE_STATEMENTS }
+            else { QUALITY_EVENT_SCHEMA_STATEMENTS };
+        for statement in statements { conn.execute(statement, [])?; }
+        Ok(())
+    })();
+    if result.is_err() { let _ = conn.execute_batch("ROLLBACK TO quality_event_schema"); }
+    conn.execute_batch("RELEASE quality_event_schema")?;
+    result
 }
 
 fn with_conn<T>(cas_dir: &Path, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -655,8 +721,17 @@ mod tests {
         assert!(!record_quality_event(dir.path(), &intervention("a")).unwrap());
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap().len(), 1);
 
+        let before = quality_events_after(dir.path(), 0, 10).unwrap();
         let conn = crate::shared_db::shared_connection(&dir.path().join("cas.db")).unwrap();
         let guard = crate::shared_db::lock_connection(&conn).unwrap();
+        // Simulate a database shipped before Turn existed, preserving its rows.
+        guard.execute_batch("DROP TRIGGER quality_events_no_update; DROP TRIGGER quality_events_no_delete; ALTER TABLE quality_events RENAME TO old_quality_events;").unwrap();
+        let old_ddl = QUALITY_EVENT_SCHEMA_STATEMENTS[0].replace(", 'turn'", "");
+        guard.execute(&old_ddl, []).unwrap();
+        guard.execute("INSERT INTO quality_events SELECT * FROM old_quality_events", []).unwrap();
+        guard.execute("DROP TABLE old_quality_events", []).unwrap();
+        ensure_quality_event_schema(&guard).unwrap();
+        ensure_quality_event_schema(&guard).unwrap();
         for statement in [
             "UPDATE quality_events SET title = 'x'",
             "DELETE FROM quality_events",
@@ -664,6 +739,17 @@ mod tests {
             let error = guard.execute(statement, []).unwrap_err().to_string();
             assert!(error.contains("append-only"), "{statement}: {error}");
         }
+        drop(guard);
+        assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap(), before);
+        let mut turn = NewQualityEvent::new("turn", QualityPayload::Turn {
+            woken_by: WakeChannel::Unknown, actions: vec![], no_op: true,
+            input_tokens: None, output_tokens: None, minutes: Some(0.5),
+        });
+        assert!(record_quality_event(dir.path(), &turn).unwrap());
+        let rows = quality_events_after(dir.path(), 0, 10).unwrap();
+        assert!(rows[1].seq > before[0].seq);
+        if let QualityPayload::Turn { no_op, .. } = &mut turn.payload { *no_op = false; }
+        assert!(record_quality_event(dir.path(), &turn).is_err());
     }
 
     /// Scope A: code, command lines, paths, secrets and notes never reach the wire.

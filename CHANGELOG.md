@@ -11,6 +11,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Recover queue ejection costs** — Backfill now reads consumed merge-queue relay history and counts each failed run once. Release reports include recovered ejections even when their original release receipt recorded zero, with the failing job title and run link retained.
 
+### Added — Friction ledger
+
+- **Measure factory turn costs** — Each completed Claude, Codex and Grok supervisor or worker turn records its verified wake channel, successful observed actions, no-op flag and measured tokens/minutes. `cas ledger report --release vX.Y.Z --offline` totals those rows by channel and discloses missing usage. Older Cloud endpoints retain unsupported Turn rows locally and retry after a cooldown.
+- **Known limitation** — OpenCode turns are not recorded yet.
+
 ### Fixed — Supervisor input
 
 - **Keep ordinary messages out of running Codex turns** — Standard, unattributed and other nonoperator messages now obey the supervisor wake gate before PTY delivery, including oversized bodies. Verified Commander input can still steer a running turn; gated messages remain available through the inbox.

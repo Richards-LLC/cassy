@@ -14544,7 +14544,7 @@ mod tests {
             for _ in 0..2 {
                 super::run_reminder_scan(super::ReminderScanInput {
                     cas_dir: cas.to_path_buf(), session_name: "s".into(), supervisor_name: "sup".into(),
-                    agent_id_to_name: HashMap::from([("sup-id".into(), "sup".into())]),
+                    agent_id_to_name: HashMap::from([("sup-id".into(), "sup".into()), (owner.id.clone(), owner.name.clone())]),
                     events: vec![], external_ready: vec![], ci_wakes: vec![],
                 });
             }

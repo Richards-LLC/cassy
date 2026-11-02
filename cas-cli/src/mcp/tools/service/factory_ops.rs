@@ -13980,18 +13980,12 @@ mod spawn_lifecycle_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        println!("NAG_MEASURE spawn_first\n{text}\nNAG_MEASURE_END");
-        let capture = tempfile::Builder::new().prefix("cas-7310-capture-").tempdir().unwrap().keep();
-        std::fs::write(capture.join("spawn_first.txt"), &text).unwrap();
         let repeated = service.factory_spawn_workers(serde_json::from_value(serde_json::json!({
             "action": "spawn_workers", "count": 1, "cli": "claude"
         })).unwrap()).await.expect("repeat spawn");
         let repeated = repeated.content.into_iter().filter_map(|content| match content.raw {
             rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
-        println!("NAG_MEASURE spawn_repeat\n{repeated}\nNAG_MEASURE_END");
-        let capture = tempfile::Builder::new().prefix("cas-7310-capture-").tempdir().unwrap().keep();
-        std::fs::write(capture.join("spawn_repeat.txt"), &repeated).unwrap();
         assert!(!repeated.contains("m-spawn-recall"), "repeated spawn memory: {repeated}");
         assert!(text.contains("Related prior context:"), "{text}");
         assert!(text.contains("m-spawn-recall"), "{text}");

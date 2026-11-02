@@ -5210,7 +5210,7 @@ mod tests {
 
     /// A normal worker shutdown deletes the agent row before its final
     /// director refresh and reminder cleanup. The pre-shutdown ID must survive
-    /// that order so its held reminder is re-armed.
+    /// that order so its held reminder is cancelled.
     #[test]
     fn normal_worker_shutdown_cancels_held_reminder_after_agent_deletion() {
         use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
@@ -5289,7 +5289,7 @@ mod tests {
         );
 
         // Match shutdown_worker_inner: the row is gone before its refresh and
-        // the cleanup that clears the hold and re-arms reminders.
+        // the cleanup that clears the hold and cancels reminders.
         app.last_db_fingerprint = None;
         app.refresh_data().unwrap();
         assert!(
@@ -5392,7 +5392,7 @@ mod tests {
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 1);
     }
 
-    /// cas-5f4b: a session shutdown re-arms every held worker's reminders.
+    /// A session shutdown cancels every held worker's reminders.
     #[test]
     fn session_shutdown_cancels_held_workers_reminders_cas_5f4b() {
         use crate::store::AgentStore;

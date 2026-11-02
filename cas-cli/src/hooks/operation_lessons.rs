@@ -59,24 +59,11 @@ pub(crate) fn operation(
     .then_some("epic-close")
 }
 
-/// The lessons tagged `operation:<op>`, most important first.
+/// Render the already scoped, ordered and session-filtered lessons.
 pub(crate) fn checklist(entries: &[Entry], operation: &str) -> Option<String> {
-    let tag = format!("operation:{operation}");
-    let mut lessons: Vec<&Entry> = entries
-        .iter()
-        .filter(|entry| entry.tags.iter().any(|candidate| candidate.eq_ignore_ascii_case(&tag)))
-        .collect();
-    if lessons.is_empty() {
-        return None;
-    }
-    lessons.sort_by(|left, right| {
-        right
-            .importance
-            .total_cmp(&left.importance)
-            .then_with(|| right.created.cmp(&left.created))
-    });
+    if entries.is_empty() { return None; }
     let mut out = format!("[operation lessons: {operation}] Check each before you continue:");
-    for entry in lessons.iter().take(MAX_LESSONS) {
+    for entry in entries {
         let text = entry
             .title
             .as_deref()
@@ -86,12 +73,6 @@ pub(crate) fn checklist(entries: &[Entry], operation: &str) -> Option<String> {
         let clipped: String = line.chars().take(MAX_LESSON_CHARS).collect();
         let ellipsis = if clipped.len() < line.len() { "…" } else { "" };
         out.push_str(&format!("\n- [ ] [{}] {clipped}{ellipsis}", entry.id));
-    }
-    if lessons.len() > MAX_LESSONS {
-        out.push_str(&format!(
-            "\n({} more: memory action=list tags={tag})",
-            lessons.len() - MAX_LESSONS
-        ));
     }
     Some(out)
 }
@@ -242,7 +223,6 @@ mod tests {
         let spawn = |cli: &str| input(&format!("{}factory", crate::harness_policy::own_tool_prefix()),
             serde_json::json!({"action": "spawn_workers", "cli": cli, "count": 1}));
         let claude = surfaced(temp.path(), &spawn("claude"));
-        println!("NAG_MEASURE lessons_claude\n{claude}\nNAG_MEASURE_END");
         assert!(!claude.contains(&codex), "Claude spawn received Codex lesson: {claude}");
         assert!(claude.contains(&general), "{claude}");
         let first = surfaced(temp.path(), &spawn("codex"));

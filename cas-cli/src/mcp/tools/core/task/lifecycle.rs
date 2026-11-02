@@ -5413,15 +5413,9 @@ mod related_recall_response_tests {
             .expect("create epic"),
         );
 
-        println!("NAG_MEASURE create_first\n{response}\nNAG_MEASURE_END");
-        let capture = tempfile::Builder::new().prefix("cas-7310-capture-").tempdir().unwrap().keep();
-        std::fs::write(capture.join("create_first.txt"), &response).unwrap();
         let repeated = text(core.cas_task_create_with_target(epic_request(
             "Timeline import follow-up again", "Plan timeline import work for the next release."
         ), None, None, true).await.expect("repeat create"));
-        println!("NAG_MEASURE create_repeat\n{repeated}\nNAG_MEASURE_END");
-        let capture = tempfile::Builder::new().prefix("cas-7310-capture-").tempdir().unwrap().keep();
-        std::fs::write(capture.join("create_repeat.txt"), &repeated).unwrap();
         assert!(!repeated.contains("m-recall-memory"), "repeated memory: {repeated}");
         assert!(response.contains("Related prior context:"), "{response}");
         assert!(response.contains("m-recall-memory"), "{response}");
@@ -5432,8 +5426,8 @@ mod related_recall_response_tests {
     }
 
     /// cas-3e41 (GH #993): a qa-labelled task's create receipt and its
-    /// worker's first context (the start response) both carry the standing
-    /// golden-set memory, not only an epic's create receipt.
+    /// worker's durable start notes carry the standing golden-set memory.
+    /// A response in the same session does not repeat the create receipt.
     #[tokio::test]
     async fn qa_task_create_and_start_carry_the_golden_set_memory_cas_3e41() {
         let _env = TestEnvGuard::with_optional_vars(&[

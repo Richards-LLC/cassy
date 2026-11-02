@@ -526,7 +526,7 @@ html[data-scheme="dark"] {
 :root .team-lane > .team-trail { grid-column: 2 / -1; grid-row: 3; }
 :root .team-lane[data-urgency] { border-inline-start: var(--space-1) solid var(--state-warn); }
 :root .team-lane[data-urgency="critical"] { border-inline-start-color: var(--state-crit); }
-:root .team-lane[data-urgency="critical"] .team-state { color: var(--state-crit); font-weight: var(--weight-semibold); }
+:root .team-lane[data-urgency="critical"] .team-state { color: var(--state-crit); background: var(--bg-panel); font-weight: var(--weight-semibold); }
 .team-attention-count { color: var(--state-crit); font-weight: inherit; border-bottom: var(--space-1) solid currentColor; }
 .team-needs[data-active="true"] { border-block-color: var(--state-warn); background: var(--tint-warn); padding-inline: var(--space-2); border-radius: var(--radius-control); }
 .team-needs button[data-urgency="critical"] { border-color: var(--state-crit); color: var(--state-crit); background: var(--bg-raised); }

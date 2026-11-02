@@ -233,7 +233,7 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 }
 
 pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
-    "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
+    "Reply contract, with the diagram, callout, table and colored-code forms Commander renders: see `cas-supervisor/references/operator-reply.md`.";
 
 fn commander_alias_reply_hint() -> String {
     format!(
@@ -2100,6 +2100,34 @@ impl CasService {
         let ready_contract = (worker_action_kind
             == Some(crate::prompt_revalidation::WorkerActionKind::Ready))
         .then(|| message.clone());
+        let worker_to_own_supervisor = role == "worker"
+            && factory_session.as_deref().is_some_and(|session| !session.trim().is_empty())
+            && agent_from_store.as_ref().is_some_and(|agent| agent.role == cas_types::AgentRole::Worker)
+            && resolved_target_agent.as_ref().is_some_and(|agent| {
+                agent.role == cas_types::AgentRole::Supervisor
+                    && agent.factory_session.as_deref() == factory_session.as_deref()
+            });
+        if worker_to_own_supervisor {
+            // Untyped startup readiness needs the same ownership facts as
+            // status/ready. This footer grants no extra wake authority.
+            // Read current ownership independently of a report's task_id: the
+            // report can concern a parked predecessor while its successor runs.
+            let tasks = crate::store::open_task_store_local(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            let mut identities = vec![display_name.as_str()];
+            if let Some(agent) = agent_from_store.as_ref() {
+                identities.push(agent.id.as_str());
+            }
+            let active = tasks.ids_by_assignees_and_statuses(
+                &identities, &[cas_types::TaskStatus::InProgress],
+            ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            if !active.is_empty() {
+                message.push_str(&format!(
+                    "\n\n[CAS current assignment: {} is InProgress for {display_name}; the worker is not unassigned.]",
+                    active.join(", "),
+                ));
+            }
+        }
         if let Some(kind) = worker_action_kind {
             message = crate::prompt_revalidation::attach_worker_action_envelope(
                 &message,

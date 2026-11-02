@@ -300,6 +300,35 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
   });
 });
 
+test("HUB-J4 a short status shows its callout and bold, not their markers", journeyPart, async ({ page, journey }, testInfo) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  hub.supervisorSays(PELICAN, "> [!WARNING]\n> **Blocked:** the queue is red on two Commander journeys.", { kind: "status" });
+  hub.supervisorSays(PELICAN, "**Merged.** Gate 11 of 14 is green and the release branch is ready for its next pass.", { kind: "status" });
+  const log = page.getByRole("log");
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await journey.stage(`Read the short status at ${width} in ${colorScheme}`, async () => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme });
+      const callout = log.getByRole("complementary", { name: "Warning", exact: true });
+      await expect(callout).toContainText("Blocked: the queue is red");
+      await expect(callout.locator("strong").last()).toHaveText("Blocked:");
+      const line = log.locator(".coalesce");
+      await expect(line.locator("strong")).toHaveText("Merged.");
+      await expect(log).not.toContainText("**");
+      await expect(log).not.toContainText("[!WARNING]");
+      // Bold joins its sentence: one reading line, not a stacked box per run.
+      const [bold, box] = await Promise.all([line.locator("strong").boundingBox(), line.boundingBox()]);
+      expect(box!.height).toBeLessThan(3 * 24 + 20);
+      expect(bold!.y - box!.y).toBeLessThan(16);
+      await log.locator(".turn").filter({ has: page.getByRole("complementary", { name: "Warning", exact: true }) }).screenshot({ path: testInfo.outputPath(`status-callout-${width}-${colorScheme}.png`) });
+      await line.screenshot({ path: testInfo.outputPath(`status-bold-${width}-${colorScheme}.png`) });
+    });
+  }
+});
+
 test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();

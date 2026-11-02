@@ -349,6 +349,84 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
 
 /// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input
 /// change, but can be rebound across a docs-only commit without rerunning.
+/// Start names what close will check, and one park reply names every failure.
+#[tokio::test]
+async fn start_lists_close_requirements_and_park_reports_every_failure() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::write(f.worker_path.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n").unwrap();
+    git(&f.worker_path, &["add", "."]);
+    git(&f.worker_path, &["commit", "-q", "-m", &format!("docs({ID}): seed the changelog")]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
+    for requirement in [
+        "Close checks",
+        "Branch: factory/br-worker to main",
+        "Changelog:",
+        "Focused proof:",
+        "Adversarial probe:",
+        "Proof targets: unrelated",
+        "Close reason:",
+    ] {
+        assert!(started.contains(requirement), "{requirement}: {started}");
+    }
+    assert!(!started.contains("exceed the response budget"), "{started}");
+
+    let artifacts = crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None);
+    let ledger_dir = &artifacts.task_dirs(ID)[0];
+    std::fs::create_dir_all(ledger_dir).unwrap();
+    std::fs::write(ledger_dir.join("LEDGER.md"), "not a ledger\n").unwrap();
+
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "the CI run passed",
+    })).await;
+    for gate in [
+        "PROOF CLAIM RECEIPT REQUIRED",
+        "QA LEDGER REJECTED",
+        "CHANGELOG [Unreleased] REQUIRED",
+        "FOCUSED PROOF REQUIRED",
+    ] {
+        assert!(refused.contains(gate), "{gate}: {refused}");
+    }
+    assert_eq!(f.task().status, TaskStatus::InProgress, "a refused delivery stays with its worker");
+
+    // A local-only tip joins the list, and its receipts are judged at that tip,
+    // but it can never move the recorded delivery anchor.
+    let anchor = f.task().deliverables.factory_branch_anchor;
+    std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 3; }\n").unwrap();
+    git(&f.worker_path, &["commit", "-qam", &format!("fix({ID}): local only")]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let unpushed = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    for expected in ["is not on origin", "FOCUSED PROOF REQUIRED", &tip[..12]] {
+        assert!(unpushed.contains(expected), "{expected}: {unpushed}");
+    }
+    assert_eq!(f.task().deliverables.factory_branch_anchor, anchor);
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+}
+
+/// A claim refusal waits for the park gates, so it must also stop a close that
+/// never parks because the delivery is already on its target.
+#[tokio::test]
+async fn deferred_claim_refusal_stops_a_merged_delivery_close() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--no-ff", "-m", "merge the lane", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "the CI run passed",
+    })).await;
+    assert!(refused.starts_with("PROOF CLAIM RECEIPT REQUIRED"), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+
+    let retried = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "gear turns",
+    })).await;
+    assert!(!retried.contains("PROOF CLAIM RECEIPT REQUIRED"), "{retried}");
+}
+
 #[tokio::test]
 async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();
@@ -890,4 +968,47 @@ async fn exact_receipt_parks_after_a_helper_branch_anchor_cas_3d70() {
     assert_eq!(task.status, TaskStatus::AwaitingMerge);
     assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
     assert!(task.deliverables.historical_factory_branch_anchors.contains(&helper));
+}
+
+/// An early metadata refusal must retain the uncited proof claim collected first.
+#[tokio::test]
+async fn close_reports_collected_and_later_refusals_cas_8f6e() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let mut task = f.task();
+    task.execution_note = Some("test-first".into());
+    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "Supervisor tests passed.",
+        "execution_note": "no-code", "external_ref": "https://example.test/proof",
+    })).await;
+    assert!(refused.contains("PROOF CLAIM RECEIPT REQUIRED"), "{refused}");
+    assert!(refused.contains("INLINE NO-CODE INTENT REJECTED"), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+    assert_eq!(f.task().execution_note.as_deref(), Some("test-first"));
+}
+
+/// A pushed continuation must not replace the commit-time anchor on refusal.
+#[tokio::test]
+async fn refused_close_preserves_anchor_cas_8f6e() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let mut task = f.task();
+    let anchor = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+    std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 2; }\n").unwrap();
+    git(&f.worker_path, &["commit", "-q", "-am", &format!("fix({ID}): finish the gear")]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "Supervisor tests passed.",
+        "commit_receipt": tip,
+    })).await;
+    assert!(refused.contains("PROOF CLAIM RECEIPT REQUIRED"), "{refused}");
+    assert!(refused.contains("FOCUSED PROOF REQUIRED"), "must reach the park preflight: {refused}");
+    let retained = f.task();
+    assert_eq!(retained.status, TaskStatus::InProgress, "{refused}");
+    assert_eq!(retained.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()), "{refused}");
+    assert_eq!(retained.deliverables.historical_factory_branch_anchors, task.deliverables.historical_factory_branch_anchors);
 }

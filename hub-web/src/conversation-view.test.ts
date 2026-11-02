@@ -331,6 +331,20 @@ describe("ConversationView (Pebble thread)", () => {
     expect(closed.dataset.expanded).toBe("false");
     expect(closed.textContent).toBe("2 more updates · gate 12 of 14");
   });
+  it("renders a short status's Markdown instead of showing its markers", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "status", "> [!WARNING]\n> **Blocked:** the queue is red."), at(9, 49));
+    history.reply(reply(2, "status", "**Merged.** Gate started"), at(9, 50)); history.reply(reply(3, "status", "**Rebased** `main`"), at(9, 51)); view.update();
+    const callout = view.element.querySelector<HTMLElement>('.bub[data-kind="status"] .markdown-callout[data-kind="warning"]')!;
+    expect(callout.querySelector("p:last-child strong")?.textContent).toBe("Blocked:");
+    const line = view.element.querySelector<HTMLElement>(".coalesce")!;
+    expect(line.textContent).toBe("1 more update · Rebased main");
+    expect(line.querySelector("strong")?.textContent).toBe("Rebased");
+    expect(line.title).toBe("Merged. Gate started\nRebased main");
+    view.element.querySelector<HTMLButtonElement>(".coalesce-expand")!.click();
+    expect([...view.element.querySelectorAll(".coalesce p strong")].map((strong) => strong.textContent)).toEqual(["Merged.", "Rebased"]);
+  });
   it("hides Show full update on a lone short status that nothing clamps", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
@@ -432,6 +446,13 @@ describe("ConversationView (Pebble thread)", () => {
     expect([...table.querySelectorAll('td.evi-number')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
+  });
+  it("renders a blank corner header as an empty cell, not a nameless column header, with copy attached below (cas-0e5e)", () => {
+    const [table] = renderBody(document, reply(1, "answer", "| | time |\n|---|---:|\n| bubble says delivered | 1.05 s |"));
+    const head = [...table!.querySelectorAll("thead tr > *")];
+    expect(head.map(cell => [cell.tagName, cell.textContent])).toEqual([["TD", ""], ["TH", "time"]]);
+    expect(table!.querySelectorAll("th:empty")).toHaveLength(0);
+    expect([...table!.children].map(child => child.className)).toEqual(["evi-scroll", "evi-actions", "evi-status"]);
   });
   it.each(["answer", "status"] as const)("copies a %s table as original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async (kind) => {
     const markdown = '| item | note | result |\r\n| --- | --- | --- |\r\n| `a\\|b` | said "ready", now | **pass** |';

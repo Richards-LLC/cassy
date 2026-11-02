@@ -1677,7 +1677,6 @@ impl FactoryApp {
 
         let DeliveryInputs {
             answered_blocked_workers,
-            verification_waits,
             data: loaded_data,
             blocks_deps,
             idle_liveness,
@@ -1874,14 +1873,6 @@ impl FactoryApp {
                 merge_alert_evidence,
                 snapshot_at,
             ) {
-                if let DirectorEvent::TaskBlocked { task_id, worker, .. } = event
-                    && let Some(dispatch) = verification_waits.get(task_id)
-                {
-                    prompt.text = format!(
-                        "{}\nWorker {worker} is waiting for verification on task {task_id}; active dispatch {dispatch} is already owned by {}.",
-                        crate::supervisor_message_wakes::QUIET, self.supervisor_name,
-                    );
-                }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
                     // cas-223f: observed off the loop beside the delivery read
                     // (cas-3b16: on the blocking lane). A worker it could not

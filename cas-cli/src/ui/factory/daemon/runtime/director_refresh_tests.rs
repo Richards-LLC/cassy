@@ -20,29 +20,218 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
+async fn r1_approved_verdict_leaves_close_retry_with_worker() {
+    r1_verification_wait_wakes("verdict").await;
+}
+
+#[tokio::test]
+async fn r1_expired_dispatch_wakes_supervisor_once() {
+    r1_verification_wait_wakes("deadline").await;
+}
+
+async fn r1_verification_wait_wakes(release: &str) {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecycleTransition, emit_verification_dispatch_handoff,
+    };
+    use cas_types::{Agent, AgentRole, TaskStatus};
+    let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    let root = fixture.app.cas_dir().to_path_buf();
+    let lead = Agent::new_with_role(
+        "lead-id".into(),
+        fixture.app.supervisor_name().into(),
+        AgentRole::Supervisor,
+    );
+    crate::store::open_agent_store(&root)
+        .unwrap()
+        .register(&lead)
+        .unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = tasks.get("cas-9efb-test").unwrap();
+    // This wait exercises a repository-independent proof, not the merge fixture's selector.
+    task.deliverables.work_target = None;
+    tasks.update(&task).unwrap();
+    let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let dispatch = cas_store::create_verification_dispatch(
+        &root,
+        "cas-9efb-test",
+        "merge-w",
+        &lead.id,
+        deadline,
+    )
+    .unwrap();
+    task.status = TaskStatus::Blocked;
+    task.pending_verification = true;
+    task.notes = format!(
+        "[{}] 🚫 BLOCKER {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id)
+    );
+    tasks.update(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    emit_verification_dispatch_handoff(
+        &root,
+        queue.as_ref(),
+        &dispatch.id,
+        &task.id,
+        &lead.id,
+        deadline,
+        "merge-w",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    core.push_task_lifecycle(
+        &task.id,
+        &task.title,
+        TaskStatus::InProgress,
+        TaskStatus::Blocked,
+        "merge-w",
+        None,
+        LifecycleTransition::Blocked,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let idle = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+            worker: "merge-w".into(),
+            active_task: None,
+        };
+        let mut inputs = fixture
+            .app
+            .delivery_request(std::slice::from_ref(&idle))
+            .read(None);
+        inputs.set_idle_liveness(
+            [(
+                "merge-w".into(),
+                Some(crate::mcp::tools::service::worker_liveness::Observation {
+                    state: crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput,
+                    evidence: "recorded task_complete".into(),
+                }),
+            )]
+            .into(),
+        );
+        let (_, prompts, _) = fixture
+            .app
+            .revalidate_and_prompt_for_delivery_from(&[idle], inputs);
+        assert!(prompts.is_empty());
+        core.push_task_lifecycle(
+            &task.id,
+            &task.title,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            "merge-w",
+            None,
+            LifecycleTransition::Blocked,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+    }
+    let rows = queue.peek_all(20).unwrap();
+    // pin: dispatch handoff is the only waking source during this owned episode.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| !crate::supervisor_message_wakes::quiet(&row.prompt))
+            .count(),
+        1,
+        "the dispatch handoff is the sole wake while verification owns the next step"
+    );
+    assert_eq!(rows.len(), 2);
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert;
+    reconcile_blocked_task_alert(&root, &task.id, deadline - chrono::Duration::seconds(1)).unwrap();
+    assert_eq!(queue.peek_all(20).unwrap().len(), 2);
+    if release == "verdict" {
+        fixture._env.set("CAS_AGENT_ROLE", "supervisor");
+        core.set_agent_id_for_testing(lead.id.clone());
+        let result = core
+            .cas_verification_add(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id": task.id,
+                    "dispatch_id": dispatch.id,
+                    "status": "approved",
+                    "summary": "Review passed; worker can retry close."
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(
+            rows.iter().filter(|row| row.target == "merge-w").count(),
+            1,
+            "the real verdict path must queue the worker's close retry: {rows:?}"
+        );
+    }
+    let released_at = if release == "deadline" {
+        deadline + chrono::Duration::seconds(1)
+    } else {
+        chrono::Utc::now()
+    };
+    for _ in 0..3 {
+        reconcile_blocked_task_alert(&root, &task.id, released_at).unwrap();
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+            &root,
+            released_at,
+        );
+    }
+    let rows = queue.peek_all(20).unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.target != "merge-w"
+                && !crate::supervisor_message_wakes::quiet(&row.prompt))
+            .count(),
+        if release == "deadline" { 2 } else { 1 },
+        "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
+    );
+}
+
+#[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};
     for cause in ["owned", "foreign", "expired", "independent", "successor"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
-        let supervisor = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
-        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let supervisor = Agent::new_with_role(
+            "lead-id".into(),
+            fixture.app.supervisor_name().into(),
+            AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&supervisor)
+            .unwrap();
         if cause == "successor" {
             let mut successor = supervisor.clone();
             successor.id = "successor-id".into();
             successor.registered_at += chrono::Duration::seconds(1);
-            crate::store::open_agent_store(&cas_dir).unwrap().register(&successor).unwrap();
+            crate::store::open_agent_store(&cas_dir)
+                .unwrap()
+                .register(&successor)
+                .unwrap();
         }
         let dispatch = cas_store::create_verification_dispatch(
-            &cas_dir, "cas-9efb-test", "merge-w",
-            if cause == "foreign" { "other-lead" } else { "lead-id" },
-            chrono::Utc::now() + chrono::Duration::minutes(if cause == "expired" { -1 } else { 10 }),
-        ).unwrap();
+            &cas_dir,
+            "cas-9efb-test",
+            "merge-w",
+            if cause == "foreign" {
+                "other-lead"
+            } else {
+                "lead-id"
+            },
+            chrono::Utc::now()
+                + chrono::Duration::minutes(if cause == "expired" { -1 } else { 10 }),
+        )
+        .unwrap();
         let store = crate::store::open_task_store_local(&cas_dir).unwrap();
         let mut task = store.get("cas-9efb-test").unwrap();
         task.status = TaskStatus::Blocked;
-        task.notes = format!("[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M"), dispatch.id);
+        task.notes = format!(
+            "[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            dispatch.id
+        );
         store.update(&task).unwrap();
         if cause == "independent" {
             store.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
@@ -50,43 +239,58 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             }})).unwrap();
         }
         let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
-            task_id: task.id, task_title: task.title, worker: "merge-w".into(),
+            task_id: task.id,
+            task_title: task.title,
+            worker: "merge-w".into(),
         };
-        let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
-        assert_eq!(prompts.len(), 1);
+        let (_, prompts, _) = fixture
+            .app
+            .revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
+        assert!(prompts.is_empty());
         let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
-        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
-        core.push_task_lifecycle("cas-9efb-test", "verification wait", TaskStatus::InProgress,
-            TaskStatus::Blocked, "merge-w", None, LifecycleTransition::Blocked,
-            &chrono::Utc::now().to_rfc3339()).unwrap();
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, is_lifecycle_wake_source,
+        };
+        core.push_task_lifecycle(
+            "cas-9efb-test",
+            "verification wait",
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            "merge-w",
+            None,
+            LifecycleTransition::Blocked,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
-        // pin: the table labels distinguish the sole owned wait from genuine waking blockers.
-        assert_eq!(is_lifecycle_wake_source(&rows[0].source), cause != "owned",
-            "{cause}: lifecycle routing must use the same sole-blocker classification");
-        // pin: the table's owned case alone gets CAS's quiet receipt marker.
-        assert_eq!(crate::supervisor_message_wakes::quiet(&rows[0].prompt), cause == "owned");
-        queue.mark_processed(rows[0].id).unwrap();
-        // pin: the cause labels select the recipient/dispatch/independent-hold table above.
-        assert_eq!(crate::supervisor_message_wakes::quiet(&prompts[0].text), cause == "owned",
-            "{cause}: only the recipient's sole active verification wait is quiet");
-        if cause == "owned" {
-            let mut daemon = daemon_on_lanes(&cas_dir);
-            std::mem::swap(&mut daemon.app, &mut fixture.app);
-            let worker = super::super::store_worker::global();
-            daemon.inject_rechecked_batch(super::super::factory_jobs::DeliverabilityBatch {
-                prompts: prompts.into_iter().map(|prompt| (prompt, true)).collect(),
-                assignments: vec![], events: vec![event], refresh_started: Instant::now(),
-            }, worker).await;
-            assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
-            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
-            assert_eq!(rows.len(), 1, "receipt must remain available for the supervisor's next poll");
-            assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
-            assert!(FactoryDaemon::supervisor_wake_class(
-                &super::super::queue_and_events::WakeSender::Daemon, "supervisor", &rows[0].source, &rows[0].prompt,
-            ).is_none());
+        let owned = matches!(cause, "owned" | "expired");
+        // pin: owned dispatches use their handoff/expiry relay instead of a generic blocker wake.
+        assert_eq!(
+            is_lifecycle_wake_source(&rows[0].source),
+            !owned,
+            "{cause}: lifecycle routing must use the same sole-blocker classification"
+        );
+        // pin: an owned dispatch keeps its generic receipt quiet even after expiry.
+        assert_eq!(
+            crate::supervisor_message_wakes::quiet(&rows[0].prompt),
+            owned
+        );
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert;
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&cas_dir, "cas-9efb-test", chrono::Utc::now()).unwrap();
         }
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(
+                &cas_dir,
+                "cas-9efb-test",
+                chrono::Utc::now() + chrono::Duration::minutes(20),
+            )
+            .unwrap();
+        }
+        assert_eq!(queue.peek_all(10).unwrap().len(), if owned { 1 } else { 2 });
     }
 }
 
@@ -148,7 +352,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
             task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
         };
-        assert_eq!(fixture.app.revalidate_and_prompt_for_delivery(&[event]).1.len(), 1,
+        assert_eq!(fixture.app.revalidate_and_prompt_for_delivery(&[event]).0.len(), 1,
             "an unrelated supervisor message must leave the blocker armed (reply_to={reply_to:?})");
     }
     let answered = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
@@ -249,8 +453,9 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
         task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
     };
-    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
-    assert_eq!(prompts.len(), 1);
+    let (events, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(events.len(), 1);
+    assert!(prompts.is_empty());
     let answered_again = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
         "action": "message", "target": "merge-w", "task_id": task.id,
         "kind": "answer", "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
@@ -274,9 +479,9 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
         task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
     };
-    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
-    assert_eq!(prompts.len(), 1);
-    assert!(!crate::supervisor_message_wakes::quiet(&prompts[0].text));
+    let (events, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(events.len(), 1);
+    assert!(prompts.is_empty());
     let opened = service.task(Parameters(serde_json::from_value(serde_json::json!({
         "action": "update", "id": task.id, "status": "open"
     })).unwrap())).await.unwrap();
@@ -1574,9 +1779,9 @@ fn idle_worker_with_task(
         worker: "idle-w".into(),
         active_task: Some(cas_factory::ActiveLeaseSummary {
             task_id: "cas-1d1e".into(),
-            task_title: "parked".into(),
-            task_status: cas_types::TaskStatus::Blocked,
-            close_rejected_reason: Some("blocked on review".into()),
+            task_title: "running".into(),
+            task_status: cas_types::TaskStatus::InProgress,
+            close_rejected_reason: Some("proof required".into()),
             pending_qa: None,
         }),
     }

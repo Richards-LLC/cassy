@@ -157,7 +157,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Recent turns appear without any action, grouped by speaker and day.
 - Loading earlier keeps the reading position; scrolling up to the button survives an intervening render even while a tail pin is pending, and the button shows progress.
-- Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting, prefixing formula-leading cells with an apostrophe. Success feedback clears after two seconds; clipboard refusal offers a persistent visible retry. Long paths wrap at phone width without widening the page (cas-4800).
+- A short status with a callout, heading or list renders it as a full message, and inline Markdown renders in the quiet status box, so no marker shows at any length. Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting, prefixing formula-leading cells with an apostrophe. Success feedback clears after two seconds; clipboard refusal offers a persistent visible retry. Long paths wrap at phone width without widening the page (cas-4800).
 - The end of history is stated, not implied.
 
 #### Edge paths
@@ -765,7 +765,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. Read the real PDF first page inline
 7. Play video and audio on demand; unavailable files keep Open
 
-Code, diagram and diff use the same Copy/Wrap/Expand header. Rich previews retain a Source/Preview toggle; the diagram step exercises both views and expansion with the keyboard.
+Code, diagram and diff use the same Copy/Wrap/Expand header. Rich previews retain a Source/Preview toggle; the diagram step exercises both views with the keyboard, and expansion in the source view, because a rendered diagram shows whole with no Expand or Wrap.
 
 The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named journey against a registered local candidate at `HUB_RICH_HUB_URL` (its `/commander/` URL). It starts no server and keeps the same protocol double; the hub binary supplies the HTML, scripts, styles and lazy assets.
 
@@ -775,7 +775,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Copy retains literal source; clipboard refusal is visible. Wrap is per block and long lines fit 390px without page overflow; unknown languages stay readable.
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
-- Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.
+- Diffs retain literal code and line markers, and a hand-written `+`/`-` change without an `@@` line colors the same way with no line numbers. More than 24 lines start collapsed and allocate line DOM only when opened.
 - Media reserve their viewport before tickets or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes. An expired video ticket is renewed once, preserving the requested playback and native Range seeking.
 - PDF previews render only the first page as pixels. Each file's chip and supported preview share one card; image thumbnails replace their type plate and open the original preview. A failed preview leaves a compact chip with an inline note.
 

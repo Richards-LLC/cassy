@@ -15,8 +15,9 @@ one explicitly with `verification action=qa_request`. A pending or failed explic
 round still binds: re-parking a changed tip opens the next round. A logged
 waiver ends that per-task obligation; deferred batch evidence is still owed.
 
-Every hour with new deliveries, the supervisor builds a candidate at the exact
-epic tip, walks the combined batch matrix and records the reviewed revision.
+Once per release, at the frozen tip after the fix-diff re-review, the supervisor
+builds a candidate, walks the combined batch matrix and records the reviewed
+revision.
 After the published ledger and `verification action=batch_receipt` cover the
 listed delivery anchors, close those deliveries. Until that receipt exists,
 a deferred delivery reports "waiting for batch receipt".

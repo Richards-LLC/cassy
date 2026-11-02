@@ -106,30 +106,46 @@ pub(super) fn park_refusal(
     target: &str,
     delivery_ranges: Option<&[(String, String)]>,
 ) -> Option<String> {
+    let refusals = park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges);
+    (!refusals.is_empty()).then(|| super::gate_preflight::park_reply(refusals))
+}
+
+/// Every receipt-scope refusal at this tip, not just the first.
+pub(super) fn park_refusals(
+    cas_root: &Path,
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> Vec<String> {
     let short = &head[..head.len().min(12)];
-    if let Some(refusal) = changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges) {
-        return Some(refusal);
-    }
+    let mut refusals: Vec<_> =
+        changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
+    // The module check below reads these receipts, so a crate that still owes
+    // one cannot be judged yet; running its tests may already cover the module.
     if !untested.is_empty() {
-        return Some(format!(
+        refusals.push(format!(
             "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours. At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
             id = task.id,
             crates = untested.join(", "),
         ));
+        return refusals;
     }
     // cas-d6eb: a blast-radius module neither declared nor covered by a
     // receipt, while proof_targets can still be widened (parking locks them).
     if !task.risk.contains(&TaskRisk::BlastRadius) {
-        return None;
+        return refusals;
     }
     let judged = for_tested_packages(proof_repo, task, changed_paths, head, &tested);
     let targets = judged.as_ref().map_or(&task.proof_targets, |(judged, _)| &judged.proof_targets);
     let uncovered = super::uncovered_blast_radius_modules(proof_repo, changed_paths, targets);
     if uncovered.is_empty() {
-        return None;
+        return refusals;
     }
     let mut widened = cas_types::normalize_proof_targets(&task.proof_targets);
     for module in &uncovered {
@@ -137,12 +153,13 @@ pub(super) fn park_refusal(
             widened.push(module.clone());
         }
     }
-    Some(format!(
+    refusals.push(format!(
         "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
-    ))
+    ));
+    refusals
 }
 
 fn product_source_path(path: &str) -> bool {
@@ -212,7 +229,7 @@ fn has_no_changelog_decision(notes: &str) -> bool {
     })
 }
 
-fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
+pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
     let reference = format!("{head}:CHANGELOG.md");
     std::process::Command::new("git")
         .args(["show", &reference])
@@ -504,7 +521,7 @@ fn workspace_manifests(repo: &Path) -> Vec<std::path::PathBuf> {
 
 /// Map each workspace package name to its crate directory's name, as
 /// [`changed_source_modules`] records it (lowercase basename).
-fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
+pub(super) fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
     let mut dirs = BTreeMap::new();
     for path in workspace_manifests(repo) {
         let Some(name) = read_manifest(&path).and_then(|manifest| {

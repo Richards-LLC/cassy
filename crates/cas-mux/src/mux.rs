@@ -304,6 +304,7 @@ pub struct Mux {
     /// Populated by `Mux::factory` from `MuxConfig.resolved_worker_specs`.
     /// Also settable at runtime via `set_worker_spec`.
     worker_specs: HashMap<String, WorkerSpec>,
+    worker_startup_prompts: HashMap<String, String>,
     /// Supervisor CLI for propagating harness context into worker spawns.
     supervisor_cli: SupervisorCli,
     /// Factory session propagated into dynamically spawned agents.
@@ -331,6 +332,7 @@ impl Mux {
             cols,
             default_worker_spec: WorkerSpec::builtin_default(),
             worker_specs: HashMap::new(),
+            worker_startup_prompts: HashMap::new(),
             supervisor_cli: SupervisorCli::Claude,
             factory_session: None,
             supervisor_launch: None,
@@ -902,6 +904,19 @@ impl Mux {
             .count()
     }
 
+    /// Prepare one launch turn containing startup and the assigned task.
+    pub fn set_worker_startup_prompt(&mut self, worker: &str, prompt: Option<String>) {
+        if let Some(prompt) = prompt {
+            self.worker_startup_prompts.insert(worker.to_owned(), prompt);
+        } else {
+            self.worker_startup_prompts.remove(worker);
+        }
+    }
+
+    fn worker_startup_prompt(&self, worker: &str) -> Option<&str> {
+        self.worker_startup_prompts.get(worker).map(String::as_str)
+    }
+
     /// Build the `PtyConfig` that `add_worker` would use for the given worker,
     /// without actually spawning a process.
     ///
@@ -963,6 +978,9 @@ impl Mux {
                 self.worker_count() + 1
             }),
         );
+        if let Some(prompt) = self.worker_startup_prompt(name) {
+            config.set_worker_startup_prompt(effective.cli.backend().name(), prompt);
+        }
         push_factory_session_env(&mut config, effective.cli, self.factory_session.as_deref());
         config
     }
@@ -1033,6 +1051,8 @@ impl Mux {
         // number is exact at the moment the env is built, with nothing to
         // thread through the caller.
         let fleet_size = self.worker_count() + 1;
+        // Consume the override: a later recycle must not reuse an old task.
+        let startup_prompt = self.worker_startup_prompts.remove(name);
         let pane = Pane::worker_resuming(
             name,
             cwd,
@@ -1051,6 +1071,7 @@ impl Mux {
             self.factory_session.as_deref(),
             Some(fleet_size),
             resume_session,
+            startup_prompt.as_deref(),
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is

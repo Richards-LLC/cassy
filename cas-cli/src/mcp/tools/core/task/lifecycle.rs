@@ -3504,6 +3504,7 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
+        let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),
@@ -3569,7 +3570,7 @@ impl CasCore {
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 unanchored_warning.unwrap_or_default(),
                 wt_info,
-                start_guidance(&task),
+                start_guidance,
             );
             let context = format!("{advisory}{related_context}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
@@ -3693,7 +3694,7 @@ impl CasCore {
             wt_info,
             sibling_notes_info.unwrap_or_default(),
             self.workflow_guidance(),
-            start_guidance(&task),
+            start_guidance,
             push_note,
         )))
     }

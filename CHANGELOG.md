@@ -7,6 +7,149 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.97.0] - 2026-11-02
+
+### Fixed — Candidate build queue
+
+- **Isolated, bounded candidate builds** — Was: worker-chosen builds inherited the daemon's credentials and supervisor role, a hung build could hold the machine lock indefinitely, and preparation could appear dead or replace a newer request. → Now: queued builds mask worker credential stores, receive only build environment variables, and stop their complete process tree after 30 minutes with an error to the requester. Preparation keeps heartbeating, and admission notices preserve newer requests.
+
+### Changed — Release closeout
+
+- **One review, one batch fix, one QA round** — Was: Supervisors built a candidate
+  and walked QA every hour, and each failure started another round, so 3.96 ran 6
+  rounds over 5 h 19 m with nothing on main. → Now: The supervisor guides fix one
+  order: freeze scope, run one full review with the queue precheck, fix everything
+  in one batch, re-review only the fix diff, run one QA round, then enqueue. A red
+  row gets one fix and a re-walk of that row, then moves to the next release unless
+  it loses operator data.
+- **No hourly QA overdue notice** — Was: The daemon told every supervisor to start a
+  QA round each hour merged work waited. → Now: The notice is gone, and a queued one
+  left by an older daemon does not wake anyone.
+
+### Fixed — Factory notification wakes
+
+- **Merged delivery facts wait for the next turn** — Was: Merge-close and lane-parked notices woke workers, and queued READY TO MERGE alerts could wake supervisors after Cassy had merged the delivery. → Now: These facts stay readable in the next-turn digest. New deliveries, verifier findings and blockers keep their action wakes.
+
+### Fixed — Worker assignments
+
+- **One assignment turn at spawn and queue advance** — Startup, the supervisor's brief and the assigned task arrive together. Queued successors survive delivery after automatic start, and worker ready/status messages name any current task.
+
+### Fixed — Factory blocker alerts
+
+- **One alert per blocker episode** — Director blocked and idle signals share the durable task lifecycle queue, stay quiet during owned verification waits, and escalate once after the deadline. Native background jobs keep a worker busy until their completion notice.
+
+- **Verification waits wake only their next owner** — Approved verdicts leave close retries with workers, and expired dispatches send one supervisor wake. Background-job completions recorded as queued-command attachments now end the job's busy state.
+
+### Changed — Close gates
+
+- **Workers see close requirements at start and every park failure at once** — Was:
+  A worker learned each close requirement from a refusal, one per attempt, so
+  only 32% of tasks closed on the first attempt. → Now: The start context lists
+  what close will check for this task and project, and a refused park reports
+  proof claims, upkeep, ledger, QA evidence, unpushed tip, changelog, focused
+  proof and proof scope together in one reply.
+
+### Fixed — Supervisor replies
+
+- **Supervisors answer with diagrams, callouts, colored code and tables** — Was:
+  The reply contract limited operator answers to bold, bullets, lists,
+  inline code and links, so Commander's rich rendering went unused. → Now: The
+  contract, the pane guidance on every harness and the pointer beside each
+  Commander question steer supervisors to a diagram for a flow, a callout for
+  bad news or a decision, a language-tagged block for commands and a table for
+  a comparison, with a worked example and what the terminal pane shows.
+
+### Fixed — Commander diagrams
+
+- **A flowchart shows from start to finish** — Was: A diagram taller than 288 px
+  was cut mid-shape with no cue, including the reply guidance's own example, so
+  the end of the flow stayed hidden until the reader found Expand. → Now: A
+  rendered diagram shows whole at phone and desktop widths, and Expand appears
+  only on its source view, where long text can still overflow.
+- **A diagram has no dead Wrap button** — Was: Wrap on a rendered diagram changed
+  nothing and took header room on a phone. → Now: Wrap appears only on the
+  diagram's source view, where it has lines to wrap.
+
+### Fixed — Commander session dots
+
+- **A stopped session no longer looks alive** — Was: A stopped session on a
+  machine that was still online showed the same green idle dot as a live one,
+  or the needs-you dot if it had unanswered attention. → Now: It shows the gray
+  disconnected dot, and a live idle session stays green.
+
+### Fixed — Commander status updates
+
+- **A short status shows its formatting** — Was: A status of 140 characters or
+  fewer folded into the quiet status box as plain text, so `> [!WARNING]` and
+  `**bold**` appeared literally, and the same callout one character longer
+  rendered properly. → Now: A short status with a callout, heading or list reads
+  as a full message at any length, and bold, code and links render in the status
+  box.
+
+### Fixed — Commander diffs
+
+- **A hand-written diff shows its changes in color** — Was: A `diff` fence
+  without an `@@` line, the way a before/after is usually written in a reply,
+  rendered as one color with no Source control. → Now: Its added and removed
+  lines are tinted like any other diff, with no line numbers because none were
+  written, and a fence with no changed line stays plain code.
+
+### Fixed — Commander tables
+
+- **Reply tables read as tables, not code boxes** — Was: A table in a reply sat
+  in a dark rounded panel with monospace numbers, no row rules, a blank
+  nameless header over the label column and Copy buttons floating above an
+  empty band. → Now: Tables are ruled rows in the bubble's own font, with
+  numbers right-aligned in tabular figures, a blank corner left as an empty
+  cell, and compact Copy Markdown and Copy CSV buttons on the table's closing
+  rule, at phone and desktop widths in light and dark.
+
+### Changed — QA candidates
+
+- **Candidates build on a worker's request** — Was: Every QA candidate took a
+  supervisor turn to start and a message back with the hash, and a request could
+  go stale in the hand-off. → Now: `factory action=candidate_request` names the
+  worker's own active task and an exact revision reachable in its own checkout;
+  the factory daemon builds it from a checkout it keeps at the default branch tip,
+  one build per machine under the build guard, and messages the worker the path,
+  version, revision, hash and log, or the exact error. A newer request replaces a
+  queued one, and a refusal names why. The worker refusal of direct builds stays.
+- **A later build keeps a cited candidate** — Was: Each build overwrote
+  `<task>/candidate`, so a ledger's cited binary could disappear. → Now: Each
+  revision lives in `<task>/candidates/<revision>/` and `candidate` points at the
+  newest; asking again for a published revision reuses it without compiling.
+
+### Fixed — Worker launch with a task
+
+- **A Claude worker spawned with a task starts** — Was: The assignment followed
+  `--mcp-config`, whose list swallowed it as a config path, so the worker exited at
+  launch with "Invalid MCP configuration" and the task stayed on a dead worker. →
+  Now: `--` ends the options before the prompt for Claude and Grok, confirmed
+  against Claude 2.1.312 and Grok 1.0.70.
+- **A failed launch leaves nothing behind** — Was: A launch that failed before it
+  used its assignment kept that prompt for the next launch of the same name. → Now:
+  The prompt is cleared and the task is released at the point of failure.
+- **A same-name replacement gets its assignment** — Was: The row its predecessor
+  received blocked a new one, so the replacement got nothing while the row counted
+  as delivered. → Now: Each launch frees the rows already received; a row still
+  pending keeps carrying the assignment, once.
+
+### Fixed — Close refusal details
+
+- **Keep earlier failures visible** — Close now includes collected proof refusals
+  beside later metadata, checkout, receipt and verification failures. Refused
+  attempts skip speculative delivery-anchor advancement.
+- **Runnable interim queue precheck** — The closeout guides name a clean-checkout
+  diagnostic with both npm installs, resolvable Playwright and Chromium, workspace
+  nextest and CI-tier tests until the hosted precheck replaces it.
+
+### Known limitation — Candidate builds
+
+- **Queued candidate builds on some Linux hosts** — On some Linux hosts, bubblewrap
+  refuses a queued candidate build in the daemon's launch context ("No permissions
+  to create a new namespace"). The worker gets that error within seconds and the
+  supervisor builds the candidate by hand. The fix is planned for the next release.
+
 ## [3.96.0] - 2026-11-02
 
 ### Fixed — Commander messages and replies

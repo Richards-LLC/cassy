@@ -126,7 +126,7 @@ fn owns_server(record: &RegisteredServer, caller: &crate::types::Agent) -> bool 
 }
 
 impl CasService {
-    fn server_caller(&self) -> Option<crate::types::Agent> {
+    pub(super) fn server_caller(&self) -> Option<crate::types::Agent> {
         let id = self.inner.get_registered_agent_id_read_only().ok()?;
         self.inner.open_agent_store().ok()?.get(&id).ok()
     }

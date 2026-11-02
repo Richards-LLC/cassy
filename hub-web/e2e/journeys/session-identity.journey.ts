@@ -367,6 +367,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
     await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
     await expect(ended.locator(".conversation-when")).toBeVisible();
+    await expect(ended.locator(".supervisor-state")).toHaveClass(/offline/);
     await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
     const clearEnded = old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true });
     await clearEnded.scrollIntoViewIfNeeded();
@@ -398,6 +399,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       // A live idle dot uses the live green, never the old gray idle token.
       if (mode !== "forced-colors") {
         expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
+        // A stopped session's dot is filled gray; a live idle dot stays an open ring.
+        expect((await look(offline))[0]).not.toBe((await look(idle))[0]);
       } else {
         expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
       }

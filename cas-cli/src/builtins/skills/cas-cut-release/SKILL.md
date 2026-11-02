@@ -12,7 +12,8 @@ proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
 
-1. Start from the code-done epic branch. CHANGELOG `[Unreleased]` holds the
+1. Start from the epic branch only after closeout is complete: one full review,
+   one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` holds the
    release entries. `scripts/release.sh --next-version` prints the version and
    the draft path; write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep

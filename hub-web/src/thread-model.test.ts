@@ -145,6 +145,11 @@ describe("threadModel", () => {
     for (const tick of ["Gate 11 of 14 targets green", "Rebasing", "fetching https://example.test/run?id=4 · 3 of 5"]) {
       expect(foldsAsStatus(tick), tick).toBe(true);
     }
+    // Block Markdown keeps its shape at any length; only inline Markdown fits the quiet line.
+    for (const block of ["> [!WARNING]\n> **Blocked:** the queue is red.", "## Blocked", "- first\n- second"]) {
+      expect(foldsAsStatus(block), block).toBe(false);
+    }
+    expect(foldsAsStatus("**Merged.** Gate 11 of 14 green")).toBe(true);
   });
   it("an ask-bearing status splits a status run and joins the supervisor turns beside it", () => {
     const history = new ConversationHistory();

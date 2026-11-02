@@ -117,6 +117,44 @@ def verify_web(scope, binary, snapshot, owned):
                 scope.spawn_hooks.remove(pids.append)
 
 
+def verified_receipt(published, revision):
+    """The published candidate's receipt, when its binary still matches it."""
+    try:
+        receipt = json.loads((published / "RECEIPT.json").read_text())
+        if receipt["revision"] == revision and receipt["sha256"] == sha256(published / "cas"):
+            return receipt
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def retain_legacy_candidate(candidate_dir, candidates):
+    """Before the per-revision layout `candidate` was a real directory."""
+    if candidate_dir.is_symlink() or not candidate_dir.exists():
+        return
+    try:
+        revision = json.loads((candidate_dir / "RECEIPT.json").read_text())["revision"]
+    except (OSError, ValueError, KeyError):
+        revision = None
+    if revision and not (candidates / revision).exists():
+        candidates.mkdir(exist_ok=True)
+        candidate_dir.rename(candidates / revision)
+    else:
+        shutil.rmtree(candidate_dir)
+
+
+def point_latest(candidate_dir, published):
+    """Atomically aim `candidate` at the newest build, which stays where it is."""
+    retain_legacy_candidate(candidate_dir, published.parent)
+    link = candidate_dir.parent / f".candidate-link-{os.getpid()}"
+    link.symlink_to(Path(published.parent.name) / published.name)
+    try:
+        os.replace(link, candidate_dir)
+    except BaseException:
+        link.unlink(missing_ok=True)
+        raise
+
+
 def build(repo, revision, candidate_dir):
     repo = repo.resolve()
     resolved = subprocess.check_output(
@@ -126,6 +164,20 @@ def build(repo, revision, candidate_dir):
     if revision != resolved:
         raise ValueError(f"--rev must be the full commit SHA ({resolved})")
     candidate_dir = candidate_dir.absolute()
+    # Each revision publishes once, so a ledger's cited candidate is never replaced.
+    task_dir = candidate_dir.parent
+    candidates = task_dir / "candidates"
+    published = candidates / revision
+    task_dir.mkdir(parents=True, exist_ok=True)
+    if task_dir.is_symlink() or candidates.is_symlink():
+        raise ValueError("candidate artifact path must not be a symlink")
+    if candidate_dir.is_symlink() and candidate_dir.resolve().parent != candidates.resolve():
+        raise ValueError("candidate artifact path must not be a symlink")
+    existing = verified_receipt(published, revision)
+    if existing:
+        point_latest(candidate_dir, published)
+        return {"candidate_dir": str(published), "revision": revision,
+                "version": existing["version"], "sha256": existing["sha256"]}
     scratch = release_env.resolve_scratch(repo, durable=True, create=True)
     if scratch.problem or not scratch.base:
         raise ValueError(f"release scratch unavailable: {scratch.problem}; {scratch.fix}")
@@ -171,10 +223,6 @@ def build(repo, revision, candidate_dir):
                 if not binary.is_file():
                     raise ValueError(f"candidate build produced no binary at {binary}")
                 declared = tomllib.loads((checkout / "cas-cli/Cargo.toml").read_text())["package"]["version"]
-                task_dir = candidate_dir.parent
-                task_dir.mkdir(parents=True, exist_ok=True)
-                if task_dir.is_symlink() or candidate_dir.is_symlink():
-                    raise ValueError("candidate artifact path must not be a symlink")
                 stage = Path(tempfile.mkdtemp(prefix=".candidate-", dir=task_dir))
                 try:
                     shutil.copy2(binary, stage / "cas")
@@ -192,25 +240,18 @@ def build(repo, revision, candidate_dir):
                     (stage / "SHA256SUMS").write_text(
                         f"{binary_hash}  cas\n{version_hash}  VERSION.txt\n"
                         f"{receipt_hash}  RECEIPT.json\n")
-                    retired = task_dir / f".candidate-retired-{os.getpid()}"
-                    if candidate_dir.exists():
-                        if retired.exists():
-                            raise ValueError(f"old candidate backup already exists at {retired}")
-                        candidate_dir.rename(retired)
-                    try:
-                        stage.rename(candidate_dir)
-                    except BaseException:
-                        if retired.exists():
-                            retired.rename(candidate_dir)
-                        raise
-                    if retired.exists():
-                        shutil.rmtree(retired)
+                    candidates.mkdir(exist_ok=True)
+                    # Only an unverifiable, so uncitable, directory can be here.
+                    if published.exists():
+                        shutil.rmtree(published)
+                    stage.rename(published)
+                    point_latest(candidate_dir, published)
                 finally:
                     if stage.exists():
                         shutil.rmtree(stage)
             finally:
                 run(scope, ["git", "-C", repo, "worktree", "remove", "--force", checkout])
-    return {"candidate_dir": str(candidate_dir), "revision": revision,
+    return {"candidate_dir": str(published), "revision": revision,
             "version": version, "sha256": binary_hash}
 
 

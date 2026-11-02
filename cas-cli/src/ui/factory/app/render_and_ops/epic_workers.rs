@@ -3153,7 +3153,44 @@ impl FactoryApp {
 
         // Capture effective CLI before spec is moved into add_worker.
         // Explicit spec overrides session default so the intro prompt matches the actual harness.
-        let effective_cli = spec.as_ref().map(|s| s.cli).unwrap_or(self.worker_cli);
+        let effective_cli = effective_spec.cli;
+
+        let queue_head = self.factory_session().and_then(|session| {
+            cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.cas_dir())
+                .and_then(|queues| queues.get(session, &worker_name)).ok()
+                .filter(|queue| queue.revision > 0)
+                .map(|queue| queue.current_task)
+        });
+        let queued_spawn = queue_head.is_some();
+        let task_id = queue_head.unwrap_or(task_id);
+        // Bind before launch so the first turn can carry the actual assignment.
+        // Store reads stay here; mux/pty only receive the composed text.
+        let startup = task_id.as_deref().and_then(|id| {
+            // Ordered spawns retain their queue selector's ownership. The
+            // startup instruction authorizes a normal gated start of its head;
+            // registration repair may already have started it by that turn.
+            if !queued_spawn && !assign_task_to_new_worker(self.cas_dir(), id, &worker_name) {
+                return None;
+            }
+            let store = open_task_store_cached(self.cas_dir()).ok()?;
+            let task = store.get(id).ok()?;
+            if queued_spawn && (task.assignee.as_deref().is_some_and(|owner| owner != worker_name)
+                || (task.status == cas_types::TaskStatus::Open
+                    && !store.list_ready().ok()?.iter().any(|ready| ready.id == id))) {
+                return None;
+            }
+            if !matches!(task.status, cas_types::TaskStatus::Open | cas_types::TaskStatus::InProgress) {
+                return None;
+            }
+            let mut prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
+                self.cas_dir(), &worker_name, id, &task.title, effective_cli,
+            );
+            if let Some(instruction) = crate::worktree::node_modules_setup_instruction(&cwd) {
+                prompt.push_str(&format!("\n\n{instruction}"));
+            }
+            Some(prompt)
+        });
+        self.mux.set_worker_startup_prompt(&worker_name, startup.clone());
 
         if let Err(e) = self.mux.add_worker(
             &worker_name,
@@ -3167,9 +3204,16 @@ impl FactoryApp {
                 "factory_worker_spawn_result",
                 vec![("success", "false"), ("reason", "mux_add_worker_failed")],
             );
+            // No process took this assignment: a later launch of this name
+            // must not inherit the prompt, and the task must not stay held.
+            self.mux.set_worker_startup_prompt(&worker_name, None);
+            if let (false, Some(id)) = (queued_spawn, task_id.as_deref()) {
+                release_preassign_if_bound(self.cas_dir(), id, &worker_name);
+            }
             return Err(e.into());
         }
         self.track_worker_process_group(&worker_name);
+        self.release_predecessor_assignment_keys(&worker_name);
 
         // STEP 3 (cas-5232): Post-spawn branch assertion — now the SECOND belt.
         // The cas-30c6 gate above already refused a misbound spawn before the
@@ -3197,26 +3241,28 @@ impl FactoryApp {
         // Track the worker name
         self.worker_names.push(worker_name.clone());
 
-        // cas-6913 / cas-7a94: pre-assign (or confirm early-assign) now that
-        // the worker name is final and the PTY is up. Best-effort — a failure
-        // here must not unwind the spawn.
-        if let Some(ref task_id) = task_id {
-            let ok = assign_task_to_new_worker(self.cas_dir(), task_id, &worker_name);
-            if !ok {
-                tracing::warn!(
-                    task_id = %task_id,
-                    worker = %worker_name,
-                    "cas-7a94: finish_worker_spawn pre-assign did not stick — \
-                     worker boots without the requested task"
-                );
+        if let (Some(prompt), Some(id), Some(session)) =
+            (startup.as_deref(), task_id.as_deref(), self.factory_session())
+        {
+            // The PTY launch handed off this exact initial argument. This is
+            // transport evidence only, never a claim that the model acted.
+            let receipt = crate::task_assignment::enqueue_spawn_message(
+                self.cas_dir(), session, &worker_name, id, prompt,
+            ).and_then(|row| {
+                let queue = crate::store::open_prompt_queue_store(self.cas_dir())?;
+                queue.record_recipient_transport_delivered(row, &worker_name)?;
+                queue.mark_transport_delivered(row)?;
+                Ok(())
+            });
+            if let Err(error) = receipt {
+                tracing::warn!(%error, %worker_name, "startup handoff receipt failed; registration will repair assignment");
             }
+            self.note_assignment_briefed(id, &worker_name);
+        } else {
+            crate::ui::factory::app::queue_codex_worker_intro_prompt(
+                self.cas_dir(), &worker_name, effective_cli,
+            );
         }
-
-        crate::ui::factory::app::queue_codex_worker_intro_prompt(
-            self.cas_dir(),
-            &worker_name,
-            effective_cli,
-        );
 
         // Update event detector so it recognizes this worker's events
         self.event_detector.add_worker(worker_name.clone());
@@ -3236,6 +3282,13 @@ impl FactoryApp {
 
         tracing::info!("spawn_worker completed: {}", worker_name);
         Ok(worker_name)
+    }
+
+    fn release_predecessor_assignment_keys(&self, worker: &str) {
+        let Some(session) = self.factory_session() else { return };
+        if let Err(error) = crate::task_assignment::release_received_assignment_keys(self.cas_dir(), session, worker) {
+            tracing::warn!(%error, worker, "a same-name predecessor's assignment row may swallow this worker's assignment");
+        }
     }
 
     /// Shutdown a worker by name
@@ -3988,6 +4041,7 @@ impl FactoryApp {
             return Err(e.into());
         }
         self.track_worker_process_group(name);
+        self.release_predecessor_assignment_keys(name);
 
         // Track the worker name
         self.worker_names.push(name.to_string());
@@ -7517,6 +7571,97 @@ mod tests {
         let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
         assert_eq!(pass.state, cas_types::QaPassState::Claimed);
         assert_eq!(pass.reviewer_agent_id.as_deref(), Some("dead-reviewer"));
+    }
+
+    fn spawn_result_for_test(name: &str, cwd: &std::path::Path) -> crate::ui::factory::app::WorkerSpawnResult {
+        crate::ui::factory::app::WorkerSpawnResult {
+            worker_name: name.into(), cwd: cwd.into(), cas_root: None, worktree: None,
+            worktree_created: false, target_seed: None, target_seed_warning: None,
+        }
+    }
+
+    /// A failed launch must not leave the task held by a worker that never
+    /// existed, nor arm its prompt for a later launch of the same name.
+    #[test]
+    fn failed_launch_releases_its_task_and_startup_prompt() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, cas_dir) = seeded_cas_dir();
+        let store = open_task_store_cached(&cas_dir).unwrap();
+        store.add(&task_with("cas-fail", None, TaskStatus::Open)).unwrap();
+        let mut app = FactoryApp::for_test_at(cas_dir);
+        // An occupied pane name fails the launch before it consumes the prompt.
+        let pty = cas_mux::Pty::spawn("ghost", cas_mux::PtyConfig {
+            command: "/bin/sh".into(), args: vec!["-c".into(), "exit 0".into()],
+            cwd: Some(temp.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            "ghost", cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+
+        let launch = app.finish_worker_spawn(
+            spawn_result_for_test("ghost", temp.path()), None, None, Some("cas-fail".into()),
+        );
+
+        assert!(launch.is_err());
+        let task = store.get("cas-fail").unwrap();
+        assert_eq!((task.assignee, task.status), (None, TaskStatus::Open));
+        let next = app.mux.build_add_worker_config("ghost", temp.path().into(), None, "supervisor", None, None);
+        assert!(!next.args.iter().any(|arg| arg.contains("cas-fail")), "stale prompt: {:?}", next.args);
+    }
+
+    /// The row a same-name predecessor received must not swallow the
+    /// replacement's assignment; one launch still gets exactly one row.
+    #[test]
+    fn same_name_relaunch_gets_its_own_assignment_row() {
+        // Launch preflight reads ambient PATH: re-exec with a private harness.
+        const CHILD: &str = "CAS_SAME_NAME_RELAUNCH_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let cas = crate::test_support::fake_cas_on_path();
+            let codex = cas.bin().join("codex");
+            std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let test = format!("{}::same_name_relaunch_gets_its_own_assignment_row", module_path!().split_once("::").unwrap().1);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env("PATH", cas.path())
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let name = "reused-name";
+        for respawn in [false, true] {
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let project = env.home().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+            let mut worker = cas_types::Agent::new("old-id".into(), name.into());
+            worker.role = cas_types::AgentRole::Worker;
+            worker.factory_session = Some("relaunch".into());
+            open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+            let task = task_with("cas-relaunch", Some(name), TaskStatus::Open);
+            open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
+            let received = crate::task_assignment::enqueue(&cas_dir, &task).unwrap().unwrap();
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            queue.record_recipient_transport_delivered(received, name).unwrap();
+            queue.mark_transport_delivered(received).unwrap();
+
+            let mut app = FactoryApp::for_test_at(cas_dir.clone());
+            app.set_factory_session("relaunch".into());
+            let spec = cas_mux::WorkerSpec::codex_default(name);
+            if respawn {
+                app.respawn_worker_with_spec(name, None, Some(spec)).unwrap();
+            } else {
+                app.finish_worker_spawn(spawn_result_for_test(name, &project), None, Some(spec), None).unwrap();
+            }
+
+            let fresh = crate::task_assignment::enqueue(&cas_dir, &task).unwrap().unwrap();
+            assert_ne!(fresh, received, "respawn={respawn}: the replacement got no row");
+            assert_eq!(crate::task_assignment::enqueue(&cas_dir, &task).unwrap(), Some(fresh));
+        }
     }
 
     // --- cas-6913 / cas-7a94: spawn-time task pre-assignment ------------

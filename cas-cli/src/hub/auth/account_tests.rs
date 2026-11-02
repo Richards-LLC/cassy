@@ -14,7 +14,7 @@ struct Paired {
 }
 
 fn paired() -> Paired {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_hub_tempdir();
     let store = AuthStore::open(root.path().join("hub"), HUB).unwrap();
     let now = Utc::now();
     let invitation = store

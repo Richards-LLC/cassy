@@ -739,6 +739,13 @@ mod tests {
         assert!(record_quality_event(dir.path(), &intervention("a")).unwrap());
         assert!(!record_quality_event(dir.path(), &intervention("a")).unwrap());
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap().len(), 1);
+        assert!(!quality_event_recorded(dir.path(), &intervention("new-key"), &[]).unwrap());
+        assert!(quality_event_recorded(dir.path(), &intervention("new-key"), &["a".into()]).unwrap());
+        let mut other_scope = intervention("new-key");
+        other_scope.scope = "other-project".into();
+        assert!(!quality_event_recorded(dir.path(), &other_scope, &["a".into()]).unwrap());
+        assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap().len(), 1,
+            "alias lookup must not append or modify the original event");
 
         let before = quality_events_after(dir.path(), 0, 10).unwrap();
         let conn = crate::shared_db::shared_connection(&dir.path().join("cas.db")).unwrap();

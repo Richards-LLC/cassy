@@ -10497,12 +10497,19 @@ impl FactoryDaemon {
                     Some((is_supervisor_target, pane_state, wake_decision, worker_is_idle))
                 } else { None };
                 if (inline_supervisor_body || supervisor_pty_delivery)
-                    && let Some((_, _, wake_decision, false)) = normal_wake {
+                    && let Some((_, pane_state, wake_decision, false)) = normal_wake {
+                    // Keep the actionable draft explanation that PTY transport
+                    // deferral used before this gate moved ahead of admission.
+                    let pending_detail = if pane_state.composer_dirty {
+                        "composer protected: operator draft is unsubmitted".to_string()
+                    } else {
+                        wake_decision.status_detail()
+                    };
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
-                            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: wake_decision.status_detail(),
+                            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: pending_detail.clone(),
                                 recheck_at: chrono::Utc::now()+chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap() });
                         self.queue_jobs.inline_parked.insert(member.id,(member.clone(),chrono::Utc::now()));
                     }
@@ -10514,7 +10521,7 @@ impl FactoryDaemon {
                         super::prompt_queue_jobs::QueueStamp::WakeDecline { detail: wake_decision.status_detail() });
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::ParkBusy {
-                            detail: wake_decision.status_detail(),
+                            detail: pending_detail,
                             recheck_at: chrono::Utc::now() + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
                         });
                     self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));

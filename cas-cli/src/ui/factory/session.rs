@@ -1485,7 +1485,7 @@ mod tests {
         let pin = provisioner_pin_path(session);
         std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
         std::fs::write(&pin, "daemon build").unwrap();
-        std::fs::write(metadata_path(session), "{}").unwrap();
+        manager.save_metadata(&create_metadata(session, i32::MAX as u32, "supervisor", &[], None, None, None)).unwrap();
         manager.remove_metadata(session).unwrap();
         assert!(!pin.parent().unwrap().exists());
         assert!(!metadata_path(session).exists());

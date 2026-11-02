@@ -75,8 +75,14 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
         action = yaml.safe_load((ROOT / '.github/actions/classify-required-diff/action.yml').read_text())
         body = action['runs']['steps'][0]['run']
         output = Path(self.scratch.name) / 'outputs'
+        # These fixtures classify an explicit base/head delta, not the outer
+        # factory push. They have no origin/default/epic refs: inheriting that
+        # event correctly makes resolve-ci-base fail closed and masks every
+        # path assertion as web-needed. Real factory ancestry has its own suite.
         result = subprocess.run(['bash', '-euo', 'pipefail', '-c', body], cwd=self.repo,
-                                env=dict(os.environ, BASE_SHA=self.base, ZERO_BASE_REF='', GITHUB_OUTPUT=str(output)),
+                                env=dict(os.environ, BASE_SHA=self.base, ZERO_BASE_REF='', GITHUB_OUTPUT=str(output),
+                                         GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/1/merge',
+                                         FULL_VALIDATION='false'),
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return dict(line.split('=', 1) for line in output.read_text().splitlines())

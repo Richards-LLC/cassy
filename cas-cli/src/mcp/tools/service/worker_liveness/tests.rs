@@ -604,3 +604,130 @@ fn claude_background_job_keeps_a_completed_turn_busy_until_its_notification() {
         );
     }
 }
+
+// Drive real /proc evidence with acknowledged CPU work, not sleeps or a
+// fabricated cpu_busy. Every process stays alive and quiescent between commands.
+#[cfg(target_os = "linux")]
+struct CpuTree {
+    harness: std::process::Child,
+    output: std::io::BufReader<std::process::ChildStdout>,
+    agent: cas_types::Agent,
+}
+
+#[cfg(target_os = "linux")]
+impl CpuTree {
+    fn new(depth: u32) -> Self {
+        use std::os::unix::process::CommandExt;
+        let script = r#"
+import subprocess, sys, time
+script, depth = sys.argv[1], int(sys.argv[2])
+child = None
+if depth:
+    child = subprocess.Popen(['python3', '-u', '-c', script, script, str(depth - 1)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert child.stdout.readline().strip() == 'ready'
+print('ready', flush=True)
+for line in sys.stdin:
+    command = line.strip()
+    if command == 'harness' or (command == 'work' and child is None):
+        end = time.process_time() + 0.15
+        while time.process_time() < end:
+            pass
+    elif child:
+        child.stdin.write('work\n' if command == 'work' else 'idle\n')
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == 'done'
+    print('done', flush=True)
+if child:
+    child.stdin.close()
+    assert child.wait(timeout=5) == 0
+"#;
+        let mut harness = std::process::Command::new("python3")
+            .arg0("claude")
+            .args(["-u", "-c", script, script, &depth.to_string()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = std::io::BufReader::new(harness.stdout.take().unwrap());
+        let mut agent =
+            cas_types::Agent::new(format!("cpu-tree-{}", harness.id()), "worker".into());
+        agent.pid = Some(harness.id());
+        agent.pid_starttime = crate::mcp::daemon::read_pid_starttime(harness.id());
+        let mut tree = Self {
+            harness,
+            output,
+            agent,
+        };
+        tree.read_ack("ready");
+        tree
+    }
+
+    fn read_ack(&mut self, expected: &str) {
+        use std::io::BufRead;
+        let mut line = String::new();
+        self.output.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), expected);
+    }
+
+    fn work(&mut self, command: &str) {
+        use std::io::Write;
+        writeln!(self.harness.stdin.as_mut().unwrap(), "{command}").unwrap();
+        self.read_ack("done");
+    }
+
+    fn observe(&self) -> Observation {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("background.jsonl");
+        std::fs::write(&path, concat!(
+            r#"{"timestamp":"2026-09-10T18:59:59Z","type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"shell","name":"Bash","input":{"command":"background job","run_in_background":true}}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-10T19:00:00Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"shell","content":"Command running in background with ID: job-42."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#,
+            "\n",
+        )).unwrap();
+        observe(
+            SupervisorCli::Claude,
+            Some(&path),
+            process_evidence(&self.agent),
+            now() + chrono::Duration::seconds(900),
+            120,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for CpuTree {
+    fn drop(&mut self) {
+        drop(self.harness.stdin.take());
+        self.harness.wait().unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_evidence_busy_background_child_and_grandchild_keep_executing() {
+    for depth in [1, 2] {
+        let mut tree = CpuTree::new(depth);
+        tree.observe(); // Cold CPU sample.
+        tree.work("work");
+        let got = tree.observe();
+        assert_eq!(
+            got.state,
+            Liveness::Executing,
+            "depth {depth}: {}",
+            got.detail()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_evidence_silent_background_child_ignores_harness_cpu() {
+    let mut tree = CpuTree::new(1);
+    tree.observe();
+    tree.work("harness");
+    let got = tree.observe();
+    assert_eq!(got.state, Liveness::Stalled, "{}", got.detail());
+}

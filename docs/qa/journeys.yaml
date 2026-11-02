@@ -18,7 +18,7 @@ bug_families:
     journeys: [HUB-J5]
   native-background-wait-bound:
     title: Native background jobs remain busy while CPU activity proves work after the stall window
-    tasks: [cas-d8a9, cas-185e]
+    tasks: [cas-d8a9, cas-185e, cas-0f78]
     invariants: [HUB-J26-BACKGROUND-BOUND]
     journeys: [HUB-J26]
   restore-survives-dismissing-browser:
@@ -498,8 +498,8 @@ invariants:
     check: Run HUB-J26 at desktop/light and phone/dark, then its lifecycle transition and forced-colors stages; compare Waiting and Offline computed pill and dot treatments.
     bug: {task: cas-7389}
   HUB-J26-BACKGROUND-BOUND:
-    statement: A native background launch keeps its worker busy within the configured stall window and afterward while the process tree is CPU busy; a missing completion becomes Stalled only without CPU activity, while a matching completion returns the worker to Waiting.
-    check: Run worker_liveness::tests::claude_background_job_keeps_a_completed_turn_busy_until_its_notification with injected time, matching and unrelated completion notices; compare Team worker liveness to the native worker_status result on the release candidate.
+    statement: A native background launch keeps its worker busy within the configured stall window and afterward while user-work descendants are CPU busy; a missing completion becomes Stalled when those jobs are quiet even if harness timers use CPU, while a matching completion returns the worker to Waiting.
+    check: Run worker_liveness::tests (including process_evidence_busy_background_child_and_grandchild_keep_executing and process_evidence_silent_background_child_ignores_harness_cpu); compare Team worker liveness to native worker_status for busy children/grandchildren and quiet children under a ticking harness past the stall window on the release candidate.
     bug: {task: cas-185e}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
@@ -2406,6 +2406,7 @@ journeys:
   - hub-web/src/main.ts
   - hub-web/src/styles.css
   - cas-cli/src/agent_model.rs
+  - cas-cli/src/cli/factory/wedged.rs
   - cas-cli/src/mcp/tools/service/worker_liveness.rs
   - cas-cli/src/mcp/tools/service/worker_liveness/tests.rs
   - cas-cli/src/bridge/server/session.rs

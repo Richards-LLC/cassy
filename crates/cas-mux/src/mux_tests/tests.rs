@@ -1817,8 +1817,9 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
         spec.cli = cli;
         let config = mux.build_add_worker_config("dynamic-worker", PathBuf::from("/tmp/test"),
             None, "supervisor", None, Some(spec));
-        assert_eq!(config.args.iter().filter(|arg| arg.as_str() == assignment).count(), 1,
-            "the assigned launch must carry one initial message for {cli:?}");
+        assert!(!config.args.iter().any(|arg| arg.contains(assignment)),
+            "the assigned launch must keep the brief out of argv for {cli:?}");
+        assert_eq!(env_value(&config, "CAS_INTERNAL_WORKER_STARTUP_BRIEF"), Some(assignment));
         // pin: assigned startup must replace the generic Codex task-selection prompt.
         assert!(!config.args.iter().any(|arg| arg.starts_with("I'm initiating Cassy worker startup now:")));
 
@@ -4273,7 +4274,8 @@ fn startup_prompt_follows_the_option_terminator_on_a_real_worker_tail() {
         let spec = WorkerSpec { cli, ..WorkerSpec::builtin_default() };
         let config = mux.build_add_worker_config("worker", project.path().into(), Some(&root), "supervisor", None, Some(spec));
         assert!(env_value(&config, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
-        assert_eq!(config.args[config.args.len() - 2..], ["--", assignment], "{cli:?}: {:?}", config.args);
+        assert_eq!(config.args[config.args.len() - 2], "--", "{cli:?}: {:?}", config.args);
+        assert_eq!(env_value(&config, "CAS_INTERNAL_WORKER_STARTUP_BRIEF"), Some(assignment));
         assert_eq!(config.args.contains(&"--mcp-config".to_string()), cli == SupervisorCli::Claude);
     }
 }

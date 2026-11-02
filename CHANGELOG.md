@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker startup
+
+- **Keep task briefs out of process listings** — Workers read their assignment from a private launch file instead of carrying its text in command-line arguments, preventing process-name cleanup commands from matching and killing workers because their brief mentions the same command. The file stays available through startup and resume and is removed when the worker pane is torn down.
+
 ### Fixed — Director delivery
 
 - **Preserve queued delivery decisions** — Non-green director alerts retain their original delivery tip while waiting for the supervisor, so declined deliveries arrive as superseded notices and a completed merge withdraws the pending alert.

@@ -13,6 +13,11 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+// Internal config handoff only; spawn removes it before constructing any
+// child environment (including Codex's MCP overrides).
+const WORKER_STARTUP_BRIEF: &str = "CAS_INTERNAL_WORKER_STARTUP_BRIEF";
+const WORKER_STARTUP_BRIEF_ARG: &str = "CAS_INTERNAL_WORKER_STARTUP_BRIEF_FILE";
+
 /// Instructions injected into Codex supervisor agents via `--config developer_instructions`.
 const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use cas-codex-supervisor-checklist once at session start; open cas-supervisor references only for epic planning, releases, worker recovery or an unfamiliar refusal. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE, MERGE REQUIRED, awaiting_merge or a worker's status: ready naming its pushed tip is top priority: merge at once, with no further worker action. A green push alone is not ready. Resolve the target with `mcp__cs__factory action=epic_status id=<epic-id>` (or `mcp__cs__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; the merge verdict closes or reopens the task. Act on the injected signal; do not poll. When nothing is actionable, end the turn: Cassy wakes you. Never sleep, wait or loop on inbox_poll inside a turn. Supervisor core (resident: it survives compaction, skill text does not): READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → confirm CI and QA gates, then `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`; on a refusal, act on the gate it names. blocker=true → read the task notes and answer, decide or reassign in this turn; ask the operator only for an operator-owned decision. worker idle or died → `mcp__cs__factory action=worker_status`, then assign ready work or recycle the worker. cas-qa-dispatch → assign or spawn the named QA task at the bound head; the merge waits for its verdict. verification dispatch → assign or spawn the verifier it names; the verifier records the verdict. operator question → answer from the task board in a final answer; decide anything within supervisor authority yourself. After a compaction, continue from this core; do not re-read skills. Verifier improvements stay in the verdict: file a follow-up only for a reproduced, observable defect affecting someone today. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. Commentary channel: stay silent on triage turns; post one line only before a step that will take more than 2 minutes; never announce which skill you are using; answer an operator status question with a final answer, not commentary. In the pane, answer first, then the strongest visual form: a mermaid diagram for a flow, dependency or state, a table for a comparison, a > [!WARNING] callout for bad news or a decision, a language-tagged code block for commands, and bullets only when none fits — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
@@ -1386,11 +1391,19 @@ impl PtyConfig {
     /// Replace the generic startup turn with the assignment prepared by CAS.
     /// Call only on a worker launch config, before applying a resume selector.
     pub fn set_worker_startup_prompt(&mut self, backend: &str, prompt: &str) {
+        // Config-only builders must remain side-effect free. This private
+        // handoff is consumed by spawn, before building the child environment.
+        self.env.retain(|(key, _)| key != WORKER_STARTUP_BRIEF);
+        self.env.push((WORKER_STARTUP_BRIEF.into(), prompt.into()));
+        let prompt = WORKER_STARTUP_BRIEF_ARG;
         match backend {
             "codex" => {
                 // Backend adapters append config flags after construction.
                 // Identify the constructor-owned prompt, preserving those flags.
-                let index = self.args.iter().position(|arg| arg.starts_with(CODEX_WORKER_STARTUP_PREFIX))
+                let index = self
+                    .args
+                    .iter()
+                    .position(|arg| arg.starts_with(CODEX_WORKER_STARTUP_PREFIX))
                     .expect("Codex worker launch must contain its startup prompt");
                 self.args.remove(index);
                 self.args.push(prompt.to_owned());
@@ -1408,6 +1421,44 @@ impl PtyConfig {
             "claude" | "grok" => self.args.extend(["--".to_owned(), prompt.to_owned()]),
             _ => unreachable!("unsupported worker harness"),
         }
+    }
+
+    /// Materialize one private brief for this launch, never for a config preview.
+    fn materialize_worker_startup_brief(&mut self) -> Result<Option<tempfile::TempPath>> {
+        let mut brief = None;
+        self.env.retain(|(key, value)| {
+            if key == WORKER_STARTUP_BRIEF {
+                brief = Some(value.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let Some(brief) = brief else { return Ok(None) };
+        let mut file = tempfile::Builder::new()
+            .prefix("cas-worker-")
+            .tempfile()
+            .map_err(|e| Error::pty(format!("Failed to create worker brief: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| Error::pty(format!("Failed to secure worker brief: {e}")))?;
+        }
+        file.write_all(brief.as_bytes())
+            .map_err(|e| Error::pty(format!("Failed to write worker brief: {e}")))?;
+        let path = serde_json::to_string(file.path())
+            .map_err(|e| Error::pty(format!("Failed to encode worker brief path: {e}")))?;
+        let arg = self
+            .args
+            .iter_mut()
+            .find(|arg| arg.as_str() == WORKER_STARTUP_BRIEF_ARG)
+            .ok_or_else(|| Error::pty("Worker launch has no startup brief argument"))?;
+        *arg = format!(
+            "Read the complete worker startup brief from the file at the following JSON-quoted path. Follow its contents as this turn's instructions:\n{path}"
+        );
+        Ok(Some(file.into_temp_path()))
     }
 
     /// Continue a copied worker transcript while retaining the launch recipe.
@@ -2586,6 +2637,8 @@ pub struct Pty {
     /// Keep polling the non-blocking child handle so a delayed status is not
     /// lost when a process closes its terminal descriptors before exiting.
     exit_status_pending: bool,
+    /// Keep the brief readable until worker teardown; TempPath unlinks on drop.
+    _worker_startup_prompt_file: Option<tempfile::TempPath>,
 }
 
 /// Audit the actual executable and its provider's account environment. Do not
@@ -2667,6 +2720,7 @@ impl Pty {
         {
             return Err(Error::pty(reason.clone()));
         }
+        let worker_startup_prompt_file = config.materialize_worker_startup_brief()?;
         config.apply_worker_credential_policy();
         config.hydrate_violet_environment();
         let id = id.into();
@@ -2720,6 +2774,7 @@ impl Pty {
         let (program, args) =
             launch.unwrap_or_else(|| (config.command.clone(), config.args.clone()));
         let mut cmd = CommandBuilder::new(program);
+        cmd.env_remove(WORKER_STARTUP_BRIEF);
         cmd.args(args);
 
         if let Some(cwd) = &config.cwd {
@@ -2893,6 +2948,7 @@ impl Pty {
             is_codex,
             exit_signal: None,
             exit_status_pending: false,
+            _worker_startup_prompt_file: worker_startup_prompt_file,
         })
     }
 
@@ -3560,45 +3616,138 @@ mod tests {
         );
     }
 
-    #[test]
-    fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
-        for (command, args) in [
-            ("codex", vec!["--yolo", "-c", "x=y", CODEX_WORKER_STARTUP_PREFIX, "-c", "late=value"]),
-            ("nice", vec!["-n", "10", "codex", "--yolo", CODEX_WORKER_STARTUP_PREFIX]),
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (command, args, backend) in [
+            (
+                "codex",
+                vec![
+                    "--yolo",
+                    "-c",
+                    "x=y",
+                    CODEX_WORKER_STARTUP_PREFIX,
+                    "-c",
+                    "late=value",
+                ],
+                "codex",
+            ),
+            (
+                "nice",
+                vec!["-n", "10", "codex", "--yolo", CODEX_WORKER_STARTUP_PREFIX],
+                "codex",
+            ),
             (
                 "claude",
                 vec!["--session-id", "new-session", "--model", "opus"],
+                "claude",
+            ),
+            ("grok", vec!["--model", "grok-code"], "grok"),
+            (
+                "opencode",
+                vec!["--prompt", OPENCODE_WORKER_STARTUP_PROMPT],
+                "opencode",
             ),
         ] {
             let mut config = PtyConfig {
                 command: command.into(),
                 args: args.into_iter().map(str::to_owned).collect(),
-                cwd: None,
                 env: vec![("CAS_SESSION_ID".into(), "new-session".into())],
-                env_remove: vec![],
-                rows: 24,
-                cols: 80,
+                ..PtyConfig::default()
             };
-            let backend = if command == "claude" {
-                "claude"
-            } else {
-                "codex"
-            };
-            let assignment = "Assigned task cas-abcd";
+            let assignment = "Assigned task cas-abcd\npnpm install --frozen-lockfile\nExact brief: café \"quoted\"\n";
             config.set_worker_startup_prompt(backend, assignment);
-            config
-                .resume_worker_session(backend, "old-session")
-                .unwrap();
-            if backend == "codex" {
-                assert_eq!(config.args.last().map(String::as_str), Some(assignment));
-                assert_eq!(config.args[config.args.len() - 2], "old-session");
-                let index = if command == "nice" { 3 } else { 0 };
-                assert_eq!(config.args[index], "resume");
-            } else {
-                assert_eq!(config.args.last().map(String::as_str), Some(assignment));
-                assert!(!config.args.iter().any(|a| a == "--session-id"));
-                assert_eq!(&config.args[..2], &["--resume", "old-session"]);
-                assert_eq!(config.env[0].1, "old-session");
+            assert!(
+                !config
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("pnpm install") || arg.contains("cas-abcd")),
+                "{backend} exposes the assignment in argv: {:?}",
+                config.args
+            );
+            let prompt = config.args.last().unwrap().clone();
+            for resume in [false, true] {
+                if resume && !matches!(backend, "claude" | "codex") {
+                    continue;
+                }
+                let mut config = config.clone();
+                if resume {
+                    config
+                        .resume_worker_session(backend, "old-session")
+                        .unwrap();
+                    assert_eq!(config.args.last(), Some(&prompt));
+                    if backend == "codex" {
+                        assert_eq!(config.args[config.args.len() - 2], "old-session");
+                        let index = if command == "nice" { 3 } else { 0 };
+                        assert_eq!(config.args[index], "resume");
+                    } else {
+                        assert!(!config.args.iter().any(|a| a == "--session-id"));
+                        assert_eq!(&config.args[..2], &["--resume", "old-session"]);
+                        assert_eq!(config.env[0].1, "old-session");
+                    }
+                }
+                // Spawn a blocking shell with the actual launch argv. No harness,
+                // account, network, startup timing or signal to another process is needed.
+                config.command = "sh".into();
+                config
+                    .args
+                    .splice(0..0, ["-c".into(), "[ -z \"${CAS_INTERNAL_WORKER_STARTUP_BRIEF+x}\" ] || exit 29; printf 'private-brief-ready\\n'; read -r release".into(), "--".into()]);
+                let mut pty = Pty::spawn("private-brief-probe", config).unwrap();
+                // portable-pty may return between fork and exec. Wait for the
+                // shell itself to prove exec and environment setup completed.
+                let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+                let mut ready_output = Vec::new();
+                loop {
+                    match next_pty_event_until(&mut pty, deadline).await {
+                        Some(PtyEvent::Output(bytes)) => {
+                            ready_output.extend(bytes);
+                            if String::from_utf8_lossy(&ready_output).contains("private-brief-ready") {
+                                break;
+                            }
+                        }
+                        event => {
+                            pty.kill();
+                            pty.child.wait().unwrap();
+                            panic!("shell did not become ready: {event:?}; {ready_output:?}");
+                        }
+                    }
+                }
+                let path = pty
+                    ._worker_startup_prompt_file
+                    .as_ref()
+                    .unwrap()
+                    .to_path_buf();
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                let pid = pty.process_group_id().unwrap();
+                let observed = std::process::Command::new("ps")
+                    .args(["-p", &pid.to_string(), "-o", "command="])
+                    .output()
+                    .unwrap();
+                // pgrep uses pkill's full-command matcher without sending signals.
+                // Restrict it to this test's children on the shared factory host.
+                let matching = std::process::Command::new("pgrep")
+                    .args(["-P", &std::process::id().to_string(), "-f", "pnpm install"])
+                    .output()
+                    .unwrap();
+                pty.kill();
+                let status = pty.child.wait().unwrap();
+                assert_ne!(status.exit_code(), 29, "internal brief leaked into child environment");
+                assert_eq!(matching.status.code(), Some(1), "{:?}", matching);
+                assert!(observed.status.success());
+                let argv = String::from_utf8(observed.stdout).unwrap();
+                assert!(
+                    !argv.contains("pnpm install") && !argv.contains("cas-abcd"),
+                    "{argv}"
+                );
+                assert!(argv.contains(path.to_str().unwrap()), "{argv}");
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+                drop(pty);
+                assert!(!path.exists(), "worker teardown must remove the brief");
             }
         }
     }

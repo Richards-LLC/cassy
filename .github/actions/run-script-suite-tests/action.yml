@@ -6,7 +6,7 @@ inputs:
     required: false
     default: ''
   full-tier:
-    description: Provision the exhaustive Makefile tier; the caller runs that target.
+    description: Provision the integration tier; visual-QA tool fixtures follow base-sha, and the caller runs the selected commands.
     required: false
     default: 'false'
 runs:
@@ -24,6 +24,8 @@ runs:
         if [[ "$FULL_TIER" != true ]]; then
           cohort=(--provisioned)
           if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+        elif [[ -n "$BASE_SHA" ]]; then
+          comparison+=(--scope-base "$BASE_SHA")
         fi
         python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" "${cohort[@]}" \
           --github-output "$GITHUB_OUTPUT"

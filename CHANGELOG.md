@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — CI tooling
+
+- **Skip unchanged visual-QA tool fixtures** — Integration CI selects these tests from their registered inputs and keeps exhaustive assembly coverage. Codemap receipt fixtures use a tiny Git repository, scoped lanes share diff classification, and obsolete PR receipt recording is removed.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

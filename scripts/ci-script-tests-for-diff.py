@@ -16,6 +16,10 @@ for every fast row together). They are reported as deferred to the full
 `ci-script-tests` row, which the integration sweep and the cut still run.
 Provisioned suites run in the existing scoped validation job on changed
 inputs. The source-built terminal suite also runs after the full-lane build.
+The integration tier uses --all --scope-base to keep its other checks while
+running visual-QA tool fixtures only for their registered inputs. Plain --all
+and the Makefile assembly target remain exhaustive; an unknown scope base
+retains every fixture.
 
 Exit 0 when every selected test passes, 1 when one fails, 2 when the tier
 list or the diff cannot be read.
@@ -93,16 +97,18 @@ PROVISIONED_INPUTS = {
     "scripts/test_factory_model_history.py": ("scripts/factory-model-history.py",),
     **{f"scripts/visual-qa{suffix}.test.mjs": VISUAL_INPUTS + fixtures for suffix, fixtures in {
         "": ("scripts/visual-qa-fixtures/*",
+             "hub-web/visual-qa-allowlist.json",
              "cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars/*"),
         "-enter-transition": ("scripts/visual-qa-fixtures/enter-transition.html",),
         "-entrypoint": ("scripts/visual-qa-fixtures/clean.html", "hub-web/scripts/visual-qa.mjs"),
         "-readiness": ("scripts/visual-qa-fixtures/loading-only.html", "scripts/visual-qa-fixtures/ranking.after.png"),
-        "-secrets": (),
+        "-secrets": ("scripts/visual-qa-fixtures/clean.html",),
     }.items()},
 }
 WEB_TESTS = {"scripts/test-verified-web-runners.mjs"} | {
     path for path in PROVISIONED_INPUTS if path.startswith("scripts/visual-qa")
 }
+VISUAL_TOOL_TESTS = {path for path in PROVISIONED_INPUTS if path.startswith("scripts/visual-qa")}
 
 
 def requirements(selected: list[tuple[str, str]]) -> dict[str, bool]:
@@ -180,12 +186,15 @@ def main() -> int:
     comparison = parser.add_mutually_exclusive_group(required=True)
     comparison.add_argument("--base")
     comparison.add_argument("--all", action="store_true", help="select the exhaustive assembly tier")
+    parser.add_argument("--scope-base", help="with --all, scope visual-QA tool fixtures to changed inputs; unknown bases retain all")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--only", help="restrict changed-input selection to one tier test path")
     parser.add_argument("--dry-run", action="store_true", help="print the selection only")
     parser.add_argument("--provisioned", action="store_true", help="run only the provisioned CI cohort, including slow suites")
     parser.add_argument("--github-output", type=Path, help="write selected tool requirements and exit without running tests")
     args = parser.parse_args()
+    if args.scope_base and not args.all:
+        parser.error("--scope-base requires --all")
     repo = Path(args.repo).resolve()
     try:
         commands = tier_commands(repo)
@@ -193,6 +202,14 @@ def main() -> int:
             raise ValueError(f"unknown tier test: {args.only}")
         selected = ([(test_script(command), command) for command in commands if test_script(command)]
                     if args.all else select(commands, changed_paths(repo, args.base)))
+        if args.scope_base:
+            try:
+                changed = {test for test, _ in select(commands, changed_paths(repo, args.scope_base))}
+            except ValueError as error:
+                print(f"ci-script-tests: {error}; retaining every visual-QA tool fixture", file=sys.stderr)
+            else:
+                selected = [(test, command) for test, command in selected
+                            if test not in VISUAL_TOOL_TESTS or test in changed]
         if args.provisioned:
             selected = [(test, command) for test, command in selected if test in PROVISIONED_INPUTS]
         if args.only:

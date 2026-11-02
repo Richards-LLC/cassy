@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  real-hub-native-composer:
+    title: The disposable supervisor exposes a native Claude composer so real Commander sends reach the provider
+    tasks: [cas-befb]
+    invariants: [HUB-J13-REAL-PROVIDER-ANSWER]
+    journeys: [HUB-J13]
   catalog-independent-live-conversations:
     title: Live sends and transport recovery survive catalog failures; drafts preserve unknown births and failed archives
     tasks: [cas-bbad5]
@@ -385,6 +390,10 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub''s project catalog,
       folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab
       closing is proven at epic assembly on a real machine'
+  HUB-J13-REAL-PROVIDER-ANSWER:
+    statement: The real launch journey crosses the native composer safety gate, delivers the operator ping and displays the disposable provider's answer without relaxed timeouts or retries.
+    check: Run real-hub-server.test.mjs and the real-hub.journey.ts HUB-J13 part against the exact candidate; require Supervisor ready, Launch supervisor answered and observed Exit. The provider is inert; daemon, PTY, queue and hub delivery remain real.
+    bug: {task: cas-befb}
   HUB-J13-NATIVE-CLAUDE-CAPACITY:
     statement: Claude account choices consume profile-local native statusline observations, including factory sessions; an older percentage stays visible with its Eastern observation time and, for an earlier day, its date until its known reset, while expired windows and changed identities cannot retain that percentage.
     check: Run generated_statusline_records_usage_even_for_a_factory_supervisor, configure_migrates_bare_statuslines_in_every_profile_once (including malformed-profile warnings and continued project hook setup), configured_profile_beats_ambient_and_main, weekly_observation_date_follows_the_eastern_day and native_claude_snapshot_reaches_limits_and_picker_without_authentication; then use the batch candidate for real sessions on two profiles and read back both cas claude percentages and their profile snapshots without a usage endpoint request or credential-content reads.
@@ -1601,6 +1610,8 @@ journeys:
   - hub-web/e2e/journeys/real-hub-home.mjs
   - hub-web/e2e/journeys/real-hub-home.test.mjs
   - hub-web/e2e/journeys/real-hub-server.mjs
+  - hub-web/e2e/journeys/real-hub-provider.mjs
+  - hub-web/e2e/journeys/real-hub-server.test.mjs
   - cas-cli/src/hub/server.rs
   - cas-cli/src/hub/launch_env.rs
   - cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs
@@ -1652,6 +1663,7 @@ journeys:
   - HUB-J13-PROVIDER-CREDENTIAL-BOUNDARY
   - HUB-J13-LAUNCH-STORE
   - HUB-J13-STARTUP-WAKE
+  - HUB-J13-REAL-PROVIDER-ANSWER
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

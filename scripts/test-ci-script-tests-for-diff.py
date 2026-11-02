@@ -39,7 +39,10 @@ class Selection(unittest.TestCase):
             (repo / 'cas-cli').mkdir()
             shutil.copyfile(Path(__file__).resolve().parents[1] / 'cas-cli/Makefile', repo / 'cas-cli/Makefile')
             transition = 'scripts/visual-qa-fixtures/enter-transition.html'
-            paths = {*inputs.values(), *(f'scripts/{name}' for name in inputs), 'docs/unrelated.md', transition}
+            clean = 'scripts/visual-qa-fixtures/clean.html'
+            allowlist = 'hub-web/visual-qa-allowlist.json'
+            paths = {*inputs.values(), *(f'scripts/{name}' for name in inputs),
+                     'docs/unrelated.md', transition, clean, allowlist}
             for path in paths:
                 file = repo / path
                 file.parent.mkdir(parents=True, exist_ok=True)
@@ -50,14 +53,15 @@ class Selection(unittest.TestCase):
             git('add', '.')
             git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
                 '-c', 'commit.gpgsign=false', 'commit', '-qm', 'PR base')
-            def selected(changed):
+            def selected(changed, comparison=None):
                 for path in changed:
                     (repo / path).write_text('PR head\n')
                 git('add', '.')
                 git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
                     '-c', 'commit.gpgsign=false', 'commit', '-qm', 'PR head')
                 result = subprocess.run([sys.executable, SELECTOR.__file__, '--repo', str(repo),
-                    '--base', 'HEAD^', '--provisioned', '--dry-run'], capture_output=True, text=True)
+                    *(comparison or ['--base', 'HEAD^', '--provisioned']), '--dry-run'],
+                    capture_output=True, text=True)
                 git('reset', '--hard', 'HEAD^')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return result.stdout
@@ -75,6 +79,29 @@ class Selection(unittest.TestCase):
             actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
                       for line in output.splitlines() if 'would run ' in line}
             self.assertEqual(actual, {'scripts/visual-qa.test.mjs', 'scripts/visual-qa-enter-transition.test.mjs'})
+            # The integration tier keeps its other machinery checks, while
+            # visual-QA tool fixtures follow their own inputs. An unknown base
+            # must retain all fixture coverage, like exhaustive assembly.
+            for changed, base, expected in [
+                (['docs/unrelated.md'], 'HEAD^', set()),
+                (['scripts/visual-qa.mjs'], 'HEAD^',
+                 {f'scripts/{name}' for name in inputs if name.startswith('visual-qa')}),
+                ([transition], 'HEAD^',
+                 {'scripts/visual-qa.test.mjs', 'scripts/visual-qa-enter-transition.test.mjs'}),
+                ([clean], 'HEAD^',
+                 {'scripts/visual-qa.test.mjs', 'scripts/visual-qa-entrypoint.test.mjs',
+                  'scripts/visual-qa-secrets.test.mjs'}),
+                ([allowlist], 'HEAD^', {'scripts/visual-qa.test.mjs'}),
+                (['docs/unrelated.md'], 'missing-base',
+                 {f'scripts/{name}' for name in inputs if name.startswith('visual-qa')}),
+            ]:
+                with self.subTest(integration_inputs=changed, base=base):
+                    output = selected(changed, ['--all', '--scope-base', base])
+                    actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
+                              for line in output.splitlines() if 'would run ' in line
+                              and 'visual-qa' in line}
+                    self.assertEqual(actual, expected, output)
+                    self.assertIn('would run python3 scripts/test-proof-target.py', output)
 
     def test_terminal_qa_inputs_select_the_real_tier_command_once(self):
         terminal = "scripts/terminal-qa.test.mjs"

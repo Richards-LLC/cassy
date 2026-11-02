@@ -2348,6 +2348,15 @@ PTY suite reuses the CLI already built by full-lane preflight, with no additiona
 Rust build. Script-only contexts log its missing source binary explicitly;
 native Codex cases likewise report explicit skips when Codex is unavailable.
 
+The queue's CI tooling tier uses the same Makefile catalog through
+`ci-script-tests-for-diff.py --all --scope-base <comparison-base>`. Its five
+visual-QA tool fixture suites run only when their registered inputs change;
+other commands still run. Dependency provisioning shares that selection.
+An unavailable base runs every fixture, and the local assembly Make target
+remains exhaustive. The codemap receipt test uses a tiny isolated Git repository
+and a process fixture for the CI policy checker, whose own tier entry retains
+the real policy tests.
+
 Fast rows include the no-build checks below. The factory pre-push hook, or lane
 CI for a pull request, selects each row when its inputs change; the merge queue
 runs its required fast-row job on the final tree:

@@ -991,6 +991,124 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Delivered);
 }
 
+/// cas-6a57: in a debug build the poll frame of an `async fn` holds a slot for
+/// every child future it constructs, so a merge that closes its delivery
+/// nested 1.79 MB of frames, overflowed tokio's 2 MiB worker and aborted
+/// `cas serve` after the merge had landed. Measure the real path's high-water
+/// mark on a worker with room to spare, so a regression reports its size
+/// instead of aborting the test binary.
+#[cfg(target_os = "linux")]
+#[test]
+fn supervisor_merge_through_close_stays_under_stack_budget_cas_6a57() {
+    /// Half of tokio's default worker stack. Measured on this fixture in a
+    /// dev-profile build: 2028440 bytes before the frames moved to the heap,
+    /// 782200 after. The headroom covers frames that vary with the operator's
+    /// config and environment.
+    const STACK_BUDGET: usize = 1024 * 1024;
+    const WORKER_STACK: usize = 8 * 1024 * 1024;
+    const PAINTED: usize = 7 * 1024 * 1024;
+    const PAINT: u64 = 0x5afe_57ac_6a57_5afe;
+
+    /// Fill the unused stack below this frame; returns its bounds.
+    #[inline(never)]
+    fn paint_stack() -> (usize, usize) {
+        let marker = 0u8;
+        let top = std::hint::black_box(&marker) as *const u8 as usize & !7;
+        let low = top - PAINTED;
+        for at in (low..top - 64 * 1024).step_by(8) {
+            // SAFETY: the range lies inside this thread's 8 MiB mapping, below
+            // every live frame, and only the paint below reads it back.
+            unsafe { (at as *mut u64).write_volatile(PAINT) };
+        }
+        (low, top)
+    }
+
+    /// Bytes below `top` that any frame has written since `paint_stack`.
+    fn stack_high_water((low, top): (usize, usize)) -> usize {
+        let mut at = low;
+        // SAFETY: as in `paint_stack`; `at` stays below the caller's frames.
+        while at < top && unsafe { (at as *const u64).read_volatile() } == PAINT {
+            at += 8;
+        }
+        top - at
+    }
+
+    let mut env = TestEnvGuard::temp_home();
+    let repo = GitRepo::new();
+    let slug = "stack-budget";
+    let remote = format!("git@github.com:org/{slug}.git");
+    run_git(&["remote", "add", "origin", &remote], &repo.root);
+    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", origin.path().display()), &remote], &repo.root);
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::ci_concluded(&cas_root, "success"));
+    std::fs::write(
+        cas_root.join("config.toml"),
+        format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n[verification]\nenabled = true\n"),
+    )
+    .expect("write config");
+    let worker_id = format!("{slug}-worker-session");
+    let supervisor_id = format!("{slug}-supervisor-session");
+    let session = format!("{slug}-factory");
+    register_delivery_agent(&cas_root, &worker_id, slug, AgentRole::Worker, &session);
+    register_delivery_agent(&cas_root, &supervisor_id, &format!("{slug}-supervisor"), AgentRole::Supervisor, &session);
+    let worker_path = cas_root.join("worktrees").join(slug);
+    repo.add_worktree(&worker_path, &format!("factory/{slug}"));
+    std::fs::write(worker_path.join("delivered.txt"), "parked delivery\n").unwrap();
+    run_git(&["add", "delivered.txt"], &worker_path);
+    run_git(&["commit", "-m", "parked delivery"], &worker_path);
+    let task_store = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("cas-stack-budget".to_string(), "Parked delivery".to_string());
+    task.task_type = TaskType::Task;
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Deep;
+    task.assignee = Some(slug.to_string());
+    task.risk = vec![cas::types::TaskRisk::None];
+    task_store.add(&task).unwrap();
+
+    // One worker keeps every poll of the merge on the painted stack.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(WORKER_STACK)
+        .enable_all()
+        .build()
+        .unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    runtime
+        .block_on(delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "PASS: delivered.txt",
+        })))))
+        .expect("worker close");
+    assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = delivery_service(&cas_root, &supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some(format!("factory/{slug}"));
+    merge.task_id = Some(task.id.clone());
+    merge.allow_trunk = Some(true);
+    merge.cleanup = Some(false);
+    let (reply, high_water) = runtime
+        .block_on(runtime.spawn(async move {
+            let painted = paint_stack();
+            let reply = supervisor.factory(Parameters(merge)).await;
+            (reply, stack_high_water(painted))
+        }))
+        .unwrap();
+
+    let reply = get_text(&reply.expect("merge replies"));
+    assert!(
+        cas_git_is_ancestor(&repo.root, &format!("factory/{slug}"), "main"),
+        "the delivery landed: {reply}"
+    );
+    assert!(reply.contains(&format!("Cassy close of {}", task.id)), "the reply names the gate: {reply}");
+    assert!(
+        high_water < STACK_BUDGET,
+        "merge through close used {high_water} stack bytes, budget {STACK_BUDGET}"
+    );
+}
+
 /// cas-96ba: transactional delivery must accept the task binding consumed by
 /// worktree target resolution. The destructive-action field guard runs before
 /// that resolver, so this proves `task_id` reaches the real merge path rather

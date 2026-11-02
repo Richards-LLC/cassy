@@ -473,6 +473,14 @@ impl CasCore {
         // never enqueue B's assignment or switch its branch in A's context.
         if queue.context_reset_from.as_deref() == Some(conversation_generation(&worker).as_str()) {
             let spawns = crate::store::open_spawn_queue_store(&self.cas_root).map_err(error)?;
+            // An operator's pending shutdown wins over automatic queue work.
+            if spawns.peek(100).map_err(error)?.iter().any(|request| {
+                request.action == cas_store::SpawnAction::Shutdown
+                    && request.factory_session.as_deref().is_none_or(|owner| owner == session)
+                    && (request.worker_names.is_empty() || request.worker_names.contains(&worker.name))
+            }) {
+                return Ok(Some(format!("Task queue waiting for worker lifecycle before {id}")));
+            }
             if queue.context_reset_request.is_none() && !spawns.has_pending_spawn(&worker.name, Some(session)).map_err(error)? {
                 let spec = crate::mcp::tools::service::factory_ops::worker_spec_from_agent(&worker);
                 cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default()).map_err(error)?;

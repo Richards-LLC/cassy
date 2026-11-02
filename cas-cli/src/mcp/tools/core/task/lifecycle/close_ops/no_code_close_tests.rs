@@ -1989,6 +1989,13 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             drop(queue_lock);
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "other-session").await.unwrap();
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
+            let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+            let stop = spawns.enqueue_shutdown(None, &[WORKER.into()], false, Some("queue-session")).unwrap();
+            crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
+            assert!(!spawns.peek(100).unwrap().iter().any(|r| r.action == cas_store::SpawnAction::Recycle),
+                "automatic handoff must not override a pending shutdown");
+            spawns.mark_processed(stop).unwrap();
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
         // cas-7f57a: a successor must not enter the preceding conversation.

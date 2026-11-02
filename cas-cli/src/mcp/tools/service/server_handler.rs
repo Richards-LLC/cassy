@@ -723,8 +723,12 @@ impl CasService {
                         .map(|path| path.to_string_lossy().into_owned()),
                     ..Default::default()
                 };
+                // Mail attribution remains Claude-specific. Usage resolves
+                // the registered worker's own harness/account independently.
+                let usage_path = input.transcript_path.as_ref().map(std::path::PathBuf::from)
+                    .or_else(|| super::factory_ops::worker_transcript_path_for_agent(&this.inner.cas_root, &agent));
                 let notice = super::factory_ops::worker_context_notice(
-                    &this.inner.cas_root, &agent, input.transcript_path.as_deref().map(std::path::Path::new),
+                    &this.inner.cas_root, &agent, usage_path.as_deref(),
                 );
                 let fallback = crate::hooks::turn_context::fallback_context(&this.inner.cas_root, &input);
                 match (notice, fallback) {

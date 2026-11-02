@@ -2001,6 +2001,10 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         fresh.cc_session_id = Some("fresh-successor-conversation".into());
         agents.update(&fresh).unwrap();
         crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        assert_eq!(f.task("cas-8488b").status, TaskStatus::Open, "a pending recycle must complete first");
+        spawns.mark_processed(resets[0].id).unwrap();
+        spawns.record_spawn_state(resets[0].id, cas_store::SpawnLifecycleState::Registered, Some(WORKER), None).unwrap();
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         let next = f.task("cas-8488b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));

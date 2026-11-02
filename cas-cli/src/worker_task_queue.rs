@@ -483,6 +483,12 @@ impl CasCore {
             }
             return Ok(Some(format!("Task queue waiting for fresh context before {id} for {}", worker.name)));
         }
+        if queue.context_reset_from.is_some() {
+            let spawns = crate::store::open_spawn_queue_store(&self.cas_root).map_err(error)?;
+            if spawns.has_pending_spawn(&worker.name, Some(session)).map_err(error)? {
+                return Ok(Some(format!("Task queue waiting for context recycle completion before {id}")));
+            }
+        }
         let mut reserved_epoch = None;
         let result = async {
             let mut task = tasks.get(&id).map_err(error)?;
@@ -630,6 +636,10 @@ pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
         "Task queue for {worker} (revision {})\nCurrent: {current}\nPending: {pending}",
         queue.revision
     );
+    if queue.starting && queue.context_reset_from.is_some() {
+        output.push_str(&format!("\nContext reset: waiting for fresh conversation (request {})",
+            queue.context_reset_request.map(|id| id.to_string()).unwrap_or_else(|| "pending".into())));
+    }
     if let Some(note) = queue.notes.last() {
         output.push_str(&format!("\n{note}"));
     }

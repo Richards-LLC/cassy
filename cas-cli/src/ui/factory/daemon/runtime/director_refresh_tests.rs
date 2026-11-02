@@ -638,6 +638,7 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
     }
     for scenario in [
         "superseded",
+        "superseded_queued",
         "missing",
         "shutdown",
         "merged_fallback",
@@ -674,7 +675,8 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
         assert_eq!(prompts.len(), 1);
         assert!(!prompts[0].is_merge_ready());
         assert!(prompts[0].text.contains("CI failed"));
-        if scenario.starts_with("superseded") {
+        let original_tip = prompts[0].merge_alert.as_ref().unwrap().factory_tip.clone();
+        if scenario.starts_with("superseded") && scenario != "superseded_queued" {
             let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
             let mut task = tasks.get("cas-9efb-test").unwrap();
             task.deliverables.decline_factory_branch_anchor();
@@ -773,11 +775,20 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
         let prompt =
             super::super::delivery::parse_director_prompt(&row.target, &row.prompt).unwrap();
         assert_eq!(prompt.retract_task.as_deref(), Some("cas-9efb-test"));
-        if scenario.starts_with("superseded") {
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_tip, original_tip,
+            "the original delivery identity must survive the queue handoff");
+        if scenario.starts_with("superseded") && scenario != "superseded_queued" {
             // pin: a withdrawn delivery must be labelled superseded and must never ask for a merge.
             assert!(prompt.text.contains("Superseded delivery"));
             // pin: a withdrawn delivery must never instruct a supervisor to merge it.
             assert!(!prompt.text.contains("MERGE REQUIRED"));
+        }
+        if scenario == "superseded_queued" {
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = tasks.get("cas-9efb-test").unwrap();
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = cas_types::TaskStatus::Open;
+            tasks.update(&task).unwrap();
         }
         if scenario == "merged_fallback" {
             fixture.advance_target(true);
@@ -828,7 +839,13 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let written = std::fs::read_to_string(&capture).unwrap();
-                    if written.contains(&prompt.text) && written.ends_with('\r') {
+                    // pin: delayed request_changes must render the informational superseded label.
+                    let expected = if scenario == "superseded_queued" { "Superseded delivery" } else { &prompt.text };
+                    if written.contains(expected) && written.ends_with('\r') {
+                        if scenario.starts_with("superseded") {
+                            // pin: a delivery withdrawn during queue delay must not ask for a merge.
+                            assert!(!written.contains("MERGE REQUIRED"));
+                        }
                         assert_eq!(written.matches('\r').count(), 1, "one submitted wake");
                         break;
                     }

@@ -443,6 +443,9 @@ pub(crate) fn enqueue_director_prompt(
 /// Retraction identity must survive a queued director wake's wait for input.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DirectorPromptContext {
+    // Preserve the released delivery tip across queue delays and worker reuse.
+    #[serde(default)]
+    merge_alert: Option<crate::ui::factory::director::MergeAlertEvidence>,
     retract_worker: Option<String>,
     retract_task: Option<String>,
     retract_epic: Option<String>,
@@ -459,6 +462,7 @@ fn enqueue_director_event(
     prompt: &crate::ui::factory::director::Prompt,
 ) -> anyhow::Result<i64> {
     let context = DirectorPromptContext {
+        merge_alert: prompt.merge_alert.clone(),
         retract_worker: prompt.retract_worker.clone(),
         retract_task: prompt.retract_task.clone(),
         retract_epic: prompt.retract_epic.clone(),
@@ -487,7 +491,7 @@ pub(crate) fn parse_director_prompt(
         target: target.into(), text: body.into(),
         retract_worker: context.retract_worker, retract_task: context.retract_task,
         retract_epic: context.retract_epic, drop_if_worker_assigned: context.drop_if_worker_assigned,
-        merge_ready: false, merge_alert: None, stall_nudge_task: None, durable_retry: true,
+        merge_ready: false, merge_alert: context.merge_alert, stall_nudge_task: None, durable_retry: true,
     })
 }
 

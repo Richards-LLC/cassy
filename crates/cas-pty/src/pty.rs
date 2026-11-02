@@ -3617,8 +3617,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
+    #[tokio::test]
+    async fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
         use std::os::unix::fs::PermissionsExt;
 
         for (command, args, backend) in [
@@ -3693,8 +3693,27 @@ mod tests {
                 config.command = "sh".into();
                 config
                     .args
-                    .splice(0..0, ["-c".into(), "[ -z \"${CAS_INTERNAL_WORKER_STARTUP_BRIEF+x}\" ] || exit 29; read -r release".into(), "--".into()]);
+                    .splice(0..0, ["-c".into(), "[ -z \"${CAS_INTERNAL_WORKER_STARTUP_BRIEF+x}\" ] || exit 29; printf 'private-brief-ready\\n'; read -r release".into(), "--".into()]);
                 let mut pty = Pty::spawn("private-brief-probe", config).unwrap();
+                // portable-pty may return between fork and exec. Wait for the
+                // shell itself to prove exec and environment setup completed.
+                let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+                let mut ready_output = Vec::new();
+                loop {
+                    match next_pty_event_until(&mut pty, deadline).await {
+                        Some(PtyEvent::Output(bytes)) => {
+                            ready_output.extend(bytes);
+                            if String::from_utf8_lossy(&ready_output).contains("private-brief-ready") {
+                                break;
+                            }
+                        }
+                        event => {
+                            pty.kill();
+                            pty.child.wait().unwrap();
+                            panic!("shell did not become ready: {event:?}; {ready_output:?}");
+                        }
+                    }
+                }
                 let path = pty
                     ._worker_startup_prompt_file
                     .as_ref()

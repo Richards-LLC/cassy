@@ -7519,18 +7519,31 @@ impl FactoryDaemon {
         }
     }
 
-    /// Claude setup pages produce output for arbitrarily long periods before
-    /// readline exists. A chooser's ❯ is not a text prompt: require the native
-    /// composer between its two horizontal rules. Use the current viewport,
-    /// never scrollback, and keep busy turns eligible when their composer is up.
+    /// Setup and approval pages can outlive the startup grace. Claude's chooser
+    /// is not a composer: require its ruled input. Other harnesses retain their
+    /// tool-call veto and confirmation boundary. Inspect the current viewport,
+    /// never scrollback; a safe working composer still accepts operator text.
     fn commander_native_input_ready(&self, pane_id: &str) -> bool {
-        if self.app.harness_for(pane_id) != cas_mux::SupervisorCli::Claude {
-            return true;
-        }
+        let cli = self.app.harness_for(pane_id);
         let Some(pane) = self.app.mux.get(pane_id) else { return false };
         let rows: Vec<_> = (0..pane.rows())
             .map(|row| pane.dump_row(row).unwrap_or_default())
             .collect();
+        if cli != cas_mux::SupervisorCli::Claude {
+            // These harnesses have no proven mid-tool composer contract. A
+            // submit must not answer an approval, even on a silent pane.
+            if self.prepared_tool_call_evidence(pane_id) == ToolCallEvidence::InFlight {
+                return false;
+            }
+            // Native dialog footers are complete rows below the composer.
+            // Assistant prose above that row cannot hold the next send.
+            let composer = rows.iter().rposition(|row| matches!(row.trim(), ">" | "›" | "❯"));
+            let footer_rows = &rows[composer.map_or(0, |input| input + 1)..];
+            return !footer_rows.iter().any(|row| matches!(row.trim().to_ascii_lowercase().as_str(),
+                "enter to confirm · esc to cancel"
+                | "press enter to confirm or esc to cancel"
+                | "press enter to continue"));
+        }
         let Some(input) = rows.iter().rposition(|row| row.trim_start().starts_with('❯')) else {
             return false;
         };
@@ -10096,7 +10109,7 @@ impl FactoryDaemon {
                 } else {
                     target.as_str()
                 };
-                // Paired human text must wait for Claude's native composer,
+                // Paired human text must wait for a safe native input boundary,
                 // including in Teams mode and on the urgent path. Setup must
                 // receive neither the body nor the submit CR. Keep the original
                 // durable row pending without spending transport retries.
@@ -10107,7 +10120,7 @@ impl FactoryDaemon {
                         self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::PendingReason {
                             reason: cas_store::PendingReason::GatedNotReady,
-                            detail: Some("Claude is awaiting its input prompt; your message is kept".into()),
+                            detail: Some("The harness is awaiting a safe input prompt; your message is kept".into()),
                         },
                     );
                     continue;

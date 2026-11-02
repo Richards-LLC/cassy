@@ -5,7 +5,7 @@ design: DESIGN.md@b43940e43
 | Field | Contract |
 | --- | --- |
 | First two lines | The existing release heading and time window identify which release the numbers describe. |
-| Scannable | Feature rows show session-attributed measurements and supervisor verdicts; one count identifies excluded measurements with unknown scope. |
+| Scannable | Feature rows show session-attributed measurements and supervisor verdicts; one count identifies actual excluded measurements with unknown scope; an empty report says none recorded when the excluded count is zero. |
 | Readable | The exclusion explains that historical measurements may contain lifetime totals, so readers cannot mistake them for release evidence. |
 | Machine output | `--json` emits one report object, preserving `features` and adding `excluded_unscoped_measurements` independently of its measured counts and verdicts. |
 | Omitted | Excluded historical payloads remain in the append-only store; their totals and measured verdicts do not enter release feedback. |

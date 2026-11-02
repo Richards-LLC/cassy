@@ -843,6 +843,34 @@ async fn cas_bf20_verified_commander_send_wakes_an_idle_supervisor() {
 
 
 #[tokio::test(flavor = "current_thread")]
+async fn non_claude_commander_send_waits_through_dialogs() {
+    if !fixture_child("non_claude_commander_send_waits_through_dialogs") { return; }
+    for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Grok] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture_for(cli).await;
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let body = "Keep these original words";
+        let id = enqueue(&daemon, "operator", body,
+            cas_store::QueueOrigin::PairedDevice { device_id: "paired".into() });
+        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        for screen in [
+            "Do you trust the contents of this directory?\r\nEnter to confirm · Esc to cancel",
+            "Would you like to run the following command?\r\n› 1. Yes\r\n  2. No\r\nPress enter to confirm or esc to cancel",
+        ] {
+            daemon.app.mux.get_mut(&supervisor).unwrap().feed(format!("\x1b[2J\x1b[H{screen}").as_bytes()).unwrap();
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "{cli:?}: {screen}");
+            assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "dialog must receive no body or submit");
+        }
+        daemon.app.mux.get_mut(&supervisor).unwrap().feed(b"\x1b[2J\x1b[HThe instructions say enter to confirm or esc to cancel.\r\nDo you trust this example?\r\n\r\n> ").unwrap();
+        typed_once(&root, &mut daemon, body).await;
+        assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap().matches(body).count(), 1);
+    }
+}
+
+
+#[tokio::test(flavor = "current_thread")]
 async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
     if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
     for guard in ["budget", "codex-budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {

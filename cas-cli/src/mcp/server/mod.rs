@@ -522,14 +522,11 @@ impl CasCore {
     /// it. Security-sensitive proof submission uses this read-only variant so
     /// a dead or unknown caller can be rejected before any durable mutation.
     pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
-        if let Some(Some(id)) = self.agent_id.get() {
-            return Ok(id.clone());
-        }
-
-        let candidate = std::env::var("CAS_SESSION_ID")
-            .ok()
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
+        let candidate = self.agent_id.get().and_then(Clone::clone).or_else(|| {
+            std::env::var("CAS_SESSION_ID").ok()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+        })
             .or_else(|| {
                 crate::agent_id::read_session_for_mcp(&self.cas_root)
                     .ok()
@@ -565,6 +562,16 @@ impl CasCore {
                     data: None,
                 })?
         };
+        // Existence alone is not authentication: nested harnesses inherit
+        // CAS_SESSION_ID. Validate before caching, without registering/reviving.
+        crate::mcp::daemon::ensure_factory_process_owner(
+            agent_store.as_ref(), &id, Some(std::process::id()),
+            Some(crate::agent_id::get_cc_pid_for_mcp()),
+        ).map_err(|error| McpError {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Cow::from(error.to_string()),
+            data: None,
+        })?;
         let _ = self.agent_id.set(Some(id.clone()));
         Ok(id)
     }

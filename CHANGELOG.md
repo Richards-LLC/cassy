@@ -11,6 +11,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep established session navigation** — Session listing keeps its 3.95 behavior while this release ships message delivery, reply recovery, supervisor identity, onboarding preservation and hub-route fixes.
 
+### Fixed — Release review
+
+- **Preserve local access and authenticated input** — Was: missing Tailscale could
+  stop a service's loopback hub, and nested read-only lookups could borrow a
+  parent's identity. → Now: Auto services retain local access with a warning,
+  read-only identity checks enforce process ownership, and Commander holds
+  non-Claude input during confirmation dialogs and pending tool calls.
+- **Long Codex conversations keep their replies** — Was: a daemon restart could
+  miss ownership older than the reply tail and repeatedly rescan rollouts.
+  → Now: streamed ownership survives long transcripts, unresolved scans back
+  off, and old finalized Queued receipts keep a slower watch for real delivery.
+- **Explain empty feedback and route recovery** — Was: empty feedback implied
+  unknown measurements and a refused foreign Serve route offered no recovery.
+  → Now: empty feedback says none recorded unless measurements were excluded;
+  route conflicts name an explicit port-scoped removal for operator review.
+
 ### Fixed — Commander phone header
 
 - **Delivery warnings keep actions visible** — Every phone header action stays inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
@@ -19,7 +35,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
 - **Claude queued answers keep their conversation** — Messages consumed during startup or a same-name restart retain their original message and paired device when the answer reaches Commander.
-- **Claude answers stay with every operator question** — Background task notifications no longer take over reply threading; a typed question and messages added during the same turn each retain their answer.
+- **Claude answers appear once per turn** — Background task notifications mirror standalone status without taking over an operator turn. Each native answer appears once under its latest verified send, and every consumed send remains Delivered.
 
 ### Fixed — Commander messages
 
@@ -42,9 +58,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Service startup restores the tailnet route after reboot** — Was: A Linux hub
   could settle on loopback after Tailscale was briefly unavailable, leaving Serve
-  pointed at a dead shim. → Now: Both service managers retry publication and
-  restart failed starts; status retains the failure cause and systemd records
-  errors in its journal.
+  pointed at a dead shim. → Now: Auto services serve loopback immediately through every publication
+  failure, retry in the background, and restore the public route and live
+  metadata without a restart. Status and logs retain the cause.
 
 ### Fixed — Friction ledger
 
@@ -60,10 +76,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   marked the private candidate checkout dirty and failed version verification.
   → Now: Verified generated assets preserve the clean source revision; changes
   to other tracked inputs and mismatched served assets still refuse publication.
-
-### Fixed — Commander
-
-- **Stopped conversations leave Commander automatically** — Ended and crashed sessions disappear without dismissal or attach retries. Machine outages keep running conversations available, and waiting messages to stopped sessions are saved as not sent.
 
 ### Fixed — Factory
 

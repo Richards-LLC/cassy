@@ -46,6 +46,24 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+Synthetic Codex supervisors bind only to a rollout carrying their own queue
+input, including an ownership envelope older than the 4 MiB reply tail. A first miss
+retries after one second, doubling up to 30 seconds; ownership reads resume at
+the last complete JSONL row rather than rescanning unchanged file bodies.
+A changed harness/account/session or startup envelope invalidates that wait. Finalized sends without delivery proof retain Queued and
+use a 30-second receipt watch; active pending sends keep the one-second watch.
+A later actual receipt still publishes Delivered.
+
+Commander text waits at confirmation/trust dialogs and at non-Claude in-flight
+tool calls. Dialog footers must match a complete native row below the composer;
+assistant prose above it never holds a send. Claude's visible native composer remains eligible during working
+turns. Held text and its submit are delivered together after that boundary clears.
+
+Each completed native turn creates one visible answer, bound to its latest
+verified Commander send; every consumed send still receives its delivery receipt.
+Standalone machine notifications create status replies when no operator input is
+pending. Only operator envelopes beginning a line can supply reply bindings.
+
 Pending Commander replies retry after one second, doubling to a sixty-second
 cap while a paired-device receipt is missing. A valid receipt, a new daemon
 WebSocket connection, or a device's first history-page request resets that retry
@@ -80,7 +98,9 @@ label and the durable reply reference.
 Factory registrations belong to their live harness process. A nested review
 that inherits `CAS_SESSION_ID`, name and role cannot re-register that identity
 from a different process, publish a socket mapping for it, or apply lifecycle
-hooks to its owner. Replacement MCP servers under the same fingerprinted harness
+hooks to its owner. Read-only guidance and receipt identity lookups apply the
+same owner check before caching an identity or authorizing later tools.
+Replacement MCP servers under the same fingerprinted harness
 remain valid. The authenticated cached owner repairs an exited PID left by older
 nested registrations before its next heartbeat, preserving its durable session.
 Tool permission hooks always retain their policy checks, even for a nested

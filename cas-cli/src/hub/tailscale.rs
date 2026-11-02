@@ -10,7 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -67,12 +67,19 @@ struct TailscaleTeardownReceipt {
     recorded_at: String,
 }
 
+/// Auto transport cannot publish until the operator installs or signs in.
+/// This is distinct from a daemon outage, which service managers retry.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct PublicationUnavailable(String);
+
 #[derive(Debug, Clone)]
 pub struct TailscaleServeManager {
     executable: OsString,
     state_dir: PathBuf,
     socket: Option<OsString>,
     deadline: Option<Deadline>,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TailscaleServeManager {
@@ -102,6 +109,7 @@ impl TailscaleServeManager {
             state_dir: state_dir.as_ref().to_path_buf(),
             socket: env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()),
             deadline: None,
+            cancelled: None,
         }
     }
 
@@ -111,6 +119,11 @@ impl TailscaleServeManager {
 
     pub(crate) fn socket(&self) -> Option<&OsStr> {
         self.socket.as_deref()
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancelled = Some(cancelled);
+        self
     }
 
     pub(crate) fn within_deadline(mut self, deadline: Deadline) -> Self {
@@ -145,6 +158,7 @@ impl TailscaleServeManager {
             match manager.ensure_with_prior_target(local_port, https_port, prior_target.clone()) {
                 Ok(receipt) => return Ok(receipt),
                 Err(error) => {
+                    if error.is::<PublicationUnavailable>() { return Err(error); }
                     let Some(delay) = delays.next().map(Duration::from_secs)
                         .filter(|delay| deadline.remaining() > *delay)
                     else { return Err(error); };
@@ -168,8 +182,17 @@ impl TailscaleServeManager {
         prior_target: Option<(u16, String)>,
     ) -> Result<TailscaleServeReceipt> {
         let local_target = format!("http://127.0.0.1:{local_port}");
+        if !self.cli_available() {
+            return Err(PublicationUnavailable(tailscale_unavailable_message()).into());
+        }
         let status = self.status()?;
         if let Some(issue) = self.login_issue_for(&status) {
+            if matches!(status.get("BackendState").and_then(Value::as_str),
+                Some("NeedsLogin" | "NeedsMachineAuth")) {
+                return Err(PublicationUnavailable(format!(
+                    "{issue}\nSign in to the selected daemon."
+                )).into());
+            }
             anyhow::bail!("{issue}");
         }
         let dns_name = status
@@ -202,7 +225,7 @@ impl TailscaleServeManager {
                         && handlers == vec![("/".to_owned(), previous.local_target.clone())])
                         || self.dead_recorded_mapping(https_port, &handlers).is_some()
                         || dead_known_target(prior_target.as_ref(), https_port, &handlers),
-                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                    "{}", self.mapping_conflict(https_port)
                 );
                 self.run(&[
                     "serve".into(),
@@ -230,7 +253,7 @@ impl TailscaleServeManager {
                 true
             } else {
                 anyhow::bail!(
-                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                    "{}", self.mapping_conflict(https_port)
                 )
             }
         };
@@ -478,6 +501,20 @@ impl TailscaleServeManager {
         Ok(handlers_on_port(&self.serve_status()?, https_port))
     }
 
+    fn mapping_conflict(&self, https_port: u16) -> String {
+        let mut cli = shell_words::quote(&self.executable_display()).into_owned();
+        if let Some(socket) = &self.socket {
+            cli.push(' ');
+            cli.push_str(&shell_words::quote(&format!("--socket={}", socket.to_string_lossy())));
+        }
+        format!(
+            "tailscale Serve HTTPS port {https_port} is already owned by another mapping\n\
+             Inspect: {cli} serve status\n\
+             Only if safe to remove: {cli} serve --https={https_port} off\n\
+             Then run `cas hub restart --tailscale-serve`."
+        )
+    }
+
     fn status(&self) -> Result<Value> {
         self.run_json(&["status".into(), "--json".into()])
     }
@@ -539,10 +576,12 @@ impl TailscaleServeManager {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
         command.args(args);
-        let output = bounded_process::run_command(
+        let output = bounded_process::run_command_cancellable(
             &mut command,
             self.deadline.unwrap_or_else(|| Deadline::after(COMMAND_TIMEOUT)),
             COMMAND_TIMEOUT,
+            Stdio::null(),
+            self.cancelled.as_deref(),
         )
         .map_err(|error| match error {
             BoundedCommandError::TimedOut => anyhow::anyhow!("tailscale command timed out"),
@@ -981,6 +1020,7 @@ mod tests {
             crate::test_paths::warm_stub(&binary, &script);
             let error = manager.ensure(4174, 443).unwrap_err().to_string();
             assert!(error.contains("already owned"), "{error}");
+            assert!(error.contains("serve --https=443 off"), "refusal must name port-scoped recovery: {error}");
             assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
         }
     }

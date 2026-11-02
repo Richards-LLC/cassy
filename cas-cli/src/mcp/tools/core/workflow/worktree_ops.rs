@@ -5064,7 +5064,10 @@ impl CasCore {
                         ci_sha: branch_ci_state.sha().to_string(),
                         target: worktree.parent_branch.clone(), repo: cwd.clone(),
                         supervisor: supervisor.id.clone(), session: session.to_string(),
-                        force, allow_trunk, cleanup, armed_at: Some(chrono::Utc::now()),
+                        force, allow_trunk, cleanup,
+                        // A Green → Pending race must not renew the wait's age.
+                        armed_at: Some(expected_delivery.and_then(|retry| retry.armed_at)
+                            .unwrap_or_else(chrono::Utc::now)),
                     };
                     match crate::factory_ci_retry::arm(&cas_root, &request) {
                         Ok(()) => retry_notice = format!("\nAutomatic retry armed for {source_sha}; green CI retries this merge, red CI or a moved lane sends one notice."),

@@ -24,7 +24,7 @@ bug_families:
   release-input-and-identity:
     title: Commander protects dialogs and factory identity follows the owning process on every lookup
     tasks: [cas-fecd]
-    invariants: [HUB-J5-DIALOG-HOLD, HUB-J26-READONLY-OWNER, HUB-J12-LOCAL-HUB]
+    invariants: [HUB-J5-DIALOG-HOLD, HUB-J26-READONLY-OWNER, HUB-J12-LOCAL-HUB, HUB-J5-LONG-CODEX-ROLLOUT, HUB-J5-QUIET-RECEIPT-POLL]
     journeys: [HUB-J5, HUB-J26, HUB-J12]
   live-idle-status-dot:
     title: Live idle supervisors and waiting workers never share the offline treatment
@@ -119,6 +119,12 @@ invariants:
   HUB-J12-LOCAL-HUB:
     statement: Auto service starts retain a healthy loopback hub and explain missing or signed-out Tailscale; transient daemon failures retain bounded retry and restart.
     check: Run hub_clean_home_test::auto_service_without_tailscale_keeps_healthy_loopback and hub_clean_home_test::service_start_retries_tailscale_before_publication on Linux with a disposable HOME; read health, status and hub.log.
+  HUB-J5-LONG-CODEX-ROLLOUT:
+    statement: A proven Codex rollout still mirrors terminal answers when its ownership envelope is older than the reply tail; unresolved ownership does not rescan every tick.
+    check: Run commander_mirror::tests::codex_boot_mirror_waits_for_its_own_rollout_in_a_reused_project and unresolved_codex_resolution_does_not_poll_every_tick; keep other panes and previous generations excluded.
+  HUB-J5-QUIET-RECEIPT-POLL:
+    statement: Cleanup without transport proof keeps Queued honest without polling finalized sends every second; a later real receipt still updates the conversation.
+    check: Run commander_mirror::tests::finalized_receipts_back_off_without_losing_later_delivery with the injected clock and verify the durable transport receipt produces Delivered.
   HUB-J5-DIALOG-HOLD:
     statement: Commander sends no body or submit into confirmation dialogs or pending non-Claude tool calls; retained words submit once after readiness returns.
     check: Run supervisor_single_turn_tests::non_claude_commander_send_waits_through_dialogs and cas_bf20_verified_commander_send_wakes_an_idle_supervisor through the real queue and private PTY.
@@ -956,6 +962,8 @@ journeys:
   - HUB-J5-GOAL
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-DIALOG-HOLD
+  - HUB-J5-LONG-CODEX-ROLLOUT
+  - HUB-J5-QUIET-RECEIPT-POLL
   - HUB-J12-SERVE-OWNERSHIP
   - HUB-J12-LOCAL-HUB
   - HUB-J12-DURABLE-SEND-REF

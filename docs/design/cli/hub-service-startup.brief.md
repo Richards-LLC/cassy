@@ -1,9 +1,9 @@
-# Hub service publication failure
+# Hub service transport states
 
 | Field | Contract |
 | --- | --- |
-| First two lines | Status identifies the exited hub and offers its restart command. |
-| Scannable | The Tailscale Serve row says FAIL when the service cannot publish. |
+| First two lines | Status identifies a healthy loopback fallback or an exited transient failure. |
+| Scannable | The Tailscale Serve row warns for healthy local fallback and says FAIL for an exited service. |
 | Readable | An indented, wrapped cause names the sanitized Tailscale failure; one restart command follows. |
 | Machine output | `hub status --json` retains its single document, including `record.transport_warning` and `tailscale_serve.message`; service errors go to stderr. |
 | Omitted | Raw Tailscale stderr remains private; the existing error classifier supplies safe causes. Retry timing stays in the service log. |

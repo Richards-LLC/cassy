@@ -52,10 +52,11 @@ if '--message' in sys.argv:
   await writeFile(provider, realHubProviderScript(cli), { mode: 0o700 });
   const child = spawn(provider, [], { cwd: home, env: { HOME: home, CAS_FACTORY_SESSION: "disposable" } });
   t.after(() => child.kill());
-  const ended = once(child, "exit");
+  const ended = once(child, "close");
   let stderr = "";
   child.stderr.on("data", data => { stderr += data; });
-  child.stdout.resume();
+  let stdout = "";
+  child.stdout.on("data", data => { stdout += data; });
   const frame = text => `\x1b[200~${text}\x1b[201~\r`;
   // Match the daemon's paste + submit stream, including a multiline startup
   // that mentions /exit as prose. No terminal line discipline may be assumed.
@@ -64,6 +65,10 @@ if '--message' in sys.argv:
   assert.deepEqual(await ended, [0, null], stderr);
   // pin: These two inert-provider replies are the native journey's startup and ping protocol.
   assert.equal(await readFile(join(home, "replies.jsonl"), "utf8"), "Supervisor ready\nLaunch supervisor answered\n");
+  // pin: Native Claude sends require an input row bounded by separator rows,
+  // at startup and after each reply (commander_native_input_ready).
+  assert.equal([...stdout.matchAll(/─{3,}\r?\n❯ \r?\n─{3,}/g)].length, 3,
+    "the fixture must expose a safe native composer for every turn");
 });
 
 test("real-hub login probe resolves only the disposable provider despite host profiles", async t => {

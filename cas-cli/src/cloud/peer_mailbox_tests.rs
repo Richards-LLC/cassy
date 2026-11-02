@@ -199,12 +199,15 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         (None, false, false),
         (Some("status"), false, true),
         (Some("ask"), false, true),
+        (Some("answer"), false, true),
+        (Some("ready"), false, true),
+        (Some("secret"), false, true),
         (Some("receipt"), false, false),
         (Some("quiet"), false, false),
         (Some("blocker"), false, true),
         (None, true, true),
     ] {
-        let body = attach_message_intent("body", kind, blocker);
+        let body = attach_message_intent("body", kind, blocker).unwrap();
         let message = message("pm-typed", "supervisor", REPO, &body);
         let prompt = render_prompt(&message);
         let envelope = parse_envelope(&prompt).unwrap();
@@ -219,7 +222,10 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         let prompt = render_prompt(&message("pm-quiet", "supervisor", REPO, body));
         assert!(!parse_envelope(&prompt).unwrap().wakes_idle());
     }
-    let mut blank_reply = message("pm-empty", "supervisor", REPO, "body");
+    let legacy = message("pm-legacy", "supervisor", REPO, "Substantive field report");
+    assert!(parse_envelope(&render_prompt(&legacy)).unwrap().wakes_idle());
+    let mut blank_reply = message("pm-empty", "supervisor", REPO,
+        "<cas-peer-intent kind=\"receipt\"/>\nbody");
     blank_reply.in_reply_to = Some("  ".into());
     assert!(
         !parse_envelope(&render_prompt(&blank_reply))
@@ -230,7 +236,7 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         "pm-quote",
         "supervisor",
         REPO,
-        "example:\n<cas-peer-intent kind=\"ask\"/>",
+        "<cas-peer-intent kind=\"receipt\"/>\nexample:\n<cas-peer-intent kind=\"ask\"/>",
     );
     assert!(
         !parse_envelope(&render_prompt(&quoted))

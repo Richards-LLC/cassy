@@ -548,18 +548,42 @@ fn repeated_fatal_codex_model_errors_override_busy_cpu_and_retries() {
 #[test]
 fn claude_background_job_keeps_a_completed_turn_busy_until_its_notification() {
     let launch = concat!(
-        r#"{"timestamp":"2026-09-10T19:00:00Z","type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-shell","name":"Bash","input":{"command":"affected tests","run_in_background":true}}]}}"#, "\n",
-        r#"{"timestamp":"2026-09-10T19:00:01Z","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-shell","content":"Command running in background with ID: job-42. Output is being written to a file."}]}}"#, "\n",
-        r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#, "\n",
+        r#"{"timestamp":"2026-09-10T19:00:00Z","type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-shell","name":"Bash","input":{"command":"affected tests","run_in_background":true}}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-10T19:00:01Z","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-shell","content":"Command running in background with ID: job-42. Output is being written to a file."}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#,
+        "\n",
     );
-    assert_eq!(run(SupervisorCli::Claude, launch, true).state, Liveness::Executing);
-    assert_eq!(run(SupervisorCli::Claude, launch, false).state, Liveness::Dead);
-    for notice in [
-        serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
-        serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+    assert_eq!(
+        run(SupervisorCli::Claude, launch, true).state,
+        Liveness::Executing
+    );
+    assert_eq!(
+        run(SupervisorCli::Claude, launch, false).state,
+        Liveness::Dead
+    );
+    for (notice, expected) in [
+        (
+            serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+            Liveness::WaitingForInput,
+        ),
+        (
+            serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+            Liveness::WaitingForInput,
+        ),
+        (
+            serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>another-job</task-id><status>completed</status></task-notification>"}}),
+            Liveness::Executing,
+        ),
     ] {
-        let finished = format!("{notice}\n{{\"timestamp\":\"2026-09-10T19:00:51Z\",\"type\":\"assistant\",\"message\":{{\"stop_reason\":\"end_turn\"}}}}\n");
-        assert_eq!(run(SupervisorCli::Claude, &format!("{launch}{finished}"), true).state,
-            Liveness::WaitingForInput, "completion notice: {notice}");
+        let finished = format!(
+            "{notice}\n{{\"timestamp\":\"2026-09-10T19:00:51Z\",\"type\":\"assistant\",\"message\":{{\"stop_reason\":\"end_turn\"}}}}\n"
+        );
+        assert_eq!(
+            run(SupervisorCli::Claude, &format!("{launch}{finished}"), true).state,
+            expected,
+            "completion notice: {notice}"
+        );
     }
 }

@@ -106,8 +106,7 @@ async fn r1_verification_wait_wakes(release: &str) {
             [(
                 "merge-w".into(),
                 Some(crate::mcp::tools::service::worker_liveness::Observation {
-                    state:
-                        crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput,
+                    state: crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput,
                     evidence: "recorded task_complete".into(),
                 }),
             )]
@@ -140,24 +139,30 @@ async fn r1_verification_wait_wakes(release: &str) {
     );
     assert_eq!(rows.len(), 2);
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert;
-    reconcile_blocked_task_alert(&root, &task.id, deadline - chrono::Duration::seconds(1))
-        .unwrap();
+    reconcile_blocked_task_alert(&root, &task.id, deadline - chrono::Duration::seconds(1)).unwrap();
     assert_eq!(queue.peek_all(20).unwrap().len(), 2);
     if release == "verdict" {
         fixture._env.set("CAS_AGENT_ROLE", "supervisor");
         core.set_agent_id_for_testing(lead.id.clone());
-        let result = core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(
-            serde_json::from_value(serde_json::json!({
-                "task_id": task.id,
-                "dispatch_id": dispatch.id,
-                "status": "approved",
-                "summary": "Review passed; worker can retry close."
-            })).unwrap(),
-        )).await.unwrap();
+        let result = core
+            .cas_verification_add(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id": task.id,
+                    "dispatch_id": dispatch.id,
+                    "status": "approved",
+                    "summary": "Review passed; worker can retry close."
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
         let rows = queue.peek_all(20).unwrap();
-        assert_eq!(rows.iter().filter(|row| row.target == "merge-w").count(), 1,
-            "the real verdict path must queue the worker's close retry: {rows:?}");
+        assert_eq!(
+            rows.iter().filter(|row| row.target == "merge-w").count(),
+            1,
+            "the real verdict path must queue the worker's close retry: {rows:?}"
+        );
     }
     let released_at = if release == "deadline" {
         deadline + chrono::Duration::seconds(1)
@@ -166,12 +171,17 @@ async fn r1_verification_wait_wakes(release: &str) {
     };
     for _ in 0..3 {
         reconcile_blocked_task_alert(&root, &task.id, released_at).unwrap();
-        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(&root, released_at);
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+            &root,
+            released_at,
+        );
     }
     let rows = queue.peek_all(20).unwrap();
     assert_eq!(
-        rows.iter().filter(|row| row.target != "merge-w"
-            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(),
+        rows.iter()
+            .filter(|row| row.target != "merge-w"
+                && !crate::supervisor_message_wakes::quiet(&row.prompt))
+            .count(),
         if release == "deadline" { 2 } else { 1 },
         "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
     );
@@ -255,24 +265,23 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
-        // pin: the table labels distinguish the sole owned wait from genuine waking blockers.
+        let owned = matches!(cause, "owned" | "expired");
+        // pin: owned dispatches use their handoff/expiry relay instead of a generic blocker wake.
         assert_eq!(
             is_lifecycle_wake_source(&rows[0].source),
-            cause != "owned",
+            !owned,
             "{cause}: lifecycle routing must use the same sole-blocker classification"
         );
-        // pin: the table's owned case alone gets CAS's quiet receipt marker.
+        // pin: an owned dispatch keeps its generic receipt quiet even after expiry.
         assert_eq!(
             crate::supervisor_message_wakes::quiet(&rows[0].prompt),
-            cause == "owned"
+            owned
         );
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert;
         for _ in 0..3 {
             reconcile_blocked_task_alert(&cas_dir, "cas-9efb-test", chrono::Utc::now()).unwrap();
         }
-        // An expired, unanswered wait escalates once; other first alerts are reused.
-        let expected = if cause == "expired" { 2 } else { 1 };
-        assert_eq!(queue.peek_all(10).unwrap().len(), expected);
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
         for _ in 0..3 {
             reconcile_blocked_task_alert(
                 &cas_dir,
@@ -281,7 +290,7 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             )
             .unwrap();
         }
-        assert_eq!(queue.peek_all(10).unwrap().len(), 2);
+        assert_eq!(queue.peek_all(10).unwrap().len(), if owned { 1 } else { 2 });
     }
 }
 

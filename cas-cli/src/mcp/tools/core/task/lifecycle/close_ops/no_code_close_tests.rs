@@ -1767,6 +1767,7 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
     // pin: the immutable close receipt reference is a durable tool-response contract.
     let path = response.lines().find_map(|line| line.strip_prefix("Details: "))
         .and_then(|line| line.split(" (SHA-256 ").next()).expect("receipt reference");
+    // pin: upkeep warnings must be recoverable in the immutable receipt instead of the response.
     assert!(std::fs::read_to_string(path).unwrap().contains("UPKEEP WARNING"));
     let closed = f.task(id);
     assert_eq!(closed.status, TaskStatus::Closed, "{response}");

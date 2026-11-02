@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.98.0] - 2026-11-02
+
 ### Fixed — Supervisor merges
 
 - **A merge keeps its reply and its close** — A supervisor's merge no longer overflows the MCP server's worker stack while closing the delivery. Development builds aborted after the merge landed, which lost the reply and the close and took the supervisor's Cassy tools with them. The merge path now uses about 780 KB of the 2 MiB stack instead of about 2 MB.

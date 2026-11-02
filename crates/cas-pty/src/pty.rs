@@ -3560,46 +3560,66 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
-        for (command, args) in [
-            ("codex", vec!["--yolo", "-c", "x=y", CODEX_WORKER_STARTUP_PREFIX, "-c", "late=value"]),
-            ("nice", vec!["-n", "10", "codex", "--yolo", CODEX_WORKER_STARTUP_PREFIX]),
-            (
-                "claude",
-                vec!["--session-id", "new-session", "--model", "opus"],
-            ),
+        use std::os::unix::fs::PermissionsExt;
+
+        for (command, args, backend) in [
+            ("codex", vec!["--yolo", "-c", "x=y", CODEX_WORKER_STARTUP_PREFIX, "-c", "late=value"], "codex"),
+            ("nice", vec!["-n", "10", "codex", "--yolo", CODEX_WORKER_STARTUP_PREFIX], "codex"),
+            ("claude", vec!["--session-id", "new-session", "--model", "opus"], "claude"),
+            ("grok", vec!["--model", "grok-code"], "grok"),
+            ("opencode", vec!["--prompt", OPENCODE_WORKER_STARTUP_PROMPT], "opencode"),
         ] {
             let mut config = PtyConfig {
                 command: command.into(),
                 args: args.into_iter().map(str::to_owned).collect(),
-                cwd: None,
                 env: vec![("CAS_SESSION_ID".into(), "new-session".into())],
-                env_remove: vec![],
-                rows: 24,
-                cols: 80,
+                ..PtyConfig::default()
             };
-            let backend = if command == "claude" {
-                "claude"
-            } else {
-                "codex"
-            };
-            let assignment = "Assigned task cas-abcd";
-            config.set_worker_startup_prompt(backend, assignment);
-            config
-                .resume_worker_session(backend, "old-session")
-                .unwrap();
-            if backend == "codex" {
-                assert_eq!(config.args.last().map(String::as_str), Some(assignment));
-                assert_eq!(config.args[config.args.len() - 2], "old-session");
-                let index = if command == "nice" { 3 } else { 0 };
-                assert_eq!(config.args[index], "resume");
-            } else {
-                assert_eq!(config.args.last().map(String::as_str), Some(assignment));
-                assert!(!config.args.iter().any(|a| a == "--session-id"));
-                assert_eq!(&config.args[..2], &["--resume", "old-session"]);
-                assert_eq!(config.env[0].1, "old-session");
+            let assignment = "Assigned task cas-abcd\npnpm install --frozen-lockfile\nExact brief: café \"quoted\"\n";
+            let _ = config.set_worker_startup_prompt(backend, assignment);
+            assert!(
+                !config.args.iter().any(|arg| arg.contains("pnpm install") || arg.contains("cas-abcd")),
+                "{backend} exposes the assignment in argv: {:?}", config.args
+            );
+            let prompt = config.args.last().unwrap().clone();
+            let path: PathBuf = serde_json::from_str(prompt.lines().last().unwrap()).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            if matches!(backend, "claude" | "codex") {
+                config.resume_worker_session(backend, "old-session").unwrap();
+                assert_eq!(config.args.last(), Some(&prompt));
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+                if backend == "codex" {
+                    assert_eq!(config.args[config.args.len() - 2], "old-session");
+                    let index = if command == "nice" { 3 } else { 0 };
+                    assert_eq!(config.args[index], "resume");
+                } else {
+                    assert!(!config.args.iter().any(|a| a == "--session-id"));
+                    assert_eq!(&config.args[..2], &["--resume", "old-session"]);
+                    assert_eq!(config.env[0].1, "old-session");
+                }
             }
+            // Spawn a blocking shell with the actual launch argv. No harness,
+            // account, network, startup timing or signal to another process is needed.
+            config.command = "sh".into();
+            config.args.splice(0..0, ["-c".into(), "read -r release".into(), "--".into()]);
+            let mut pty = Pty::spawn("private-brief-probe", config).unwrap();
+            let pid = pty.process_group_id().unwrap();
+            let observed = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "command="])
+                .output().unwrap();
+            pty.kill();
+            pty.child.wait().unwrap();
+            assert!(observed.status.success());
+            let argv = String::from_utf8(observed.stdout).unwrap();
+            assert!(!argv.contains("pnpm install") && !argv.contains("cas-abcd"), "{argv}");
+            assert!(argv.contains(path.to_str().unwrap()), "{argv}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+            drop(pty);
+            assert!(!path.exists(), "worker teardown must remove the brief");
         }
     }
 

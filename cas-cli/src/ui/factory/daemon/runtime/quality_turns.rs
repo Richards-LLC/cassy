@@ -251,7 +251,7 @@ impl Cursor {
                         }
                     }
                 }
-                "task_complete" | "turn_complete" | "turn_aborted" => {
+                "task_complete" | "turn_complete" | "turn_completed" | "turn_aborted" => {
                     if self.pending.as_ref().is_some_and(|turn| payload["turn_id"].as_str().is_none_or(|id| id == turn.id)) {
                         self.complete(at, root);
                     }
@@ -325,9 +325,16 @@ impl Scanner {
                     project.to_str().and_then(|project| crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
                         project, source.account_dir.as_deref(), &|path| codex_rollout_owns_recipient(
                             path, queue, session, &source.agent_name, startup_id, &self.ownership)))
+                } else if let Some(account) = source.account_dir.as_deref() {
+                    // The generic worker resolver honors named accounts only
+                    // for Codex. Bind this scanner to every explicit account.
+                    let directory = if source.cli == cas_mux::SupervisorCli::Claude { "projects" } else { "sessions" };
+                    crate::mcp::tools::service::factory_ops::transcript_path_from_resolution(
+                        crate::mcp::tools::service::factory_ops::resolve_transcript_in_roots(
+                            &[PathBuf::from(account).join(directory)], project.to_str(), &source.harness_session, source.cli))
                 } else {
                     crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
-                        project.to_str(), &source.harness_session, source.cli, source.account_dir.as_deref())
+                        project.to_str(), &source.harness_session, source.cli, None)
                 };
                 let Some(path) = path else {
                     self.misses.insert(source.agent_id.clone(), (source, Instant::now() + Duration::from_secs(30)));

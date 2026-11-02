@@ -1036,6 +1036,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn grok_completed_factory_turn_uses_native_usage_and_queue_provenance() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let queue = SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
+        let account = temp.path().join("grok");
+        let mut agent = Agent::new_with_role("grok-id".into(), "grok-supervisor".into(), AgentRole::Supervisor);
+        agent.cc_session_id = Some("grok-native".into());
+        agent.factory_session = Some("factory-1".into());
+        agent.metadata.insert("supervisor_cli".into(), "grok".into());
+        agent.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
+        let id = queue.enqueue_urgent_with_outcome("director", &agent.name, "review", Some("factory-1"),
+            None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+        // Shape observed in live Grok updates.jsonl (ACP session/update).
+        let update = |at, body| serde_json::json!({"timestamp":at,"method":"session/update","params":{
+            "sessionId":"grok-native","update":body,"_meta":{"promptId":"prompt-1","turnStartMs":1793617200000i64,"agentTimestampMs":at * 1000i64}}});
+        let rows = [
+            update(1793617200i64, serde_json::json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":format!("Message from director: [cas #{id} agent-authored 0s first] review")}})),
+            update(1793617201, serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","rawInput":{"action":"update","id":"cas-test"},"_meta":{"x.ai/tool":{"name":"cas__task"}}})),
+            update(1793617202, serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{"success":true}})),
+            update(1793617203, serde_json::json!({"sessionUpdate":"turn_completed","prompt_id":"prompt-1","usage":{"inputTokens":30,"outputTokens":5},"elapsed_ms":3000})),
+        ];
+        let path = account.join("sessions/project/grok-native/updates.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, std::slice::from_ref(&agent), state);
+        let mut state = MirrorScanState::default();
+        scan(&mut state);
+        scan(&mut state);
+        scan(&mut MirrorScanState::default());
+        let events = cas_store::quality_events_after(&root, 0, 10).unwrap();
+        assert_eq!(events.len(), 1, "one Grok native turn, including after restart");
+        let payload = serde_json::to_value(&events[0].payload).unwrap();
+        assert_eq!(payload["woken_by"], "director");
+        assert_eq!(payload["actions"], serde_json::json!(["task_mutation"]));
+        assert_eq!(payload["no_op"], false);
+        assert_eq!(payload["input_tokens"], 30);
+        assert_eq!(payload["output_tokens"], 5);
+        assert_eq!(payload["minutes"], 0.05);
+    }
+
     fn codex_turn(prompt: &str) -> Vec<Value> {
         vec![
             serde_json::json!({"timestamp":"2026-09-23T12:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),

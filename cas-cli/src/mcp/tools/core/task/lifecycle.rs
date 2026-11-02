@@ -5392,6 +5392,11 @@ mod related_recall_response_tests {
             .expect("create epic"),
         );
 
+        println!("NAG_MEASURE create_first\n{response}\nNAG_MEASURE_END");
+        let repeated = text(core.cas_task_create(Parameters(epic_request(
+            "Timeline import follow-up again", "Plan timeline import work for the next release."
+        ))).await.expect("repeat create"));
+        println!("NAG_MEASURE create_repeat\n{repeated}\nNAG_MEASURE_END");
         assert!(response.contains("Related prior context:"), "{response}");
         assert!(response.contains("m-recall-memory"), "{response}");
         assert!(

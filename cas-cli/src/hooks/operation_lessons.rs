@@ -189,6 +189,26 @@ mod tests {
     }
 
     #[test]
+    fn spawn_lessons_match_harness_and_surface_once_per_session() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let codex = lesson(&store, "Codex spawn policy", &["operation:spawn", "codex"], 0.9);
+        let general = lesson(&store, "Keep workers scoped", &["operation:spawn"], 0.8);
+        let spawn = |cli: &str| input(&format!("{}factory", crate::harness_policy::own_tool_prefix()),
+            serde_json::json!({"action": "spawn_workers", "cli": cli, "count": 1}));
+        let claude = surfaced(temp.path(), &spawn("claude"));
+        assert!(!claude.contains(&codex), "Claude spawn received Codex lesson: {claude}");
+        assert!(claude.contains(&general), "{claude}");
+        let first = surfaced(temp.path(), &spawn("codex"));
+        assert!(first.contains(&codex) && !first.contains(&general), "{first}");
+        assert!(!surfaced(temp.path(), &spawn("codex")).contains("[operation lessons"));
+        let mut next = spawn("codex");
+        next.session_id = "another-session".into();
+        assert!(surfaced(temp.path(), &next).contains(&codex));
+    }
+
+    #[test]
     fn spawn_and_epic_close_are_recognized_on_the_callers_tool_prefix() {
         let spawn = input(
             "mcp__cs__factory",

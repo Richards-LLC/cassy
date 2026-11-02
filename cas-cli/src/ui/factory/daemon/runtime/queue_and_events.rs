@@ -14485,6 +14485,42 @@ mod tests {
         super::cancel_task_reminder(reminders.as_ref(), &stale).unwrap();
     }
 
+    #[test]
+    fn worker_reminders_end_silently_on_shutdown_or_terminal_task() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for (shutdown, terminal) in [(true, false), (false, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let cas = root.path();
+            let agents = crate::store::open_agent_store(cas).unwrap();
+            let mut owner = cas_types::Agent::new_with_role("worker-id".into(), "worker".into(), cas_types::AgentRole::Worker);
+            owner.factory_session = Some("s".into());
+            if shutdown { owner.status = cas_types::AgentStatus::Shutdown; }
+            agents.register(&owner).unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role("sup-id".into(), "sup".into(), cas_types::AgentRole::Supervisor);
+            supervisor.factory_session = Some("s".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = crate::store::open_task_store(cas).unwrap();
+            let mut task = Task::new("cas-wait".into(), "wait".into());
+            if terminal { task.status = TaskStatus::Closed; }
+            tasks.add(&task).unwrap();
+            let reminders = crate::store::open_reminder_store(cas).unwrap();
+            reminders.create_with_scope(&owner.id, None, "retry task", cas_store::ReminderTriggerType::Time,
+                Some(chrono::Utc::now() - chrono::Duration::hours(2)), None, None, 60,
+                Some("s"), Some(&task.id), true, None).unwrap();
+            for _ in 0..2 {
+                super::run_reminder_scan(super::ReminderScanInput {
+                    cas_dir: cas.to_path_buf(), session_name: "s".into(), supervisor_name: "sup".into(),
+                    agent_id_to_name: HashMap::from([("sup-id".into(), "sup".into())]),
+                    events: vec![], external_ready: vec![], ci_wakes: vec![],
+                });
+            }
+            assert!(reminders.list_all_pending().unwrap().is_empty());
+            assert!(crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap().is_empty(),
+                "ended worker wait must not page anyone: shutdown={shutdown}, terminal={terminal}");
+            assert!(reminders.list_recently_fired(60).unwrap().is_empty());
+        }
+    }
+
     /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
     /// satisfied wake fires once with the run conclusions.
     #[test]

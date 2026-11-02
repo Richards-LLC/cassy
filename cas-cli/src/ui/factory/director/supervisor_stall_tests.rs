@@ -439,7 +439,7 @@ fn stall_gate_fires_once_per_ten_minutes_and_accumulates_actionable_idle_time() 
         start,
         600,
     );
-    assert_eq!(first.wake, Some(actionable.clone()));
+    assert!(first.wake.is_none(), "zero actionable idle seconds must not wake: {first:?}");
 
     let early = tracker.observe(
         Some(actionable.clone()),

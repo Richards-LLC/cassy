@@ -7,87 +7,81 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Changed — 3.96 release scope
+### Fixed — Commander messages and replies
 
-- **Keep established session navigation** — Session listing keeps its 3.95 behavior while this release ships message delivery, reply recovery, supervisor identity, onboarding preservation and hub-route fixes.
-
-### Fixed — Release review
-
-- **Preserve local access and authenticated input** — Was: missing Tailscale could
-  stop a service's loopback hub, and nested read-only lookups could borrow a
-  parent's identity. → Now: Auto services retain local access with a warning,
-  read-only identity checks enforce process ownership, and Commander holds
-  non-Claude input during confirmation dialogs and pending tool calls.
-- **Long Codex conversations keep their replies** — Was: a daemon restart could
-  miss ownership older than the reply tail and repeatedly rescan rollouts.
-  → Now: streamed ownership survives long transcripts, unresolved scans back
-  off, and old finalized Queued receipts keep a slower watch for real delivery.
-- **Explain empty feedback and route recovery** — Was: empty feedback implied
-  unknown measurements and a refused foreign Serve route offered no recovery.
-  → Now: empty feedback says none recorded unless measurements were excluded;
-  route conflicts name an explicit port-scoped removal for operator review.
-
-### Fixed — Commander phone header
-
-- **Delivery warnings keep actions visible** — Every phone header action stays inside the screen when a delivery warning appears; Raw output uses its existing icon beside the warning.
-
-### Fixed — Commander boot replies
-
-- **Codex boot and replacement answers** — Commander follows the supervisor’s own Codex rollout when several panes share a project, so early messages and same-name restarts keep their answers in the right conversation.
-- **Claude queued answers keep their conversation** — Messages consumed during startup or a same-name restart retain their original message and paired device when the answer reaches Commander.
-- **Claude answers appear once per turn** — Background task notifications mirror standalone status without taking over an operator turn. Each native answer appears once under its latest verified send, and every consumed send remains Delivered.
-
-### Fixed — Commander messages
-
-- **Keep messages through Claude setup** — Commander retains the original words while Claude shows onboarding or sign-in pages, then sends them once its text prompt is ready. Setup dialogs no longer consume a send reported as Delivered.
-
-- **Operator messages reach the harness like terminal input** — Verified
-  Commander messages enter idle and working supervisors' input directly; fresh
-  MCP heartbeats no longer hold them. Recipient reads and acknowledgements
-  update queued bubbles live on every connected device.
+- **Messages reach the conversation like terminal input** — Was: Fresh background
+  heartbeats could hold a message instead of letting it reach an idle or working
+  conversation. → Now: Verified messages enter native input directly, and read
+  and delivered updates reach every connected device.
+- **Setup keeps the original message** — Was: Claude onboarding or sign-in could
+  consume input reported as delivered, and other native dialogs could receive
+  input meant for a prompt. → Now: Original words wait for a ready text prompt;
+  confirmation dialogs and pending tools keep their input protection.
+- **Replies stay with the right conversation** — Was: Boot-time sends, same-name
+  replacements and shared-project Codex rollouts could lose or misbind an answer.
+  → Now: Claude and Codex retain the original send and paired-device binding,
+  including framed Codex messages and ownership deep in long transcripts.
+- **Each native answer appears once** — Was: Background notifications could take
+  over an operator turn or leave answers and delivery receipts out of step.
+  → Now: Standalone status stays separate, each answer mirrors once under its
+  latest verified send, and every consumed send remains Delivered.
 
 ### Fixed — Commander hub
 
-- **Failed hub starts preserve operator routes** — A stopped local service on a
-  previously used Serve port is left untouched unless its exact target is
-  recorded as Cassy's. Proven owned routes still recover after Tailscale outages.
+- **Recover the tailnet route after reboot** — Was: A Tailscale outage could leave
+  Serve pointing at a dead local shim. → Now: Auto-mode services keep serving on
+  loopback while publication retries in the background, then restore the route
+  and live status without a restart. Required mode still refuses failed publication.
+- **Preserve exact route ownership** — Was: Failed starts could lose their prior
+  target or treat an unrelated stopped service as an owned route. → Now: Prior
+  ownership survives failed starts, and only an exact recorded target can be
+  removed; foreign-route conflicts name a port-specific remedy for operator review.
+- **Keep local access when Tailscale is unavailable** — Was: A missing CLI or
+  incomplete Tailscale setup could stop an Auto-mode service's local hub.
+  → Now: Loopback stays available with a sanitized warning while public-route
+  recovery continues when possible.
 
-- **Slow boot retries keep their route ownership** — A failed service start
-  preserves its previous Serve target even when only a legacy runtime record
-  identifies it, so a later start can restore the route after Tailscale returns.
+### Fixed — Commander phone header
 
-- **Service startup restores the tailnet route after reboot** — Was: A Linux hub
-  could settle on loopback after Tailscale was briefly unavailable, leaving Serve
-  pointed at a dead shim. → Now: Auto services serve loopback immediately through every publication
-  failure, retry in the background, and restore the public route and live
-  metadata without a restart. Status and logs retain the cause.
+- **Delivery warnings keep actions visible** — Was: A delivery warning could push
+  phone header actions outside the screen. → Now: Every action stays in view,
+  with the existing Raw output icon beside the warning.
+
+### Fixed — Runtime identity
+
+- **Nested lookups preserve the live owner** — Was: Nested reviews and read-only
+  lookups could borrow a parent's identity, replace its process record or disable
+  its communication on exit. → Now: Process ownership is authenticated for reads
+  and writes; nested callers cannot replace or clean up a live owner's identity,
+  and prior exited-process and hostname records recover normally.
 
 ### Fixed — Friction ledger
 
-- **Release feedback excludes lifetime totals** — Was: Backfill dated all-time
-  retrieval counts as new measurements, inflating release evidence and allowing
-  repeat snapshots on later days. → Now: Backfill leaves feature measurements to
-  session end; reports exclude historical measurements without session
-  attribution and disclose their count while retaining scoped feedback.
+- **Release feedback reports measured evidence** — Was: Backfill assigned lifetime
+  retrieval totals to a release, and empty feedback suggested unknown measurements.
+  → Now: Reports exclude unattributed totals, disclose exclusions and say none
+  recorded when no feedback exists; feature measurements stay tied to session end.
 
 ### Fixed — QA candidates
 
-- **Source-only Commander changes build candidates** — Was: Rebuilt web assets
-  marked the private candidate checkout dirty and failed version verification.
-  → Now: Verified generated assets preserve the clean source revision; changes
-  to other tracked inputs and mismatched served assets still refuse publication.
+- **Source-only Commander candidates keep their identity** — Was: Regenerated
+  browser assets could mark a private candidate dirty and refuse its build.
+  → Now: Verified generated assets retain the source identity, while unrelated
+  tracked edits and mismatched served assets still refuse publication.
 
-### Fixed — Factory
+### Changed — Release scope
 
-- **Nested reviews preserve supervisor ownership** — Was: A disposable Codex
-  review could inherit the supervisor's identity, replace its process record,
-  and disable worker messages and the peer mailbox when it exited. → Now:
-  Nested harnesses cannot take over a live factory identity or run lifecycle
-  cleanup against it; the authenticated owner also repairs older exited-PID
-  records before heartbeats resume. Tool policy checks keep enforcing their
-  denials for nested callers, and legacy parent records and exited rows from
-  an earlier hostname can recover normally. Live owners also keep lifecycle
-  hooks and MCP reconnection working when their hostname changes.
+- **Session listing waits for the next release** — Was: This release included
+  automatic removal of stopped conversations and a new recovery path for their
+  unsent drafts. → Now: That work has been reverted from this release. Non-running
+  sessions remain listed until the next release, using the existing 3.95 behavior.
+
+### Test — Native delivery and recovery
+
+- **Assertions follow automatic recovery and real reply binding** — Was: Some
+  fixtures expected a manual restart, accepted obsolete message framing or reused
+  process identity without a fingerprint. → Now: Targeted tests assert background
+  publication, framed Codex reply binding and the owned process fingerprint.
 
 ## [3.95.0] - 2026-11-01
 

@@ -1106,7 +1106,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_c
     let (temp, worker, cas_dir, first, lane) = delivered_worktree_fixture(&mut env, branch).await;
     std::fs::write(
         cas_dir.join("config.toml"),
-        "[project]\ncanonical_id = \"release-project\"\n[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"batch\"\n",
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"batch\"\n",
     )
     .unwrap();
     let mut deliveries = vec![(first, "src/one.rs")];
@@ -1124,11 +1124,13 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_c
     };
     let dispatched = |id: &str| cas_store::get_latest_verification_dispatch(&cas_dir, id).unwrap().is_some();
     let mut tips = Vec::new();
-    for (id, path) in &deliveries {
-        worker
-            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-            .await
-            .expect("start delivery");
+    for (index, (id, path)) in deliveries.iter().enumerate() {
+        if index > 0 {
+            worker
+                .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+                .await
+                .expect("start delivery");
+        }
         let tip = merge_delivery_of(temp.path(), lane.path(), &cas_dir, id, path, branch);
         let waiting = close(id, &tip).await;
         tips.push(tip);

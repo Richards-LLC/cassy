@@ -111,9 +111,9 @@ class PolicyTests(unittest.TestCase):
 
     def test_real_parser_provisioning_step_reuses_yaml_or_isolates_installation(self):
         step = next(s for s in self.ci()['jobs']['fast-validation-ci-tiers']['steps']
-                    if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
-        # Isolate tool orchestration and the pip network boundary. The make
-        # fixture runs the actual parsed-policy suite, without recursive make.
+                    if s.get('name') == 'Test release publication guards')
+        # Isolate tool orchestration and the pip boundary. The tier runner
+        # fixture runs parsed policy rather than recursively launching itself.
         interpreter = shlex.quote(sys.executable)
         parser = shlex.quote(str(policy.HERE / 'policy.py'))
         for mode in ['present', 'absent', 'venv-failure', 'install-failure']:
@@ -123,7 +123,7 @@ class PolicyTests(unittest.TestCase):
                 runner_temp = fixture / 'runner';runner_temp.mkdir()
                 log = fixture / 'calls'
                 log.write_text('')
-                (bin_dir / 'python3').write_text('''#!/usr/bin/env bash
+                (bin_dir / 'python3').write_text(f'''#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == -c ]]; then
   echo import >> "$CALLS"
@@ -134,6 +134,11 @@ elif [[ "$1 $2" == '-m venv' ]]; then
   mkdir -p "$3/bin"
   cp "$FIXTURE/pip" "$3/bin/pip"
   cp "$FIXTURE/venv-python" "$3/bin/python3"
+elif [[ "$1" == scripts/ci-script-tests-for-diff.py ]]; then
+  [[ "$*" == 'scripts/ci-script-tests-for-diff.py --all --scope-base verified-base' ]]
+  echo tier >> "$CALLS"
+  command -v python3 >> "$CALLS"
+  {interpreter} {parser} check
 else
   printf 'unexpected python %s\\n' "$*" >> "$CALLS"
   exit 2
@@ -144,29 +149,18 @@ set -euo pipefail
 printf 'pip %s\\n' "$*" >> "$CALLS"
 [[ "$MODE" != install-failure ]]
 ''')
-                (fixture / 'venv-python').write_text(f'#!/usr/bin/env bash\nexec {interpreter} "$@"\n')
+                (fixture / 'venv-python').write_text('#!/usr/bin/env bash\nexec "$FIXTURE/bin/python3" "$@"\n')
                 # cas-a1b0: the pinned linter comes from the root lockfile.
                 (bin_dir / 'npm').write_text('#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$CALLS"\n')
-                (bin_dir / 'make').write_text(f'''#!/usr/bin/env bash
-set -euo pipefail
-[[ "$*" == '-C cas-cli test-ci-tiers' ]]
-echo make >> "$CALLS"
-command -v python3 >> "$CALLS"
-if [[ "$MODE" == present ]]; then
-  {interpreter} {parser} check
-else
-  python3 {parser} check
-fi
-''')
                 for child in [*bin_dir.iterdir(), fixture / 'pip', fixture / 'venv-python']:
                     child.chmod(0o755)
                 result = self.run_body(step['run'], dict(
                     PATH=f'{bin_dir}:/usr/bin:/bin', RUNNER_TEMP=str(runner_temp),
-                    CALLS=str(log), MODE=mode, FIXTURE=str(fixture)))
+                    CALLS=str(log), MODE=mode, FIXTURE=str(fixture), BASE_SHA='verified-base'))
                 calls = log.read_text().splitlines()
                 if mode in ['venv-failure', 'install-failure']:
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertNotIn('make', calls)
+                    self.assertNotIn('tier', calls)
                     if mode == 'venv-failure': self.assertEqual(calls, ['import', 'venv'])
                     self.assertNotIn('npm ci --no-audit --no-fund', calls)
                 else:
@@ -174,13 +168,13 @@ fi
                     count = len(self.entries) + len(json.loads((policy.HERE / 'prose-pins.json').read_text()))
                     self.assertIn(f'parsed policy/prose: {count} passed; 0 failed', result.stdout)
                     if mode == 'present':
-                        self.assertEqual(calls, ['import', 'npm ci --no-audit --no-fund', 'make', str(bin_dir / 'python3')])
+                        self.assertEqual(calls, ['import', 'npm ci --no-audit --no-fund', 'tier', str(bin_dir / 'python3')])
                         self.assertFalse((runner_temp / 'ci-tiers-venv').exists())
                     else:
                         self.assertEqual(calls, ['import', 'venv',
                             'pip install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt',
                             'npm ci --no-audit --no-fund',
-                            'make', str(runner_temp / 'ci-tiers-venv/bin/python3')])
+                            'tier', str(runner_temp / 'ci-tiers-venv/bin/python3')])
 
     def test_parsed_archive_fail_open_contract_and_all_four_mutations(self):
         job = self.ci()['jobs']['fast-validation-suite-build']
@@ -404,14 +398,14 @@ fi
             context = {
                 'needs.ci-diff.outputs.class': 'rust-touched',
                 'github.event_name': event, 'github.ref': ref, 'vars.CAS_LANE_SLIM': slim,
-                'steps.classify-diff.outputs.fast-admission': fast,
-                'steps.classify-diff.outputs.rust-unaffected': 'false'}
+                'needs.ci-diff.outputs.fast-admission': fast,
+                'needs.ci-diff.outputs.rust-unaffected': 'false'}
             for key, value in jobs[job].get('env', {}).items():
                 context[f'env.{key}'] = str(self.gh_value(value, context)).lower()
             return self.gh_expr(step['if'], context)
         rust = 'Run change-scoped tests with impact evidence'
         for job, name, fast in [
-            ('docs-lint', 'Run no-build release gate rows', 'true'), ('docs-lint', 'Markdown lint', 'true'),
+            ('docs-lint', 'Run no-build release gate rows', 'true'),
             ('scoped-validation-fast', 'Run no-build release gate rows', 'true'),
             ('scoped-validation-fast', rust, 'true'),
             ('scoped-validation-fast', 'Test snapshot-pinned CLI output surfaces', 'true'),
@@ -422,6 +416,13 @@ fi
                 self.assertTrue(runs(job, name, '', fast), 'unset CAS_LANE_SLIM keeps the lane as it was')
                 self.assertFalse(runs(job, name, 'true', fast))
         self.assertTrue(runs('scoped-validation', rust, 'true', 'false', event='pull_request', ref='refs/pull/1/merge'))
+        # Factory fast rows already lint the same Markdown diff. Other events
+        # retain the standalone lint instead of losing their only owner.
+        for slim in ['', 'true']:
+            self.assertFalse(runs('docs-lint', 'Markdown lint', slim, 'true'))
+            for event in ['pull_request', 'merge_group']:
+                self.assertTrue(runs('docs-lint', 'Markdown lint', slim, 'true',
+                                     event=event, ref='refs/pull/1/merge'))
 
     def test_release_fixtures_run_only_for_scripts_changes_in_both_lane_paths(self):
         scripts = ['test-release.sh', 'test-release-publish.sh', 'test-install-on-publish.sh', 'test-hub-pin.sh']
@@ -679,6 +680,15 @@ else:
                     self.assertEqual(self.gh_expr(step['if'], context),
                                      expected and 'uses' not in step)
                 if expected:
+                    # The full integration tier scopes visual tool fixtures
+                    # using this same comparison base, before provisioning.
+                    full_output = self.root / 'full-output'
+                    result = self.run_body(steps[0]['run'], dict(env,
+                        FULL_TIER='true', GITHUB_OUTPUT=str(full_output)))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    full_signals = dict(line.split('=', 1) for line in full_output.read_text().splitlines())
+                    self.assertEqual(full_signals['browser'], 'false')
+                    full_output.unlink()
                     # This no-dependency suite needs no fake npm/pip/browser.
                     provision = self.run_body(steps[-2]['run'], dict(FULL_TIER='false',
                         NEED_LINT='false', NEED_WEB='false', NEED_BROWSER='false', NEED_PDF='false'))

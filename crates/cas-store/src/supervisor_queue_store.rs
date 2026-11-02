@@ -271,6 +271,19 @@ pub struct SqliteSupervisorQueueStore {
 }
 
 impl SqliteSupervisorQueueStore {
+    /// Read durable event history, including already processed/delivered rows.
+    pub fn event_history_since(&self, event_type: &str, since: DateTime<Utc>) -> Result<Vec<SupervisorNotification>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
+                    transition_key, prompt_delivered_at FROM supervisor_queue
+             WHERE event_type=?1 AND julianday(created_at)>=julianday(?2)
+             ORDER BY julianday(created_at), id",
+        )?;
+        Ok(stmt.query_map(params![event_type, since.to_rfc3339()], Self::notification_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Open or create a SQLite supervisor queue store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -1160,6 +1173,10 @@ mod tests {
         // Polling again should return empty (already processed)
         let notifications = store.poll("supervisor-1", 10).unwrap();
         assert!(notifications.is_empty());
+        let history = store.event_history_since("worker_died", Utc::now() - chrono::Duration::minutes(1)).unwrap();
+        assert_eq!(history.iter().map(|row| row.id).collect::<Vec<_>>(), [id2]);
+        assert!(history[0].processed_at.is_some());
+        assert!(store.event_history_since("worker_died", Utc::now() + chrono::Duration::minutes(1)).unwrap().is_empty());
     }
 
     #[test]

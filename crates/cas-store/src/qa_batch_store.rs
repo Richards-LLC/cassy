@@ -202,7 +202,8 @@ pub fn qa_batch_receipts_for_task(
 }
 
 /// The release verdicts naming `task`. They are kept apart from QA receipts: a
-/// review never pays a QA walk's debt, and a QA walk never replaces the review.
+/// review is not a QA walk, and a QA walk never replaces the review. The close
+/// policy may accept an exact release verdict for deferred Tier 1 batch debt.
 pub fn release_verdicts_for_task(
     root: &Path,
     project: &str,

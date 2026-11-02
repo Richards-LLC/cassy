@@ -48,8 +48,11 @@ implemented each task.
 
 A release verdict uses the same action with `verification_type=release`: one
 review of the assembled tip, whose published report names every delivery. It rides
-task sync on a reserved `RELEASE_VERDICT_PROOF:` line and never counts as QA
-evidence, so Tier 1 deliveries need both it and any QA receipt they owe.
+task sync on a reserved `RELEASE_VERDICT_PROOF:` line. For Tier 1 deliveries
+owned by release review, its exact-anchor coverage also satisfies deferred
+batch debt. It does not replace general QA evidence, Tier 2 probes or a
+dedicated review. A verdict recorded after an expired dispatch supersedes
+that old wait; live or newer dispatches and rejected verdicts retain authority.
 
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same
@@ -123,7 +126,8 @@ that does not contain reviewed staging, or an omitted task cannot reuse it. Corr
 published ledger and receipt; existing receipts cannot be edited.
 
 An integrated task without a receipt follows the normal evidence gate. A task
-that deferred evidence at park must have a valid listed receipt or a passed
+that deferred evidence at park must have a valid listed receipt (including a
+covering release verdict for release-owned Tier 1 work) or a passed
 explicit independent QA round covering its current delivery anchor before it
 can close. Pending, failed or older-tip rounds do not clear this debt. The
 obligation survives changes to surface classification, gate settings and
@@ -138,3 +142,12 @@ available.
 
 Batch receipts and deferred obligations are local project records in
 `.cas/cas.db` (migration 276). They do not create a cloud synchronization lane.
+
+A successor supervisor's startup recovery list spans all review tiers, rather
+than only release-owned Tier 1 deliveries. Each integrated, content-preserved
+project delivery without a live review or adverse verdict shows its current
+hold and a close action. Tier 0 still passes mechanical gates; dedicated
+reviews retain their own verdicts, and Tier 2 still needs an adversarial probe.
+CI overrides remain subject to independent QA. Close rechecks these gates; appearing in recovery never approves or closes a delivery.
+Unreadable verification metadata skips and reports that row while preserving
+the other recovery actions and the inherited supervisor handoff.

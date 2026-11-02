@@ -6,6 +6,81 @@ use cas_store::{AgentStore, NotificationPriority, QueueOrigin, SqliteAgentStore}
 use cas_types::{Agent, AgentRole};
 
 const SOURCE: &str = "supervisor-handoff";
+const RECOVERY_SOURCE: &str = "integrated-delivery-recovery";
+
+/// Project facts, rather than a predecessor's session membership, determine
+/// recovery. This is an actionable list, not the bounded historical preview.
+/// Close remains the authority: startup never adopts, resolves or closes work.
+fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
+    use crate::mcp::tools::core::task::{lifecycle::review_tier, task_owned_by_project};
+    use cas_types::{TaskStatus, VerificationStatus};
+    let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(String::new()) };
+    let tasks = crate::store::open_task_store(root)?;
+    let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+    let verifications = crate::store::open_verification_store(root)?;
+    let mut parked = tasks.list(Some(TaskStatus::AwaitingMerge))?;
+    parked.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut rows = Vec::new();
+    let mut skipped = Vec::new();
+    for task in parked {
+        if !task_owned_by_project(&task, root, Some(&project))
+            || task.deliverables.merge_conflicted
+        {
+            continue;
+        }
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { continue };
+        let Ok((repo, target)) = crate::qa_batch::task_context(root, &task) else { continue };
+        if crate::qa_batch::integration_state(&repo, anchor, &target) != Some(true)
+            || core.guard_direct_update_close_merge_state(tasks.as_ref(), &task, None).is_err()
+        {
+            continue;
+        }
+        // An adverse or unanswered decision is substantive review work, not
+        // a missing receipt. A malformed row stays closed to recovery without
+        // hiding the other deliveries or the already-claimed session handoff.
+        let metadata = (|| -> anyhow::Result<_> {
+            Ok((verifications.get_latest_for_task(&task.id)?,
+                cas_store::get_latest_verification_dispatch(root, &task.id)?))
+        })();
+        let (latest, dispatch) = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped.push(format!("- {}: verification metadata unreadable; inspect/repair this row before retrying recovery ({error}).\n", task.id));
+                continue;
+            }
+        };
+        if latest.as_ref().is_some_and(|v| matches!(v.status, VerificationStatus::Rejected | VerificationStatus::SupervisorCall | VerificationStatus::Skipped)) {
+            continue;
+        }
+        if dispatch.as_ref().is_some_and(|d| {
+            matches!(d.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                && d.deadline_at > chrono::Utc::now()
+        }) {
+            continue;
+        }
+        let review = match review_tier::tier_for_delivery(&task, &repo).map(|decision| decision.tier) {
+            Some(review_tier::VerificationTier::Mechanical) => "mechanical close gates",
+            Some(review_tier::VerificationTier::Adversarial) => "dedicated verifier and adversarial probe",
+            _ if review_tier::release_verdict_owns(root, &task, &repo) => "release verdict or receipt",
+            _ => "dedicated verifier",
+        };
+        let hold = match dispatch.as_ref().map(|dispatch| dispatch.state) {
+            _ if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override => "CI override; independent QA must be rechecked",
+            Some(cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut) => "expired verification request",
+            _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Error) => "verification error",
+            _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Approved) => "recorded approval; close gates need rechecking",
+            _ => "close gates pending",
+        };
+        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; review path: {review}; next: task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
+    }
+    if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
+    Ok(format!(
+        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Adopt each row and run its close action to recheck the current hold. Supply the exact verdict/receipt or dedicated review requested by close; Tier 2 still needs its own verifier and adversarial probe.\n{}",
+        rows.len(), rows.concat() + &if skipped.is_empty() { String::new() } else {
+            format!("Skipped recovery rows ({}):\n{}", skipped.len(), skipped.concat())
+        }
+    ))
+}
 
 fn preview(value: &serde_json::Value) -> serde_json::Value {
     let Some(fields) = value.as_object() else {
@@ -221,13 +296,30 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(id)?;
     resume(root, &agent)?;
-    let messages = crate::store::open_prompt_queue_store(root)?
+    let queue = crate::store::open_prompt_queue_store(root)?;
+    if agent.role == AgentRole::Supervisor {
+        let recovery = integrated_recovery(root).unwrap_or_else(|error| format!(
+            "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
+        ));
+        if !recovery.is_empty() {
+            queue.enqueue_idempotent(
+                RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),
+                Some(RECOVERY_SOURCE), Some(NotificationPriority::High),
+                &format!("{RECOVERY_SOURCE}:{}:{}", agent.id, agent.registered_at.to_rfc3339()),
+                Some(&QueueOrigin::Daemon),
+            )?;
+        }
+    }
+    let mut messages = queue
         .surface_unseen_from_sources_for_recipient(
             &agent.name,
             agent.factory_session.as_deref(),
             &[SOURCE],
             1,
         )?;
+    messages.extend(queue.surface_unseen_from_sources_for_recipient(
+        &agent.name, agent.factory_session.as_deref(), &[RECOVERY_SOURCE], 1,
+    )?);
     Ok(messages
         .into_iter()
         .map(|row| row.prompt)

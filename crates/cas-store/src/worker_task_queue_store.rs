@@ -38,6 +38,11 @@ pub struct WorkerTaskQueue {
     pub starting: bool,
     #[serde(default)]
     pub dispatch_revision: u64,
+    /// A queued successor cannot start in this predecessor conversation.
+    #[serde(default)]
+    pub context_reset_from: Option<String>,
+    #[serde(default)]
+    pub context_reset_request: Option<i64>,
     pub notes: Vec<String>,
 }
 
@@ -159,6 +164,8 @@ mod tests {
         let mut stale = first.clone();
         first.current_task = Some("cas-running".into());
         first.current_started = true;
+        first.context_reset_from = Some("old-agent|old-session".into());
+        first.context_reset_request = Some(123);
         first.pending = vec!["cas-b".into(), "cas-a".into()];
         store.save("session", "worker", &mut first).unwrap();
         stale.pending = vec!["cas-lost".into()];

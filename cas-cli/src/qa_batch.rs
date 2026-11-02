@@ -377,6 +377,62 @@ pub(crate) fn satisfying_release_verdict(
     covering_receipt(root, task, repo, target, head, cas_store::release_verdicts_for_task)
 }
 
+/// A later release review can retire an expired Tier 1 dispatch, but cannot
+/// replace a live cycle, a rejected review, or immutable delivery authority.
+/// Keep the old dispatch as audit history; every integration gate still runs.
+pub(crate) fn release_supersedes_stale_dispatch(
+    root: &Path,
+    task: &Task,
+) -> Result<Option<QaBatchReceipt>, String> {
+    use cas_types::VerificationDispatchState::{Claimed, Pending, TimedOut};
+    let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &task.id)
+        .map_err(|e| e.to_string())? else { return Ok(None) };
+    if !matches!(dispatch.state, TimedOut | Pending | Claimed)
+        || (dispatch.state != TimedOut && dispatch.deadline_at > chrono::Utc::now())
+        || dispatch.receipt_id.is_some()
+        || dispatch.delivery_transaction_id.is_some()
+        || task.deliverables.factory_branch_start.is_none()
+        || task.deliverables.factory_branch_anchor.is_none()
+    {
+        return Ok(None);
+    }
+    let latest = crate::store::open_verification_store(root)
+        .map_err(|e| e.to_string())?
+        .get_latest_for_task(&task.id).map_err(|e| e.to_string())?;
+    if latest.is_some_and(|verdict| !matches!(
+        verdict.status, cas_types::VerificationStatus::Pending | cas_types::VerificationStatus::Approved
+    )) {
+        return Ok(None);
+    }
+    let (repo, target) = task_context(root, task)?;
+    if !crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns(root, task, &repo) {
+        return Ok(None);
+    }
+    let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { return Ok(None) };
+    Ok(satisfying_release_verdict(root, task, &repo, &target, anchor)?
+        .filter(|receipt| chrono::DateTime::parse_from_rfc3339(&receipt.recorded_at)
+            .is_ok_and(|recorded| recorded > dispatch.requested_at)))
+}
+
+/// Deferred Tier 1 batch debt follows its release verdict's exact anchor,
+/// project, independent author and published bytes. This does not turn a code
+/// review into general QA evidence or waive Tier 2 / dedicated review paths.
+pub(crate) fn satisfying_deferred_receipt(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+) -> Result<Option<QaBatchReceipt>, String> {
+    if let Some(receipt) = satisfying_receipt(root, task, repo, target, head)? {
+        return Ok(Some(receipt));
+    }
+    if crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns(root, task, repo) {
+        return satisfying_release_verdict(root, task, repo, target, head);
+    }
+    Ok(None)
+}
+
 /// cas-f497: whether the close gate would answer WAITING FOR RELEASE VERDICT for
 /// this delivery. Anything unreadable is `false`, so the delivery keeps its usual
 /// stall prompt rather than going quiet. Runs Git; call it off the factory loop.
@@ -541,7 +597,7 @@ pub(crate) fn ensure_deferred_close(
         .ok_or_else(|| debt_refusal(&task.id))?;
     let satisfies = |head: &str| -> Result<bool, String> {
         Ok(
-            satisfying_receipt(root, task, &repo, &target, head)?.is_some()
+            satisfying_deferred_receipt(root, task, &repo, &target, head)?.is_some()
                 || covering_pass(root, task, &repo, &target, head)?.is_some(),
         )
     };

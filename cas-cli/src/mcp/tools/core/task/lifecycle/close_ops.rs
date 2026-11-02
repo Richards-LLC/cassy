@@ -7934,11 +7934,23 @@ impl CasCore {
             gate_refusals.push(message);
         }
 
+        // cas-d8b2: an exact release verdict recorded after an expired Tier 1
+        // cycle can satisfy it. Resolve this before the timeout early return;
+        // it never waives integration/content, QA, or dedicated-review gates.
+        let superseding_release_verdict = if close_disposition.requires_delivery_gates() {
+            match crate::qa_batch::release_supersedes_stale_dispatch(&self.cas_root, &task) {
+                Ok(receipt) => receipt,
+                Err(error) => return Ok(Self::tool_error(format!(
+                    "VERIFICATION DISPATCH INVALID: cannot validate release recovery for {}: {error}", task.id
+                ))),
+            }
+        } else { None };
+
         // An explicitly persisted proof cycle is stronger than configuration,
         // depth, orphan, and review convenience paths. Once one exists, no
         // close projection may proceed until that exact dispatch resolves.
         // This guard also protects internal post-merge re-close calls.
-        if close_disposition != TaskCloseDisposition::Decision {
+        if close_disposition != TaskCloseDisposition::Decision && superseding_release_verdict.is_none() {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                 Err(error) => {
                     return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
@@ -9664,10 +9676,10 @@ impl CasCore {
         // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
         // one verdict of the assembled tip names it. A dispatch or verdict already on
         // record keeps its authority below, and Tier 2 never takes this path.
-        let release_verdict_covers = !rapid_unsampled
+        let release_verdict_covers = superseding_release_verdict.is_some() || (!rapid_unsampled
             && no_verification_on_record
             && verification_tier.is_some()
-            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
+            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root));
         if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers) {
             match crate::qa_batch::satisfying_release_verdict(
                 &self.cas_root,

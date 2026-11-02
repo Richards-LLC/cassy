@@ -97,7 +97,7 @@ fn bounded_reply(text: &str) -> String {
 
 /// Only suppress complete, content-free updates. A real answer, or a status
 /// containing another sentence, still belongs in the operator's history.
-fn no_action_reply(text: &str) -> bool {
+pub(super) fn no_action_reply(text: &str) -> bool {
     if crate::supervisor_message_wakes::pure_ack(text) {
         return true;
     }
@@ -462,6 +462,7 @@ type TranscriptSource = (String, cas_mux::SupervisorCli, Option<String>);
 
 #[derive(Default)]
 pub(crate) struct MirrorScanState {
+    turns: super::quality_turns::Scanner,
     cursors: HashMap<String, TranscriptCursor>,
     resolution_misses: HashMap<String, (TranscriptSource, Option<i64>, Instant, Duration)>,
     codex_ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
@@ -488,7 +489,7 @@ struct TranscriptCursor {
 }
 
 #[derive(Default)]
-struct RolloutOwnership {
+pub(super) struct RolloutOwnership {
     offset: u64,
     modified: Option<SystemTime>,
     created: Option<SystemTime>,
@@ -500,12 +501,13 @@ struct RolloutOwnership {
 /// Incrementally index envelope IDs, then verify against the current recipient
 /// and startup boundary. A miss never rereads unchanged tool output; ownership
 /// can still precede the bounded reply tail by hours.
-fn codex_rollout_owns_recipient(
+pub(super) fn codex_rollout_owns_recipient(
     path: &Path,
     queue: &dyn PromptQueueStore,
     session: &str,
     recipient: &str,
     startup_id: Option<i64>,
+    supervisor_alias: bool,
     cache: &RefCell<HashMap<PathBuf, RolloutOwnership>>,
 ) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else { return false };
@@ -553,7 +555,7 @@ fn codex_rollout_owns_recipient(
         if startup_id == Some(*id) { return true; }
         queue.queued_prompt(*id).ok().flatten().is_some_and(|row| {
             row.factory_session.as_deref() == Some(session)
-                && (row.target == recipient || row.target == "supervisor")
+                && (row.target == recipient || (supervisor_alias && row.target == "supervisor"))
         })
     })
 }
@@ -566,6 +568,7 @@ pub(super) fn scan_supervisor_replies(
     agents: &[cas_types::Agent],
     state: &mut MirrorScanState,
 ) {
+    state.turns.scan(root, project_path, session, queue, agents);
     let now = Instant::now();
     #[cfg(test)]
     let now = state.poll_clock.unwrap_or(now);
@@ -689,7 +692,7 @@ pub(super) fn scan_supervisor_replies(
                 if unbound_codex {
                     return crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
                         project_path.to_str()?, account.as_deref(),
-                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, &state.codex_ownership),
+                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, true, &state.codex_ownership),
                     );
                 }
                 crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
@@ -903,6 +906,337 @@ mod tests {
     use super::*;
     use cas_store::{AgentStore, OperatorStamp, SqliteAgentStore, SqlitePromptQueueStore};
     use cas_types::{Agent, AgentRole};
+
+    #[test]
+    fn completed_factory_turns_write_quality_events_without_commander_mirroring() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            for role in [AgentRole::Supervisor, AgentRole::Worker] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join(".cas");
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::write(root.join("config.toml"), "[factory]\ncommander_mirror_enabled = false\n").unwrap();
+                let queue = SqlitePromptQueueStore::open(&root).unwrap();
+                queue.init().unwrap();
+                let mut agent = Agent::new_with_role("turn-agent".into(), "turn-worker".into(), role);
+                // Factory Codex registrations precede the native rollout UUID.
+                agent.cc_session_id = Some(if cli == cas_mux::SupervisorCli::Codex {
+                    "codex-turn-agent".into()
+                } else { "native-ledger-session".into() });
+                let cwd = if cli == cas_mux::SupervisorCli::Codex && role == AgentRole::Worker {
+                    root.join("worktrees/turn-worker")
+                } else { temp.path().to_path_buf() };
+                std::fs::create_dir_all(&cwd).unwrap();
+                if role == AgentRole::Worker {
+                    agent.metadata.insert("clone_path".into(), cwd.to_string_lossy().into_owned());
+                }
+                agent.factory_session = Some("factory-1".into());
+                let account = temp.path().join("account");
+                let prefix = if role == AgentRole::Supervisor { "supervisor" } else { "worker" };
+                agent.metadata.insert(format!("{prefix}_cli"), cli.backend().name().into());
+                agent.metadata.insert(format!("{prefix}_account_dir"), account.to_string_lossy().into_owned());
+                let id = queue.enqueue_urgent_with_outcome(
+                    "director", &agent.name, "Review the task", Some("factory-1"),
+                    None, None, false, Some(&cas_store::QueueOrigin::Daemon),
+                ).unwrap().id();
+                let prompt = if cli == cas_mux::SupervisorCli::Claude {
+                    if role == AgentRole::Supervisor {
+                        format!("<teammate-message teammate_id=\"director\">\n[cas #{id} agent-authored 0s first]\nReview the task\n</teammate-message>")
+                    } else { format!("CAS wake: message {id} from director is in your inbox") }
+                } else { format!("Message from director: [cas #{id} agent-authored 0s first]\nReview the task") };
+                let at = |second| format!("2026-11-02T12:00:{second:02}Z");
+                let call = serde_json::json!({"action":"update", "id":"cas-turn-test", "notes":"recorded decision"});
+                let mut lines = if cli == cas_mux::SupervisorCli::Claude {
+                    vec![
+                        serde_json::json!({"type":"user","uuid":"turn-1","timestamp":at(0),"message":{"content":prompt}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(1),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"tool_use","id":"call-1","name":"mcp__cs__task","input":call}]}}),
+                        serde_json::json!({"type":"user","timestamp":at(2),"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false,"content":"updated"}]}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(3),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"text","text":"Updated."}],"stop_reason":"end_turn"}}),
+                        serde_json::json!({"type":"system","timestamp":at(3),"subtype":"turn_duration"}),
+                    ]
+                } else {
+                    vec![
+                        serde_json::json!({"type":"session_meta","payload":{"id":"native-ledger-session","cwd":cwd,"source":"cli"}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(0),"payload":{"type":"task_started","turn_id":"turn-1"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(0),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(1),"payload":{"type":"function_call","call_id":"call-1","name":"mcp__cs__task","arguments":call.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(2),"payload":{"type":"function_call_output","call_id":"call-1","output":"updated"}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":5}}}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"task_complete","turn_id":"turn-1"}}),
+                    ]
+                };
+                if cli == cas_mux::SupervisorCli::Codex {
+                    for prompt in ["<environment_context>\n<shell>bash</shell>\n</environment_context>", "# AGENTS.md instructions for /repo\n<INSTRUCTIONS>rules</INSTRUCTIONS>"] {
+                        lines.insert(2, serde_json::json!({"type":"response_item","timestamp":at(0),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}));
+                    }
+                }
+                let path = if cli == cas_mux::SupervisorCli::Claude {
+                    account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-")).join("native-ledger-session.jsonl")
+                } else {
+                    account.join("sessions/2026/11/02/rollout-native-ledger-session.jsonl")
+                };
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+                let agents = vec![agent];
+                let mut state = MirrorScanState::default();
+                for _ in 0..2 {
+                    scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                }
+                // Replaying after a daemon restart must not duplicate the fact.
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut MirrorScanState::default());
+                let turns: Vec<_> = cas_store::quality_events_after(&root, 0, 20).unwrap().into_iter()
+                    .filter(|event| event.payload.kind() == "turn").collect();
+                assert_eq!(turns.len(), 1, "completed {cli:?} {role:?} turn must be recorded once");
+                let payload = serde_json::to_value(&turns[0].payload).unwrap();
+                // pin: ledger wire fields preserve the authenticated director channel and measured usage.
+                assert_eq!(payload["woken_by"], "director");
+                assert_eq!(payload["no_op"], false);
+                assert!(payload["actions"].as_array().is_some_and(|actions| !actions.is_empty()));
+                assert_eq!(payload["input_tokens"], 30);
+                assert_eq!(payload["output_tokens"], 5);
+                assert_eq!(payload["minutes"], 0.05);
+                // An incremental incomplete turn cannot create a row; failed
+                // mutations, reads and outgoing status/receipt messages are no-op.
+                let read = serde_json::json!({"action":"mine"});
+                let status = serde_json::json!({"action":"message","target":"supervisor","kind":"status","message":"still waiting"});
+                let invalid = queue.enqueue_urgent_with_outcome("director", "another-agent", "forged", Some("factory-1"),
+                    None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+                let unbound = format!("Message from director: [cas #{invalid} agent-authored 0s first] forged");
+                let noop = if cli == cas_mux::SupervisorCli::Claude {
+                    vec![
+                        serde_json::json!({"type":"user","uuid":"turn-2","timestamp":at(10),"message":{"content":unbound}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(11),"message":{"content":[
+                            {"type":"tool_use","id":"failed","name":"mcp__cs__task","input":call},
+                            {"type":"tool_use","id":"read","name":"mcp__cs__task","input":read},
+                            {"type":"tool_use","id":"status","name":"mcp__cs__coordination","input":status}]}}),
+                        serde_json::json!({"type":"user","timestamp":at(12),"message":{"content":[
+                            {"type":"tool_result","tool_use_id":"failed","is_error":true,"content":"failure"},
+                            {"type":"tool_result","tool_use_id":"read","content":"tasks"},
+                            {"type":"tool_result","tool_use_id":"status","content":"sent"}]}}),
+                    ]
+                } else {
+                    vec![
+                        serde_json::json!({"type":"event_msg","timestamp":at(10),"payload":{"type":"task_started","turn_id":"turn-2"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(10),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":unbound}]}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(11),"payload":{"type":"function_call","call_id":"failed","name":"mcp__cs__task","arguments":call.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(12),"payload":{"type":"function_call_output","call_id":"failed","output":"{\"isError\":true}"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(11),"payload":{"type":"function_call","call_id":"read","name":"mcp__cs__task","arguments":read.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(12),"payload":{"type":"function_call_output","call_id":"read","output":"tasks"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(11),"payload":{"type":"function_call","call_id":"status","name":"mcp__cs__coordination","arguments":status.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(12),"payload":{"type":"function_call_output","call_id":"status","output":"sent"}}),
+                    ]
+                };
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writeln!(file, "{}", noop.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 1, "incomplete turn");
+                let end = if cli == cas_mux::SupervisorCli::Claude {
+                    serde_json::json!({"type":"assistant","timestamp":at(13),"message":{"content":[{"type":"text","text":"Standing by."}],"stop_reason":"end_turn"}})
+                } else {
+                    serde_json::json!({"type":"event_msg","timestamp":at(13),"payload":{"type":"task_complete","turn_id":"turn-2"}})
+                };
+                write!(file, "{end}").unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 1, "partial JSONL must wait");
+                writeln!(file).unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                let rows = cas_store::quality_events_after(&root, 0, 20).unwrap();
+                assert_eq!(rows.len(), 2);
+                let noop = serde_json::to_value(&rows[1].payload).unwrap();
+                assert_eq!(noop["no_op"], true);
+                assert_eq!(noop["actions"], serde_json::json!([]));
+                assert_eq!(noop["woken_by"], "unknown", "wrong-recipient envelope is untrusted");
+                assert!(noop["input_tokens"].is_null(), "missing usage must stay unknown");
+                // Truncation replays with the same natural keys, never duplicates.
+                std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 2);
+            }
+        }
+    }
+
+    struct TurnFixture {
+        temp: tempfile::TempDir,
+        root: PathBuf,
+        queue: SqlitePromptQueueStore,
+        agents: Vec<Agent>,
+        path: PathBuf,
+        cli: cas_mux::SupervisorCli,
+        state: MirrorScanState,
+    }
+
+    impl TurnFixture {
+        fn new(cli: cas_mux::SupervisorCli) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("config.toml"), "[factory]\ncommander_mirror_enabled = false\n").unwrap();
+            let queue = SqlitePromptQueueStore::open(&root).unwrap(); queue.init().unwrap();
+            let account = temp.path().join("account");
+            let mut agent = Agent::new_with_role("turn-agent".into(), "turn-worker".into(), AgentRole::Worker);
+            agent.cc_session_id = Some("native-ledger-session".into());
+            agent.factory_session = Some("factory-1".into());
+            agent.metadata.insert("worker_cli".into(), cli.backend().name().into());
+            agent.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into_owned());
+            let path = if cli == cas_mux::SupervisorCli::Claude {
+                account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-")).join("native-ledger-session.jsonl")
+            } else { account.join("sessions/2026/11/02/rollout-native-ledger-session.jsonl") };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+            Self { temp, root, queue, agents: vec![agent], path, cli, state: MirrorScanState::default() }
+        }
+        fn append(&self, rows: &[Value]) {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&self.path).unwrap();
+            for row in rows { writeln!(f, "{row}").unwrap(); }
+        }
+        fn scan(&mut self) {
+            scan_supervisor_replies(&self.root, self.temp.path(), "factory-1", &self.queue, &self.agents, &mut self.state);
+        }
+        fn rows(&self) -> Vec<Value> {
+            cas_store::quality_events_after(&self.root, 0, 100).unwrap().into_iter()
+                .map(|row| serde_json::to_value(row.payload).unwrap()).collect()
+        }
+        fn input(&self, id: &str, prompt: &str, second: u32) -> Vec<Value> {
+            let at = format!("2026-11-02T12:00:{second:02}Z");
+            if self.cli == cas_mux::SupervisorCli::Claude {
+                vec![serde_json::json!({"type":"user","promptId":id,"uuid":id,"timestamp":at,"message":{"content":prompt}})]
+            } else {
+                vec![serde_json::json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_started","turn_id":id}}),
+                    serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}})]
+            }
+        }
+        fn end(&self, id: &str, reply: &str, second: u32) -> Vec<Value> {
+            let at = format!("2026-11-02T12:00:{second:02}Z");
+            if self.cli == cas_mux::SupervisorCli::Claude {
+                vec![serde_json::json!({"type":"assistant","timestamp":at,"message":{"content":[{"type":"text","text":reply}],"stop_reason":"end_turn"}})]
+            } else {
+                vec![serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":reply}]}}),
+                    serde_json::json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete","turn_id":id}})]
+            }
+        }
+    }
+
+    #[test]
+    fn turn_prose_only_counts_for_operator_or_verified_question() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            let mut sender = Agent::new_with_role("sender".into(), "sender".into(), AgentRole::Supervisor);
+            sender.factory_session = None; f.agents.push(sender);
+            for (index, origin, message, expected_noop) in [
+                (0, cas_store::QueueOrigin::Daemon, "The worker is waiting", true),
+                (1, cas_store::QueueOrigin::PairedDevice { device_id:"device".into() }, "Explain this status", false),
+                (2, cas_store::QueueOrigin::RegisteredAgent { agent_id:"sender".into() }, "Which task should I take?", false),
+                (3, cas_store::QueueOrigin::Unattributed, "Which task should I take?", true),
+            ] {
+                let queue_id = f.queue.enqueue_urgent_with_outcome("sender", "turn-worker", message, Some("factory-1"), None, None, false, Some(&origin)).unwrap().id();
+                let id = format!("prose-{index}");
+                let prompt = format!("[cas #{queue_id} agent-authored 0s first] {message}");
+                f.append(&f.input(&id, &prompt, index * 10));
+                f.append(&f.end(&id, "There is no new decision; the owner is still waiting.", index * 10 + 1));
+                f.scan();
+                let rows = f.rows();
+                assert_eq!(rows.last().unwrap()["no_op"], expected_noop, "{cli:?} row {index}: {rows:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn turn_scan_does_not_replay_append_read_after_an_older_metadata_snapshot() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut f = TurnFixture::new(cas_mux::SupervisorCli::Claude);
+        f.append(&f.input("first", "first", 0)); f.append(&f.end("first", "Finished.", 1));
+        let tail = f.input("appended", "later", 10).into_iter().chain(f.end("appended", "Finished.", 11))
+            .map(|row| format!("{row}\n")).collect::<String>();
+        std::fs::File::open(&f.path).unwrap().set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(100))).unwrap();
+        f.state.turns.before_read = Some(Box::new(move |path| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(tail.as_bytes()).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(200))).unwrap();
+        }));
+        f.scan(); assert_eq!(f.rows().len(), 2);
+        let bytes = f.state.turns.bytes_read(); assert!(bytes > 0);
+        f.scan();
+        assert_eq!(f.state.turns.bytes_read(), bytes, "an append read in the first pass must not trigger a full replay");
+    }
+
+    #[test]
+    fn a_new_native_turn_discards_an_unfinished_pending_turn() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            f.append(&f.input("abandoned", "old input", 0)); f.scan();
+            assert!(f.rows().is_empty());
+            f.append(&f.input("replacement", "new input", 10));
+            f.append(&f.end("replacement", "Finished.", 11)); f.scan();
+            let rows = f.rows(); assert_eq!(rows.len(), 1, "{cli:?} replacement turn must finish");
+            assert_eq!(rows[0]["minutes"], 1.0 / 60.0, "{cli:?} duration must exclude abandoned input");
+        }
+    }
+
+    #[test]
+    fn grok_completed_factory_turn_uses_native_usage_and_queue_provenance() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let queue = SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
+        let account = temp.path().join("grok");
+        let mut agent = Agent::new_with_role("grok-id".into(), "grok-supervisor".into(), AgentRole::Supervisor);
+        agent.cc_session_id = Some("grok-native".into());
+        agent.factory_session = Some("factory-1".into());
+        agent.metadata.insert("supervisor_cli".into(), "grok".into());
+        agent.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
+        let id = queue.enqueue_urgent_with_outcome("director", &agent.name, "review", Some("factory-1"),
+            None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+        // Shape observed in live Grok updates.jsonl (ACP session/update).
+        let update = |at, body| serde_json::json!({"timestamp":at,"method":"session/update","params":{
+            "sessionId":"grok-native","update":body,"_meta":{"promptId":"prompt-1","turnStartMs":1793617200000i64,"agentTimestampMs":at * 1000i64}}});
+        let rows = [
+            update(1793617200i64, serde_json::json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":format!("Message from director: [cas #{id} agent-authored 0s first] review")}})),
+            update(1793617201, serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","rawInput":{"tool_name":"cas__task","tool_input":{"action":"update","id":"cas-test"}},"_meta":{"x.ai/tool":{"name":"use_tool"}}})),
+            update(1793617202, serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{"success":true}})),
+            update(1793617203, serde_json::json!({"sessionUpdate":"turn_completed","prompt_id":"prompt-1","usage":{"inputTokens":30,"outputTokens":5},"elapsed_ms":3000})),
+        ];
+        let path = account.join("sessions/project/grok-native/updates.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, std::slice::from_ref(&agent), state);
+        let mut state = MirrorScanState::default();
+        scan(&mut state);
+        scan(&mut state);
+        scan(&mut MirrorScanState::default());
+        let events = cas_store::quality_events_after(&root, 0, 10).unwrap();
+        assert_eq!(events.len(), 1, "one Grok native turn, including after restart");
+        let payload = serde_json::to_value(&events[0].payload).unwrap();
+        assert_eq!(payload["woken_by"], "director");
+        assert_eq!(payload["actions"], serde_json::json!(["task_mutation"]));
+        assert_eq!(payload["no_op"], false);
+        assert_eq!(payload["input_tokens"], 30);
+        assert_eq!(payload["output_tokens"], 5);
+        assert_eq!(payload["minutes"], 0.05);
+        // Streaming internal restatements, including a long chunk, must not
+        // create Answer actions on Grok's native completion path either.
+        use std::io::Write;
+        let extra = [
+            update(1793617210, serde_json::json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":format!("CAS wake: message {id} from director is in your inbox")}})),
+            update(1793617211, serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The owner remains unchanged and there is no new decision. ".repeat(20)}})),
+            update(1793617212, serde_json::json!({"sessionUpdate":"turn_completed","prompt_id":"prompt-2","elapsed_ms":2000})),
+        ];
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for row in extra { writeln!(file, "{row}").unwrap(); }
+        scan(&mut state);
+        let events = cas_store::quality_events_after(&root, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        let payload = serde_json::to_value(&events[1].payload).unwrap();
+        assert_eq!(payload["woken_by"], "director");
+        assert_eq!(payload["no_op"], true);
+        assert_eq!(payload["actions"], serde_json::json!([]));
+    }
 
     fn codex_turn(prompt: &str) -> Vec<Value> {
         vec![

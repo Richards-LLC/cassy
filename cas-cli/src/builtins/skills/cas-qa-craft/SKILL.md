@@ -43,7 +43,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    [references/maintain.md](references/maintain.md).
 4. Run `cas qa ledger init --task <id>` and edit the printed project-scoped
    ledger ([evidence guidance](references/evidence-ledger.md)). Drive every cell against the real
-   build: Playwright using project/`cas-playwright-debug` conventions for rendered web/hub surfaces,
+   build: Playwright CLI by default (MCP for long exploratory walks); use project/`cas-playwright-debug` 1.64 recording and healer guards for rendered web/hub surfaces,
    or the real binary for CLI. For API cells, `LEDGER.md` is the HTTP request/status/body transcript
    against the real server build (for example `next build` then `next start`) or a configured
    deployed sandbox with project-provided credentials. Pair it with `contracts.diff` against

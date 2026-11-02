@@ -1027,23 +1027,27 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
     assert!(closed.contains("Closed task:"), "{closed}");
 }
 
-/// Deliver one file, merged to main, and close through the real close path with
-/// the delivery's start and anchor recorded. Returns the close's text and notes.
-async fn close_delivery_of(path: &str, branch: &str) -> (String, String, bool) {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, service, cas_dir, task_id, worker_dir) =
-        delivered_worktree_fixture(&mut test_env, branch).await;
-    let start = head_of(worker_dir.path());
-    let file = worker_dir.path().join(path);
+/// Commit one file on the worker's lane, merge it to main and record the
+/// delivery's start and anchor on the task. Returns the delivered tip.
+fn merge_delivery_of(
+    root: &std::path::Path,
+    lane: &std::path::Path,
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    path: &str,
+    branch: &str,
+) -> String {
+    let start = head_of(lane);
+    let file = lane.join(path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(file, "delivered\n").unwrap();
-    proof_boundary_git(worker_dir.path(), &["add", path]);
-    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "deliver one path"]);
-    let tip = head_of(worker_dir.path());
-    proof_boundary_git(temp.path(), &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
+    proof_boundary_git(lane, &["add", path]);
+    proof_boundary_git(lane, &["commit", "-q", "-m", "deliver one path"]);
+    let tip = head_of(lane);
+    proof_boundary_git(root, &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
 
-    let tasks = open_task_store(&cas_dir).unwrap();
-    let mut task = tasks.get(&task_id).unwrap();
+    let tasks = open_task_store(cas_dir).unwrap();
+    let mut task = tasks.get(task_id).unwrap();
     task.deliverables.factory_branch_anchor = Some(tip.clone());
     task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
         work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
@@ -1052,11 +1056,27 @@ async fn close_delivery_of(path: &str, branch: &str) -> (String, String, bool) {
         base_sha: start,
     });
     tasks.update(&task).unwrap();
+    tip
+}
+
+/// Deliver one file, merged to main, and close through the real close path with
+/// the delivery's start and anchor recorded. Returns the close's text and notes.
+async fn close_delivery_of(path: &str, branch: &str) -> (String, String, bool) {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, branch).await;
+    // QA mode decides who reviews a Tier 1 delivery; cas-ce5e covers batch mode.
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"per_task\"\n",
+    )
+    .unwrap();
+    let tip = merge_delivery_of(temp.path(), worker_dir.path(), &cas_dir, &task_id, path, branch);
 
     let mut request = close_request(&task_id, "delivered");
     request.commit_receipt = Some(tip);
     let text = extract_text(service.cas_task_close(Parameters(request)).await.expect("close"));
-    let notes = tasks.get(&task_id).unwrap().notes;
+    let notes = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap().notes;
     let dispatched = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().is_some();
     (text, notes, dispatched)
 }
@@ -1074,6 +1094,89 @@ async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
     assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
     assert!(dispatched, "{text}");
     assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
+}
+
+/// cas-ce5e: in release QA mode Tier 1 merged deliveries open no verifier and
+/// close on one verdict naming them. A Tier 2 delivery named in that same verdict
+/// still gets its own verifier.
+#[tokio::test]
+async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_cas_ce5e() {
+    let mut env = TestEnvGuard::temp_home();
+    let branch = "factory/release-batch";
+    let (temp, worker, cas_dir, first, lane) = delivered_worktree_fixture(&mut env, branch).await;
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = \"release-project\"\n[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"batch\"\n",
+    )
+    .unwrap();
+    let mut deliveries = vec![(first, "src/one.rs")];
+    for path in ["src/two.rs", ".github/workflows/guard.yml"] {
+        let created = worker
+            .cas_task_create(Parameters(simple_task_req("Another delivery in the release")))
+            .await
+            .unwrap();
+        deliveries.push((extract_task_id(&extract_text(created)).unwrap().to_string(), path));
+    }
+    let close = async |id: &str, tip: &str| {
+        let mut request = close_request(id, "delivered");
+        request.commit_receipt = Some(tip.to_string());
+        extract_text(worker.cas_task_close(Parameters(request)).await.expect("close"))
+    };
+    let dispatched = |id: &str| cas_store::get_latest_verification_dispatch(&cas_dir, id).unwrap().is_some();
+    let mut tips = Vec::new();
+    for (id, path) in &deliveries {
+        worker
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .expect("start delivery");
+        let tip = merge_delivery_of(temp.path(), lane.path(), &cas_dir, id, path, branch);
+        let waiting = close(id, &tip).await;
+        tips.push(tip);
+        if path.starts_with("src/") {
+            assert!(waiting.contains("WAITING FOR RELEASE VERDICT"), "{waiting}");
+            assert!(!dispatched(id), "{waiting}");
+        } else {
+            assert!(!waiting.contains("WAITING FOR RELEASE VERDICT"), "{waiting}");
+            assert!(dispatched(id), "{waiting}");
+        }
+    }
+
+    let report = temp.path().join("RELEASE-REVIEW.md");
+    let named: Vec<&str> = deliveries.iter().map(|(id, _)| id.as_str()).collect();
+    std::fs::write(&report, format!("# Release review\n{}\n", named.join(" PASS\n"))).unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let artifact = cas::artifacts::publish(
+        &cas::artifacts::PublishContext {
+            store: &artifacts,
+            roots: cas::artifacts::paths::PublishRoots::new(&cas_dir, &temp.path().join("artifacts"), named[0]),
+            task_id: named[0].into(),
+            cloud: None,
+        },
+        &report,
+    )
+    .unwrap()
+    .artifact
+    .id;
+    let supervisor = CasService::new(registered_supervisor(&cas_dir, "release-supervisor").await, None);
+    let verdict: cas_mcp::types::VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action": "batch_receipt", "verification_type": "release", "task_ids": named,
+        "staging_sha": head_of(temp.path()), "ledger_artifact_id": artifact,
+        "ledger_path": report, "ledger_author": "release-reviewer",
+    }))
+    .unwrap();
+    let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
+    assert!(recorded.contains("Release verdict"), "{recorded}");
+
+    for (index, (id, path)) in deliveries.iter().enumerate() {
+        let closed = close(id, &tips[index]).await;
+        if path.starts_with("src/") {
+            assert!(closed.contains("Closed task:"), "{closed}");
+            assert!(!dispatched(id), "{closed}");
+        } else {
+            assert!(closed.contains("VERIFICATION REQUIRED"), "{closed}");
+            assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
+        }
+    }
 }
 
 /// cas-5200 negative: a receipt that is NOT on the target keeps today's

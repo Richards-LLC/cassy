@@ -725,6 +725,28 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     );
 }
 
+/// cas-ce5e: a release verdict must name each delivery it covers, and a code
+/// review never stands in for the QA walk those deliveries still owe.
+#[tokio::test]
+async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let verdict = |tasks: &[&str]| -> VerificationRequest {
+        let mut request = serde_json::to_value(fx.request()).unwrap();
+        request.as_object_mut().unwrap().extend(
+            serde_json::json!({"verification_type": "release", "task_ids": tasks}).as_object().unwrap().clone(),
+        );
+        serde_json::from_value(request).unwrap()
+    };
+    // The published report names cas-bq01 and cas-bq02 only.
+    let refused = fx.supervisor.verification(Parameters(verdict(&["cas-bq01", "cas-bq03"]))).await.unwrap_err();
+    assert!(refused.message.contains("does not name cas-bq03"), "{refused:?}");
+
+    fx.supervisor.verification(Parameters(verdict(&["cas-bq01"]))).await.unwrap();
+    let close = fx.close("cas-bq01").await;
+    assert!(close.contains("no `qa-bundle:` note"), "{close}");
+}
+
 impl Fx {
     fn unmerge(&self) {
         let tasks = open_task_store(&self.repo.join(".cas")).unwrap();

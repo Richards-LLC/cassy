@@ -9,6 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory liveness and recovery
 
+- **Attribute background CPU to the job** — Busy children and grandchildren keep workers Executing after the stall window; a quiet job becomes Stalled even when its harness burns CPU. Harness CPU still proves inference when no user jobs exist.
+
 - **Keep healthy background work busy** — CPU-active process trees remain Executing after a background job passes the stall window; only quiet, unconfirmed jobs become Stalled. The candidate runner alone publishes its sandbox marker, starts its heartbeat before a five-second probe, and bounds probe cleanup. Old verification waits retain one deadline alert, recent expiries survive missing local task rows, and shorter supervisor guidance preserves the existing session-start budget.
 
 ### Fixed — Peer answers and reminder timers

@@ -623,14 +623,21 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
         .map(|(_, tail)| tail.split_whitespace().collect())
         .unwrap_or_default();
     let state = fields.first().copied().unwrap_or("unknown");
-    let fingerprint = fields.get(19).copied().unwrap_or("").to_string();
-    let ticks = wedged::process_cpu_ticks(pid);
+    let ticks = wedged::worker_cpu_samples(pid);
     static SAMPLES: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<u32, (String, u64)>>,
     > = std::sync::LazyLock::new(Default::default);
     let busy = ticks.and_then(|ticks| {
         let mut samples = SAMPLES.lock().ok()?;
-        record_cpu_sample(&mut samples, pid, &fingerprint, ticks)
+        let mut busy = None;
+        // Aggregate deltas, not lifetime totals: every process keeps its own
+        // start-time identity, including across child exits and PID reuse.
+        for (pid, fingerprint, ticks) in ticks {
+            if let Some(active) = record_cpu_sample(&mut samples, pid, &fingerprint, ticks) {
+                busy = Some(busy.unwrap_or(false) || active);
+            }
+        }
+        busy
     });
     let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"))
         .unwrap_or_else(|_| "unavailable".into());

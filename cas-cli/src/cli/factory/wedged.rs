@@ -1782,21 +1782,67 @@ fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
 pub(crate) fn process_cpu_ticks(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let last_paren = raw.rfind(')')?;
-        let tail = raw.get(last_paren + 1..)?;
-        // fields after comm: state(3) ppid(4) ... utime(14) stime(15)
-        // index 0 of tail split is state → utime is index 11, stime index 12
-        let mut parts = tail.split_whitespace();
-        let utime: u64 = parts.nth(11)?.parse().ok()?;
-        let stime: u64 = parts.next()?.parse().ok()?;
-        Some(utime.saturating_add(stime))
+        process_cpu_sample(pid).map(|(_, ticks)| ticks)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
         None
     }
+}
+
+/// CPU counters with start-time identities for live worker-owned work.
+/// When jobs exist, harness timers cannot prove those jobs are progressing.
+/// Otherwise retain harness CPU as evidence of foreground inference. Persistent
+/// MCP sidecars and their descendants cannot supply either signal.
+/// Keep counters separate: summing lifetime ticks before taking a delta would
+/// mistake a newly attached process for activity and lose work when one exits.
+pub(crate) fn worker_cpu_samples(root_pid: u32) -> Option<Vec<(u32, String, u64)>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut queue = VecDeque::from([root_pid]);
+        let mut visited = HashSet::from([root_pid]);
+        let mut samples = Vec::new();
+        while let Some(parent) = queue.pop_front() {
+            let Some(children) = descendant_pids(parent) else {
+                if parent == root_pid {
+                    return None;
+                }
+                continue; // A descendant can exit during the sample.
+            };
+            for child in children {
+                if !visited.insert(child) || is_cas_sidecar(&process_command_name(child), child) {
+                    continue;
+                }
+                queue.push_back(child);
+                if let Some((fingerprint, ticks)) = process_cpu_sample(child) {
+                    samples.push((child, fingerprint, ticks));
+                }
+            }
+        }
+        if samples.is_empty() {
+            let (fingerprint, ticks) = process_cpu_sample(root_pid)?;
+            samples.push((root_pid, fingerprint, ticks));
+        }
+        Some(samples)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root_pid;
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_cpu_sample(pid: u32) -> Option<(String, u64)> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = raw.get(raw.rfind(')')? + 1..)?;
+    // After comm: state(3), ... utime(14), stime(15), ... starttime(22).
+    let mut parts = tail.split_whitespace();
+    let utime: u64 = parts.nth(11)?.parse().ok()?;
+    let stime: u64 = parts.next()?.parse().ok()?;
+    let fingerprint = parts.nth(6)?.to_owned();
+    Some((fingerprint, utime.saturating_add(stime)))
 }
 
 /// True when `pid` consumed CPU between two short samples — the mid-

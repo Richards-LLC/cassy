@@ -647,12 +647,18 @@ if child:
             .args(["-u", "-c", script, script, &depth.to_string()])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         let output = std::io::BufReader::new(harness.stdout.take().unwrap());
-        let mut agent = cas_types::Agent::new(format!("cpu-tree-{}", harness.id()), "worker".into());
+        let mut agent =
+            cas_types::Agent::new(format!("cpu-tree-{}", harness.id()), "worker".into());
         agent.pid = Some(harness.id());
         agent.pid_starttime = crate::mcp::daemon::read_pid_starttime(harness.id());
-        let mut tree = Self { harness, output, agent };
+        let mut tree = Self {
+            harness,
+            output,
+            agent,
+        };
         tree.read_ack("ready");
         tree
     }
@@ -681,8 +687,13 @@ if child:
             r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#,
             "\n",
         )).unwrap();
-        observe(SupervisorCli::Claude, Some(&path), process_evidence(&self.agent),
-            now() + chrono::Duration::seconds(900), 120)
+        observe(
+            SupervisorCli::Claude,
+            Some(&path),
+            process_evidence(&self.agent),
+            now() + chrono::Duration::seconds(900),
+            120,
+        )
     }
 }
 
@@ -702,7 +713,12 @@ fn process_evidence_busy_background_child_and_grandchild_keep_executing() {
         tree.observe(); // Cold CPU sample.
         tree.work("work");
         let got = tree.observe();
-        assert_eq!(got.state, Liveness::Executing, "depth {depth}: {}", got.detail());
+        assert_eq!(
+            got.state,
+            Liveness::Executing,
+            "depth {depth}: {}",
+            got.detail()
+        );
     }
 }
 

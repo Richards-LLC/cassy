@@ -4851,6 +4851,9 @@ mod tests {
     #[test]
     fn update_transport_failure_is_a_warning_with_working_recovery() {
         let verification = unavailable_update_transport("tailscale CLI is unavailable");
+        assert!(verification.remedy.as_deref().unwrap().contains("automatically"),
+            "Auto publication recovery must not require an operator restart");
+        assert!(!verification.remedy.as_deref().unwrap().contains("cas hub restart"));
         assert_eq!(verification.transport_verified, Some(false));
         assert_eq!(
             format_update_transport_warning(

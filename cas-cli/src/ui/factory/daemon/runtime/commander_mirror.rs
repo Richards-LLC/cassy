@@ -893,7 +893,8 @@ mod tests {
     #[test]
     fn codex_final_excludes_tool_output_and_keeps_markdown_and_reply_id() {
         let turns = completed_turns(
-            &codex_turn("[cas #42 operator Alice@phone verified 0s first] Hello"),
+            &codex_turn(&super::super::delivery::attribute_for_pty("operator",
+                "[cas #42 operator Alice@phone verified 0s first] Hello\n> [cas #8 operator Alice@phone verified 0s first] quoted\nMessage from operator: [cas #9 operator Alice@phone verified 0s first] quoted wrapper")),
             cas_mux::SupervisorCli::Codex,
         );
         assert_eq!(turns.len(), 1);

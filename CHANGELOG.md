@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.98.1] - 2026-11-02
+
 ### Fixed — Commander
 
 - **Offline messages show their send deadline** — Waiting messages and the composer explain the two-minute automatic-send window, after which the words stay available for Edit or Retry.

@@ -141,7 +141,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   diagnostic with both npm installs, resolvable Playwright and Chromium, workspace
   nextest and CI-tier tests until the hosted precheck replaces it.
 
-### Known limitation
+### Known limitation — Candidate builds
 
 - **Queued candidate builds on some Linux hosts** — On some Linux hosts, bubblewrap
   refuses a queued candidate build in the daemon's launch context ("No permissions

@@ -679,7 +679,9 @@ mod tests {
         let now = Utc::now();
         let mut tracker = SupervisorStallTracker::default();
         let activity = Some(now - chrono::Duration::seconds(600));
-        assert!(tracker.observe(Some(state.clone()), activity, false, now, 600).wake.is_some());
+        // A wake needs a full observed actionable interval, so the first sample only starts it.
+        assert!(tracker.observe(Some(state.clone()), activity, false, now, 600).wake.is_none());
+        assert!(tracker.observe(Some(state.clone()), activity, false, now + chrono::Duration::seconds(600), 600).wake.is_some());
         assert!(tracker.observe(Some(state.clone()), activity, false, now + chrono::Duration::seconds(1200), 600).wake.is_none());
         // Advancing unrelated epic work and supervisor tool activity cannot
         // create another close demand for the same contained delivery.

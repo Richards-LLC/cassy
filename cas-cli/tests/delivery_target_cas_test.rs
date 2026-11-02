@@ -1550,7 +1550,7 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 /// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
 #[tokio::test]
 async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
-    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held"] {
+    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "gh-failure", "green-bad-neighbor", "missing-supervisor"] {
         let home = TempDir::new().unwrap();
         let fake_bin = TempDir::new().unwrap();
         let gh = fake_bin.path().join("gh");
@@ -1558,6 +1558,7 @@ async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
         std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
         cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
 if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
+if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-failure ]; then exit 1; fi
 cat "$CAS_CI_RETRY_TEST_RESPONSE"
 "#);
         let mut env = TestEnvGuard::new();
@@ -1592,6 +1593,14 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
             old["armed_at"] = serde_json::json!("2000-01-01T00:00:00Z");
             std::fs::write(&request, serde_json::to_vec(&old).unwrap()).unwrap();
         }
+        if outcome == "missing-supervisor" {
+            let mut orphan = saved.clone();
+            orphan["supervisor"] = serde_json::json!("deleted-supervisor");
+            std::fs::write(&request, serde_json::to_vec(&orphan).unwrap()).unwrap();
+        }
+        if outcome == "green-bad-neighbor" {
+            std::fs::write(request.with_file_name("broken.json"), "not json").unwrap();
+        }
         if outcome == "green-held" {
             cas_store::create_verification_dispatch_bound(
                 &fixture.cas_root, &fixture.task_id, &fixture.supervisor_id,
@@ -1602,6 +1611,10 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         std::fs::write(&response, format!(r#"{{"check_runs":[{{"name":"Fast Validation","status":"completed","conclusion":"{}"}}]}}"#,
             if outcome == "red" { "failure" } else { "success" })).unwrap();
         if outcome == "no-checks" { std::fs::write(&response, "{}").unwrap(); }
+        if outcome == "gh-failure" { std::fs::write(&response, "gh-failure").unwrap(); }
+        if outcome == "cancelled" {
+            std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"cancelled"}]}"#).unwrap();
+        }
         if outcome == "expired" {
             std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
         }
@@ -1621,6 +1634,11 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         if outcome.starts_with("green") {
             assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"));
             assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
+            if outcome == "green-held" {
+                let task = open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap();
+                assert_ne!(task.status, TaskStatus::Closed);
+                assert!(task.notes.contains("close held"), "{}", task.notes);
+            }
         } else {
             assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
             assert_eq!(notices.len(), 1, "{outcome}: red and moved lanes each send one notice");

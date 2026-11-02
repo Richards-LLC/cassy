@@ -39,7 +39,10 @@ class Selection(unittest.TestCase):
             (repo / 'cas-cli').mkdir()
             shutil.copyfile(Path(__file__).resolve().parents[1] / 'cas-cli/Makefile', repo / 'cas-cli/Makefile')
             transition = 'scripts/visual-qa-fixtures/enter-transition.html'
-            paths = {*inputs.values(), *(f'scripts/{name}' for name in inputs), 'docs/unrelated.md', transition}
+            clean = 'scripts/visual-qa-fixtures/clean.html'
+            allowlist = 'hub-web/visual-qa-allowlist.json'
+            paths = {*inputs.values(), *(f'scripts/{name}' for name in inputs),
+                     'docs/unrelated.md', transition, clean, allowlist}
             for path in paths:
                 file = repo / path
                 file.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +88,10 @@ class Selection(unittest.TestCase):
                  {f'scripts/{name}' for name in inputs if name.startswith('visual-qa')}),
                 ([transition], 'HEAD^',
                  {'scripts/visual-qa.test.mjs', 'scripts/visual-qa-enter-transition.test.mjs'}),
+                ([clean], 'HEAD^',
+                 {'scripts/visual-qa.test.mjs', 'scripts/visual-qa-entrypoint.test.mjs',
+                  'scripts/visual-qa-secrets.test.mjs'}),
+                ([allowlist], 'HEAD^', {'scripts/visual-qa.test.mjs'}),
                 (['docs/unrelated.md'], 'missing-base',
                  {f'scripts/{name}' for name in inputs if name.startswith('visual-qa')}),
             ]:

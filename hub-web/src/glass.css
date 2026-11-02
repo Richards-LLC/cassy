@@ -533,7 +533,7 @@ html[data-scheme="dark"] {
 :root .team-lane:focus { outline: none; }
 :root .team-lane:focus-visible { outline: var(--line-width) dotted var(--ink); outline-offset: calc(-1 * var(--space-2)); }
 @media (max-width: 500px) {
-  :root .team-lane { row-gap: 2px; margin-block-end: var(--space-2); }
+  :root .team-lane { row-gap: 2px; padding-block: var(--space-1); margin-block-end: var(--space-2); }
   :root .team-lane > .provider-avatar { grid-row: 1 / span 2; }
   :root .team-lane > .team-trail { grid-column: 1 / -1; margin-block-start: var(--space-1); }
 }

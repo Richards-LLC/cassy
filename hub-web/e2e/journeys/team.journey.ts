@@ -83,6 +83,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 blocked, 2 waiting, 1 parked. 2 need you.");
       });
       await journey.stage("A lifecycle event updates staffing without reloading", async () => {
+        fleet.tasks[2].status = "in_progress";
         fleet.agents[0].liveness = "stalled";
         fleet.agents[3].liveness = "offline";
         const started = performance.now();

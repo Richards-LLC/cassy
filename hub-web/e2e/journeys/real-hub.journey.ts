@@ -759,9 +759,12 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     await confirmation.getByRole("button", { name: "Exit", exact: true }).click();
     const exitReceipt = page.locator(".supervisor-command-receipt");
     await expect(exitReceipt).toContainText("/exit");
-    await expect(exitReceipt).toHaveAttribute("data-phase", "observed", { timeout: 15_000 });
-    await expect(page.getByRole("tabpanel", { name: "Conversation" }).getByText("Session ended", { exact: true }))
-      .toBeVisible({ timeout: 15_000 });
+    // cas-befb: confirmed exit removes the stopped conversation, including its
+    // command receipt. Assert the running-only catalog's terminal state.
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row"))
+      .toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByText("No live supervisors listed. Start one with New session.", { exact: true }))
+      .toBeVisible();
     await page.screenshot({ path: join(directory, "J04-exit-ended.png") });
     passed = true;
   } finally {

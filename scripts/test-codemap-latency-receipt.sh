@@ -5,18 +5,19 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 receipt="$script_dir/codemap-latency-receipt.sh"
 tmp="$(mktemp -d)"
+fixture_repo="$tmp/repo"
 named_worktree=""
 named_branch=""
 detached_worktree=""
 cleanup() {
     if [[ -n "$detached_worktree" ]]; then
-        git worktree remove --force "$detached_worktree" >/dev/null 2>&1 || true
+        git -C "$fixture_repo" worktree remove --force "$detached_worktree" >/dev/null 2>&1 || true
     fi
     if [[ -n "$named_worktree" ]]; then
-        git worktree remove --force "$named_worktree" >/dev/null 2>&1 || true
+        git -C "$fixture_repo" worktree remove --force "$named_worktree" >/dev/null 2>&1 || true
     fi
     if [[ -n "$named_branch" ]]; then
-        git branch -D "$named_branch" >/dev/null 2>&1 || true
+        git -C "$fixture_repo" branch -D "$named_branch" >/dev/null 2>&1 || true
     fi
     rm -rf "$tmp"
 }
@@ -104,9 +105,33 @@ fi
 EOF
 chmod +x "$tmp/fake-gh"
 
+# The receipt owns Git/worktree orchestration, not a recursive run of every
+# CI policy fixture. Keep Git and the docs classifier real; isolate the policy
+# check at its process boundary (its own Make row already exercises it).
+git init -q "$fixture_repo"
+git -C "$fixture_repo" remote add origin https://example.invalid/codemap-fixture.git
+mkdir -p "$fixture_repo/.claude" "$fixture_repo/scripts"
+printf '%s\n' '# Fixture codemap' > "$fixture_repo/.claude/CODEMAP.md"
+export CODEMAP_TEST_CLASSIFIER="$script_dir/classify-ci-diff.sh"
+export DOCS_CHECK_CALLS="$tmp/docs-check-calls"
+cat > "$fixture_repo/scripts/classify-ci-diff.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec "$CODEMAP_TEST_CLASSIFIER" "$@"
+EOF
+cat > "$fixture_repo/scripts/test-ci-test-tiers.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' checked >> "$DOCS_CHECK_CALLS"
+exit "${FAKE_DOCS_STATUS:-0}"
+EOF
+chmod +x "$fixture_repo/scripts/"*.sh
+git -C "$fixture_repo" add .
+git -C "$fixture_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit -qm 'codemap fixture'
 named_worktree="$tmp/named-worktree"
 named_branch="codemap-latency-self-test-$$"
-git worktree add --quiet -b "$named_branch" "$named_worktree" HEAD
+git -C "$fixture_repo" worktree add --quiet -b "$named_branch" "$named_worktree" HEAD
 
 export CAS_BIN="$tmp/fake-cas"
 export GH_BIN="$tmp/fake-gh"
@@ -133,6 +158,13 @@ if cmp -s "$artifact" <(printf '%s\n' "$out" | sed '/^ARTIFACT_PATH=/d'); then
 else
     bad 'artifact differs from emitted receipt'
 fi
+if [[ -s "$DOCS_CHECK_CALLS" ]]; then ok 'docs contract check actually runs'; else bad 'docs contract check never ran'; fi
+set +e
+docs_failure_output="$(FAKE_DOCS_STATUS=9 "$receipt" --repo-root "$named_worktree" 2>/dev/null)"
+docs_failure_status=$?
+set -e
+if [[ "$docs_failure_status" -ne 0 ]]; then ok 'docs contract failure propagates'; else bad 'docs contract failure was ignored'; fi
+expect_field "$docs_failure_output" DOCS_ONLY_LOCAL_CONTRACT_EXIT_STATUS 1 'docs contract records its child failure'
 
 # A changed candidate must fail before CODEMAP.md can be touched.
 printf '%s\n' 'changed render' >"$tmp/changed-CODEMAP.md"
@@ -220,7 +252,7 @@ expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_WITHIN_BUDGET false 'exa
 # A detached checkout remains invalid for an ordinary local rehearsal, even
 # when the test process itself has inherited the complete CI identity.
 detached_worktree="$tmp/detached-worktree"
-git worktree add --quiet --detach "$detached_worktree" HEAD
+git -C "$fixture_repo" worktree add --quiet --detach "$detached_worktree" HEAD
 set +e
 detached_local_output="$(
     env \
@@ -265,14 +297,14 @@ expect_field "$detached_ci_output" LOCAL_COMMIT_PUSH_READINESS_EXIT_STATUS 0 'CI
 # Remove the exact validated temporary branch and prove its ref is gone. The
 # EXIT trap retains the same cleanup for failures before this assertion.
 validated_branch="$named_branch"
-git worktree remove --force "$named_worktree" >/dev/null
+git -C "$fixture_repo" worktree remove --force "$named_worktree" >/dev/null
 named_worktree=""
-if git branch -D "$validated_branch" >/dev/null 2>&1; then
+if git -C "$fixture_repo" branch -D "$validated_branch" >/dev/null 2>&1; then
     named_branch=""
 else
     bad 'temporary named branch cleanup failed'
 fi
-if git show-ref --verify --quiet "refs/heads/$validated_branch"; then
+if git -C "$fixture_repo" show-ref --verify --quiet "refs/heads/$validated_branch"; then
     bad 'temporary named branch ref leaked'
 else
     ok 'temporary named branch ref is removed'

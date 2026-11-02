@@ -27,7 +27,6 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **No polling or sleeping.** Wait on event reminders (`ci_completed`, task events, `branch_contained_in`) or harness background-task completion. Delay reminders are for actual deadlines and admission retries. Never poll the operator inbox; Commander already wakes you.
 - **Pane budget:** ~150 words of prose, answer first: findings, rejections, measurements, merge receipts, pointers. Show flows, comparisons and bad news [visually](references/operator-reply.md). Timelines, gates and lane history go to notes/artifacts; no narration/recap.
-- **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Commander answers:** reply once in the Claude/Codex pane. Web/phone receive the mirror, including offline catch-up. [Disabled or unmirrored supervisors](references/reference.md#verified-commander-messages) use explicit routing.
 - **Unprompted operator updates:** `target=operator kind=status|receipt|ask|blocker`, optional `attachment=<artifact-id>`; no pane prose.
@@ -53,6 +52,8 @@ routing updates or waiting on a wake, read
 [message delivery](references/reference.md#message-delivery-and-wake-authority).
 
 Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. After the closure pass, dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update` (not `transfer`), then end the turn.
+
+Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 
 ## Phase references
 

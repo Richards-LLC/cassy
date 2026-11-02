@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Candidate build queue
+
+- **Isolated, bounded candidate builds** — Was: worker-chosen builds inherited the daemon's credentials and supervisor role, a hung build could hold the machine lock indefinitely, and preparation could appear dead or replace a newer request. → Now: queued builds mask worker credential stores, receive only build environment variables, and stop their complete process tree after 30 minutes with an error to the requester. Preparation keeps heartbeating, and admission notices preserve newer requests.
+
 ### Changed — Release closeout
 
 - **One review, one batch fix, one QA round** — Was: Supervisors built a candidate

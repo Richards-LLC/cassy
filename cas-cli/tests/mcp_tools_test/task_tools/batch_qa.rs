@@ -762,9 +762,10 @@ async fn orphaned_delivery_still_waits_for_the_release_verdict_cas_ce5e() {
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     let mut task = tasks.get("cas-bq01").unwrap();
     let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
+    task.assignee = Some("gone-worker".into());
     task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
         work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
-        assignee: "test-agent".into(),
+        assignee: "gone-worker".into(),
         branch: "factory/test-agent".into(),
         base_sha: git(&fx.repo, &["rev-parse", &format!("{anchor}^")]),
     });

@@ -221,6 +221,7 @@ pub struct PeerEnvelope {
 /// A sender-selected action, independent of Cloud's authenticated identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerMessageKind {
+    Status,
     Ask,
     Blocker,
     Receipt,
@@ -231,6 +232,7 @@ pub enum PeerMessageKind {
 impl PeerMessageKind {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Status => "status",
             Self::Ask => "ask",
             Self::Receipt => "receipt",
             Self::Quiet => "quiet",
@@ -241,6 +243,7 @@ impl PeerMessageKind {
 
     fn parse(value: &str) -> Option<Self> {
         match value {
+            "status" => Some(Self::Status),
             "ask" => Some(Self::Ask),
             "receipt" => Some(Self::Receipt),
             "quiet" => Some(Self::Quiet),
@@ -253,7 +256,8 @@ impl PeerMessageKind {
 
 impl PeerEnvelope {
     pub fn wakes_idle(&self) -> bool {
-        !matches!(self.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet))
+        matches!(self.kind, Some(PeerMessageKind::Status | PeerMessageKind::Ask
+            | PeerMessageKind::Blocker | PeerMessageKind::EpicSplitDecided))
     }
 }
 
@@ -262,14 +266,12 @@ impl PeerEnvelope {
 /// envelope may use it to wake a supervisor.
 pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> String {
     let kind = if blocker {
-        Some(PeerMessageKind::Blocker)
+        PeerMessageKind::Blocker
     } else {
-        kind.and_then(PeerMessageKind::parse)
+        // Untyped peer mail is an FYI. An explicit action opts into a wake.
+        kind.and_then(PeerMessageKind::parse).unwrap_or(PeerMessageKind::Receipt)
     };
-    match kind {
-        Some(kind) => format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()),
-        None => body.to_string(),
-    }
+    format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str())
 }
 
 fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {

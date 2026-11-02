@@ -52,6 +52,25 @@ pub(crate) fn compact_receipt(
     ))
 }
 
+/// Keep advisory upkeep in the existing receipt channel. Failure to write the
+/// file leaves the task's durable upkeep notes as the fallback, never a nag.
+pub(crate) fn upkeep_receipt(
+    cas_root: &std::path::Path,
+    configured_artifacts_root: Option<&str>,
+    task_id: &str,
+    kind: &str,
+    visible: String,
+    notices: &[String],
+) -> String {
+    if notices.is_empty() { return visible; }
+    let detail = format!("{visible}\n\n{}", notices.join("\n"));
+    compact_receipt(cas_root, configured_artifacts_root, task_id, kind, &visible, &detail)
+        .unwrap_or_else(|error| {
+            tracing::warn!(task_id, %error, "upkeep receipt detail unavailable; retained in task notes");
+            visible
+        })
+}
+
 /// What the timed-out verification cycle was bound to.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum VerificationTimeout<'a> {
@@ -132,11 +151,12 @@ pub(crate) fn upkeep_message(
     warnings: &[String],
     caller_prefix: &str,
 ) -> String {
-    let warnings = if warnings.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n{}", warnings.join("\n"))
-    };
+    // Routine documentation advisories remain in the note/receipt writer.
+    // Keep analysis context that explains an actual blocking finding.
+    let warnings = warnings.iter()
+        .filter(|warning| !warning.starts_with("UPKEEP ADVISORY G5")
+            && !warning.contains("attributed delivery base unavailable"))
+        .map(|warning| format!("\n{warning}")).collect::<String>();
     format!(
         "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )

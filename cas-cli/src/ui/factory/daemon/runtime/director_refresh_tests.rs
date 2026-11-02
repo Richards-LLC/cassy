@@ -26,7 +26,9 @@ async fn r1_approved_verdict_leaves_close_retry_with_worker() {
 
 #[tokio::test]
 async fn r1_expired_dispatch_wakes_supervisor_once() {
-    r1_verification_wait_wakes("deadline").await;
+    for release in ["deadline", "close-timeout", "sweep-before-close-timeout"] {
+        r1_verification_wait_wakes(release).await;
+    }
 }
 
 async fn r1_verification_wait_wakes(release: &str) {
@@ -164,11 +166,22 @@ async fn r1_verification_wait_wakes(release: &str) {
             "the real verdict path must queue the worker's close retry: {rows:?}"
         );
     }
-    let released_at = if release == "deadline" {
+    let released_at = if release != "verdict" {
         deadline + chrono::Duration::seconds(1)
     } else {
         chrono::Utc::now()
     };
+    if release == "sweep-before-close-timeout" {
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+            &root, released_at,
+        );
+    }
+    if release.contains("close-timeout") {
+        // The close retry persists this transition before the daemon sees it.
+        let timed_out = cas_store::timeout_verification_dispatch(&root, &task.id, released_at)
+            .unwrap().unwrap();
+        assert_eq!(timed_out.state, cas_types::VerificationDispatchState::TimedOut);
+    }
     for _ in 0..3 {
         reconcile_blocked_task_alert(&root, &task.id, released_at).unwrap();
         crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
@@ -182,15 +195,33 @@ async fn r1_verification_wait_wakes(release: &str) {
             .filter(|row| row.target != "merge-w"
                 && !crate::supervisor_message_wakes::quiet(&row.prompt))
             .count(),
-        if release == "deadline" { 2 } else { 1 },
+        if release != "verdict" { 2 } else { 1 },
         "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
     );
+    if release == "verdict" {
+        let resolved_at = cas_store::get_latest_verification_dispatch(&root, &task.id)
+            .unwrap().unwrap().resolved_at.unwrap();
+        let close_deadline = resolved_at + chrono::Duration::minutes(5);
+        reconcile_blocked_task_alert(&root, &task.id, close_deadline - chrono::Duration::seconds(1)).unwrap();
+        assert_eq!(queue.peek_all(20).unwrap().len(), rows.len(),
+            "approval gives the worker a bounded chance to retry close");
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&root, &task.id, close_deadline).unwrap();
+            crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+                &root, close_deadline,
+            );
+        }
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target != "merge-w"
+            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 2,
+            "an unretried approval must escalate exactly once after its grace period: {rows:?}");
+    }
 }
 
 #[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};
-    for cause in ["owned", "foreign", "expired", "independent", "successor"] {
+    for cause in ["owned", "foreign", "expired", "timed-out", "independent", "successor"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         let supervisor = Agent::new_with_role(
@@ -221,9 +252,12 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
                 "lead-id"
             },
             chrono::Utc::now()
-                + chrono::Duration::minutes(if cause == "expired" { -1 } else { 10 }),
+                + chrono::Duration::minutes(if matches!(cause, "expired" | "timed-out") { -1 } else { 10 }),
         )
         .unwrap();
+        if cause == "timed-out" {
+            cas_store::timeout_verification_dispatch(&cas_dir, "cas-9efb-test", chrono::Utc::now()).unwrap();
+        }
         let store = crate::store::open_task_store_local(&cas_dir).unwrap();
         let mut task = store.get("cas-9efb-test").unwrap();
         task.status = TaskStatus::Blocked;
@@ -265,7 +299,7 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
-        let owned = matches!(cause, "owned" | "expired");
+        let owned = matches!(cause, "owned" | "expired" | "timed-out");
         // pin: owned dispatches use their handoff/expiry relay instead of a generic blocker wake.
         assert_eq!(
             is_lifecycle_wake_source(&rows[0].source),

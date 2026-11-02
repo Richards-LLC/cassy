@@ -59,24 +59,11 @@ pub(crate) fn operation(
     .then_some("epic-close")
 }
 
-/// The lessons tagged `operation:<op>`, most important first.
+/// Render the already scoped, ordered and session-filtered lessons.
 pub(crate) fn checklist(entries: &[Entry], operation: &str) -> Option<String> {
-    let tag = format!("operation:{operation}");
-    let mut lessons: Vec<&Entry> = entries
-        .iter()
-        .filter(|entry| entry.tags.iter().any(|candidate| candidate.eq_ignore_ascii_case(&tag)))
-        .collect();
-    if lessons.is_empty() {
-        return None;
-    }
-    lessons.sort_by(|left, right| {
-        right
-            .importance
-            .total_cmp(&left.importance)
-            .then_with(|| right.created.cmp(&left.created))
-    });
+    if entries.is_empty() { return None; }
     let mut out = format!("[operation lessons: {operation}] Check each before you continue:");
-    for entry in lessons.iter().take(MAX_LESSONS) {
+    for entry in entries {
         let text = entry
             .title
             .as_deref()
@@ -86,12 +73,6 @@ pub(crate) fn checklist(entries: &[Entry], operation: &str) -> Option<String> {
         let clipped: String = line.chars().take(MAX_LESSON_CHARS).collect();
         let ellipsis = if clipped.len() < line.len() { "…" } else { "" };
         out.push_str(&format!("\n- [ ] [{}] {clipped}{ellipsis}", entry.id));
-    }
-    if lessons.len() > MAX_LESSONS {
-        out.push_str(&format!(
-            "\n({} more: memory action=list tags={tag})",
-            lessons.len() - MAX_LESSONS
-        ));
     }
     Some(out)
 }
@@ -104,7 +85,51 @@ pub(crate) fn context_for_tool(cas_root: &Path, input: &HookInput) -> Option<Str
             .and_then(|store| store.get(id).ok())
             .is_some_and(|task| task.task_type == crate::types::TaskType::Epic)
     })?;
-    checklist(&crate::store::open_store(cas_root).ok()?.list().ok()?, operation)
+    let mut entries = crate::store::open_store(cas_root).ok()?.list().ok()?;
+    let response = input.tool_response.as_ref().map(serde_json::Value::to_string).unwrap_or_default();
+    let request = input.tool_input.as_ref();
+    let matches_harness = |harness: &str| {
+        // The resolved spec wins over the request, including provider fallback.
+        if response.contains("Worker spec:") {
+            return response.contains(&format!(": {harness} model="));
+        }
+        request.is_some_and(|request| {
+            request.get("cli").and_then(serde_json::Value::as_str) == Some(harness)
+                || request.get("workers").and_then(serde_json::Value::as_array)
+                    .is_some_and(|workers| workers.iter().any(|worker| {
+                        worker.get("cli").and_then(serde_json::Value::as_str) == Some(harness)
+                    }))
+        })
+    };
+    entries.retain(|entry| {
+        let scopes: Vec<_> = ["codex", "claude", "grok", "opencode"].into_iter()
+            .filter(|harness| entry.tags.iter().any(|tag| {
+                tag.eq_ignore_ascii_case(harness)
+                    || tag.eq_ignore_ascii_case(&format!("harness:{harness}"))
+                    || tag.eq_ignore_ascii_case(&format!("cli:{harness}"))
+            })).collect();
+        !entry.archived
+            && entry.tags.iter().any(|tag| tag.eq_ignore_ascii_case(&format!("operation:{operation}")))
+            && (operation != "spawn" || scopes.is_empty() || scopes.into_iter().any(matches_harness))
+    });
+    entries.sort_by(|left, right| right.importance.total_cmp(&left.importance).then_with(|| right.created.cmp(&left.created)));
+    let entries: Vec<_> = entries.into_iter()
+        .filter(|entry| claim_session_item(cas_root, &input.session_id, &entry.id))
+        .take(MAX_LESSONS).collect();
+    checklist(&entries, operation)
+}
+
+/// Atomic session-scoped recall dedupe shared by the hook and MCP receipts.
+/// Only IDs are retained; neither memory text nor request contents reach disk.
+/// Missing session identity or an unavailable marker store stays quiet.
+pub(crate) fn claim_session_item(cas_root: &Path, session: &str, id: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    if session.trim().is_empty() { return false; }
+    let directory = cas_root.join("session-context-fingerprints")
+        .join(format!("{:x}", Sha256::digest(session.as_bytes())));
+    if std::fs::create_dir_all(&directory).is_err() { return false; }
+    std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(directory.join(format!("{:x}.seen", Sha256::digest(id.as_bytes())))).is_ok()
 }
 
 #[cfg(test)]
@@ -180,12 +205,33 @@ mod tests {
         assert!(!context.contains(&untagged) && !context.contains(&report), "{context}");
 
         let skill = input("Skill", serde_json::json!({ "skill": "cas-cut-release" }));
-        assert!(surfaced(temp.path(), &skill).contains(&scratch));
+        assert!(!surfaced(temp.path(), &skill).contains(&scratch));
         let status = input(
             "Bash",
             serde_json::json!({ "command": "scripts/release.sh --next-version" }),
         );
         assert!(!surfaced(temp.path(), &status).contains("[operation lessons"));
+    }
+
+    #[test]
+    fn spawn_lessons_match_harness_and_surface_once_per_session() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let codex = lesson(&store, "Codex spawn policy", &["operation:spawn", "codex"], 0.9);
+        let general = lesson(&store, "Keep workers scoped", &["operation:spawn"], 0.8);
+        let spawn = |cli: &str| input(&format!("{}factory", crate::harness_policy::own_tool_prefix()),
+            serde_json::json!({"action": "spawn_workers", "cli": cli, "count": 1}));
+        let claude = surfaced(temp.path(), &spawn("claude"));
+        assert!(!claude.contains(&codex), "Claude spawn received Codex lesson: {claude}");
+        assert!(claude.contains(&general), "{claude}");
+        let first = surfaced(temp.path(), &spawn("codex"));
+        assert!(first.contains(&codex) && !first.contains(&general), "{first}");
+        let repeated = surfaced(temp.path(), &spawn("codex"));
+        assert!(!repeated.contains(&codex) && !repeated.contains(&general), "{repeated}");
+        let mut next = spawn("codex");
+        next.session_id = "another-session".into();
+        assert!(surfaced(temp.path(), &next).contains(&codex));
     }
 
     #[test]

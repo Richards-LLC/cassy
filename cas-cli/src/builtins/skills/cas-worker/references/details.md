@@ -83,7 +83,9 @@ implementation-task close verification remains supervisor-owned.
 server exception, with `cas-servers`. `factory action=candidate_request
 task_id=<own-task> revision=<full-sha>` is the candidate exception; never ask the
 supervisor for a candidate the daemon can build, and never run Cargo for one. A refusal
-names why. Fleet, merges, cleanup and database control
+names why. Where the daemon cannot sandbox a build (not Linux, or no working `bwrap`),
+the refusal says so; then ask the supervisor, who runs `cas qa candidate build` directly.
+Fleet, merges, cleanup and database control
 belong to the supervisor even where the runtime exposes them.
 
 Operational bugs use `cas config get issues.repo` and

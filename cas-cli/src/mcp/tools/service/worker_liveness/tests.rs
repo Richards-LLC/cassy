@@ -563,6 +563,16 @@ fn claude_background_job_keeps_a_completed_turn_busy_until_its_notification() {
         run(SupervisorCli::Claude, launch, false).state,
         Liveness::Dead
     );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("silent-background.jsonl");
+    std::fs::write(&path, launch).unwrap();
+    // No terminal notification: foreground end_turn must not own busy forever.
+    let launched_at = now() - chrono::Duration::seconds(59);
+    for (elapsed, expected) in [(299, Liveness::Executing), (300, Liveness::Stalled)] {
+        assert_eq!(observe(SupervisorCli::Claude, Some(&path), process(true),
+            launched_at + chrono::Duration::seconds(elapsed), 300).state, expected,
+            "unconfirmed background job at {elapsed}s");
+    }
     for (notice, expected) in [
         (
             serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),

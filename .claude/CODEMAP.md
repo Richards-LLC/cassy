@@ -69,10 +69,10 @@
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup, events, probes, relays and rendering schedule; `fixtures/claude-2.1.312-usage.txt` records the native Claude Usage screen.
-- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - Claude/Codex transcript ownership, answer mirroring and bounded historical reply watches.
+- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - Claude/Codex transcript ownership, answer mirroring, no-action status suppression and bounded historical reply watches.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - native prompt readiness, queued input and live recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
-- `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminders and task-wait defaults.
+- `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminders, task-wait defaults and delay-poll refusal.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` - Slack intake and ordered wake recovery.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - per-session consumer receipts and communication health.
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry.rs` - dispatch/readiness attribution and owned-server process checks.
@@ -89,8 +89,10 @@
 - `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - service dispatch, bounded futures and request schemas.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates and merged-delivery closure; `recall_terms.rs` filters content terms for task-create context and epic scope comparison.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - delivery anchors, close audit tracking and guarded note-preserving park.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - durable lifecycle alerts, dispatch-owned expiry and the five-minute approved-close grace period.
+- `cas-cli/src/mcp/tools/service/worker_liveness.rs` - bounded transcript/process evidence; native background launch timestamps expire at the configured stall window.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - worktree-keyed receipts and introducing-merge boundaries.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, `gate_preflight.rs` start-time close requirements, queue proof, reviewed corrections and upkeep modules.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, evidence-only delivery, queue proof, reviewed corrections and upkeep; `gate_preflight.rs` defines start-time close requirements and snapshots park checks before mutation.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - verdict-driven close/reopen.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - supervisor-approved replacement branch takeover, checked against the prior start and retained in the audit trail.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
@@ -139,6 +141,8 @@
 
 - **Rust proof:** inline modules, `crates/cas-store/tests/`, explicit `cas-cli/tests/` harnesses and `cas-cli/tests/integration/`; isolation in `cas-cli/src/test_env_guard.rs`.
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright, `scripts/journey-eval.sh` affected selection and `hub-web/scripts/` visual/performance probes.
+- **Bug regressions:** `docs/qa/bug-families/` groups journey cases by failure, including stopped-session status, assignment continuation, diagrams and reply formatting.
+- **Operational analysis:** `docs/analysis/` records ready-board audits and published-epic close design decisions.
 - **Real-machine QA:** `scripts/qa-rig/commander-two-machine/` and `docs/qa/` journeys, sidecar cases and batch evaluations; `docs/qa/bug-families/supervisor-command-usage-screen.yaml` selects the native Claude Usage journey.
 - **Contributor contracts:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`; design/terminal briefs and captures under `docs/design/`.
 - **Release records:** `CHANGELOG.md`, `docs/release-notes/`, `docs/release-reports/` for titled entries, Slack drafts and Markdown/HTML/PDF proof.

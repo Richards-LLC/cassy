@@ -159,7 +159,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
    ```
 
 <!-- markdownlint-disable-next-line MD029 -->
-6. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
+6. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Wait for a concrete event with `coordination remind remind_event=...` or the harness background-task completion notice. Timers are for real deadlines and admission retries; never poll for inbox or status updates.
 
 ### Resuming an Existing EPIC
 

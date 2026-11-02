@@ -3411,12 +3411,13 @@ impl CasService {
             });
         let related_context = recall_subject
             .and_then(|subject| {
-                self.inner.related_recall(
+                self.inner.related_recall_excluding(
                     &crate::mcp::tools::core::task::lifecycle::task_recall_query(
                         &subject.title,
                         &subject.labels,
                         &subject.description,
                     ),
+                    Some(&subject.id),
                 )
             })
             .unwrap_or_default();
@@ -13920,7 +13921,8 @@ mod spawn_lifecycle_tests {
     #[tokio::test]
     async fn spawn_response_surfaces_related_recall_for_active_epic_cas_0efb() {
         use cas_types::{Entry, Task, TaskType};
-        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "spawn-recall");
 
         let temp = tempfile::tempdir().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
@@ -13978,6 +13980,13 @@ mod spawn_lifecycle_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let repeated = service.factory_spawn_workers(serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers", "count": 1, "cli": "claude"
+        })).unwrap()).await.expect("repeat spawn");
+        let repeated = repeated.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(!repeated.contains("m-spawn-recall"), "repeated spawn memory: {repeated}");
         assert!(text.contains("Related prior context:"), "{text}");
         assert!(text.contains("m-spawn-recall"), "{text}");
         assert!(text.contains("Reuse timeline rollout plan"), "{text}");

@@ -155,6 +155,18 @@ def point_latest(candidate_dir, published):
         raise
 
 
+def sweep_abandoned(repo, scratch_parent, scratch_prefix, task_dir):
+    """A killed build never unwinds, so the next one reclaims what it left.
+
+    `cas qa candidate build` holds the machine's build lock around this script,
+    so no other build is publishing from this task's stage directories.
+    """
+    release_scratch.sweep_abandoned(repo, scratch_parent, scratch_prefix)
+    for stage in task_dir.glob(".candidate-*"):
+        if stage.is_dir() and not stage.is_symlink():
+            shutil.rmtree(stage, ignore_errors=True)
+
+
 def build(repo, revision, candidate_dir):
     repo = repo.resolve()
     resolved = subprocess.check_output(
@@ -181,11 +193,11 @@ def build(repo, revision, candidate_dir):
     scratch = release_env.resolve_scratch(repo, durable=True, create=True)
     if scratch.problem or not scratch.base:
         raise ValueError(f"release scratch unavailable: {scratch.problem}; {scratch.fix}")
+    scratch_prefix = Path(scratch.base).name + ".qa-candidate-"
+    sweep_abandoned(repo, Path(scratch.base).parent, scratch_prefix, task_dir)
     with release_scratch.ChildScope() as scope:
         with (
-            release_scratch.OwnedDirectory(
-                Path(scratch.base).name + ".qa-candidate-", Path(scratch.base).parent,
-            ) as owned,
+            release_scratch.OwnedDirectory(scratch_prefix, Path(scratch.base).parent) as owned,
             release_scratch.BoundedCache(owned / "target", os.environ, repo) as target,
         ):
             # Private, size/age bounded output lives only for this candidate.

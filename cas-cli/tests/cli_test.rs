@@ -3422,3 +3422,18 @@ fn qa_ledger_check_accepts_copied_skill_examples() {
         );
     }
 }
+
+#[test]
+fn release_precheck_isolates_checkout_python_modules() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join("shadowed");
+    std::fs::write(root.path().join("shutil.py"),
+        "from pathlib import Path\nPath('shadowed').write_text('credentials exposed')\nraise SystemExit(7)\n").unwrap();
+    let output = cas_cmd(root.path()).current_dir(root.path())
+        .args(["release", "precheck", "missing-sha", "--json"])
+        .output().unwrap();
+    assert!(!marker.exists(), "checkout shutil.py ran with inherited credentials");
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["error"].as_str().is_some(), "{report}");
+}

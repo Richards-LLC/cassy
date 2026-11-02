@@ -6265,6 +6265,8 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         .await
         .expect("public cleanup-before-close-gate merge");
     let gate_text = get_text(&result);
+    assert!(!result.is_error.unwrap_or(false), "Git landed; only close is held: {gate_text}");
+    assert!(gate_text.contains("Merge landed; close held"), "{gate_text}");
     assert!(
         gate_text.contains("VERIFICATION") && gate_text.contains(&post_merge_dispatch.id),
         "worktree_merge must return the exact actionable close gate, got:\n{gate_text}"

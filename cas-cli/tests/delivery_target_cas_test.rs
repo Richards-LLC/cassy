@@ -1550,7 +1550,7 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 /// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
 #[tokio::test]
 async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
-    for outcome in ["green", "red", "moved"] {
+    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held"] {
         let home = TempDir::new().unwrap();
         let fake_bin = TempDir::new().unwrap();
         let gh = fake_bin.path().join("gh");
@@ -1587,11 +1587,26 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         assert!(request.exists());
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
-        std::fs::write(&response, "{}").unwrap();
-        cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
-        assert!(request.exists());
+        // Corrupt neighbours must not prevent a valid retry from settling.
+        std::fs::write(request.with_file_name("broken.json"), "not json").unwrap();
+        if outcome == "expired" {
+            let mut old = saved.clone();
+            old["armed_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+            std::fs::write(&request, serde_json::to_vec(&old).unwrap()).unwrap();
+        }
+        if outcome == "green-held" {
+            cas_store::create_verification_dispatch_bound(
+                &fixture.cas_root, &fixture.task_id, &fixture.supervisor_id,
+                &fixture.supervisor_id, &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap();
+        }
         std::fs::write(&response, format!(r#"{{"check_runs":[{{"name":"Fast Validation","status":"completed","conclusion":"{}"}}]}}"#,
             if outcome == "red" { "failure" } else { "success" })).unwrap();
+        if outcome == "no-checks" { std::fs::write(&response, "{}").unwrap(); }
+        if outcome == "expired" {
+            std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
+        }
         if outcome == "moved" {
             let worker = fixture.cas_root.join("worktrees").join(&slug);
             std::fs::write(worker.join("new-work.txt"), "unreviewed work").unwrap();
@@ -1605,7 +1620,7 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         // pin: retry notices share the CI watcher's durable lifecycle wake namespace.
         let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
             .peek_all(100).unwrap().into_iter().filter(|p| p.source.starts_with("lifecycle-wake:ci-red-run:") || p.source.starts_with("lifecycle-wake:merge-ci-retry:")).collect();
-        if outcome == "green" {
+        if outcome.starts_with("green") {
             assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"));
             assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
         } else {

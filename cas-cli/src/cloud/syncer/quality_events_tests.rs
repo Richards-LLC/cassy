@@ -21,6 +21,7 @@ struct CloudState {
     forced: Vec<u16>,
     /// Any POST over this many events answers 413.
     max_batch: Option<usize>,
+    reject_turns: bool,
 }
 
 #[derive(Clone, Default)]
@@ -67,8 +68,13 @@ impl Respond for MockCloud {
         }
         state.posts.push(events.len());
         let (mut accepted, mut duplicates) = (0, 0);
+        let mut rejected = Vec::new();
         for event in events {
             assert!(event["project_id"].is_string(), "project_id is required on every event");
+            if state.reject_turns && event["kind"] == "turn" {
+                rejected.push(serde_json::json!({"id": event["id"], "reason":"unknown kind"}));
+                continue;
+            }
             if state.rows.iter().any(|row| row["id"] == event["id"]) {
                 duplicates += 1;
             } else {
@@ -80,7 +86,7 @@ impl Respond for MockCloud {
             }
         }
         ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "accepted": accepted, "duplicates": duplicates, "rejected": [],
+            "accepted": accepted, "duplicates": duplicates, "rejected": rejected,
         }))
     }
 }
@@ -215,9 +221,40 @@ async fn route_not_live_holds_the_cursor_and_413_splits_the_batch() {
         let summary = syncer.sync_quality_events(true).unwrap();
         assert!(!summary.capability_absent);
         assert_eq!(summary.pushed, 3);
-        let cloud = state.0.lock().unwrap();
-        assert_eq!(cloud.posts, [1, 1, 1], "halved from 3 events to 1, then held there");
-        assert_eq!(cloud.rows.len(), 3);
+        {
+            let cloud = state.0.lock().unwrap();
+            assert_eq!(cloud.posts, [1, 1, 1], "halved from 3 events to 1, then held there");
+            assert_eq!(cloud.rows.len(), 3);
+        }
+        let held = syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().unwrap();
+        let turn = NewQualityEvent::new("native turn", QualityPayload::Turn {
+            woken_by: cas_store::WakeChannel::Director, actions: vec![], no_op: true,
+            input_tokens: Some(30), output_tokens: Some(5), minutes: Some(0.05),
+        });
+        cas_store::record_quality_event(&root, &turn).unwrap();
+        emit(&root, "after turn");
+        state.0.lock().unwrap().max_batch = None;
+        for status in [400, 422] {
+            state.0.lock().unwrap().forced = vec![status];
+            assert!(syncer.sync_quality_events(true).unwrap().capability_absent);
+            assert_eq!(syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().as_deref(), Some(held.as_str()));
+        }
+        state.0.lock().unwrap().reject_turns = true;
+        assert!(syncer.sync_quality_events(true).unwrap().capability_absent);
+        assert_eq!(syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().as_deref(), Some(held.as_str()));
+        let tail = cas_store::quality_events_after(&root, held.parse().unwrap(), 10).unwrap();
+        assert_eq!(tail.len(), 2, "refused Turn and following rows remain queued locally");
+        state.0.lock().unwrap().forced = vec![500];
+        assert!(syncer.sync_quality_events(false).unwrap().capability_absent);
+        assert_eq!(state.0.lock().unwrap().forced, [500], "cooldown makes no request");
+        {
+            let mut cloud = state.0.lock().unwrap();
+            cloud.forced.clear(); cloud.reject_turns = false;
+        }
+        let retry = syncer.sync_quality_events(true).unwrap();
+        assert!(!retry.capability_absent);
+        assert_eq!(state.0.lock().unwrap().rows.len(), 5);
+        assert_eq!(syncer.queue().get_metadata(super::PUSH_CURSOR_KEY).unwrap().as_deref(), Some(tail.last().unwrap().seq.to_string().as_str()));
     })
     .await
     .unwrap();

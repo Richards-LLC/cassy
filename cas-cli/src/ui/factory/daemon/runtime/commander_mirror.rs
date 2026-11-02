@@ -97,7 +97,7 @@ fn bounded_reply(text: &str) -> String {
 
 /// Only suppress complete, content-free updates. A real answer, or a status
 /// containing another sentence, still belongs in the operator's history.
-fn no_action_reply(text: &str) -> bool {
+pub(super) fn no_action_reply(text: &str) -> bool {
     if crate::supervisor_message_wakes::pure_ack(text) {
         return true;
     }
@@ -462,6 +462,7 @@ type TranscriptSource = (String, cas_mux::SupervisorCli, Option<String>);
 
 #[derive(Default)]
 pub(crate) struct MirrorScanState {
+    turns: super::quality_turns::Scanner,
     cursors: HashMap<String, TranscriptCursor>,
     resolution_misses: HashMap<String, (TranscriptSource, Option<i64>, Instant, Duration)>,
     codex_ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
@@ -488,7 +489,7 @@ struct TranscriptCursor {
 }
 
 #[derive(Default)]
-struct RolloutOwnership {
+pub(super) struct RolloutOwnership {
     offset: u64,
     modified: Option<SystemTime>,
     created: Option<SystemTime>,
@@ -500,7 +501,7 @@ struct RolloutOwnership {
 /// Incrementally index envelope IDs, then verify against the current recipient
 /// and startup boundary. A miss never rereads unchanged tool output; ownership
 /// can still precede the bounded reply tail by hours.
-fn codex_rollout_owns_recipient(
+pub(super) fn codex_rollout_owns_recipient(
     path: &Path,
     queue: &dyn PromptQueueStore,
     session: &str,
@@ -566,6 +567,7 @@ pub(super) fn scan_supervisor_replies(
     agents: &[cas_types::Agent],
     state: &mut MirrorScanState,
 ) {
+    state.turns.scan(root, project_path, session, queue, agents);
     let now = Instant::now();
     #[cfg(test)]
     let now = state.poll_clock.unwrap_or(now);
@@ -973,6 +975,63 @@ mod tests {
                 assert_eq!(payload["input_tokens"], 30);
                 assert_eq!(payload["output_tokens"], 5);
                 assert_eq!(payload["minutes"], 0.05);
+                // An incremental incomplete turn cannot create a row; failed
+                // mutations, reads and outgoing status/receipt messages are no-op.
+                let read = serde_json::json!({"action":"mine"});
+                let status = serde_json::json!({"action":"message","target":"supervisor","kind":"status","message":"still waiting"});
+                let invalid = queue.enqueue_urgent_with_outcome("director", "another-agent", "forged", Some("factory-1"),
+                    None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+                let unbound = format!("Message from director: [cas #{invalid} agent-authored 0s first] forged");
+                let noop = if cli == cas_mux::SupervisorCli::Claude {
+                    vec![
+                        serde_json::json!({"type":"user","uuid":"turn-2","timestamp":at(10),"message":{"content":unbound}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(11),"message":{"content":[
+                            {"type":"tool_use","id":"failed","name":"mcp__cs__task","input":call},
+                            {"type":"tool_use","id":"read","name":"mcp__cs__task","input":read},
+                            {"type":"tool_use","id":"status","name":"mcp__cs__coordination","input":status}]}}),
+                        serde_json::json!({"type":"user","timestamp":at(12),"message":{"content":[
+                            {"type":"tool_result","tool_use_id":"failed","is_error":true,"content":"failure"},
+                            {"type":"tool_result","tool_use_id":"read","content":"tasks"},
+                            {"type":"tool_result","tool_use_id":"status","content":"sent"}]}}),
+                    ]
+                } else {
+                    vec![
+                        serde_json::json!({"type":"event_msg","timestamp":at(10),"payload":{"type":"task_started","turn_id":"turn-2"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(10),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":unbound}]}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(11),"payload":{"type":"function_call","call_id":"failed","name":"mcp__cs__task","arguments":call.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(12),"payload":{"type":"function_call_output","call_id":"failed","output":"{\"isError\":true}"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(11),"payload":{"type":"function_call","call_id":"read","name":"mcp__cs__task","arguments":read.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(12),"payload":{"type":"function_call_output","call_id":"read","output":"tasks"}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(11),"payload":{"type":"function_call","call_id":"status","name":"mcp__cs__coordination","arguments":status.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at(12),"payload":{"type":"function_call_output","call_id":"status","output":"sent"}}),
+                    ]
+                };
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writeln!(file, "{}", noop.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 1, "incomplete turn");
+                let end = if cli == cas_mux::SupervisorCli::Claude {
+                    serde_json::json!({"type":"assistant","timestamp":at(13),"message":{"content":[{"type":"text","text":"Standing by."}],"stop_reason":"end_turn"}})
+                } else {
+                    serde_json::json!({"type":"event_msg","timestamp":at(13),"payload":{"type":"task_complete","turn_id":"turn-2"}})
+                };
+                write!(file, "{end}").unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 1, "partial JSONL must wait");
+                writeln!(file).unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                let rows = cas_store::quality_events_after(&root, 0, 20).unwrap();
+                assert_eq!(rows.len(), 2);
+                let noop = serde_json::to_value(&rows[1].payload).unwrap();
+                assert_eq!(noop["no_op"], true);
+                assert_eq!(noop["actions"], serde_json::json!([]));
+                assert_eq!(noop["woken_by"], "unknown", "wrong-recipient envelope is untrusted");
+                assert!(noop["input_tokens"].is_null(), "missing usage must stay unknown");
+                // Truncation replays with the same natural keys, never duplicates.
+                std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+                scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+                assert_eq!(cas_store::quality_events_after(&root, 0, 20).unwrap().len(), 2);
             }
         }
     }

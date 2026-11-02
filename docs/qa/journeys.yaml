@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  native-background-wait-bound:
+    title: Silent native background jobs stop reporting busy after the configured stall window
+    tasks: [cas-d8a9]
+    invariants: [HUB-J26-BACKGROUND-BOUND]
+    journeys: [HUB-J26]
   phone-warning-header:
     title: Warning badges preserve every phone conversation header action
     tasks: [cas-a929]
@@ -470,6 +475,10 @@ invariants:
     statement: Waiting workers use live-green pills and hollow green dots; Offline workers have gray pills and neutral dots. Their pill treatments and dot shapes remain distinct in forced colors, with accessible state names.
     check: Run HUB-J26 at desktop/light and phone/dark, then its lifecycle transition and forced-colors stages; compare Waiting and Offline computed pill and dot treatments.
     bug: {task: cas-7389}
+  HUB-J26-BACKGROUND-BOUND:
+    statement: A native background launch keeps its worker busy only within the configured stall window; a missing completion becomes Stalled, while a matching completion returns the worker to Waiting.
+    check: Run worker_liveness::tests::claude_background_job_keeps_a_completed_turn_busy_until_its_notification with injected time, matching and unrelated completion notices; compare Team worker liveness to the native worker_status result on the release candidate.
+    bug: {task: cas-d8a9}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -2374,11 +2383,13 @@ journeys:
   - hub-web/src/main.ts
   - hub-web/src/styles.css
   - cas-cli/src/agent_model.rs
+  - cas-cli/src/mcp/tools/service/worker_liveness.rs
+  - cas-cli/src/mcp/tools/service/worker_liveness/tests.rs
   - cas-cli/src/bridge/server/session.rs
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE]
+  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

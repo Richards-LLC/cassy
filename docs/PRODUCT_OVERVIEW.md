@@ -22,6 +22,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Worker task queue** - an ordered backlog for one worker. Closing or parking starts the next eligible task on its own target branch; supervisors inspect, reorder or clear pending work, and stale entries carry skip notes.
 - **QA candidate** - an exact-revision binary for a QA walk. A worker requests one for its own active task, and the factory daemon builds it, one at a time per machine, and messages the worker the hash and receipt. Each revision keeps its own directory, so a later build never replaces a cited one.
 - **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI.
+- **Bounded waits** - an approved verification gives the worker five minutes to retry close before one supervisor escalation. A dispatch timed out by close shares the daemon's expiry relay; silent native background jobs become stalled after the configured stall window instead of staying busy forever.
 - **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
 - **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.
 - **Worktree** - a separate Git checkout and branch that isolates a worker's changes; under disk pressure, build caches left by removed checkouts are reclaimed oldest first.

@@ -335,7 +335,7 @@ impl CasCore {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
-        let Ok(mut task) = store.get(task_id) else {
+        let Ok(task) = store.get(task_id) else {
             return CassyMergeClose::NotEligible;
         };
         if task.status == TaskStatus::Closed {

@@ -930,6 +930,7 @@ mod tests {
                             delivery: (format!("factory/{}", fact.worker), Some("tip".into())),
                             ci_pending: false,
                             merged_close_blocked: None,
+                            awaits_release_verdict: false,
                         },
                     )
                 })
@@ -1003,6 +1004,7 @@ mod tests {
                 delivery: ("factory/wa-cas-a".into(), Some("tip-a".into())),
                 ci_pending: false,
                 merged_close_blocked: None,
+                awaits_release_verdict: false,
             },
         );
         git.insert(
@@ -1012,6 +1014,7 @@ mod tests {
                 delivery: ("factory/wb-cas-b".into(), Some("tip-b".into())),
                 ci_pending: true,
                 merged_close_blocked: None,
+                awaits_release_verdict: false,
             },
         );
         // Computed for another worker: stale.
@@ -1024,6 +1027,7 @@ mod tests {
                 delivery: ("factory/x".into(), Some("tip-x".into())),
                 ci_pending: false,
                 merged_close_blocked: None,
+                awaits_release_verdict: false,
             },
         );
         let combined = combine(&facts, &git);

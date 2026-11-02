@@ -1011,7 +1011,7 @@ mod supervisor_handoff_tests {
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "delivery"]);
         let anchor = git(&["rev-parse", "HEAD"]);
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff-project'\n[qa]\nmode='batch'\n").unwrap();
-        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-foreign", "cas-unmerged", "cas-override", "cas-dedicated", "cas-live-review"] {
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-foreign", "cas-unmerged", "cas-override", "cas-dedicated", "cas-live-review", "cas-tier-zero", "cas-tier-two", "cas-rejected", "cas-unreadable"] {
             let mut task = Task::new(id.into(), "Merged delivery".into());
             task.origin_project = Some(if id == "cas-foreign" { "another-project" } else { "handoff-project" }.into());
             task.status = TaskStatus::AwaitingMerge;
@@ -1021,6 +1021,22 @@ mod supervisor_handoff_tests {
                 work_target: cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "main".into() },
                 assignee: "ended-worker".into(), branch: format!("factory/{id}"), base_sha: base.clone(),
             });
+            if id == "cas-tier-zero" {
+                std::fs::write(temp.path().join("README.md"), "documentation delivery\n").unwrap();
+                git(&["add", "README.md"]);
+                git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "docs delivery"]);
+                task.deliverables.factory_branch_start.as_mut().unwrap().base_sha = anchor.clone();
+                task.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+            }
+            if id == "cas-tier-two" {
+                let tier_base = git(&["rev-parse", "HEAD"]);
+                std::fs::create_dir_all(temp.path().join("cas-cli/src/hooks")).unwrap();
+                std::fs::write(temp.path().join("cas-cli/src/hooks/guard.rs"), "guard delivery\n").unwrap();
+                git(&["add", "cas-cli/src/hooks/guard.rs"]);
+                git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "guard delivery"]);
+                task.deliverables.factory_branch_start.as_mut().unwrap().base_sha = tier_base;
+                task.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+            }
             if id == "cas-unmerged" {
                 git(&["branch", "unmerged-target", &base]);
                 task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "unmerged-target".into() });
@@ -1032,8 +1048,14 @@ mod supervisor_handoff_tests {
                 task.labels.push("force-verifier".into());
             }
             tasks.add(&task).unwrap();
-            if id == "cas-live-review" {
-                cas_store::create_verification_dispatch(&root, id, "reviewer", "reviewer", chrono::Utc::now() + chrono::Duration::hours(1)).unwrap();
+            if matches!(id, "cas-live-review" | "cas-tier-two" | "cas-unreadable") {
+                let deadline = chrono::Utc::now() + chrono::Duration::hours(if id == "cas-live-review" { 1 } else { -1 });
+                cas_store::create_verification_dispatch(&root, id, "reviewer", "reviewer", deadline).unwrap();
+            }
+            if id == "cas-rejected" {
+                let mut verdict = cas_types::Verification::new("ver-rejected".into(), id.into());
+                verdict.status = cas_types::VerificationStatus::Rejected;
+                crate::store::open_verification_store(&root).unwrap().add(&verdict).unwrap();
             }
         }
         std::fs::write(temp.path().join("src/dropped.rs"), "lost delivery\n").unwrap();
@@ -1131,13 +1153,17 @@ mod supervisor_handoff_tests {
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three"] {
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable"] {
             assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");
         }
+        let tier_two_row = context.lines().find(|line| line.starts_with("- cas-tier-two:")).unwrap();
+        assert!(tier_two_row.contains("expired") && tier_two_row.contains("dedicated verifier") && tier_two_row.contains("adversarial probe"), "Tier 2 must show its hold and required review: {tier_two_row}");
+        let tier_zero_row = context.lines().find(|line| line.starts_with("- cas-tier-zero:")).unwrap();
+        assert!(tier_zero_row.contains("mechanical"), "Tier 0 keeps mechanical close gates: {tier_zero_row}");
         assert!(!context.contains("task action=close id=cas-foreign"), "foreign projects stay outside recovery: {context}");
         assert!(!context.contains("task action=close id=cas-unmerged"), "unmerged work stays outside recovery: {context}");
-        for id in ["cas-override", "cas-dedicated", "cas-live-review", "cas-dropped"] {
+        for id in ["cas-override", "cas-live-review", "cas-dropped", "cas-rejected"] {
             assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
         }
         assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
@@ -1166,6 +1192,10 @@ mod supervisor_handoff_tests {
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
         assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
         assert!(!again.contains("Integrated deliveries to adopt/close"), "recovery actions must surface once per successor");
+        // A malformed dispatch in this isolated fixture must not consume the next
+        // successor's claimed handoff or hide the other recovery rows.
+        let fixture_db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        fixture_db.execute("UPDATE verification_dispatches SET repository_proof = 'unreadable-json' WHERE task_id = 'cas-unreadable'", []).unwrap();
         handle_session_end(&HookInput { session_id: "successor-id".into(), reason: Some("operator".into()), ..Default::default() }, Some(&root)).unwrap();
         env.set("CAS_AGENT_NAME", "third-supervisor");
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
@@ -1174,6 +1204,9 @@ mod supervisor_handoff_tests {
         let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
         assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
         assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");
+        assert!(context.contains("task action=close id=cas-tier-two"), "one unreadable row must not hide valid recovery: {context}");
+        assert!(!context.contains("task action=close id=cas-unreadable"), "unreadable metadata must not authorize recovery: {context}");
+        assert!(context.contains("cas-unreadable: verification metadata unreadable"), "startup must report the skipped row: {context}");
 
 
     }

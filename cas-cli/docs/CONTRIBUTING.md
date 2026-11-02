@@ -162,6 +162,18 @@ require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
 
+Planning recall at task creation and worker spawn requires matching content terms;
+weak incidental matches stay silent. Each recalled item and operation lesson is
+shown at most once in a harness session. Spawn lessons tagged for a harness are
+shown only when that harness is selected. Upkeep advisories at close remain in
+the immutable receipt details and task notes.
+
+Worker-owned reminders end on shutdown or a terminal bound task, including
+cross-session and suspended waits. Supervisor-owned cross-session event watches
+retain their completion semantics. A supervisor-stalled prompt requires the
+configured interval of observed actionable idle time, readable worker holds,
+current open tasks, and the existing pinned-epic assignment boundary.
+
 Authenticated messages directed to a supervisor wake its idle pane, including
 peer field reports with no `kind`. The first message opens a fixed burst window
 (`factory.supervisor_message_debounce_secs`, default 20 seconds, range 0–300).

@@ -5209,7 +5209,7 @@ mod tests {
     /// director refresh and reminder cleanup. The pre-shutdown ID must survive
     /// that order so its held reminder is re-armed.
     #[test]
-    fn normal_worker_shutdown_rearms_held_reminder_after_agent_deletion() {
+    fn normal_worker_shutdown_cancels_held_reminder_after_agent_deletion() {
         use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
         use crate::types::{Agent, AgentRole};
 
@@ -5307,7 +5307,7 @@ mod tests {
                 .list_pending_for_target("worker-id")
                 .unwrap()
                 .len(),
-            1
+            0
         );
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
 
@@ -5378,7 +5378,7 @@ mod tests {
                 .list_pending_for_target("current-worker-id")
                 .unwrap()
                 .len(),
-            1
+            0
         );
         assert!(
             reminders
@@ -5391,7 +5391,7 @@ mod tests {
 
     /// cas-5f4b: a session shutdown re-arms every held worker's reminders.
     #[test]
-    fn session_shutdown_rearms_held_workers_reminders_cas_5f4b() {
+    fn session_shutdown_cancels_held_workers_reminders_cas_5f4b() {
         use crate::store::AgentStore;
         use crate::types::{Agent, AgentRole};
 
@@ -5418,7 +5418,7 @@ mod tests {
         app.rearm_held_reminders_at_shutdown("shutdown-5f4b");
 
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
-        assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 1);
+        assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 0);
     }
 
     /// A hold update touches session metadata, not cas.db. The ordinary

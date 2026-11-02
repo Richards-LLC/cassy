@@ -84,12 +84,14 @@ The composer also offers a local, lazily loaded emoji tray beside the mic: searc
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.
 
-<!-- cas:project-overview
-# Product paths the G6 park gate and overview freshness watch. Keep when regenerating.
-domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs"]
-watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
--->
+
 
 Commander’s lazy Team tab sits beside a supervisor conversation. It uses the same scoped staffing and epic progress model as Tasks & progress: worker/task lanes, merge metrics, and a Needs you strip. The daemon reports harness/model, task start and durable lifecycle receipts; missing evidence stays unreported. Existing hub events refresh Team without an extra polling loop, while the browser updates elapsed text locally. The view includes keyboard tabs, phone stacking, forced colors and reduced motion, with no terminal or raw work output.
 
 The conversation's phase line uses the selected supervisor's recorded lifecycle start/end and the daemon's observation time. A local clock displays elapsed duration; waiting, completed, stale and disconnected states stay still. Missing phases or start times stay unreported. The ordinary status stream supplies these safe facts while Show work remains off; it exposes no tool input, output or reasoning text.
+
+<!-- cas:project-overview
+# Product paths the G6 park gate and overview freshness watch. Keep when regenerating.
+domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs", "crates/cas-types/src/entry.rs"]
+watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
+-->

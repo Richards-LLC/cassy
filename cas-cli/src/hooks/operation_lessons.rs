@@ -198,6 +198,7 @@ mod tests {
         let spawn = |cli: &str| input(&format!("{}factory", crate::harness_policy::own_tool_prefix()),
             serde_json::json!({"action": "spawn_workers", "cli": cli, "count": 1}));
         let claude = surfaced(temp.path(), &spawn("claude"));
+        println!("NAG_MEASURE lessons_claude\n{claude}\nNAG_MEASURE_END");
         assert!(!claude.contains(&codex), "Claude spawn received Codex lesson: {claude}");
         assert!(claude.contains(&general), "{claude}");
         let first = surfaced(temp.path(), &spawn("codex"));

@@ -5393,10 +5393,15 @@ mod related_recall_response_tests {
         );
 
         println!("NAG_MEASURE create_first\n{response}\nNAG_MEASURE_END");
-        let repeated = text(core.cas_task_create(Parameters(epic_request(
+        let capture = tempfile::Builder::new().prefix("cas-7310-capture-").tempdir().unwrap().keep();
+        std::fs::write(capture.join("create_first.txt"), &response).unwrap();
+        let repeated = text(core.cas_task_create_with_target(epic_request(
             "Timeline import follow-up again", "Plan timeline import work for the next release."
-        ))).await.expect("repeat create"));
+        ), None, None, true).await.expect("repeat create"));
         println!("NAG_MEASURE create_repeat\n{repeated}\nNAG_MEASURE_END");
+        let capture = tempfile::Builder::new().prefix("cas-7310-capture-").tempdir().unwrap().keep();
+        std::fs::write(capture.join("create_repeat.txt"), &repeated).unwrap();
+        assert!(!repeated.contains("m-recall-memory"), "repeated memory: {repeated}");
         assert!(response.contains("Related prior context:"), "{response}");
         assert!(response.contains("m-recall-memory"), "{response}");
         assert!(
@@ -5812,6 +5817,7 @@ mod related_recall_response_tests {
 
     #[test]
     fn related_recall_is_bounded_by_result_count_and_character_cap() {
+        let mut env = TestEnvGuard::with_vars(&[("CAS_SESSION_ID", "bounded-recall")]);
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         for index in 0..6 {
@@ -5823,6 +5829,10 @@ mod related_recall_response_tests {
             );
         }
 
+        add_memory(&core, "m-weak-match", "Incidental keyword", "Keyword belongs to an unrelated outage.");
+        assert!(core.related_recall("bounded keyword").is_some());
+        assert!(core.related_recall("bounded keyword").is_none(), "seen strong matches and weak matches stay quiet");
+        env.set("CAS_SESSION_ID", "bounded-recall-limit");
         let response = core
             .related_recall("bounded recall shared keyword")
             .expect("matching recall");

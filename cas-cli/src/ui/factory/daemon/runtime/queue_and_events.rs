@@ -14514,6 +14514,10 @@ mod tests {
                     events: vec![], external_ready: vec![], ci_wakes: vec![],
                 });
             }
+            let ended = reminders.list_recently_ended(&owner.id, 86400).unwrap();
+            assert_eq!(ended.len(), 1);
+            assert_eq!(ended[0].status, cas_store::ReminderStatus::Cancelled,
+                "worker wait must cancel before expiry can escalate: shutdown={shutdown}, terminal={terminal}");
             assert!(reminders.list_all_pending().unwrap().is_empty());
             assert!(crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap().is_empty(),
                 "ended worker wait must not page anyone: shutdown={shutdown}, terminal={terminal}");

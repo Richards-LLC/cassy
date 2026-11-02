@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory context and reminders
+
+- **Quiet repeated planning** — Operation lessons match the spawned harness and appear once per session; task and spawn recall filters weak matches and repeats. Close upkeep details live in receipt files. Worker reminders end with shutdown or terminal tasks, and supervisor stall prompts wait for actionable idle time and current, eligible work.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

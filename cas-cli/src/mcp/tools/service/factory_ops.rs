@@ -3985,7 +3985,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
-        use cas_types::AgentRole;
+        use cas_types::{AgentRole, AgentStatus};
 
         let worker_name = req
             .target
@@ -4030,6 +4030,10 @@ impl CasService {
                 agent.role == AgentRole::Worker
                     && agent.name == worker_name
                     && agent.visible_to_factory_session(factory_session.as_deref())
+                    // Legacy unscoped requests may be consumed by any daemon.
+                    // Only an explicit owner session may recover dead rows.
+                    && (factory_session.is_some()
+                        || matches!(agent.status, AgentStatus::Active | AgentStatus::Idle))
             })
             .max_by_key(|agent| {
                 (
@@ -4076,8 +4080,8 @@ impl CasService {
         // retains the checkout and task bindings, so it must be able to resume
         // that work. A stale heartbeat alone never grants this exception:
         // process liveness still protects a running harness's unsaved work.
-        let recovering_dead_worker =
-            !super::agent_liveness::evaluate_supervision_liveness(&worker).is_live();
+        let recovering_dead_worker = factory_session.is_some()
+            && !super::agent_liveness::evaluate_supervision_liveness(&worker).is_live();
         if snapshot.unsafe_worktree && !recovering_dead_worker {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -4144,12 +4148,17 @@ impl CasService {
                 ),
             ));
         }
-        let spec_json = serde_json::to_string(&spec).map_err(|error| {
+        let mut spec_payload = serde_json::to_value(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to serialize worker recipe: {error}"),
             )
         })?;
+        // Keep the recovery-only intent through queueing. A replacement may
+        // acquire a live pane before it registers, or even before dequeue.
+        // WorkerSpec consumers ignore this compatible metadata field.
+        spec_payload["dead_worker_recovery"] = serde_json::Value::Bool(recovering_dead_worker);
+        let spec_json = spec_payload.to_string();
         let request_id = queue
             .enqueue_recycle(worker_name, Some(&spec_json), factory_session.as_deref())
             .map_err(|error| {

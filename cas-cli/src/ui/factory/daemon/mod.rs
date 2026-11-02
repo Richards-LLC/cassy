@@ -143,6 +143,8 @@ enum PendingSpawn {
         request_id: i64,
         name: String,
         spec: Option<cas_mux::WorkerSpec>,
+        /// Recovery of a registry-dead worker must never stop a live successor.
+        dead_worker_recovery: bool,
         stopped: bool,
     },
     /// Spawn a shell pane

@@ -11,6 +11,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Quiet repeated planning** — Operation lessons match the spawned harness and appear once per session; task and spawn recall filters weak matches and repeats. Close upkeep details live in receipt files. Worker reminders end with shutdown or terminal tasks, and supervisor stall prompts wait for actionable idle time and current, eligible work.
 
+### Fixed — Queued candidate builds
+
+- **Queued builds run again** — Was: Every queued candidate build failed within seconds with "bwrap: No permissions to create a new namespace", because the sandbox was told to run `/proc/self/exe`, which names bubblewrap once it is inside. → Now: The sandbox runs the daemon's real binary path.
+- **Refused at the request** — Was: A worker on macOS, on a host without `bwrap`, or under a daemon that cannot start the sandbox got "Queued" and a failure later. → Now: The daemon tests its own sandbox when it starts, and the request is refused at once, with the reason and the supervisor's direct build named as the fallback.
+- **Killed builds no longer leak disk** — Was: A build killed by a timeout or a daemon restart left its checkout and up to 20 GiB of target behind, and the retry started a new one. → Now: The next build removes what a killed build left, and leaves a running build alone.
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

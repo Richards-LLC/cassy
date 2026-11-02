@@ -315,8 +315,8 @@ An avatar names who is working, and the model's provider is that identity.
 - **Fallback.** An unknown or unsupported harness shows its name's first two letters in `--font-ui` 600 (OpenCode → "OC"); a session with no harness shows the machine monogram on its machine accent. Never a single tiny glyph (✳, `>_`) in a dark circle.
 - **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it. Its colour is the state, per the operator's ruling of 2026-11-01. Each dot clears 3:1 against `--bg-raised`, has a state name for assistive technology and hover, and is never the only carrier of the state: the row text or a status pill says it too.
   - **Working:** a solid `--state-ok` green circle; solid `CanvasText` in forced colours.
-  - **Idle:** a solid muted green `--state-idle` circle (3.16:1 light, 3.67:1 dark); a hollow square with `Canvas` fill and `CanvasText` outline in forced colours, distinct from both circles even if system colours coincide. A live supervisor never gets a gray dot.
-  - **Offline:** a solid gray `--state-off` circle (3.77:1 light, 5.91:1 dark), for a disconnected or ended session. Gray is reserved for offline; in forced colours it has a `Canvas` fill and `CanvasText` outline.
+  - **Idle:** a solid muted green `--state-idle` circle (3.76:1 light, 3.73:1 dark); a hollow square with `Canvas` fill and `CanvasText` outline in forced colours, distinct from both circles even if system colours coincide. A live supervisor never gets a gray dot.
+  - **Offline:** a solid gray `--state-off` circle (4.48:1 light, 6.00:1 dark), for a disconnected or ended session. Gray is reserved for offline; in forced colours it has a `Canvas` fill and `CanvasText` outline.
   - **Needs you:** solid `--state-warn`, with the existing worded reason.
   - Neutral non-status marks (a cleared attention dot, the Team trail's unreported connector) use `--state-off`.
 

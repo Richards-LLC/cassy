@@ -27,7 +27,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Factory process safety
 
-- **Supervisor subagents cannot signal workers by name** — Pattern-based shell kills are refused for every factory role, including native subagents that inherit the supervisor role. Agents must signal the PID they started, preventing dependency cleanup commands from terminating sibling workers whose startup instructions match the pattern.
+- **Factory agents cannot signal processes by search pattern** — Shell hooks refuse `pkill`, `killall`, and variable, substituted or piped `kill` operands combined with `pgrep` or filtered process listings, including loops, `eval` and assigned command names. This applies to every factory role and inherited supervisor subagent; literal PID signals and reads from an owned PID file remain available.
 
 ## [3.98.1] - 2026-11-02
 

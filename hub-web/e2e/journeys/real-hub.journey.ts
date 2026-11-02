@@ -775,3 +775,85 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     }
   }
 });
+
+// QA cas-51f6 round 1 had only the protocol double. This walks the same card
+// against the candidate binary's embedded Commander: one supervisor and no
+// workers, then that session ended, dismissed and reached again.
+test("HUB-J14 real hub supervisor-only card shows live status and keeps a dismissed session reachable", {
+  annotation: { type: "journey-part", description: "real hub, supervisor-only project card" },
+}, async ({ page, context }, info) => {
+  const directory = resolve(process.env.JOURNEY_RECEIPTS ??
+    join(process.env.JOURNEY_OUTPUT ?? "e2e/.results/real-hub", "journeys"),
+    "HUB-J14", "parts", `real-hub-run-${info.repeatEachIndex}`);
+  claimReceiptDirectory(directory, info.title);
+  const secrets: string[] = [];
+  let fixture: { pairUrl: string; version: string } | undefined;
+  let tracing = false;
+  let passed = false;
+  const readback: Record<string, unknown> = {};
+  const dot = (row: ReturnType<typeof page.locator>) => row.locator(".supervisor-state").evaluate((node) => {
+    const fill = (value: string) => { const probe = document.body.appendChild(document.createElement("span")); probe.style.background = value; const rgb = getComputedStyle(probe).backgroundColor; probe.remove(); return rgb; };
+    return { state: node.className, fill: getComputedStyle(node).backgroundColor, active: fill("var(--state-ok)"), idle: fill("var(--state-idle)"), off: fill("var(--state-off)") };
+  });
+  try {
+    fixture = await command("reset", { endSession: true });
+    const pairing = new URL(fixture!.pairUrl);
+    secrets.push(fixture!.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? "");
+    pairing.pathname = "/commander/";
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Project card QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    await context.tracing.start({ screenshots: false,
+      snapshots: { dom: true, aria: true, screen: true }, sources: true });
+    tracing = true;
+    const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+    const card = list.locator(".project-card");
+    await expect(card).toHaveCount(1);
+    const row = card.locator(".conversation-row").filter({ hasText: "journey-supervisor" });
+    await expect(row).toHaveCount(1);
+    await expect(card.locator(".project-card-summary")).toBeHidden();
+    await expect(card.getByRole("button", { name: /^Filter conversations on .+, online$/ })).toBeVisible();
+    const live = await dot(row);
+    readback.live = live;
+    expect(live.state).not.toMatch(/offline/);
+    expect(live.fill).toBe(/working/.test(live.state) ? live.active : live.idle);
+    expect(live.fill).not.toBe(live.off);
+    await page.screenshot({ path: join(directory, "J01-live-card.png") });
+
+    await card.getByRole("button", { name: /^End session journey-supervisor on / }).click();
+    await card.getByRole("button", { name: "End session", exact: true }).click();
+    await expect(row.locator(".conversation-preview")).toHaveText("Ended", { timeout: 30_000 });
+    const ended = await dot(row);
+    readback.ended = ended;
+    expect(ended.fill).toBe(ended.off);
+    await page.screenshot({ path: join(directory, "J02-ended.png") });
+
+    await card.getByRole("button", { name: "Dismiss ended session journey-supervisor", exact: true }).click();
+    await expect(card).toHaveCount(0);
+    await list.getByRole("button", { name: "Show 1 dismissed session", exact: true }).click();
+    await expect(row).toHaveCount(1);
+    await page.screenshot({ path: join(directory, "J03-dismissed-shown.png") });
+    await card.getByRole("button", { name: "Restore dismissed session journey-supervisor", exact: true }).click();
+    await page.reload();
+    await expect(card.getByRole("button", { name: "Dismiss ended session journey-supervisor", exact: true })).toBeVisible();
+    await page.screenshot({ path: join(directory, "J04-restored.png") });
+    passed = true;
+  } finally {
+    try {
+      await page.screenshot({ path: join(directory, "final.png") }).catch(() => undefined);
+      await writeFile(join(directory, "final.aria.yml"), await page.locator("body").ariaSnapshot().catch(() => "# unavailable"));
+      await writeFile(join(directory, "result.json"), JSON.stringify({
+        id: "HUB-J14", status: passed ? "PASS" : "FAIL", binary: fixture?.version,
+        label: "real-bundle, real-hub, real-factory-daemon, inert-supervisor-provider",
+        viewport: page.viewportSize(), readback,
+      }, null, 2));
+      if (tracing) await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
+    } finally {
+      await context.close().catch(() => undefined);
+      await command("cleanup");
+    }
+  }
+});

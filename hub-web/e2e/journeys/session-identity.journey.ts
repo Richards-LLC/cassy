@@ -330,7 +330,9 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
   };
   machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
     name: "golden-jaguar-44", supervisor: "golden-jaguar-44", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
-  }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000)];
+  }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000),
+  // QA cas-51f6 F02: a project whose only session has ended.
+  { ...endedSession("quiet-otter-12", -4 * 3_600_000), project: "old-demo", project_dir: "/projects/old-demo" }];
   const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "github.com/acme/studio", project_name: "Studio", harness: "claude", machine_online: true }] };
   const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
     [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
@@ -363,8 +365,18 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(pulseMachine).toBeVisible();
     expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
     const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
-    await expect(liveSupervisor.locator(".supervisor-state")).not.toHaveClass(/offline/);
     const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
+    // Operator ruling 2026-11-01: green is active, muted green is idle, gray is
+    // disconnected. The live idle supervisor reads muted green, never gray.
+    const dots = await page.evaluate(([live, gone]) => {
+      const fill = (value: string) => { const probe = document.body.appendChild(document.createElement("span")); probe.style.background = value; const rgb = getComputedStyle(probe).backgroundColor; probe.remove(); return rgb; };
+      return { live: getComputedStyle(live!).backgroundColor, gone: getComputedStyle(gone!).backgroundColor, active: fill("var(--state-ok)"), idle: fill("var(--state-idle)"), off: fill("var(--state-off)") };
+    }, [await liveSupervisor.locator(".supervisor-state").elementHandle(), await ended.locator(".supervisor-state").elementHandle()] as const);
+    const [red, green, blue] = dots.live.match(/\d+/g)!.map(Number);
+    expect(green).toBeGreaterThan(Math.max(red!, blue!));
+    expect(dots.live).toBe(dots.idle);
+    expect(dots.live).not.toBe(dots.active);
+    expect(dots.gone).toBe(dots.off);
     await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
     await expect(ended.locator(".conversation-when")).toBeVisible();
     await expect(ended.locator(".supervisor-state")).toHaveClass(/offline/);
@@ -396,11 +408,11 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       await expect(offline).toHaveAttribute("title", "Offline");
       const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
       expect(await look(idle)).not.toEqual(await look(offline));
-      // A live idle dot uses the live green, never the old gray idle token.
+      // Operator ruling 2026-11-01: a live idle dot is filled muted green, a
+      // stopped one filled gray, and neither carries the old hollow ring.
       if (mode !== "forced-colors") {
-        expect((await look(idle))[1]).toBe(await card.locator(".machine-online-dot.online").evaluate(node => getComputedStyle(node).backgroundColor));
-        // A stopped session's dot is filled gray; a live idle dot stays an open ring.
         expect((await look(offline))[0]).not.toBe((await look(idle))[0]);
+        expect((await look(idle))[2]).toBe("0px");
       } else {
         expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
       }
@@ -417,12 +429,12 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
     await expect(ended).toHaveCount(0);
     await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(1);
-    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(4);
     await old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true }).click();
     await expect(old.locator(".conversation-row")).toHaveCount(1);
     await expect(old.locator(".conversation-topline .conversation-action")).toBeHidden();
     await expect(liveSupervisor).toBeVisible();
-    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(3);
+    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(4);
     // The hub keeps the preference; a fresh browser has no local dismissal keys.
     await expect.poll(() => hub.machine("atlas").sessions.filter(row => row.dismissed).length).toBe(3);
     for (let tick = 0; tick < 3; tick++) {
@@ -476,6 +488,28 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await page.emulateMedia({ colorScheme: "light", forcedColors: "none", contrast: "no-preference" });
   });
 
+  await journey.stage("A dismissed session in an ended-only project stays reachable", async () => {
+    const demo = () => list.getByRole("group", { name: /^old-demo ·/ });
+    const otter = (scope: ReturnType<typeof demo>) => scope.locator(".conversation-row").filter({ hasText: "quiet-otter-12" });
+    await demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true }).click();
+    await expect(demo()).toHaveCount(0);
+    const search = page.getByRole("searchbox", { name: "Search conversations" });
+    await search.fill("quiet-otter");
+    await expect(otter(demo())).toHaveCount(1);
+    await search.fill("");
+    await expect(demo()).toHaveCount(0);
+    const reveal = list.getByRole("button", { name: "Show 4 dismissed sessions", exact: true });
+    await reveal.click();
+    await expect(otter(demo())).toHaveCount(1);
+    await expect(list.getByRole("group", { name: /^pulse-card ·/ }).locator(".conversation-row")).toHaveCount(4);
+    await demo().getByRole("button", { name: "Restore dismissed session quiet-otter-12", exact: true }).click();
+    await list.getByRole("button", { name: "Hide 3 dismissed sessions", exact: true }).click();
+    await expect(list.getByRole("group", { name: /^pulse-card ·/ }).locator(".conversation-row")).toHaveCount(1);
+    await expect(demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true })).toBeVisible();
+    await page.reload();
+    await expect(otter(demo())).toHaveCount(1);
+  });
+
   await journey.stage("Filters intersect search, and a decision opens its own session", async () => {
     await filters.getByRole("button", { name: "Needs you", exact: true }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(1);
@@ -512,7 +546,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
     await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
     await filters.getByRole("button", { name: "All", exact: true }).click();
-    await expect(list.locator(".conversation-row")).toHaveCount(3);
+    // Studio's two rows, pulse-card's live row and the restored old-demo row.
+    await expect(list.locator(".conversation-row")).toHaveCount(4);
     // A kept catalog's positive online bit must yield to a lost connection.
     await hub.down("atlas", { sockets: "close" });
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, offline", exact: true })).toBeVisible();
